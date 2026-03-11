@@ -30,6 +30,10 @@ const SERVICE_COLORS = {
 };
 
 const DENY_COLOR = '#ef4444';
+const NODE_CARD_SIZE = 160;
+const NODE_SAFETY_PADDING = 26;
+const MIN_NODE_SPACING = 172;
+const NODE_COLLISION_GAP = 18;
 
 function vlanTagToSubnet(tag) {
   const s = String(tag).padStart(4, '0');
@@ -85,16 +89,157 @@ function buildPolicyGraph(policies) {
   return { degree, peers, interVlan };
 }
 
-function placeOnRing(tags, radius, cx, cy, startAngle = -Math.PI / 2, spread = Math.PI * 2) {
+function ellipseCircumference(radiusX, radiusY) {
+  if (radiusX <= 0 || radiusY <= 0) return 0;
+  const h = ((radiusX - radiusY) ** 2) / ((radiusX + radiusY) ** 2 || 1);
+  return Math.PI * (radiusX + radiusY) * (1 + ((3 * h) / (10 + Math.sqrt(4 - (3 * h)))));
+}
+
+function placeOnEllipse(tags, radiusX, radiusY, cx, cy, startAngle = -Math.PI / 2, spread = Math.PI * 2) {
   if (tags.length === 0) return [];
   return tags.map((tag, index) => {
     const angle = startAngle + (spread * index) / tags.length;
     return {
       tag,
-      x: cx + Math.cos(angle) * radius,
-      y: cy + Math.sin(angle) * radius,
+      x: cx + Math.cos(angle) * radiusX,
+      y: cy + Math.sin(angle) * radiusY,
     };
   });
+}
+
+function placeAcrossBands(tags, {
+  baseRadiusX,
+  baseRadiusY,
+  maxRadiusX,
+  maxRadiusY,
+  cx,
+  cy,
+  spacing = MIN_NODE_SPACING,
+  startAngle = -Math.PI / 2,
+}) {
+  if (tags.length === 0) return [];
+
+  const placed = [];
+  const remaining = [...tags];
+  const gapX = Math.max(74, spacing * 0.72);
+  const gapY = Math.max(42, spacing * 0.38);
+  let bandIndex = 0;
+
+  while (remaining.length > 0) {
+    const radiusX = Math.min(maxRadiusX, baseRadiusX + (bandIndex * gapX));
+    const radiusY = Math.min(maxRadiusY, baseRadiusY + (bandIndex * gapY));
+    const circumference = ellipseCircumference(radiusX, radiusY);
+    let capacity = Math.max(1, Math.floor(circumference / spacing));
+
+    const atLimit = radiusX >= maxRadiusX - 1 && radiusY >= maxRadiusY - 1;
+    if (atLimit) capacity = remaining.length;
+
+    const count = Math.min(remaining.length, capacity);
+    const slice = remaining.splice(0, count);
+    const angleOffset = bandIndex % 2 === 0 ? 0 : Math.PI / Math.max(6, count);
+    placed.push(...placeOnEllipse(slice, radiusX, radiusY, cx, cy, startAngle + angleOffset));
+
+    bandIndex += 1;
+    if (bandIndex > 8 && remaining.length > 0) {
+      placed.push(...placeOnEllipse(remaining.splice(0), maxRadiusX, maxRadiusY, cx, cy, startAngle + 0.2));
+      break;
+    }
+  }
+
+  return placed;
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function resolveSquareCollisions(initialPositions, width, height, fixedTags = new Set()) {
+  const tags = Object.keys(initialPositions);
+  if (tags.length <= 1) return initialPositions;
+
+  const half = NODE_CARD_SIZE / 2;
+  const minX = half + NODE_SAFETY_PADDING;
+  const maxX = Math.max(minX, width - half - NODE_SAFETY_PADDING);
+  const minY = half + NODE_SAFETY_PADDING;
+  const maxY = Math.max(minY, height - half - NODE_SAFETY_PADDING);
+
+  const positions = Object.fromEntries(
+    tags.map(tag => [
+      tag,
+      {
+        x: clamp(initialPositions[tag].x, minX, maxX),
+        y: clamp(initialPositions[tag].y, minY, maxY),
+      },
+    ])
+  );
+
+  for (let iteration = 0; iteration < 90; iteration += 1) {
+    let moved = false;
+    const adjustments = Object.fromEntries(tags.map(tag => [tag, { x: 0, y: 0 }]));
+
+    for (let i = 0; i < tags.length; i += 1) {
+      for (let j = i + 1; j < tags.length; j += 1) {
+        const tagA = tags[i];
+        const tagB = tags[j];
+        const a = positions[tagA];
+        const b = positions[tagB];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const overlapX = (NODE_CARD_SIZE + NODE_COLLISION_GAP) - Math.abs(dx);
+        const overlapY = (NODE_CARD_SIZE + NODE_COLLISION_GAP) - Math.abs(dy);
+
+        if (overlapX <= 0 || overlapY <= 0) continue;
+
+        moved = true;
+        const pushAlongX = overlapX < overlapY;
+        const fixedA = fixedTags.has(tagA);
+        const fixedB = fixedTags.has(tagB);
+        const dirX = dx === 0 ? (i % 2 === 0 ? -1 : 1) : Math.sign(dx);
+        const dirY = dy === 0 ? (j % 2 === 0 ? -1 : 1) : Math.sign(dy);
+
+        if (pushAlongX) {
+          const amount = overlapX + 0.5;
+          if (!fixedA && !fixedB) {
+            adjustments[tagA].x -= dirX * (amount / 2);
+            adjustments[tagB].x += dirX * (amount / 2);
+          } else if (fixedA && !fixedB) {
+            adjustments[tagB].x += dirX * amount;
+          } else if (!fixedA && fixedB) {
+            adjustments[tagA].x -= dirX * amount;
+          }
+        } else {
+          const amount = overlapY + 0.5;
+          if (!fixedA && !fixedB) {
+            adjustments[tagA].y -= dirY * (amount / 2);
+            adjustments[tagB].y += dirY * (amount / 2);
+          } else if (fixedA && !fixedB) {
+            adjustments[tagB].y += dirY * amount;
+          } else if (!fixedA && fixedB) {
+            adjustments[tagA].y -= dirY * amount;
+          }
+        }
+      }
+    }
+
+    tags.forEach((tag) => {
+      if (fixedTags.has(tag)) {
+        positions[tag] = {
+          x: clamp(initialPositions[tag].x, minX, maxX),
+          y: clamp(initialPositions[tag].y, minY, maxY),
+        };
+        return;
+      }
+
+      positions[tag] = {
+        x: clamp(positions[tag].x + (adjustments[tag].x * 0.92), minX, maxX),
+        y: clamp(positions[tag].y + (adjustments[tag].y * 0.92), minY, maxY),
+      };
+    });
+
+    if (!moved) break;
+  }
+
+  return positions;
 }
 
 function buildNodePositions(vlans, policies, srcTag, width, height) {
@@ -105,12 +250,13 @@ function buildNodePositions(vlans, policies, srcTag, width, height) {
 
   const cx = width / 2;
   const cy = height / 2;
-  const minDim = Math.max(500, Math.min(width, height));
+  const safeRadiusX = Math.max(120, (width / 2) - ((NODE_CARD_SIZE / 2) + NODE_SAFETY_PADDING));
+  const safeRadiusY = Math.max(100, (height / 2) - ((NODE_CARD_SIZE / 2) + NODE_SAFETY_PADDING));
   const positions = {};
 
   if (sortedTags.length === 1) {
     positions[sortedTags[0]] = { x: cx, y: cy };
-    return positions;
+    return resolveSquareCollisions(positions, width, height);
   }
 
   if (srcTag) {
@@ -121,40 +267,82 @@ function buildNodePositions(vlans, policies, srcTag, width, height) {
     );
     const otherTags = sortedTags.filter(tag => tag !== srcTag && !peerTags.includes(tag));
 
-    const innerRadius = Math.min(minDim * 0.27, 245);
-    const outerRadius = Math.min(minDim * 0.43, 360);
+    const innerBaseX = Math.min(Math.max(safeRadiusX * 0.42, 165), safeRadiusX);
+    const innerBaseY = Math.min(Math.max(safeRadiusY * 0.3, 110), safeRadiusY);
+    const innerMaxX = Math.min(safeRadiusX * 0.7, safeRadiusX - 26);
+    const innerMaxY = Math.min(safeRadiusY * 0.58, safeRadiusY - 22);
+    const outerBaseX = Math.min(Math.max(safeRadiusX * 0.7, innerMaxX + 32), safeRadiusX);
+    const outerBaseY = Math.min(Math.max(safeRadiusY * 0.72, innerMaxY + 18), safeRadiusY);
 
-    placeOnRing(peerTags, innerRadius, cx, cy).forEach(({ tag, x, y }) => {
+    placeAcrossBands(peerTags, {
+      baseRadiusX: innerBaseX,
+      baseRadiusY: innerBaseY,
+      maxRadiusX: Math.max(innerBaseX, innerMaxX),
+      maxRadiusY: Math.max(innerBaseY, innerMaxY),
+      cx,
+      cy,
+      spacing: MIN_NODE_SPACING - 8,
+    }).forEach(({ tag, x, y }) => {
       positions[tag] = { x, y };
     });
 
-    placeOnRing(otherTags, outerRadius, cx, cy, -Math.PI / 2 + 0.35).forEach(({ tag, x, y }) => {
+    placeAcrossBands(otherTags, {
+      baseRadiusX: outerBaseX,
+      baseRadiusY: outerBaseY,
+      maxRadiusX: safeRadiusX,
+      maxRadiusY: safeRadiusY,
+      cx,
+      cy,
+      startAngle: -Math.PI / 2 + 0.28,
+    }).forEach(({ tag, x, y }) => {
       positions[tag] = { x, y };
     });
 
-    return positions;
+    return resolveSquareCollisions(positions, width, height, new Set([String(srcTag)]));
   }
 
   if (sortedTags.length <= 4) {
-    placeOnRing(sortedTags, Math.min(minDim * 0.34, 270), cx, cy).forEach(({ tag, x, y }) => {
+    placeOnEllipse(
+      sortedTags,
+      Math.min(Math.max(safeRadiusX * 0.65, 160), safeRadiusX),
+      Math.min(Math.max(safeRadiusY * 0.6, 120), safeRadiusY),
+      cx,
+      cy
+    ).forEach(({ tag, x, y }) => {
       positions[tag] = { x, y };
     });
-    return positions;
+    return resolveSquareCollisions(positions, width, height);
   }
 
   const innerCount = Math.max(2, Math.ceil(sortedTags.length / 3));
   const innerTags = sortedTags.slice(0, innerCount);
   const outerTags = sortedTags.slice(innerCount);
 
-  placeOnRing(innerTags, Math.min(minDim * 0.22, 190), cx, cy).forEach(({ tag, x, y }) => {
+  placeAcrossBands(innerTags, {
+    baseRadiusX: Math.min(Math.max(safeRadiusX * 0.34, 140), safeRadiusX),
+    baseRadiusY: Math.min(Math.max(safeRadiusY * 0.28, 95), safeRadiusY),
+    maxRadiusX: Math.min(safeRadiusX * 0.58, safeRadiusX - 32),
+    maxRadiusY: Math.min(safeRadiusY * 0.5, safeRadiusY - 24),
+    cx,
+    cy,
+    spacing: MIN_NODE_SPACING - 10,
+  }).forEach(({ tag, x, y }) => {
     positions[tag] = { x, y };
   });
 
-  placeOnRing(outerTags, Math.min(minDim * 0.4, 340), cx, cy, -Math.PI / 2 + 0.2).forEach(({ tag, x, y }) => {
+  placeAcrossBands(outerTags, {
+    baseRadiusX: Math.min(Math.max(safeRadiusX * 0.72, 220), safeRadiusX),
+    baseRadiusY: Math.min(Math.max(safeRadiusY * 0.72, 150), safeRadiusY),
+    maxRadiusX: safeRadiusX,
+    maxRadiusY: safeRadiusY,
+    cx,
+    cy,
+    startAngle: -Math.PI / 2 + 0.18,
+  }).forEach(({ tag, x, y }) => {
     positions[tag] = { x, y };
   });
 
-  return positions;
+  return resolveSquareCollisions(positions, width, height);
 }
 
 function buildLineModels(policies, positions, srcTag) {
@@ -346,6 +534,7 @@ export default function PoliciesPage() {
   const peerMap = graph.peers;
   const selectedTag = srcVlan?.tag || null;
   const peerTags = new Set(selectedTag ? Array.from(peerMap.get(selectedTag) || []) : []);
+  const meshMinHeight = Math.max(620, 620 + (Math.max(0, vlans.length - 10) * 30));
   const targetNodePositions = buildNodePositions(vlans, policies, selectedTag, canvasSize.width, canvasSize.height);
   const nodePositions = Object.keys(animatedNodePositions).length > 0 ? animatedNodePositions : targetNodePositions;
   const lines = buildLineModels(policies, nodePositions, selectedTag);
@@ -507,7 +696,7 @@ export default function PoliciesPage() {
 
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
-      <div className="grid gap-4 xl:grid-cols-[1.4fr_0.8fr]">
+      <div className="space-y-4">
         <div className="rounded-3xl border border-gray-800 bg-[radial-gradient(circle_at_top,_rgba(59,130,246,0.16),_transparent_35%),linear-gradient(180deg,_rgba(15,23,42,0.98),_rgba(2,6,23,0.98))] p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-3">
@@ -555,6 +744,7 @@ export default function PoliciesPage() {
           <div
             ref={canvasRef}
             className="relative mt-6 overflow-hidden rounded-[28px] border border-slate-800 bg-[radial-gradient(circle_at_center,_rgba(30,41,59,0.75),_rgba(2,6,23,0.98)_68%)] px-4 py-4 min-h-[620px]"
+            style={{ minHeight: `${meshMinHeight}px` }}
             onMouseLeave={() => setHoveredLine(null)}
           >
             <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.05)_1px,transparent_1px)] bg-[size:72px_72px]" />
@@ -896,7 +1086,7 @@ export default function PoliciesPage() {
           </div>
         </div>
 
-        <div className="space-y-4">
+        <div className="grid gap-4 lg:grid-cols-2">
           <div className="rounded-3xl border border-gray-800 bg-gray-900/90 p-5">
             <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">How To Read It</p>
             <div className="mt-3 space-y-3 text-sm text-slate-300">
