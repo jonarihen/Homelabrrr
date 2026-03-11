@@ -1,0 +1,318 @@
+import { useState } from 'react';
+import Layout from '../components/Layout.jsx';
+import { useAuth } from '../contexts/AuthContext.jsx';
+import useDocumentTitle from '../hooks/useDocumentTitle.js';
+import api from '../api.js';
+
+const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
+
+export default function AccountPage() {
+  useDocumentTitle('Account');
+  const { user, setUser } = useAuth();
+  const enrollmentOnly = user?.twoFactorSetupRequired || (user?.require2fa && !user?.twoFactorEnabled);
+
+  return (
+    <Layout>
+      <div className="p-6 lg:p-8 max-w-2xl mx-auto space-y-6">
+        {/* Header */}
+        <div>
+          <h1 className="text-2xl font-bold text-white tracking-tight">Account Settings</h1>
+          <p className="text-sm text-gray-500 mt-1">Manage your profile, password, and security</p>
+        </div>
+
+        {/* 2FA enforcement banner */}
+        {user?.require2fa && !user?.twoFactorEnabled && (
+          <div className="bg-yellow-900/20 border border-yellow-700/50 rounded-2xl p-4 flex items-start gap-3">
+            <svg className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+            <div>
+              <p className="text-sm text-yellow-300 font-medium">Two-factor authentication required</p>
+              <p className="text-xs text-yellow-400/70 mt-0.5">Your administrator requires all accounts to have 2FA enabled. Please set it up below.</p>
+            </div>
+          </div>
+        )}
+
+        {enrollmentOnly ? (
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+            <p className="text-sm text-white font-medium">Finish 2FA setup first</p>
+            <p className="text-xs text-gray-500 mt-1.5">Username and password changes are locked until this account has a working second factor.</p>
+          </div>
+        ) : (
+          <>
+            <UsernameSection user={user} setUser={setUser} />
+            <PasswordSection />
+          </>
+        )}
+        <TwoFactorSection user={user} setUser={setUser} />
+      </div>
+    </Layout>
+  );
+}
+
+// ── Username ─────────────────────────────────────────────────────────────────
+
+function UsernameSection({ user, setUser }) {
+  const [username, setUsername] = useState(user?.username || '');
+  const [msg, setMsg] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true); setMsg('');
+    try {
+      await api.put('/auth/change-username', { username });
+      setUser(u => ({ ...u, username }));
+      setMsg('Username updated');
+    } catch (e) {
+      setMsg('error:' + (e.response?.data?.error || 'Failed'));
+    } finally { setSaving(false); }
+  };
+
+  const isError = msg.startsWith('error:');
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-9 h-9 bg-blue-500/10 rounded-xl flex items-center justify-center">
+          <svg className="w-4.5 h-4.5 text-blue-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+          </svg>
+        </div>
+        <div>
+          <h2 className="text-sm font-semibold text-white">Username</h2>
+          <p className="text-xs text-gray-500">Change your display name</p>
+        </div>
+      </div>
+      <form onSubmit={submit} className="flex items-end gap-3">
+        <div className="flex-1">
+          <input type="text" required value={username} onChange={e => { setUsername(e.target.value); setMsg(''); }} className={inputCls} />
+        </div>
+        <button type="submit" disabled={saving || username === user?.username} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium rounded-xl transition-colors shrink-0">
+          {saving ? 'Saving...' : 'Update'}
+        </button>
+      </form>
+      {msg && <p className={`text-xs mt-2 ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
+    </div>
+  );
+}
+
+// ── Password ─────────────────────────────────────────────────────────────────
+
+function PasswordSection() {
+  const [form, setForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [msg, setMsg] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (form.newPassword !== form.confirmPassword) { setMsg('error:Passwords do not match'); return; }
+    setSaving(true); setMsg('');
+    try {
+      await api.put('/auth/change-password', { currentPassword: form.currentPassword, newPassword: form.newPassword });
+      setForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setMsg('Password updated');
+    } catch (e) {
+      setMsg('error:' + (e.response?.data?.error || 'Failed'));
+    } finally { setSaving(false); }
+  };
+
+  const isError = msg.startsWith('error:');
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-9 h-9 bg-purple-500/10 rounded-xl flex items-center justify-center">
+          <svg className="w-4.5 h-4.5 text-purple-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+          </svg>
+        </div>
+        <div>
+          <h2 className="text-sm font-semibold text-white">Password</h2>
+          <p className="text-xs text-gray-500">Change your account password</p>
+        </div>
+      </div>
+      <form onSubmit={submit} className="space-y-3">
+        <div>
+          <label className="block text-xs text-gray-500 mb-1.5 font-medium">Current Password</label>
+          <input type="password" required value={form.currentPassword} onChange={e => setForm(f => ({ ...f, currentPassword: e.target.value }))} className={inputCls} autoComplete="current-password" />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1.5 font-medium">New Password</label>
+            <input type="password" required value={form.newPassword} onChange={e => setForm(f => ({ ...f, newPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1.5 font-medium">Confirm Password</label>
+            <input type="password" required value={form.confirmPassword} onChange={e => setForm(f => ({ ...f, confirmPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
+          </div>
+        </div>
+        {msg && <p className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
+        <button type="submit" disabled={saving} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium rounded-xl transition-colors">
+          {saving ? 'Updating...' : 'Change Password'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+// ── Two-Factor ───────────────────────────────────────────────────────────────
+
+function TwoFactorSection({ user, setUser }) {
+  const [step, setStep] = useState('idle');
+  const [qrDataUrl, setQrDataUrl] = useState('');
+  const [secret, setSecret] = useState('');
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [success, setSuccess] = useState('');
+
+  const startSetup = async () => {
+    setError(''); setSuccess(''); setSaving(true);
+    try {
+      const { data } = await api.post('/auth/2fa/setup');
+      setQrDataUrl(data.qrDataUrl);
+      setSecret(data.secret);
+      setStep('setup');
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to start setup');
+    } finally { setSaving(false); }
+  };
+
+  const enable = async (e) => {
+    e.preventDefault(); setError(''); setSaving(true);
+    try {
+      await api.post('/auth/2fa/enable', { code });
+      setUser(u => ({ ...u, twoFactorEnabled: true, twoFactorSetupRequired: false }));
+      setStep('idle'); setCode('');
+      setSuccess('Two-factor authentication enabled.');
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to enable 2FA');
+    } finally { setSaving(false); }
+  };
+
+  const disable = async (e) => {
+    e.preventDefault(); setError(''); setSaving(true);
+    try {
+      await api.post('/auth/2fa/disable', { code });
+      setUser(u => ({ ...u, twoFactorEnabled: false }));
+      setStep('idle'); setCode('');
+      setSuccess('Two-factor authentication disabled.');
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to disable 2FA');
+    } finally { setSaving(false); }
+  };
+
+  const cancel = () => { setStep('idle'); setCode(''); setError(''); };
+
+  const isRequired = user?.require2fa && !user?.twoFactorEnabled;
+
+  return (
+    <div className={`bg-gray-900 border rounded-2xl p-5 space-y-4 ${isRequired ? 'border-yellow-700/50' : 'border-gray-800'}`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${user?.twoFactorEnabled ? 'bg-green-500/10' : 'bg-gray-800'}`}>
+            <svg className={`w-4.5 h-4.5 ${user?.twoFactorEnabled ? 'text-green-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-white">Two-Factor Authentication</h2>
+            <p className="text-xs text-gray-500">
+              {user?.twoFactorEnabled ? 'Your account is protected with an authenticator app' : 'Add an extra layer of security'}
+            </p>
+          </div>
+        </div>
+        <span className={`text-xs px-2.5 py-1 rounded-full ring-1 ${user?.twoFactorEnabled ? 'bg-green-500/10 ring-green-500/20 text-green-400' : 'bg-gray-800 ring-gray-700 text-gray-400'}`}>
+          {user?.twoFactorEnabled ? 'Enabled' : 'Disabled'}
+        </span>
+      </div>
+
+      {success && (
+        <p className="text-xs text-green-400 bg-green-900/20 border border-green-800/30 rounded-xl p-3 flex items-center gap-2">
+          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+          {success}
+        </p>
+      )}
+
+      {step === 'idle' && (
+        user?.twoFactorEnabled ? (
+          user?.require2fa ? (
+            <p className="text-xs text-gray-500">Your administrator requires 2FA on this account, so it cannot be disabled here.</p>
+          ) : (
+            <button
+              onClick={() => { setStep('disable'); setError(''); setSuccess(''); }}
+              className="text-sm text-red-400 hover:text-red-300 border border-red-800/50 hover:border-red-600 px-4 py-2 rounded-xl transition-colors"
+            >
+              Disable 2FA
+            </button>
+          )
+        ) : (
+          <button
+            onClick={startSetup}
+            disabled={saving}
+            className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20"
+          >
+            {saving ? 'Setting up...' : 'Enable 2FA'}
+          </button>
+        )
+      )}
+
+      {step === 'setup' && (
+        <form onSubmit={enable} className="space-y-4 border-t border-gray-700/50 pt-4">
+          <div>
+            <p className="text-xs text-gray-400 mb-3">
+              1. Scan this QR code with your authenticator app (Google Authenticator, Authy, etc.)
+            </p>
+            <div className="flex justify-center bg-white rounded-xl p-3 w-fit">
+              <img src={qrDataUrl} alt="2FA QR Code" className="w-44 h-44" />
+            </div>
+            <details className="mt-3">
+              <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-400">Can't scan? Enter code manually</summary>
+              <p className="text-xs font-mono text-gray-300 bg-gray-800 rounded-lg p-2.5 mt-2 break-all select-all">{secret}</p>
+            </details>
+          </div>
+          <div>
+            <p className="text-xs text-gray-400 mb-2">2. Enter the 6-digit code from your app to confirm</p>
+            <input
+              type="text" inputMode="numeric" autoComplete="one-time-code"
+              value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              className={`${inputCls} text-center tracking-[0.3em] font-mono text-lg`}
+              placeholder="000000" maxLength={6} autoFocus
+            />
+          </div>
+          {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+          <div className="flex gap-3">
+            <button type="submit" disabled={saving || code.length !== 6} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+              {saving ? 'Activating...' : 'Activate 2FA'}
+            </button>
+            <button type="button" onClick={cancel} className="px-5 text-sm text-gray-400 hover:text-white border border-gray-700 rounded-xl transition-colors">
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {step === 'disable' && (
+        <form onSubmit={disable} className="space-y-3 border-t border-gray-700/50 pt-4">
+          <p className="text-xs text-gray-400">Enter your current authenticator code to disable 2FA</p>
+          <input
+            type="text" inputMode="numeric" autoComplete="one-time-code"
+            value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            className={`${inputCls} text-center tracking-[0.3em] font-mono text-lg`}
+            placeholder="000000" maxLength={6} autoFocus
+          />
+          {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+          <div className="flex gap-3">
+            <button type="submit" disabled={saving || code.length !== 6} className="flex-1 bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+              {saving ? 'Disabling...' : 'Confirm Disable'}
+            </button>
+            <button type="button" onClick={cancel} className="px-5 text-sm text-gray-400 hover:text-white border border-gray-700 rounded-xl transition-colors">
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}

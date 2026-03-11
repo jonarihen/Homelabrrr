@@ -1,0 +1,1008 @@
+import { Router } from 'express';
+import bcrypt from 'bcryptjs';
+import db from '../db.js';
+import { getAllVMs, getHostStatus, getHosts, getHost } from '../proxmox.js';
+import { createClient, vlanTagToSubnet } from '../fortigate.js';
+import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
+import { sanitizeError } from '../utils/sanitize.js';
+import { logAudit } from '../utils/audit.js';
+
+const router = Router();
+// All admin routes require at least authentication
+router.use(requireAuth);
+
+// Permission middleware shortcuts
+const pUsers       = requirePermission('can_manage_users');
+const pAssignments = requirePermission('can_manage_assignments', 'can_manage_users');
+const pHosts       = requirePermission('can_manage_hosts');
+const pFirewalls   = requirePermission('can_manage_firewalls');
+const pVlans       = requirePermission('can_manage_vlans');
+const pPolicies    = requirePermission('can_manage_policies');
+const pTemplates   = requirePermission('can_manage_templates');
+const pAudit       = requirePermission('can_view_audit_log');
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+
+const LOCKOUT_WINDOW_MS = 10 * 60 * 1000;
+const LOCKOUT_MAX = 10;
+
+function ensureCanManageTargetUser(req, res, userId) {
+  if (req.session.isAdmin) return true;
+
+  const target = db.prepare('SELECT is_admin FROM users WHERE id = ?').get(userId);
+  if (!target) {
+    res.status(404).json({ error: 'User not found' });
+    return false;
+  }
+  if (target.is_admin) {
+    res.status(403).json({ error: 'Only admins can modify admin accounts' });
+    return false;
+  }
+  return true;
+}
+
+router.get('/users', pUsers, (req, res) => {
+  const windowStart = Date.now() - LOCKOUT_WINDOW_MS;
+  const users = db.prepare(`
+    SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_provision, u.totp_enabled, u.require_2fa,
+      u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_vlans, u.can_manage_policies,
+      u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log,
+      u.created_at,
+      (SELECT COUNT(*) FROM vm_assignments WHERE user_id = u.id) as vm_count,
+      (SELECT COUNT(*) FROM login_attempts WHERE username = u.username AND attempted_at > ?) as recent_failures
+    FROM users u
+    ORDER BY u.username
+  `).all(windowStart);
+  res.json(users.map(u => ({ ...u, locked: u.recent_failures >= LOCKOUT_MAX, twoFactorEnabled: !!u.totp_enabled, require2fa: !!u.require_2fa, canProvision: !!u.can_provision })));
+});
+
+router.post('/users', pUsers, (req, res) => {
+  const { username, password, isAdmin } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password required' });
+  }
+  if (isAdmin && !req.session.isAdmin) {
+    return res.status(403).json({ error: 'Only admins can create admin accounts' });
+  }
+  const hash = bcrypt.hashSync(password, 10);
+  try {
+    const r = db.prepare(
+      'INSERT INTO users (username, password, is_admin) VALUES (?, ?, ?)'
+    ).run(username, hash, isAdmin ? 1 : 0);
+    logAudit(req, 'admin_create_user', username, '');
+    res.json({ id: r.lastInsertRowid, username, isAdmin: !!isAdmin });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+    throw err;
+  }
+});
+
+router.post('/users/:id/reset-2fa', requireAdmin, (req, res) => {
+  db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.params.id);
+  logAudit(req, 'admin_reset_2fa', req.params.id, '');
+  res.json({ ok: true });
+});
+
+router.post('/users/:id/unlock', pUsers, (req, res) => {
+  if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
+  const user = db.prepare('SELECT username FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  db.prepare('DELETE FROM login_attempts WHERE username = ?').run(user.username);
+  logAudit(req, 'admin_unlock_user', req.params.id, '');
+  res.json({ ok: true });
+});
+
+router.put('/users/:id/username', pUsers, (req, res) => {
+  if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: 'Username required' });
+  try {
+    db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'Username already taken' });
+    }
+    throw err;
+  }
+});
+
+router.put('/users/:id/password', pUsers, (req, res) => {
+  if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
+  const { password } = req.body;
+  if (!password) return res.status(400).json({ error: 'Password required' });
+  const hash = bcrypt.hashSync(password, 10);
+  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hash, req.params.id);
+  logAudit(req, 'admin_reset_password', req.params.id, '');
+  res.json({ ok: true });
+});
+
+router.put('/users/:id/require-2fa', requireAdmin, (req, res) => {
+  const { enabled } = req.body;
+  db.prepare('UPDATE users SET require_2fa = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
+  res.json({ ok: true });
+});
+
+router.put('/users/:id/see-all-vms', requireAdmin, (req, res) => {
+  const { enabled } = req.body;
+  db.prepare('UPDATE users SET see_all_vms = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
+  res.json({ ok: true });
+});
+
+router.put('/users/:id/can-provision', requireAdmin, (req, res) => {
+  const { enabled } = req.body;
+  db.prepare('UPDATE users SET can_provision = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
+  res.json({ ok: true });
+});
+
+// Permission toggle endpoint for all granular permissions
+router.put('/users/:id/permission', requireAdmin, (req, res) => {
+  const { permission, enabled } = req.body;
+  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log'];
+  if (!validPerms.includes(permission)) {
+    return res.status(400).json({ error: `Invalid permission: ${permission}` });
+  }
+  db.prepare(`UPDATE users SET ${permission} = ? WHERE id = ?`).run(enabled ? 1 : 0, req.params.id);
+  logAudit(req, 'admin_toggle_permission', req.params.id, `${permission}=${enabled ? 1 : 0}`);
+  res.json({ ok: true });
+});
+
+router.delete('/users/:id', pUsers, (req, res) => {
+  if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
+  if (parseInt(req.params.id) === req.session.userId) {
+    return res.status(400).json({ error: 'Cannot delete yourself' });
+  }
+  db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+  logAudit(req, 'admin_delete_user', req.params.id, '');
+  res.json({ ok: true });
+});
+
+// ─── VMs (from Proxmox) ───────────────────────────────────────────────────────
+
+router.get('/vms', pAssignments, async (req, res) => {
+  try {
+    const vms = await getAllVMs();
+    const assignments = db.prepare(`
+      SELECT va.*, u.username FROM vm_assignments va
+      JOIN users u ON u.id = va.user_id
+    `).all();
+
+    const assignedMap = {};
+    assignments.forEach(a => { assignedMap[`${a.node}-${a.vmid}`] = a; });
+
+    const enriched = vms.map(vm => ({
+      ...vm,
+      assignment: assignedMap[`${vm.node}-${vm.vmid}`] || null,
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// ─── VM Assignments ───────────────────────────────────────────────────────────
+
+router.get('/assignments', pAssignments, (req, res) => {
+  const rows = db.prepare(`
+    SELECT va.*, u.username FROM vm_assignments va
+    JOIN users u ON u.id = va.user_id
+    ORDER BY u.username
+  `).all();
+  res.json(rows);
+});
+
+router.post('/assignments', pAssignments, (req, res) => {
+  const { userId, node, vmid } = req.body;
+  if (!userId || !node || !vmid) {
+    return res.status(400).json({ error: 'userId, node and vmid required' });
+  }
+  try {
+    const r = db.prepare(
+      'INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)'
+    ).run(userId, node, parseInt(vmid));
+    res.json({ id: r.lastInsertRowid });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'VM already assigned to a user' });
+    }
+    throw err;
+  }
+});
+
+router.delete('/assignments/:id', pAssignments, (req, res) => {
+  db.prepare('DELETE FROM vm_assignments WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// ─── VLANs ───────────────────────────────────────────────────────────────────
+
+// VLANs read also needed by policies page and assignments page
+// Non-admins only see VLANs assigned to them via user_vlans
+router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies', 'can_manage_assignments'), (req, res) => {
+  const isAdmin = req.session.isAdmin;
+  const vlans = isAdmin
+    ? db.prepare('SELECT * FROM vlans ORDER BY tag').all()
+    : db.prepare(`
+        SELECT v.* FROM vlans v
+        JOIN user_vlans uv ON uv.vlan_id = v.id
+        WHERE uv.user_id = ?
+        ORDER BY v.tag
+      `).all(req.session.userId);
+  const syncs = db.prepare(`
+    SELECT fvs.vlan_id, fvs.firewall_id, fvs.interface_name, f.name as firewall_name
+    FROM firewall_vlan_sync fvs
+    JOIN firewalls f ON f.id = fvs.firewall_id
+  `).all();
+  const syncMap = {};
+  syncs.forEach(s => {
+    if (!syncMap[s.vlan_id]) syncMap[s.vlan_id] = [];
+    syncMap[s.vlan_id].push({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name });
+  });
+  const fwRanges = db.prepare('SELECT id, name, vlan_range_start, vlan_range_end FROM firewalls').all();
+  res.json(vlans.map(v => ({ ...v, firewallSync: syncMap[v.id] || [], subnet: vlanTagToSubnet(v.tag), firewallRanges: fwRanges })));
+});
+
+router.post('/vlans', pVlans, (req, res) => {
+  const { name, tag, description } = req.body;
+  if (!name || tag === undefined) {
+    return res.status(400).json({ error: 'Name and tag required' });
+  }
+  try {
+    const r = db.prepare(
+      'INSERT INTO vlans (name, tag, description) VALUES (?, ?, ?)'
+    ).run(name, parseInt(tag), description || '');
+    res.json({ id: r.lastInsertRowid, name, tag: parseInt(tag), description: description || '' });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'VLAN tag already exists' });
+    }
+    throw err;
+  }
+});
+
+router.put('/vlans/:id', pVlans, (req, res) => {
+  const { name, tag, description } = req.body;
+  if (!name || tag === undefined) {
+    return res.status(400).json({ error: 'Name and tag required' });
+  }
+  try {
+    db.prepare(
+      'UPDATE vlans SET name = ?, tag = ?, description = ? WHERE id = ?'
+    ).run(name, parseInt(tag), description || '', req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'VLAN tag already exists' });
+    }
+    throw err;
+  }
+});
+
+router.delete('/vlans/:id', pVlans, async (req, res) => {
+  const vlan = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
+  if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
+
+  const syncs = db.prepare(`
+    SELECT fvs.*, f.name as fw_name, f.host, f.port, f.api_key, f.vdom, f.verify_tls, f.root_vdom, f.trunk_switch_serial, f.trunk_switch_port
+    FROM firewall_vlan_sync fvs
+    JOIN firewalls f ON f.id = fvs.firewall_id
+    WHERE fvs.vlan_id = ?
+  `).all(req.params.id);
+
+  const fwResults = [];
+  for (const sync of syncs) {
+    console.log(`[delete-vlan] Deprovisioning VLAN ${vlan.tag} (${sync.interface_name}) from ${sync.fw_name}`);
+    try {
+      const client = createClient(sync);
+      const policyIds = JSON.parse(sync.policy_ids || '[]');
+      const { errors } = await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
+        rootVdom: sync.root_vdom || 'root',
+        trunkSwitchSerial: sync.trunk_switch_serial || '',
+        trunkSwitchPort:   sync.trunk_switch_port   || '',
+      });
+      if (errors.length > 0) {
+        console.warn(`[delete-vlan] Partial cleanup on ${sync.fw_name}:`, errors);
+        fwResults.push({ firewall: sync.fw_name, status: 'partial', errors });
+      } else {
+        console.log(`[delete-vlan] Successfully removed from ${sync.fw_name}`);
+        fwResults.push({ firewall: sync.fw_name, status: 'ok' });
+      }
+    } catch (err) {
+      console.error(`[delete-vlan] Failed to deprovision from ${sync.fw_name}:`, err.message);
+      fwResults.push({ firewall: sync.fw_name, status: 'error', error: err.message });
+    }
+  }
+
+  db.prepare('DELETE FROM vlans WHERE id = ?').run(req.params.id);
+  logAudit(req, 'admin_delete_vlan', `VLAN ${vlan.tag}`, fwResults.length ? `FW cleanup: ${fwResults.map(r => `${r.firewall}=${r.status}`).join(', ')}` : '');
+  res.json({ ok: true, firewallCleanup: fwResults });
+});
+
+// ─── User VLAN assignments ────────────────────────────────────────────────────
+
+router.get('/users/:id/vlans', pAssignments, (req, res) => {
+  const vlans = db.prepare(`
+    SELECT v.* FROM vlans v
+    JOIN user_vlans uv ON uv.vlan_id = v.id
+    WHERE uv.user_id = ?
+    ORDER BY v.tag
+  `).all(req.params.id);
+  res.json(vlans);
+});
+
+router.post('/users/:id/vlans', pAssignments, (req, res) => {
+  const { vlanId } = req.body;
+  if (!vlanId) return res.status(400).json({ error: 'vlanId required' });
+  try {
+    db.prepare('INSERT INTO user_vlans (user_id, vlan_id) VALUES (?, ?)').run(req.params.id, vlanId);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'VLAN already assigned to this user' });
+    }
+    throw err;
+  }
+});
+
+router.delete('/users/:id/vlans/:vlanId', pAssignments, (req, res) => {
+  db.prepare('DELETE FROM user_vlans WHERE user_id = ? AND vlan_id = ?').run(req.params.id, req.params.vlanId);
+  res.json({ ok: true });
+});
+
+// ─── User VM assignments ──────────────────────────────────────────────────────
+
+router.get('/users/:id/vms', pAssignments, (req, res) => {
+  res.json(db.prepare('SELECT * FROM vm_assignments WHERE user_id = ?').all(req.params.id));
+});
+
+// ─── Settings ───────────────────────────────────────────────────────────────
+
+router.get('/settings', requireAdmin, (req, res) => {
+  const rows = db.prepare('SELECT * FROM settings').all();
+  const settings = {};
+  rows.forEach(r => { settings[r.key] = r.value; });
+  res.json(settings);
+});
+
+router.put('/settings/:key', requireAdmin, (req, res) => {
+  const { value } = req.body;
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
+    .run(req.params.key, String(value), String(value));
+  res.json({ ok: true });
+});
+
+// ─── PVE Hosts ──────────────────────────────────────────────────────────────
+
+router.get('/pve-hosts', pHosts, (req, res) => {
+  const hosts = getHosts().map(h => ({
+    id: h.id, name: h.name, host: h.host, port: h.port,
+    token_id: h.token_id, verify_tls: h.verify_tls, created_at: h.created_at,
+    // Don't send token_secret to frontend
+  }));
+  res.json(hosts);
+});
+
+router.get('/pve-hosts/:id/status', pHosts, async (req, res) => {
+  const host = getHost(parseInt(req.params.id));
+  if (!host) return res.status(404).json({ error: 'Host not found' });
+  const status = await getHostStatus(host);
+  res.json(status);
+});
+
+router.post('/pve-hosts', pHosts, (req, res) => {
+  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls = false } = req.body;
+  if (!name || !host || !tokenId || !tokenSecret) {
+    return res.status(400).json({ error: 'Name, host, tokenId and tokenSecret are required' });
+  }
+  try {
+    const r = db.prepare(
+      'INSERT INTO pve_hosts (name, host, port, token_id, token_secret, verify_tls) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(name, host, port, tokenId, tokenSecret, verifyTls ? 1 : 0);
+    res.json({ id: r.lastInsertRowid, name, host, port });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.put('/pve-hosts/:id', pHosts, (req, res) => {
+  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls = false } = req.body;
+  if (!name || !host || !tokenId) {
+    return res.status(400).json({ error: 'Name, host and tokenId are required' });
+  }
+  const existing = getHost(parseInt(req.params.id));
+  if (!existing) return res.status(404).json({ error: 'Host not found' });
+
+  // If tokenSecret is empty, keep the existing one
+  const secret = tokenSecret || existing.token_secret;
+  db.prepare(
+    'UPDATE pve_hosts SET name = ?, host = ?, port = ?, token_id = ?, token_secret = ?, verify_tls = ? WHERE id = ?'
+  ).run(name, host, port, tokenId, secret, verifyTls ? 1 : 0, req.params.id);
+  res.json({ ok: true });
+});
+
+router.delete('/pve-hosts/:id', pHosts, (req, res) => {
+  const count = db.prepare('SELECT COUNT(*) as count FROM pve_hosts').get();
+  if (count.count <= 1) {
+    return res.status(400).json({ error: 'Cannot delete the last host' });
+  }
+  db.prepare('DELETE FROM pve_hosts WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// ─── Firewalls ─────────────────────────────────────────────────────────────
+
+// Firewalls read also needed by policies page and vlans page
+router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_policies', 'can_manage_vlans'), (req, res) => {
+  const firewalls = db.prepare('SELECT * FROM firewalls ORDER BY name').all();
+  // Don't expose api_key to frontend
+  res.json(firewalls.map(f => ({
+    id: f.id, name: f.name, type: f.type, host: f.host, port: f.port,
+    vdom: f.vdom, parent_interface: f.parent_interface,
+    wan_interface: f.wan_interface, vlan_range_start: f.vlan_range_start,
+    vlan_range_end: f.vlan_range_end, lab_vdom_link: f.lab_vdom_link,
+    root_vdom: f.root_vdom, root_vdom_link: f.root_vdom_link,
+    route_gateway: f.route_gateway, trunk_switch_serial: f.trunk_switch_serial,
+    trunk_switch_port: f.trunk_switch_port, verify_tls: f.verify_tls,
+    created_at: f.created_at,
+  })));
+});
+
+router.get('/firewalls/:id/status', pFirewalls, async (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    const status = await client.getSystemStatus();
+    const interfaces = await client.getInterfaces();
+    const vlanIfaces = interfaces.filter(i => i.type === 'vlan');
+    res.json({
+      online: true,
+      version: status?.results?.version || status?.version || 'Unknown',
+      hostname: status?.results?.hostname || status?.hostname || fw.name,
+      serial: status?.results?.serial || status?.serial || '',
+      vdom: fw.vdom,
+      vlanCount: vlanIfaces.length,
+    });
+  } catch (err) {
+    res.json({ online: false, error: err.message });
+  }
+});
+
+router.get('/firewalls/:id/switches', pFirewalls, async (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    const switches = await client.getManagedSwitches(fw.root_vdom || 'root');
+    const result = switches.map(sw => ({
+      serial: sw.sn || sw['switch-id'] || '',
+      name: sw['switch-id'] || sw.name || sw.sn || '',
+      ports: (sw.ports || []).map(p => ({
+        name: p['port-name'],
+        vlan: p.vlan || '',
+        type: p.type || 'physical',
+        members: p.members || '',
+      })),
+    }));
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.post('/firewalls', pFirewalls, (req, res) => {
+  const { name, type = 'fortigate', host, port = 443, apiKey, vdom = 'root', parentInterface = 'fortilink', wanInterface = 'wan1', vlanRangeStart = 1001, vlanRangeEnd = 1999, labVdomLink = 'lab-root0', rootVdom = 'root', rootVdomLink = 'lab-root1', routeGateway = '10.255.254.2', trunkSwitchSerial = '', trunkSwitchPort = '', verifyTls = false } = req.body;
+  if (!name || !host || !apiKey) {
+    return res.status(400).json({ error: 'Name, host, and API key are required' });
+  }
+  if (vlanRangeStart >= vlanRangeEnd || vlanRangeStart < 1 || vlanRangeEnd > 4094) {
+    return res.status(400).json({ error: 'Invalid VLAN range (must be 1–4094, start < end)' });
+  }
+  try {
+    const r = db.prepare(
+      'INSERT INTO firewalls (name, type, host, port, api_key, vdom, parent_interface, wan_interface, vlan_range_start, vlan_range_end, lab_vdom_link, root_vdom, root_vdom_link, route_gateway, trunk_switch_serial, trunk_switch_port, verify_tls) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(name, type, host, port, apiKey, vdom, parentInterface, wanInterface, vlanRangeStart, vlanRangeEnd, labVdomLink, rootVdom, rootVdomLink, routeGateway, trunkSwitchSerial, trunkSwitchPort, verifyTls ? 1 : 0);
+    logAudit(req, 'admin_create_firewall', name, `${host}:${port} vdom=${vdom}`);
+    res.json({ id: r.lastInsertRowid, name, host, port });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.put('/firewalls/:id', pFirewalls, (req, res) => {
+  const { name, host, port = 443, apiKey, vdom, parentInterface, wanInterface, verifyTls } = req.body;
+  if (!name || !host) {
+    return res.status(400).json({ error: 'Name and host are required' });
+  }
+  const existing = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Firewall not found' });
+
+  const key = apiKey || existing.api_key;
+  const rangeStart    = req.body.vlanRangeStart ?? existing.vlan_range_start;
+  const rangeEnd      = req.body.vlanRangeEnd   ?? existing.vlan_range_end;
+  const labLink       = req.body.labVdomLink    || existing.lab_vdom_link   || 'lab-root0';
+  const rootVd        = req.body.rootVdom       || existing.root_vdom       || 'root';
+  const rootLink      = req.body.rootVdomLink   || existing.root_vdom_link  || 'lab-root1';
+  const routeGw       = req.body.routeGateway   || existing.route_gateway   || '10.255.254.2';
+  const trunkSerial   = req.body.trunkSwitchSerial ?? existing.trunk_switch_serial ?? '';
+  const trunkPort     = req.body.trunkSwitchPort   ?? existing.trunk_switch_port   ?? '';
+  if (rangeStart >= rangeEnd || rangeStart < 1 || rangeEnd > 4094) {
+    return res.status(400).json({ error: 'Invalid VLAN range (must be 1–4094, start < end)' });
+  }
+  db.prepare(
+    'UPDATE firewalls SET name = ?, host = ?, port = ?, api_key = ?, vdom = ?, parent_interface = ?, wan_interface = ?, vlan_range_start = ?, vlan_range_end = ?, lab_vdom_link = ?, root_vdom = ?, root_vdom_link = ?, route_gateway = ?, trunk_switch_serial = ?, trunk_switch_port = ?, verify_tls = ? WHERE id = ?'
+  ).run(name, host, port, key, vdom || existing.vdom, parentInterface || existing.parent_interface, wanInterface || existing.wan_interface, rangeStart, rangeEnd, labLink, rootVd, rootLink, routeGw, trunkSerial, trunkPort, verifyTls ? 1 : 0, req.params.id);
+  logAudit(req, 'admin_update_firewall', name, `${host}:${port}`);
+  res.json({ ok: true });
+});
+
+router.delete('/firewalls/:id', pFirewalls, (req, res) => {
+  const fw = db.prepare('SELECT name FROM firewalls WHERE id = ?').get(req.params.id);
+  db.prepare('DELETE FROM firewalls WHERE id = ?').run(req.params.id);
+  logAudit(req, 'admin_delete_firewall', fw?.name || req.params.id, '');
+  res.json({ ok: true });
+});
+
+// ─── VLAN ↔ Firewall Sync ─────────────────────────────────────────────────
+
+router.get('/vlans/:id/sync', pVlans, (req, res) => {
+  const syncs = db.prepare(`
+    SELECT fvs.*, f.name as firewall_name, f.host as firewall_host
+    FROM firewall_vlan_sync fvs
+    JOIN firewalls f ON f.id = fvs.firewall_id
+    WHERE fvs.vlan_id = ?
+  `).all(req.params.id);
+  res.json(syncs);
+});
+
+router.post('/vlans/:id/sync', pVlans, async (req, res) => {
+  try {
+    const vlan = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
+    if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
+
+    const { firewallId, allowInternet = true, enableDhcp = true } = req.body;
+    const fwRows = firewallId
+      ? [db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId)]
+      : db.prepare('SELECT * FROM firewalls').all();
+
+    console.log(`[sync] VLAN ${vlan.tag} → ${fwRows.length} firewall(s), allowInternet=${allowInternet}, enableDhcp=${enableDhcp}`);
+
+    const results = [];
+    for (const fw of fwRows) {
+      if (!fw) continue;
+      // Skip if already synced
+      const existing = db.prepare('SELECT id FROM firewall_vlan_sync WHERE firewall_id = ? AND vlan_id = ?').get(fw.id, vlan.id);
+      if (existing) { results.push({ firewall: fw.name, status: 'already_synced' }); continue; }
+
+      // Validate VLAN tag is within this firewall's allowed range
+      if (vlan.tag < fw.vlan_range_start || vlan.tag > fw.vlan_range_end) {
+        results.push({ firewall: fw.name, status: 'error', error: `VLAN tag ${vlan.tag} is outside allowed range ${fw.vlan_range_start}–${fw.vlan_range_end}` });
+        continue;
+      }
+
+      try {
+        console.log(`[sync] Provisioning VLAN ${vlan.tag} on ${fw.name} (${fw.host}:${fw.port} vdom=${fw.vdom})`);
+        const client = createClient(fw);
+        const result = await client.provisionVlan(
+          vlan.tag, vlan.name, fw.parent_interface,
+          {
+            allowInternet, enableDhcp,
+            labVdomLink:  fw.lab_vdom_link  || 'lab-root0',
+            rootVdom:     fw.root_vdom      || 'root',
+            rootVdomLink: fw.root_vdom_link || 'lab-root1',
+            routeGateway: fw.route_gateway  || '10.255.254.2',
+            trunkSwitchSerial: fw.trunk_switch_serial || '',
+            trunkSwitchPort:   fw.trunk_switch_port   || '',
+          }
+        );
+        console.log(`[sync] Success:`, JSON.stringify(result));
+        db.prepare(
+          'INSERT INTO firewall_vlan_sync (firewall_id, vlan_id, interface_name, policy_ids, dhcp_server_id) VALUES (?, ?, ?, ?, ?)'
+        ).run(fw.id, vlan.id, result.interfaceName, JSON.stringify(result.policyIds), result.dhcpServerId || null);
+        logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${result.interfaceName} (${result.subnet.network})`);
+        results.push({ firewall: fw.name, status: 'ok', ...result });
+      } catch (err) {
+        console.error(`[sync] Error provisioning VLAN ${vlan.tag} on ${fw.name}:`, err.message);
+        results.push({ firewall: fw.name, status: 'error', error: err.message });
+      }
+    }
+    res.json(results);
+  } catch (err) {
+    console.error('[sync] Unexpected error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
+  const sync = db.prepare(
+    'SELECT fvs.*, f.* FROM firewall_vlan_sync fvs JOIN firewalls f ON f.id = fvs.firewall_id WHERE fvs.vlan_id = ? AND fvs.firewall_id = ?'
+  ).get(req.params.id, req.params.firewallId);
+  if (!sync) return res.status(404).json({ error: 'Sync record not found' });
+
+  try {
+    const client = createClient(sync);
+    const policyIds = JSON.parse(sync.policy_ids || '[]');
+    await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
+      rootVdom: sync.root_vdom || 'root',
+      trunkSwitchSerial: sync.trunk_switch_serial || '',
+      trunkSwitchPort:   sync.trunk_switch_port   || '',
+    });
+  } catch (err) {
+    console.error('Deprovision warning:', err.message);
+  }
+
+  db.prepare('DELETE FROM firewall_vlan_sync WHERE vlan_id = ? AND firewall_id = ?').run(req.params.id, req.params.firewallId);
+  logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${req.params.id}`, `Firewall ${req.params.firewallId}`);
+  res.json({ ok: true });
+});
+
+// ─── Policy Engine ──────────────────────────────────────────────────────────
+
+router.get('/policies', pPolicies, async (req, res) => {
+  const { firewallId } = req.query;
+  if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
+
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+
+  try {
+    const client = createClient(fw);
+    const allPolicies = await client.getPolicies();
+
+    // Get synced VLANs for this firewall (non-admins only see their assigned VLANs)
+    const isAdmin = req.session.isAdmin;
+    const syncs = isAdmin
+      ? db.prepare(`
+          SELECT fvs.interface_name, v.id as vlan_id, v.name as vlan_name, v.tag as vlan_tag
+          FROM firewall_vlan_sync fvs
+          JOIN vlans v ON v.id = fvs.vlan_id
+          WHERE fvs.firewall_id = ?
+        `).all(firewallId)
+      : db.prepare(`
+          SELECT fvs.interface_name, v.id as vlan_id, v.name as vlan_name, v.tag as vlan_tag
+          FROM firewall_vlan_sync fvs
+          JOIN vlans v ON v.id = fvs.vlan_id
+          JOIN user_vlans uv ON uv.vlan_id = v.id AND uv.user_id = ?
+          WHERE fvs.firewall_id = ?
+        `).all(req.session.userId, firewallId);
+    const vlanInterfaces = new Set(syncs.map(s => s.interface_name));
+    const vlanMap = {};
+    syncs.forEach(s => { vlanMap[s.interface_name] = s; });
+
+    // Filter to policies involving synced VLANs
+    const policies = allPolicies
+      .filter(p => {
+        const srcs = (p.srcintf || []).map(i => i.name);
+        return srcs.some(s => vlanInterfaces.has(s));
+      })
+      .map(p => {
+        const srcName = (p.srcintf || [])[0]?.name || '';
+        const dstName = (p.dstintf || [])[0]?.name || '';
+        const srcVlan = vlanMap[srcName] || null;
+        const dstVlan = vlanMap[dstName] || null;
+        const isInternet = dstName === (fw.lab_vdom_link || 'lab-root0');
+        return {
+          policyid: p.policyid,
+          name: p.name,
+          srcintf: srcName,
+          dstintf: dstName,
+          srcaddr: (p.srcaddr || []).map(a => a.name),
+          dstaddr: (p.dstaddr || []).map(a => a.name),
+          service: (p.service || []).map(s => s.name),
+          action: p.action,
+          logtraffic: p.logtraffic,
+          globalLabel: p['global-label'] || '',
+          comments: p.comments || '',
+          isInternet,
+          srcVlan: srcVlan ? { id: srcVlan.vlan_id, name: srcVlan.vlan_name, tag: srcVlan.vlan_tag } : null,
+          dstVlan: dstVlan ? { id: dstVlan.vlan_id, name: dstVlan.vlan_name, tag: dstVlan.vlan_tag } : null,
+        };
+      });
+
+    res.json(policies);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.post('/policies', pPolicies, async (req, res) => {
+  const { firewallId, srcVlanTag, dstVlanTag, services = ['ALL'], action = 'accept', bidirectional = false } = req.body;
+  if (!firewallId || !srcVlanTag || !dstVlanTag) {
+    return res.status(400).json({ error: 'firewallId, srcVlanTag, and dstVlanTag are required' });
+  }
+  if (srcVlanTag === dstVlanTag) {
+    return res.status(400).json({ error: 'Source and destination VLANs must be different' });
+  }
+
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+
+  // Resolve VLANs
+  const srcVlan = db.prepare('SELECT v.*, fvs.interface_name FROM vlans v JOIN firewall_vlan_sync fvs ON fvs.vlan_id = v.id WHERE v.tag = ? AND fvs.firewall_id = ?').get(srcVlanTag, firewallId);
+  const dstVlan = db.prepare('SELECT v.*, fvs.interface_name FROM vlans v JOIN firewall_vlan_sync fvs ON fvs.vlan_id = v.id WHERE v.tag = ? AND fvs.firewall_id = ?').get(dstVlanTag, firewallId);
+  if (!srcVlan) return res.status(400).json({ error: `Source VLAN ${srcVlanTag} not synced to this firewall` });
+  if (!dstVlan) return res.status(400).json({ error: `Destination VLAN ${dstVlanTag} not synced to this firewall` });
+
+  // Non-admins must have both VLANs assigned to them
+  if (!req.session.isAdmin) {
+    const hasSrc = db.prepare('SELECT 1 FROM user_vlans WHERE user_id = ? AND vlan_id = ?').get(req.session.userId, srcVlan.id);
+    const hasDst = db.prepare('SELECT 1 FROM user_vlans WHERE user_id = ? AND vlan_id = ?').get(req.session.userId, dstVlan.id);
+    if (!hasSrc) return res.status(403).json({ error: `You do not have access to source VLAN ${srcVlanTag}` });
+    if (!hasDst) return res.status(403).json({ error: `You do not have access to destination VLAN ${dstVlanTag}` });
+  }
+
+  const srcSubnet = vlanTagToSubnet(srcVlanTag);
+  const dstSubnet = vlanTagToSubnet(dstVlanTag);
+  if (!srcSubnet || !dstSubnet) return res.status(400).json({ error: 'Cannot derive subnets from VLAN tags' });
+
+  const srcAddrName = `NET-${srcSubnet.networkIp}_24`;
+  const dstAddrName = `NET-${dstSubnet.networkIp}_24`;
+
+  try {
+    const client = createClient(fw);
+
+    // Ensure address objects exist
+    for (const [name, subnet] of [[srcAddrName, srcSubnet], [dstAddrName, dstSubnet]]) {
+      if (!await client.getAddressObject(name)) {
+        await client.createAddressObject(name, `${subnet.networkIp} ${subnet.netmask}`);
+      }
+    }
+
+    // Check for duplicate policy
+    const existing = await client.getPolicies();
+    const dup = existing.find(p =>
+      (p.srcintf || []).some(i => i.name === srcVlan.interface_name) &&
+      (p.dstintf || []).some(i => i.name === dstVlan.interface_name)
+    );
+    if (dup) return res.status(409).json({ error: `Policy from ${srcVlan.interface_name} to ${dstVlan.interface_name} already exists (id: ${dup.policyid})` });
+
+    const policyIds = [];
+
+    // Forward policy
+    const fwdRes = await client.createPolicy({
+      name: `${srcVlan.interface_name}-to-${dstVlan.interface_name}`,
+      srcintf: [{ name: srcVlan.interface_name }],
+      dstintf: [{ name: dstVlan.interface_name }],
+      srcaddr: [{ name: srcAddrName }],
+      dstaddr: [{ name: dstAddrName }],
+      action,
+      schedule: 'always',
+      service: services.map(s => ({ name: s })),
+      logtraffic: 'all',
+      'global-label': `${srcVlan.name} (${srcVlan.interface_name})`,
+      comments: `Inter-VLAN policy created via VM Manager`,
+    });
+    if (fwdRes?.mkey) policyIds.push(fwdRes.mkey);
+
+    // Reverse policy if bidirectional
+    if (bidirectional) {
+      const revDup = existing.find(p =>
+        (p.srcintf || []).some(i => i.name === dstVlan.interface_name) &&
+        (p.dstintf || []).some(i => i.name === srcVlan.interface_name)
+      );
+      if (!revDup) {
+        const revRes = await client.createPolicy({
+          name: `${dstVlan.interface_name}-to-${srcVlan.interface_name}`,
+          srcintf: [{ name: dstVlan.interface_name }],
+          dstintf: [{ name: srcVlan.interface_name }],
+          srcaddr: [{ name: dstAddrName }],
+          dstaddr: [{ name: srcAddrName }],
+          action,
+          schedule: 'always',
+          service: services.map(s => ({ name: s })),
+          logtraffic: 'all',
+          'global-label': `${dstVlan.name} (${dstVlan.interface_name})`,
+          comments: `Inter-VLAN policy created via VM Manager`,
+        });
+        if (revRes?.mkey) policyIds.push(revRes.mkey);
+      }
+    }
+
+    logAudit(req, 'admin_create_policy', `${srcVlan.interface_name} → ${dstVlan.interface_name}`, `services: ${services.join(',')} action: ${action}${bidirectional ? ' (bidirectional)' : ''}`);
+    res.json({ policyIds });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.delete('/policies/:policyId', pPolicies, async (req, res) => {
+  const { firewallId } = req.query;
+  if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
+
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+
+  try {
+    const client = createClient(fw);
+
+    // Non-admins can only delete policies involving their assigned VLANs
+    if (!req.session.isAdmin) {
+      const policy = await client.getPolicy(req.params.policyId);
+      if (policy) {
+        const policyIntfs = [
+          ...((policy.srcintf || []).map(i => i.name)),
+          ...((policy.dstintf || []).map(i => i.name)),
+        ];
+        // Get user's VLAN interfaces on this firewall
+        const userSyncs = db.prepare(`
+          SELECT fvs.interface_name FROM firewall_vlan_sync fvs
+          JOIN user_vlans uv ON uv.vlan_id = fvs.vlan_id AND uv.user_id = ?
+          WHERE fvs.firewall_id = ?
+        `).all(req.session.userId, firewallId);
+        const userIntfs = new Set(userSyncs.map(s => s.interface_name));
+        const hasAccess = policyIntfs.some(i => userIntfs.has(i));
+        if (!hasAccess) {
+          return res.status(403).json({ error: 'You do not have access to the VLANs in this policy' });
+        }
+      }
+    }
+
+    await client.deletePolicy(req.params.policyId);
+    logAudit(req, 'admin_delete_policy', `Policy ${req.params.policyId}`, `Firewall: ${fw.name}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// ─── Address & Service Objects ──────────────────────────────────────────────
+
+router.get('/objects/addresses', requireAdmin, async (req, res) => {
+  const { firewallId } = req.query;
+  if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    const objects = await client.getAddressObjects();
+    res.json(objects.map(o => ({
+      name: o.name,
+      type: o.type,
+      subnet: o.subnet,
+      fqdn: o.fqdn || '',
+      comment: o.comment || '',
+      color: o.color || 0,
+    })));
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.post('/objects/addresses', requireAdmin, async (req, res) => {
+  const { firewallId, name, type = 'ipmask', subnet, fqdn, comment } = req.body;
+  if (!firewallId || !name) return res.status(400).json({ error: 'firewallId and name required' });
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    const data = { name, type };
+    if (type === 'ipmask' && subnet) data.subnet = subnet;
+    if (type === 'fqdn' && fqdn) data.fqdn = fqdn;
+    if (comment) data.comment = comment;
+    await client.createAddressObject(data);
+    logAudit(req, 'admin_create_address_object', name, `type=${type} ${subnet || fqdn || ''}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.put('/objects/addresses/:name', requireAdmin, async (req, res) => {
+  const { firewallId, subnet, fqdn, comment } = req.body;
+  if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    const data = {};
+    if (subnet) data.subnet = subnet;
+    if (fqdn) data.fqdn = fqdn;
+    if (comment !== undefined) data.comment = comment;
+    await client.updateAddressObject(req.params.name, data);
+    logAudit(req, 'admin_update_address_object', req.params.name, JSON.stringify(data));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.delete('/objects/addresses/:name', requireAdmin, async (req, res) => {
+  const { firewallId } = req.query;
+  if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    await client.deleteAddressObject(req.params.name);
+    logAudit(req, 'admin_delete_address_object', req.params.name, `Firewall: ${fw.name}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.get('/objects/services', requireAdmin, async (req, res) => {
+  const { firewallId } = req.query;
+  if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    const objects = await client.getServiceObjects();
+    res.json(objects.map(o => ({
+      name: o.name,
+      protocol: o.protocol,
+      tcpPortrange: o['tcp-portrange'] || '',
+      udpPortrange: o['udp-portrange'] || '',
+      comment: o.comment || '',
+      color: o.color || 0,
+    })));
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.post('/objects/services', requireAdmin, async (req, res) => {
+  const { firewallId, name, protocol = 'TCP/UDP/SCTP', tcpPortrange, udpPortrange, comment } = req.body;
+  if (!firewallId || !name) return res.status(400).json({ error: 'firewallId and name required' });
+  if (!tcpPortrange && !udpPortrange) return res.status(400).json({ error: 'At least one port range required' });
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    const data = { name, protocol };
+    if (tcpPortrange) data['tcp-portrange'] = tcpPortrange;
+    if (udpPortrange) data['udp-portrange'] = udpPortrange;
+    if (comment) data.comment = comment;
+    await client.createServiceObject(data);
+    logAudit(req, 'admin_create_service_object', name, `tcp=${tcpPortrange || ''} udp=${udpPortrange || ''}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.delete('/objects/services/:name', requireAdmin, async (req, res) => {
+  const { firewallId } = req.query;
+  if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const client = createClient(fw);
+    await client.deleteServiceObject(req.params.name);
+    logAudit(req, 'admin_delete_service_object', req.params.name, `Firewall: ${fw.name}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Helper: compute subnet for a VLAN tag
+router.get('/vlans/subnet/:tag', pVlans, (req, res) => {
+  const subnet = vlanTagToSubnet(parseInt(req.params.tag));
+  if (!subnet) return res.status(400).json({ error: 'Invalid tag for auto IP scheme' });
+  res.json(subnet);
+});
+
+// ─── Audit Log ──────────────────────────────────────────────────────────────
+
+router.get('/audit-log', pAudit, (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const offset = (page - 1) * limit;
+  const action = req.query.action || '';
+
+  const where = action ? 'WHERE action = ?' : '';
+  const params = action ? [action] : [];
+
+  const { count } = db.prepare(`SELECT COUNT(*) as count FROM audit_log ${where}`).get(...params);
+  const rows = db.prepare(
+    `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+  ).all(...params, limit, offset);
+  res.json({ rows, total: count, page, limit });
+});
+
+export default router;

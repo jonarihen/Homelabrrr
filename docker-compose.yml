@@ -1,0 +1,40 @@
+services:
+  backend:
+    build: ./backend
+    container_name: proxmox-frontend-backend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET must be set in .env}
+      - ALLOWED_ORIGIN=${ALLOWED_ORIGIN:-}
+      - COOKIE_SECURE=${COOKIE_SECURE:-true}
+      - INITIAL_ADMIN_USERNAME=${INITIAL_ADMIN_USERNAME:-}
+      - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD:-}
+      - PORT=3000
+    volumes:
+      - db_data:/app/data
+    networks:
+      - internal
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: proxmox-frontend-ui
+    restart: unless-stopped
+    ports:
+      - target: 80
+        published: 8181
+        protocol: tcp
+        host_ip: ${FRONTEND_BIND_ADDRESS:-0.0.0.0}
+    depends_on:
+      - backend
+    networks:
+      - internal
+
+volumes:
+  db_data:
+
+networks:
+  internal:
+    driver: bridge
