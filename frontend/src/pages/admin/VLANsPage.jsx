@@ -3,6 +3,30 @@ import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 
+function findNextAvailableVlanTag(vlans, firewalls) {
+  const usedTags = new Set(vlans.map(vlan => parseInt(vlan.tag, 10)).filter(Number.isInteger));
+  const ranges = firewalls.length > 0
+    ? firewalls
+        .map(firewall => ({
+          start: firewall.vlan_range_start || 1001,
+          end: firewall.vlan_range_end || 1999,
+        }))
+        .sort((a, b) => a.start - b.start || a.end - b.end)
+    : [{ start: 1001, end: 1999 }];
+
+  for (const range of ranges) {
+    for (let tag = range.start; tag <= range.end; tag += 1) {
+      if (!usedTags.has(tag)) return tag;
+    }
+  }
+
+  for (let tag = 1; tag <= 4094; tag += 1) {
+    if (!usedTags.has(tag)) return tag;
+  }
+
+  return null;
+}
+
 export default function VLANsPage() {
   useDocumentTitle('VLANs');
   const [vlans, setVlans]       = useState([]);
@@ -160,6 +184,7 @@ export default function VLANsPage() {
       {modalOpen && (
         <VLANFormModal
           vlan={editVlan}
+          vlans={vlans}
           firewalls={firewalls}
           onClose={() => setModalOpen(false)}
           onSaved={load}
@@ -178,8 +203,13 @@ export default function VLANsPage() {
   );
 }
 
-function VLANFormModal({ vlan, firewalls, onClose, onSaved }) {
-  const [form, setForm]     = useState({ name: vlan?.name || '', tag: vlan?.tag || '', description: vlan?.description || '' });
+function VLANFormModal({ vlan, vlans, firewalls, onClose, onSaved }) {
+  const suggestedTag = !vlan ? findNextAvailableVlanTag(vlans, firewalls) : null;
+  const [form, setForm] = useState({
+    name: vlan?.name || '',
+    tag: vlan?.tag || suggestedTag || '',
+    description: vlan?.description || '',
+  });
   const [syncToFw, setSyncToFw] = useState(!vlan && firewalls.length > 0);
   const [allowInternet, setAllowInternet] = useState(true);
   const [enableDhcp, setEnableDhcp] = useState(true);
@@ -251,6 +281,16 @@ function VLANFormModal({ vlan, firewalls, onClose, onSaved }) {
             placeholder="e.g. 1126"
             autoFocus
           />
+          {!vlan && suggestedTag && String(form.tag) === String(suggestedTag) && (
+            <p className="mt-2 text-xs text-emerald-400">
+              Suggested next available tag from the configured firewall ranges.
+            </p>
+          )}
+          {!vlan && !suggestedTag && (
+            <p className="mt-2 text-xs text-amber-400">
+              No free VLAN tags were found in the configured firewall pools. Pick a tag manually.
+            </p>
+          )}
           {subnet && (
             <div className="mt-2 bg-blue-900/20 border border-blue-800/30 rounded-lg px-3 py-2 text-xs space-y-0.5">
               <p className="text-blue-400">Auto subnet: <span className="font-mono">{subnet.network}</span></p>

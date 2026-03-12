@@ -308,12 +308,27 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
         fwResults.push({ firewall: sync.fw_name, status: 'partial', errors });
       } else {
         console.log(`[delete-vlan] Successfully removed from ${sync.fw_name}`);
+        db.prepare('DELETE FROM firewall_vlan_sync WHERE firewall_id = ? AND vlan_id = ?').run(sync.firewall_id, vlan.id);
         fwResults.push({ firewall: sync.fw_name, status: 'ok' });
       }
     } catch (err) {
       console.error(`[delete-vlan] Failed to deprovision from ${sync.fw_name}:`, err.message);
       fwResults.push({ firewall: sync.fw_name, status: 'error', error: err.message });
     }
+  }
+
+  const failedCleanup = fwResults.filter(result => result.status !== 'ok');
+  if (failedCleanup.length > 0) {
+    logAudit(
+      req,
+      'admin_delete_vlan_blocked',
+      `VLAN ${vlan.tag}`,
+      `Firewall cleanup incomplete: ${failedCleanup.map(r => `${r.firewall}=${r.status}`).join(', ')}`
+    );
+    return res.status(409).json({
+      error: 'VLAN cleanup did not complete on all synced firewalls. The VLAN was kept in the portal so you can retry safely.',
+      firewallCleanup: fwResults,
+    });
   }
 
   db.prepare('DELETE FROM vlans WHERE id = ?').run(req.params.id);

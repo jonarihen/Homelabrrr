@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-03-12 — Safer VLAN deletion cleanup
+
+### VLAN delete behavior
+- Deleting a VLAN now keeps the VLAN in the portal if cleanup fails on any synced firewall
+- Successful firewall deprovision steps now remove their sync record immediately, while failed firewalls remain attached for retry
+- This prevents the app from dropping the VLAN locally while referenced firewall policies or interfaces still exist remotely
+
+## 2026-03-12 — VLAN tag autofill from firewall ranges
+
+### VLAN creation workflow
+- The `New VLAN` modal now pre-populates the tag field with the next available VLAN tag from the configured firewall ranges
+- If no firewall ranges exist, the form falls back to the first free tag in the default recommended range
+- Added inline messaging so it is clear when the suggested tag came from the firewall pool or when no free pooled tags remain
+
 ## 2026-03-12 — TLS defaults and SSH host verification
 
 ### Secure-by-default management transport

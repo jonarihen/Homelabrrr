@@ -34,6 +34,8 @@ const NODE_CARD_SIZE = 160;
 const NODE_SAFETY_PADDING = 26;
 const MIN_NODE_SPACING = 172;
 const NODE_COLLISION_GAP = 18;
+const MUTED_LINE_OPACITY = 0.44;
+const MUTED_NODE_OPACITY = 0.68;
 
 function vlanTagToSubnet(tag) {
   const s = String(tag).padStart(4, '0');
@@ -814,7 +816,7 @@ export default function PoliciesPage() {
 
                   {lines.map(line => {
                     const isHovered = hoveredLine === line.id;
-                    const opacity = line.isFocused ? 1 : 0.18;
+                    const opacity = line.isFocused ? 1 : MUTED_LINE_OPACITY;
                     return (
                       <g key={line.id}>
                         <path
@@ -1010,7 +1012,7 @@ export default function PoliciesPage() {
                     const isMuted = !!srcVlan && !isSource && !isPeer;
                     const routeCount = degreeMap.get(vlan.tag) || 0;
                     const peerCount = (peerMap.get(vlan.tag) || new Set()).size;
-                    const scale = isSource ? 1.16 : isDestination ? 1.1 : isPeer ? 1.02 : isMuted ? 0.9 : 1;
+                    const scale = isSource ? 1.16 : isDestination ? 1.1 : isPeer ? 1.02 : isMuted ? 0.96 : 1;
                     const statusLabel = isSource ? 'Source' : isDestination ? 'Target' : isPeer ? 'Linked' : 'Open';
                     const statusTone = isSource
                       ? 'border-cyan-400/25 bg-cyan-500/12 text-cyan-200'
@@ -1032,10 +1034,11 @@ export default function PoliciesPage() {
                               : isPeer
                                 ? 'border-slate-500/80 bg-slate-800/92 hover:border-cyan-300/50'
                                 : 'border-slate-800 bg-slate-900/88 hover:border-slate-600 hover:bg-slate-900'
-                        } ${isMuted ? 'opacity-30' : 'opacity-100'}`}
+                        }`}
                         style={{
                           left: `${position.x}px`,
                           top: `${position.y}px`,
+                          opacity: isMuted ? MUTED_NODE_OPACITY : 1,
                           transform: `translate(-50%, -50%) scale(${scale})`,
                         }}
                       >
