@@ -6,11 +6,11 @@ import api from '../api.js';
 export default function SSHModal({ vm, onClose }) {
   const [step, setStep] = useState('config'); // 'config' | 'terminal'
   const [keys, setKeys] = useState([]);
-  const [sshConfig, setSshConfig] = useState(null);
-  const [form, setForm] = useState({ keyId: '', host: '', port: 22, username: 'root', passphrase: '' });
+  const [form, setForm] = useState({ keyId: '', host: '', port: 22, username: 'root', hostFingerprint: '', passphrase: '' });
   const [error, setError] = useState('');
   const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [scanningFingerprint, setScanningFingerprint] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -20,8 +20,13 @@ export default function SSHModal({ vm, onClose }) {
       setKeys(keysRes.data);
       const cfg = configRes.data;
       if (cfg) {
-        setSshConfig(cfg);
-        setForm(f => ({ ...f, host: cfg.host, port: cfg.port, username: cfg.username }));
+        setForm(f => ({
+          ...f,
+          host: cfg.host,
+          port: cfg.port,
+          username: cfg.username,
+          hostFingerprint: cfg.hostFingerprint || '',
+        }));
       }
       if (keysRes.data.length > 0) {
         setForm(f => ({ ...f, keyId: keysRes.data[0].id }));
@@ -36,11 +41,15 @@ export default function SSHModal({ vm, onClose }) {
     setError('');
     if (!form.keyId) return setError('Select an SSH key');
     if (!form.host) return setError('Host/IP is required');
+    if (!form.hostFingerprint) return setError('SSH host fingerprint is required');
 
     try {
       // Save config for this VM
       await api.put(`/ssh/config/${vm.node}/${vm.vmid}`, {
-        host: form.host, port: form.port, username: form.username,
+        host: form.host,
+        port: form.port,
+        username: form.username,
+        hostFingerprint: form.hostFingerprint,
       });
       // Get connection token
       const { data } = await api.post('/ssh/connect', {
@@ -52,6 +61,27 @@ export default function SSHModal({ vm, onClose }) {
       setStep('terminal');
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to connect');
+    }
+  };
+
+  const scanFingerprint = async () => {
+    if (!form.host) {
+      setError('Enter the SSH host/IP before scanning');
+      return;
+    }
+
+    setScanningFingerprint(true);
+    setError('');
+    try {
+      const { data } = await api.post(`/ssh/config/${vm.node}/${vm.vmid}/scan-fingerprint`, {
+        host: form.host,
+        port: form.port,
+      });
+      setForm(f => ({ ...f, hostFingerprint: data.hostFingerprint || '' }));
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to scan SSH fingerprint');
+    } finally {
+      setScanningFingerprint(false);
     }
   };
 
@@ -121,6 +151,30 @@ export default function SSHModal({ vm, onClose }) {
                     placeholder="Leave empty if none"
                   />
                 </Field>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs text-gray-400">Host Key Fingerprint</label>
+                  <button
+                    type="button"
+                    onClick={scanFingerprint}
+                    disabled={scanningFingerprint}
+                    className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
+                  >
+                    {scanningFingerprint ? 'Scanning...' : 'Scan fingerprint'}
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  required
+                  value={form.hostFingerprint}
+                  onChange={e => setForm(f => ({ ...f, hostFingerprint: e.target.value }))}
+                  className={inputCls}
+                  placeholder="SHA256:..."
+                />
+                <p className="mt-1.5 text-xs text-gray-500">
+                  Scan reads the server host key and stores a pinned fingerprint for future SSH verification.
+                </p>
               </div>
               {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
               <button type="submit" className={btnCls}>Connect</button>

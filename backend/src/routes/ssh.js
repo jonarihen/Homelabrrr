@@ -7,6 +7,7 @@ import { join } from 'path';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
+import { normalizeSshHostFingerprint, scanSshHostFingerprint } from '../utils/sshHostKey.js';
 
 // Convert a PPK key (any version) to OpenSSH PEM using puttygen.
 // passphrase is the PPK decryption passphrase (empty string if unencrypted).
@@ -104,7 +105,7 @@ router.get('/config/:node/:vmid', (req, res) => {
   if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const global = db.prepare('SELECT host, port FROM vm_ssh_configs WHERE node = ? AND vmid = ?')
+  const global = db.prepare('SELECT host, port, host_fingerprint FROM vm_ssh_configs WHERE node = ? AND vmid = ?')
     .get(node, parseInt(vmid));
   const userRow = db.prepare('SELECT username FROM vm_ssh_user_configs WHERE user_id = ? AND node = ? AND vmid = ?')
     .get(req.session.userId, node, parseInt(vmid));
@@ -112,24 +113,29 @@ router.get('/config/:node/:vmid', (req, res) => {
   res.json({
     host: global?.host || null,
     port: global?.port || 22,
+    hostFingerprint: global?.host_fingerprint || '',
     username: userRow?.username || 'root',
   });
 });
 
 router.put('/config/:node/:vmid', (req, res) => {
   const { node, vmid } = req.params;
-  const { host, port = 22, username = 'root' } = req.body;
+  const { host, port = 22, username = 'root', hostFingerprint = '' } = req.body;
   if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!host) return res.status(400).json({ error: 'Host/IP required' });
+  const normalizedFingerprint = normalizeSshHostFingerprint(hostFingerprint);
+  if (!normalizedFingerprint) {
+    return res.status(400).json({ error: 'SSH host fingerprint is required' });
+  }
 
   // Save host/port globally (shared across users)
   db.prepare(`
-    INSERT INTO vm_ssh_configs (node, vmid, host, port, username)
-    VALUES (?, ?, ?, ?, '')
-    ON CONFLICT(node, vmid) DO UPDATE SET host = ?, port = ?
-  `).run(node, parseInt(vmid), host, port, host, port);
+    INSERT INTO vm_ssh_configs (node, vmid, host, port, host_fingerprint, username)
+    VALUES (?, ?, ?, ?, ?, '')
+    ON CONFLICT(node, vmid) DO UPDATE SET host = ?, port = ?, host_fingerprint = ?
+  `).run(node, parseInt(vmid), host, port, normalizedFingerprint, host, port, normalizedFingerprint);
 
   // Save username per-user
   db.prepare(`
@@ -139,6 +145,22 @@ router.put('/config/:node/:vmid', (req, res) => {
   `).run(req.session.userId, node, parseInt(vmid), username, username);
 
   res.json({ ok: true });
+});
+
+router.post('/config/:node/:vmid/scan-fingerprint', async (req, res) => {
+  const { node, vmid } = req.params;
+  const { host, port = 22 } = req.body;
+  if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  if (!host) return res.status(400).json({ error: 'Host/IP required' });
+
+  try {
+    const hostFingerprint = await scanSshHostFingerprint(host, parseInt(port, 10) || 22);
+    res.json({ hostFingerprint });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── SSH Connect (create token) ──────────────────────────────────────────────
@@ -156,7 +178,7 @@ router.post('/connect', (req, res) => {
     .get(keyId, req.session.userId);
   if (!key) return res.status(404).json({ error: 'SSH key not found' });
 
-  const global = db.prepare('SELECT host, port FROM vm_ssh_configs WHERE node = ? AND vmid = ?')
+  const global = db.prepare('SELECT host, port, host_fingerprint FROM vm_ssh_configs WHERE node = ? AND vmid = ?')
     .get(node, parseInt(vmid));
   const userRow = db.prepare('SELECT username FROM vm_ssh_user_configs WHERE user_id = ? AND node = ? AND vmid = ?')
     .get(req.session.userId, node, parseInt(vmid));
@@ -164,10 +186,14 @@ router.post('/connect', (req, res) => {
   if (!global?.host) {
     return res.status(400).json({ error: 'SSH host is not configured for this VM' });
   }
+  if (!global.host_fingerprint) {
+    return res.status(400).json({ error: 'SSH host fingerprint is not configured for this VM' });
+  }
 
   const host = global.host;
   const port = global.port || 22;
   const username = userRow?.username || 'root';
+  const hostFingerprint = normalizeSshHostFingerprint(global.host_fingerprint);
 
   // Purge expired
   for (const [k, v] of sshSessions) {
@@ -178,7 +204,7 @@ router.post('/connect', (req, res) => {
   sshSessions.set(token, {
     userId: req.session.userId,
     sessionId: req.sessionID,
-    host, port, username,
+    host, port, username, hostFingerprint,
     privateKey: key.private_key,
     passphrase,
     expires: Date.now() + 120_000,

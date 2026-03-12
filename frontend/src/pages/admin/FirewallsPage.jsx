@@ -16,7 +16,7 @@ export default function FirewallsPage() {
   const [switchesLoading, setSwitchesLoading] = useState(false);
 
   function defaultForm() {
-    return { name: '', host: '', port: 443, apiKey: '', vdom: 'lab', parentInterface: 'fortilink', wanInterface: 'wan1', vlanRangeStart: 1001, vlanRangeEnd: 1999, labVdomLink: 'lab-root0', rootVdom: 'root', rootVdomLink: 'lab-root1', routeGateway: '10.255.254.2', trunkSwitchSerial: '', trunkSwitchPort: '', verifyTls: false };
+    return { name: '', host: '', port: 443, apiKey: '', vdom: 'lab', parentInterface: 'fortilink', wanInterface: 'wan1', vlanRangeStart: 1001, vlanRangeEnd: 1999, labVdomLink: 'lab-root0', rootVdom: 'root', rootVdomLink: 'lab-root1', routeGateway: '10.255.254.2', trunkSwitchSerial: '', trunkSwitchPort: '', verifyTls: true };
   }
 
   const load = () => {
@@ -130,6 +130,7 @@ export default function FirewallsPage() {
                       <div>
                         <h3 className="text-white font-semibold">{fw.name}</h3>
                         <p className="text-xs text-gray-500 font-mono">{fw.host}:{fw.port}</p>
+                        <p className="text-[10px] text-gray-600 mt-0.5">{fw.verify_tls ? 'TLS verification on' : 'TLS verification off'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -211,6 +212,18 @@ export default function FirewallsPage() {
                 <input type="password" required={!editId} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} className={inputCls} placeholder="REST API administrator token" />
                 <p className="text-xs text-gray-600 mt-1">Create in FortiGate: System &gt; Administrators &gt; REST API</p>
               </div>
+              <label className="flex items-start gap-3 cursor-pointer rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3">
+                <input
+                  type="checkbox"
+                  checked={form.verifyTls}
+                  onChange={e => setForm(f => ({ ...f, verifyTls: e.target.checked }))}
+                  className="accent-blue-500 mt-0.5"
+                />
+                <div>
+                  <p className="text-sm text-white">Verify TLS certificate</p>
+                  <p className="text-xs text-gray-500 mt-0.5">Keep this enabled unless the firewall is still using an untrusted self-signed certificate.</p>
+                </div>
+              </label>
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs text-gray-400 mb-1.5 font-medium">VDOM</label>

@@ -26,7 +26,7 @@ export function vlanTagToSubnet(tag) {
  * FortiGate REST API client for FortiOS 7.x
  */
 export class FortiGateAPI {
-  constructor(host, port, apiKey, vdom = 'root', verifyTls = false) {
+  constructor(host, port, apiKey, vdom = 'root', verifyTls = true) {
     this.host = host;
     this.port = port || 443;
     this.apiKey = apiKey;
@@ -605,6 +605,6 @@ export function createClient(firewall) {
     firewall.port,
     firewall.api_key,
     firewall.vdom,
-    !!firewall.verify_tls
+    firewall.verify_tls !== 0
   );
 }

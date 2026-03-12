@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-03-12 — TLS defaults and SSH host verification
+
+### Secure-by-default management transport
+- New Proxmox and FortiGate entries now default to TLS certificate verification enabled
+- Existing saved hosts and firewalls keep their current `verify_tls` values during update instead of silently falling back to disabled
+- Fresh databases now create firewall and PVE host records with secure TLS defaults
+
+### SSH host key pinning
+- VM SSH configs now store a pinned SSH host fingerprint alongside host and port
+- Browser SSH access now refuses to connect unless a fingerprint is configured for the VM
+- Added SSH fingerprint scanning to the SSH modal so users can fetch and save the presented host key before connecting
+- Backend SSH connections now verify the presented host key against the stored fingerprint and reject mismatches
+
 ## 2026-03-12 — Authentication and websocket hardening
 
 ### Session and 2FA protection

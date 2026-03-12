@@ -17,6 +17,7 @@ import adminRoutes from './routes/admin.js';
 import vmRoutes, { vncSessions } from './routes/vms.js';
 import sshRoutes, { sshSessions } from './routes/ssh.js';
 import provisionRoutes from './routes/provision.js';
+import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 
 const app = express();
 const server = createServer(app);
@@ -262,8 +263,10 @@ vncWss.on('connection', async (clientWs, vncSession) => {
 // ─── SSH connection handler ──────────────────────────────────────────────────
 
 sshWss.on('connection', (clientWs, sshSession) => {
-  const { host, port, username, privateKey, passphrase } = sshSession;
+  const { host, port, username, privateKey, passphrase, hostFingerprint } = sshSession;
   const conn = new SSHClient();
+  const expectedHostFingerprint = normalizeSshHostFingerprint(hostFingerprint);
+  let hostVerificationError = '';
 
   conn.on('ready', () => {
     console.log(`SSH connected: ${username}@${host}:${port}`);
@@ -314,9 +317,10 @@ sshWss.on('connection', (clientWs, sshSession) => {
   });
 
   conn.on('error', (err) => {
-    console.error(`SSH error (${host}):`, err.message);
+    const message = hostVerificationError || err.message;
+    console.error(`SSH error (${host}):`, message);
     if (clientWs.readyState === 1) {
-      clientWs.send(JSON.stringify({ type: 'error', error: err.message }));
+      clientWs.send(JSON.stringify({ type: 'error', error: message }));
       clientWs.close();
     }
   });
@@ -333,6 +337,14 @@ sshWss.on('connection', (clientWs, sshSession) => {
       privateKey,
       passphrase: passphrase || undefined,
       readyTimeout: 10000,
+      hostVerifier: (key) => {
+        const presentedFingerprint = sshHostFingerprint(key);
+        if (presentedFingerprint !== expectedHostFingerprint) {
+          hostVerificationError = `SSH host key mismatch. Expected ${expectedHostFingerprint}, got ${presentedFingerprint}`;
+          return false;
+        }
+        return true;
+      },
     });
   } catch (err) {
     console.error(`SSH connect error (${host}):`, err.message);

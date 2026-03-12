@@ -63,6 +63,7 @@ db.exec(`
     vmid INTEGER NOT NULL,
     host TEXT NOT NULL,
     port INTEGER DEFAULT 22,
+    host_fingerprint TEXT DEFAULT '',
     username TEXT DEFAULT 'root',
     UNIQUE(node, vmid)
   );
@@ -101,6 +102,7 @@ db.exec(`
     port INTEGER DEFAULT 8006,
     token_id TEXT NOT NULL,
     token_secret TEXT NOT NULL,
+    verify_tls INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
   );
 `);
@@ -119,6 +121,7 @@ try { db.exec(`
     UNIQUE(user_id, node, vmid)
   )
 `); } catch { /* exists */ }
+try { db.exec("ALTER TABLE vm_ssh_configs ADD COLUMN host_fingerprint TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN see_all_vms INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0'); } catch { /* exists */ }
@@ -203,7 +206,7 @@ try { db.exec(`
     wan_interface TEXT DEFAULT 'wan1',
     vlan_range_start INTEGER DEFAULT 1001,
     vlan_range_end INTEGER DEFAULT 1999,
-    verify_tls INTEGER DEFAULT 0,
+    verify_tls INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
   )
 `); } catch { /* exists */ }

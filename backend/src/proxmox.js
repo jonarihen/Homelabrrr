@@ -2,7 +2,7 @@ import https from 'https';
 import db from './db.js';
 
 function agentForHost(host) {
-  return new https.Agent({ rejectUnauthorized: !!host.verify_tls });
+  return new https.Agent({ rejectUnauthorized: host.verify_tls !== 0 });
 }
 
 // ── Per-host API request ─────────────────────────────────────────────────────
@@ -371,6 +371,6 @@ export async function getHostForNode(nodeName) {
     port: host.port,
     tokenId: host.token_id,
     tokenSecret: host.token_secret,
-    verifyTls: !!host.verify_tls,
+    verifyTls: host.verify_tls !== 0,
   };
 }

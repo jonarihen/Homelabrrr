@@ -393,7 +393,7 @@ router.get('/pve-hosts/:id/status', pHosts, async (req, res) => {
 });
 
 router.post('/pve-hosts', pHosts, (req, res) => {
-  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls = false } = req.body;
+  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls = true } = req.body;
   if (!name || !host || !tokenId || !tokenSecret) {
     return res.status(400).json({ error: 'Name, host, tokenId and tokenSecret are required' });
   }
@@ -408,7 +408,7 @@ router.post('/pve-hosts', pHosts, (req, res) => {
 });
 
 router.put('/pve-hosts/:id', pHosts, (req, res) => {
-  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls = false } = req.body;
+  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls } = req.body;
   if (!name || !host || !tokenId) {
     return res.status(400).json({ error: 'Name, host and tokenId are required' });
   }
@@ -417,9 +417,10 @@ router.put('/pve-hosts/:id', pHosts, (req, res) => {
 
   // If tokenSecret is empty, keep the existing one
   const secret = tokenSecret || existing.token_secret;
+  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== 0 : !!verifyTls;
   db.prepare(
     'UPDATE pve_hosts SET name = ?, host = ?, port = ?, token_id = ?, token_secret = ?, verify_tls = ? WHERE id = ?'
-  ).run(name, host, port, tokenId, secret, verifyTls ? 1 : 0, req.params.id);
+  ).run(name, host, port, tokenId, secret, verifyTlsEnabled ? 1 : 0, req.params.id);
   res.json({ ok: true });
 });
 
@@ -494,7 +495,7 @@ router.get('/firewalls/:id/switches', pFirewalls, async (req, res) => {
 });
 
 router.post('/firewalls', pFirewalls, (req, res) => {
-  const { name, type = 'fortigate', host, port = 443, apiKey, vdom = 'root', parentInterface = 'fortilink', wanInterface = 'wan1', vlanRangeStart = 1001, vlanRangeEnd = 1999, labVdomLink = 'lab-root0', rootVdom = 'root', rootVdomLink = 'lab-root1', routeGateway = '10.255.254.2', trunkSwitchSerial = '', trunkSwitchPort = '', verifyTls = false } = req.body;
+  const { name, type = 'fortigate', host, port = 443, apiKey, vdom = 'root', parentInterface = 'fortilink', wanInterface = 'wan1', vlanRangeStart = 1001, vlanRangeEnd = 1999, labVdomLink = 'lab-root0', rootVdom = 'root', rootVdomLink = 'lab-root1', routeGateway = '10.255.254.2', trunkSwitchSerial = '', trunkSwitchPort = '', verifyTls = true } = req.body;
   if (!name || !host || !apiKey) {
     return res.status(400).json({ error: 'Name, host, and API key are required' });
   }
@@ -529,12 +530,13 @@ router.put('/firewalls/:id', pFirewalls, (req, res) => {
   const routeGw       = req.body.routeGateway   || existing.route_gateway   || '10.255.254.2';
   const trunkSerial   = req.body.trunkSwitchSerial ?? existing.trunk_switch_serial ?? '';
   const trunkPort     = req.body.trunkSwitchPort   ?? existing.trunk_switch_port   ?? '';
+  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== 0 : !!verifyTls;
   if (rangeStart >= rangeEnd || rangeStart < 1 || rangeEnd > 4094) {
     return res.status(400).json({ error: 'Invalid VLAN range (must be 1–4094, start < end)' });
   }
   db.prepare(
     'UPDATE firewalls SET name = ?, host = ?, port = ?, api_key = ?, vdom = ?, parent_interface = ?, wan_interface = ?, vlan_range_start = ?, vlan_range_end = ?, lab_vdom_link = ?, root_vdom = ?, root_vdom_link = ?, route_gateway = ?, trunk_switch_serial = ?, trunk_switch_port = ?, verify_tls = ? WHERE id = ?'
-  ).run(name, host, port, key, vdom || existing.vdom, parentInterface || existing.parent_interface, wanInterface || existing.wan_interface, rangeStart, rangeEnd, labLink, rootVd, rootLink, routeGw, trunkSerial, trunkPort, verifyTls ? 1 : 0, req.params.id);
+  ).run(name, host, port, key, vdom || existing.vdom, parentInterface || existing.parent_interface, wanInterface || existing.wan_interface, rangeStart, rangeEnd, labLink, rootVd, rootLink, routeGw, trunkSerial, trunkPort, verifyTlsEnabled ? 1 : 0, req.params.id);
   logAudit(req, 'admin_update_firewall', name, `${host}:${port}`);
   res.json({ ok: true });
 });
