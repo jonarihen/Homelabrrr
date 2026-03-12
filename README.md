@@ -137,6 +137,7 @@ Example values live in [`.env.example`](/root/Proxmox-frontend/.env.example).
 | `SESSION_SECRET` | Session signing secret |
 | `ALLOWED_ORIGIN` | Allowed browser origin for CORS |
 | `COOKIE_SECURE` | Marks auth cookies as secure |
+| `TRUST_PROXY` | Number or mode used for Express proxy trust |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
 | `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing |

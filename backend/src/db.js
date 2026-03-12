@@ -78,6 +78,15 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS two_factor_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    attempted_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_two_factor_attempts ON two_factor_attempts(username, attempted_at);
+`);
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

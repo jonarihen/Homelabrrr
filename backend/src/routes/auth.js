@@ -19,6 +19,17 @@ const loginLimiter = rateLimit({
 
 const LOCKOUT_WINDOW_MS = 10 * 60 * 1000;
 const LOCKOUT_MAX      = 10;
+const TWO_FACTOR_WINDOW_MS = 10 * 60 * 1000;
+const TWO_FACTOR_MAX      = 6;
+
+const verifyTwoFactorLimiter = rateLimit({
+  windowMs: TWO_FACTOR_WINDOW_MS,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { error: 'Too many two-factor verification attempts, please try again later.' },
+});
 
 function serializeUser(user) {
   return {
@@ -48,9 +59,48 @@ function startUserSession(req, user, { twoFactorEnrollmentOnly = false } = {}) {
   req.session.twoFactorEnrollmentOnly = twoFactorEnrollmentOnly;
 }
 
+function clearPendingAuth(req) {
+  delete req.session.pendingUserId;
+  delete req.session.pendingUsername;
+  delete req.session.pendingIsAdmin;
+}
+
+function regenerateSession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.regenerate((err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+function clearExpiredTwoFactorAttempts() {
+  const windowStart = Date.now() - TWO_FACTOR_WINDOW_MS;
+  db.prepare('DELETE FROM two_factor_attempts WHERE attempted_at < ?').run(windowStart);
+  return windowStart;
+}
+
+function countTwoFactorAttempts(username, windowStart) {
+  return db.prepare(
+    'SELECT COUNT(*) as count FROM two_factor_attempts WHERE username = ? AND attempted_at > ?'
+  ).get(username, windowStart).count;
+}
+
+function recordTwoFactorFailure(username) {
+  const now = Date.now();
+  const windowStart = now - TWO_FACTOR_WINDOW_MS;
+  db.prepare('DELETE FROM two_factor_attempts WHERE attempted_at < ?').run(windowStart);
+  db.prepare('INSERT INTO two_factor_attempts (username, attempted_at) VALUES (?, ?)').run(username, now);
+  return countTwoFactorAttempts(username, windowStart);
+}
+
+function clearTwoFactorAttempts(username) {
+  db.prepare('DELETE FROM two_factor_attempts WHERE username = ?').run(username);
+}
+
 // ─── Login ────────────────────────────────────────────────────────────────────
 
-router.post('/login', loginLimiter, (req, res) => {
+router.post('/login', loginLimiter, async (req, res, next) => {
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
@@ -82,55 +132,78 @@ router.post('/login', loginLimiter, (req, res) => {
 
   db.prepare('DELETE FROM login_attempts WHERE username = ?').run(username);
 
-  // If 2FA is enabled, set a pending state and ask for the code
-  if (user.totp_enabled) {
-    req.session.pendingUserId  = user.id;
-    req.session.pendingUsername = user.username;
-    req.session.pendingIsAdmin  = user.is_admin === 1;
-    return res.json({ requiresTwoFactor: true });
-  }
+  try {
+    await regenerateSession(req);
 
-  if (user.require_2fa) {
-    startUserSession(req, user, { twoFactorEnrollmentOnly: true });
-    logAudit(req, 'login', user.username, '2FA setup required');
-    return res.json({
-      ...serializeUser(user),
-      twoFactorSetupRequired: true,
-    });
-  }
+    // If 2FA is enabled, set a pending state and ask for the code
+    if (user.totp_enabled) {
+      req.session.pendingUserId = user.id;
+      req.session.pendingUsername = user.username;
+      req.session.pendingIsAdmin = user.is_admin === 1;
+      return res.json({ requiresTwoFactor: true });
+    }
 
-  startUserSession(req, user);
-  logAudit(req, 'login', user.username, '');
-  res.json(serializeUser(user));
+    if (user.require_2fa) {
+      startUserSession(req, user, { twoFactorEnrollmentOnly: true });
+      logAudit(req, 'login', user.username, '2FA setup required');
+      return res.json({
+        ...serializeUser(user),
+        twoFactorSetupRequired: true,
+      });
+    }
+
+    startUserSession(req, user);
+    logAudit(req, 'login', user.username, '');
+    return res.json(serializeUser(user));
+  } catch (err) {
+    return next(err);
+  }
 });
 
 // ─── Verify 2FA code (completes login) ───────────────────────────────────────
 
-router.post('/verify-2fa', (req, res) => {
-  if (!req.session.pendingUserId) {
+router.post('/verify-2fa', verifyTwoFactorLimiter, async (req, res, next) => {
+  if (!req.session.pendingUserId || !req.session.pendingUsername) {
     return res.status(400).json({ error: 'No pending authentication' });
   }
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
+  const pendingUsername = req.session.pendingUsername;
+  const windowStart = clearExpiredTwoFactorAttempts();
+  const currentAttempts = countTwoFactorAttempts(pendingUsername, windowStart);
+  if (currentAttempts >= TWO_FACTOR_MAX) {
+    clearPendingAuth(req);
+    return res.status(423).json({ error: 'Two-factor verification locked — too many invalid codes. Sign in again in 10 minutes.' });
+  }
+
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.pendingUserId);
   if (!user?.totp_enabled || !user.totp_secret) {
+    clearPendingAuth(req);
     return res.status(400).json({ error: 'Invalid state' });
   }
 
   const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: user.totp_secret });
   if (!isValid) {
-    return res.status(401).json({ error: 'Invalid code — check your authenticator app and try again.' });
+    const attempts = recordTwoFactorFailure(pendingUsername);
+    const remaining = TWO_FACTOR_MAX - attempts;
+    if (remaining <= 0) {
+      clearPendingAuth(req);
+      return res.status(423).json({ error: 'Two-factor verification locked — too many invalid codes. Sign in again in 10 minutes.' });
+    }
+    return res.status(401).json({ error: `Invalid code (${remaining} attempt${remaining !== 1 ? 's' : ''} remaining before lockout)` });
   }
 
-  // Complete login
-  delete req.session.pendingUserId;
-  delete req.session.pendingUsername;
-  delete req.session.pendingIsAdmin;
+  clearTwoFactorAttempts(pendingUsername);
 
-  startUserSession(req, user);
-  logAudit(req, 'login', user.username, '2FA verified');
-  res.json(serializeUser(user));
+  try {
+    await regenerateSession(req);
+    startUserSession(req, user);
+    logAudit(req, 'login', user.username, '2FA verified');
+    return res.json(serializeUser(user));
+  } catch (err) {
+    return next(err);
+  }
 });
 
 // ─── Logout ───────────────────────────────────────────────────────────────────

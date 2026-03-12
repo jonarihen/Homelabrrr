@@ -176,6 +176,8 @@ router.post('/connect', (req, res) => {
 
   const token = uuidv4();
   sshSessions.set(token, {
+    userId: req.session.userId,
+    sessionId: req.sessionID,
     host, port, username,
     privateKey: key.private_key,
     passphrase,

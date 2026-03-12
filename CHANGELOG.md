@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-03-12 — Authentication and websocket hardening
+
+### Session and 2FA protection
+- Login and 2FA completion now regenerate the session ID before elevating the session, reducing session fixation risk
+- Added dedicated failed-attempt tracking for `/auth/verify-2fa` with lockout behavior after repeated invalid TOTP codes
+- Added extra rate limiting on 2FA verification attempts
+
+### Websocket token tightening
+- VNC and SSH websocket upgrades now validate the browser `Origin` before accepting the connection
+- Console websocket tokens are now bound to the authenticated session that created them
+- VNC and SSH tokens are now single-use during websocket upgrade instead of remaining replayable after first connect
+
+### Proxy and audit trust cleanup
+- Audit logging now relies on Express-resolved client IPs instead of manually trusting raw `X-Forwarded-For`
+- Added configurable `TRUST_PROXY` runtime support so reverse-proxy hop trust is not hardcoded in the backend
+
+## 2026-03-11 — README polish for GitHub
+
+### Repository presentation
+- Added a proper root `README.md` for the project
+- Reworked the documentation into a more GitHub-friendly landing page with a stronger intro, badges, highlights, and clearer section structure
+
+### Setup and operations docs
+- Documented the reverse-proxy deployment model more clearly
+- Added cleaner quick-start, environment, security, and rollback guidance so the repo is easier to understand when landing on it for the first time
+
 ## 2026-03-11 — Admin changelog viewer
 
 ### Admin sidebar access

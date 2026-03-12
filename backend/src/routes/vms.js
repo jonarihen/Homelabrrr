@@ -144,6 +144,8 @@ router.post('/:node/:vmid/vnc-ticket', async (req, res) => {
     }
 
     vncSessions.set(token, {
+      userId: req.session.userId,
+      sessionId: req.sessionID,
       node, vmid, vmtype,
       ticket: vncData.ticket,
       port:   vncData.port,

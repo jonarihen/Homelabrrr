@@ -21,7 +21,15 @@ import provisionRoutes from './routes/provision.js';
 const app = express();
 const server = createServer(app);
 
-app.set('trust proxy', 1);
+function parseTrustProxy(value) {
+  if (value === undefined || value === null || value === '') return 1;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  const numeric = Number(value);
+  return Number.isNaN(numeric) ? value : numeric;
+}
+
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || null;
 
@@ -36,7 +44,7 @@ if (ALLOWED_ORIGIN) {
   }));
 }
 const SqliteSessionStore = SqliteStore(session);
-app.use(session({
+const sessionMiddleware = session({
   store: new SqliteSessionStore({
     client: db,
     expired: { clear: true, intervalMs: 900000 },
@@ -50,7 +58,8 @@ app.use(session({
     secure: process.env.COOKIE_SECURE === 'true',
     maxAge: 24 * 60 * 60 * 1000,
   },
-}));
+});
+app.use(sessionMiddleware);
 
 app.use((req, res, next) => {
   if (!req.session?.twoFactorEnrollmentOnly) return next();
@@ -97,18 +106,74 @@ const vncWss = new WebSocketServer({
 
 const sshWss = new WebSocketServer({ noServer: true });
 
-server.on('upgrade', (request, socket, head) => {
+function rejectUpgrade(socket, code, message) {
+  socket.write(`HTTP/1.1 ${code} ${message}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
+
+function isAllowedUpgradeOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin) return false;
+  if (ALLOWED_ORIGIN) return origin === ALLOWED_ORIGIN;
+
+  try {
+    return new URL(origin).host === request.headers.host;
+  } catch {
+    return false;
+  }
+}
+
+function loadUpgradeSession(request) {
+  return new Promise((resolve, reject) => {
+    sessionMiddleware(request, {
+      getHeader() { return undefined; },
+      setHeader() {},
+      end() {},
+    }, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+server.on('upgrade', async (request, socket, head) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
+
+  if (url.pathname !== '/api/vnc' && url.pathname !== '/api/ssh') {
+    socket.destroy();
+    return;
+  }
+
+  if (!isAllowedUpgradeOrigin(request)) {
+    rejectUpgrade(socket, 403, 'Forbidden');
+    return;
+  }
+
+  try {
+    await loadUpgradeSession(request);
+  } catch (err) {
+    console.error('Failed to load websocket session:', err.message);
+    rejectUpgrade(socket, 500, 'Internal Server Error');
+    return;
+  }
+
+  if (!request.session?.userId) {
+    rejectUpgrade(socket, 401, 'Unauthorized');
+    return;
+  }
 
   if (url.pathname === '/api/vnc') {
     const token = url.searchParams.get('token');
     const sess = vncSessions.get(token);
     if (!sess || sess.expires < Date.now()) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
+      rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
-    sess.expires = Date.now() + 60 * 60 * 1000;
+    if (sess.userId !== request.session.userId || sess.sessionId !== request.sessionID) {
+      rejectUpgrade(socket, 401, 'Unauthorized');
+      return;
+    }
+    vncSessions.delete(token);
     vncWss.handleUpgrade(request, socket, head, (ws) => {
       vncWss.emit('connection', ws, sess);
     });
@@ -116,11 +181,14 @@ server.on('upgrade', (request, socket, head) => {
     const token = url.searchParams.get('token');
     const sess = sshSessions.get(token);
     if (!sess || sess.expires < Date.now()) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
+      rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
-    sess.expires = Date.now() + 60 * 60 * 1000;
+    if (sess.userId !== request.session.userId || sess.sessionId !== request.sessionID) {
+      rejectUpgrade(socket, 401, 'Unauthorized');
+      return;
+    }
+    sshSessions.delete(token);
     sshWss.handleUpgrade(request, socket, head, (ws) => {
       sshWss.emit('connection', ws, sess);
     });
