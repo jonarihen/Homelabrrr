@@ -166,7 +166,7 @@ server.on('upgrade', async (request, socket, head) => {
   if (url.pathname === '/api/vnc') {
     const token = url.searchParams.get('token');
     const sess = vncSessions.get(token);
-    if (!sess || sess.expires < Date.now()) {
+    if (!sess || sess.expires < Date.now() || sess._consumed) {
       rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
@@ -174,14 +174,17 @@ server.on('upgrade', async (request, socket, head) => {
       rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
-    vncSessions.delete(token);
+    // Mark as consumed immediately to prevent parallel replays, but keep the
+    // entry until the upgrade completes so a failed upgrade doesn't lose data.
+    sess._consumed = true;
     vncWss.handleUpgrade(request, socket, head, (ws) => {
+      vncSessions.delete(token);
       vncWss.emit('connection', ws, sess);
     });
   } else if (url.pathname === '/api/ssh') {
     const token = url.searchParams.get('token');
     const sess = sshSessions.get(token);
-    if (!sess || sess.expires < Date.now()) {
+    if (!sess || sess.expires < Date.now() || sess._consumed) {
       rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
@@ -189,8 +192,9 @@ server.on('upgrade', async (request, socket, head) => {
       rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
-    sshSessions.delete(token);
+    sess._consumed = true;
     sshWss.handleUpgrade(request, socket, head, (ws) => {
+      sshSessions.delete(token);
       sshWss.emit('connection', ws, sess);
     });
   } else {

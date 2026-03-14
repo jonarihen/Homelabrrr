@@ -100,8 +100,8 @@ export class FortiGateAPI {
 
   // ─── Interfaces ──────────────────────────────────────────────────────────────
 
-  async getInterfaces() {
-    const res = await this.request('GET', 'cmdb/system/interface');
+  async getInterfaces(vdomOverride = null) {
+    const res = await this.request('GET', 'cmdb/system/interface', null, vdomOverride);
     return res.results || [];
   }
 
@@ -200,8 +200,8 @@ export class FortiGateAPI {
 
   // ─── Firewall Address Objects ────────────────────────────────────────────────
 
-  async getAddressObjects() {
-    const res = await this.request('GET', 'cmdb/firewall/address');
+  async getAddressObjects(vdomOverride = null) {
+    const res = await this.request('GET', 'cmdb/firewall/address', null, vdomOverride);
     return res.results || [];
   }
 
@@ -255,6 +255,35 @@ export class FortiGateAPI {
 
   async deleteServiceObject(name) {
     return this.request('DELETE', `cmdb/firewall.service/custom/${encodeURIComponent(name)}`);
+  }
+
+  // ─── Virtual IPs (Port Forwarding) ──────────────────────────────────────────
+
+  async getVips(vdomOverride = null) {
+    const res = await this.request('GET', 'cmdb/firewall/vip', null, vdomOverride);
+    return res.results || [];
+  }
+
+  async getVip(name, vdomOverride = null) {
+    try {
+      const res = await this.request('GET', `cmdb/firewall/vip/${encodeURIComponent(name)}`, null, vdomOverride);
+      return res.results?.[0] || null;
+    } catch { return null; }
+  }
+
+  async createVip(data, vdomOverride = null) {
+    return this.request('POST', 'cmdb/firewall/vip', data, vdomOverride);
+  }
+
+  async deleteVip(name, vdomOverride = null) {
+    return this.request('DELETE', `cmdb/firewall/vip/${encodeURIComponent(name)}`, null, vdomOverride);
+  }
+
+  // ─── Address Groups ─────────────────────────────────────────────────────────
+
+  async getAddressGroups(vdomOverride = null) {
+    const res = await this.request('GET', 'cmdb/firewall/addrgrp', null, vdomOverride);
+    return res.results || [];
   }
 
   // ─── Switch-controller managed-switch ──────────────────────────────────────
@@ -389,99 +418,140 @@ export class FortiGateAPI {
     const rootVdomLink = opts.rootVdomLink || 'lab-root1';
     const routeGateway = opts.routeGateway || '10.255.254.2';
 
-    // ── Step 1: VLAN interface at global scope, assigned to lab VDOM ─────────
-    const existing = await this.getInterface(ifaceName);
-    if (existing) {
-      console.log(`[provision] Interface ${ifaceName} already exists, skipping`);
-    } else {
-      await this.createVlanInterface(
-        ifaceName, tag, parentInterface,
-        subnet.ip, subnet.netmask,
-        { description: name }
-      );
-      console.log(`[provision] Created interface ${ifaceName} (global scope, vdom=${this.vdom})`);
-    }
-
-    const policyIds = [];
-    let dhcpServerId = null;
-    let staticRouteId = null;
+    // Track what we created (not what already existed) so we can roll back on failure
+    let createdInterface = false;
+    let createdAddrObj = false;
     const addrObjName = `NET-${subnet.networkIp}_24`;
+    const policyIds = [];
+    let createdPolicyId = null;
+    let dhcpServerId = null;
+    let createdDhcpId = null;
+    let staticRouteId = null;
+    let createdRouteId = null;
 
-    // ── Step 2: Address object for the VLAN subnet ───────────────────────────
-    const existingAddr = await this.getAddressObject(addrObjName);
-    if (existingAddr) {
-      console.log(`[provision] Address object ${addrObjName} already exists, skipping`);
-    } else {
-      await this.createAddressObject(addrObjName, `${subnet.networkIp} ${subnet.netmask}`);
-      console.log(`[provision] Created address object ${addrObjName}`);
-    }
-
-    // ── Step 3: Firewall policy in lab (VLAN → lab-root0) ─────────────────────
-    if (opts.allowInternet !== false) {
-      const allPolicies = await this.getPolicies();
-      const existingPolicy = allPolicies.find(p =>
-        (p.srcintf || []).some(i => i.name === ifaceName)
-      );
-      if (existingPolicy) {
-        policyIds.push(existingPolicy.policyid);
-        console.log(`[provision] Policy for ${ifaceName} already exists (id: ${existingPolicy.policyid}), skipping`);
-      } else {
-        const policyRes = await this.createPolicy({
-          name: `${ifaceName}-internet`,
-          srcintf: [{ name: ifaceName }],
-          dstintf: [{ name: labVdomLink }],
-          srcaddr: [{ name: addrObjName }],
-          dstaddr: [{ name: 'all' }],
-          action: 'accept',
-          schedule: 'always',
-          service: [{ name: 'ALL' }],
-          logtraffic: 'all',
-          'global-label': `${name} (${ifaceName})`,
-          comments: `Auto-created for ${name} (${ifaceName})`,
-        });
-        if (policyRes?.mkey) policyIds.push(policyRes.mkey);
-        console.log(`[provision] Created policy id=${policyRes?.mkey} with sequence group "${name} (${ifaceName})"`);
+    const rollback = async (reason) => {
+      console.error(`[provision] Rolling back ${ifaceName} due to: ${reason}`);
+      const warnings = [];
+      if (createdDhcpId) {
+        try { await this.deleteDhcpServer(createdDhcpId); } catch (e) { warnings.push(`dhcp: ${e.message}`); }
       }
-    }
+      if (createdRouteId) {
+        try { await this.deleteStaticRoute(createdRouteId, rootVdom); } catch (e) { warnings.push(`route: ${e.message}`); }
+      }
+      if (createdPolicyId) {
+        try { await this.deletePolicy(createdPolicyId); } catch (e) { warnings.push(`policy: ${e.message}`); }
+      }
+      if (createdAddrObj) {
+        try { await this.deleteAddressObject(addrObjName); } catch (e) { warnings.push(`addr: ${e.message}`); }
+      }
+      if (createdInterface) {
+        try { await this.deleteInterface(ifaceName); } catch (e) { warnings.push(`iface: ${e.message}`); }
+      }
+      if (warnings.length > 0) console.warn(`[provision] Rollback warnings for ${ifaceName}:`, warnings);
+    };
 
-    // ── Step 3: Static route in root VDOM ─────────────────────────────────────
-    const rootRoutes = await this.getStaticRoutes(rootVdom);
-    const existingRoute = rootRoutes.find(r => r.dst === `${subnet.networkIp} ${subnet.netmask}`);
-    if (existingRoute) {
-      staticRouteId = existingRoute['seq-num'] || existingRoute.seq_num;
-      console.log(`[provision] Static route for ${subnet.network} already exists in ${rootVdom} (seq-num: ${staticRouteId}), skipping`);
-    } else {
-      try {
+    try {
+      // ── Step 1: VLAN interface at global scope, assigned to lab VDOM ─────────
+      const existing = await this.getInterface(ifaceName);
+      if (existing) {
+        console.log(`[provision] Interface ${ifaceName} already exists, skipping`);
+      } else {
+        await this.createVlanInterface(
+          ifaceName, tag, parentInterface,
+          subnet.ip, subnet.netmask,
+          { description: name }
+        );
+        createdInterface = true;
+        console.log(`[provision] Created interface ${ifaceName} (global scope, vdom=${this.vdom})`);
+      }
+
+      // ── Step 2: Address object for the VLAN subnet ───────────────────────────
+      const existingAddr = await this.getAddressObject(addrObjName);
+      if (existingAddr) {
+        console.log(`[provision] Address object ${addrObjName} already exists, skipping`);
+      } else {
+        await this.createAddressObject(addrObjName, `${subnet.networkIp} ${subnet.netmask}`);
+        createdAddrObj = true;
+        console.log(`[provision] Created address object ${addrObjName}`);
+      }
+
+      // ── Step 3: Firewall policy in lab (VLAN → lab-root0) ─────────────────────
+      if (opts.allowInternet !== false) {
+        const allPolicies = await this.getPolicies();
+        const existingPolicy = allPolicies.find(p =>
+          (p.srcintf || []).some(i => i.name === ifaceName)
+        );
+        if (existingPolicy) {
+          policyIds.push(existingPolicy.policyid);
+          console.log(`[provision] Policy for ${ifaceName} already exists (id: ${existingPolicy.policyid}), skipping`);
+        } else {
+          const policyRes = await this.createPolicy({
+            name: `${ifaceName}-internet`,
+            srcintf: [{ name: ifaceName }],
+            dstintf: [{ name: labVdomLink }],
+            srcaddr: [{ name: addrObjName }],
+            dstaddr: [{ name: 'all' }],
+            action: 'accept',
+            schedule: 'always',
+            service: [{ name: 'ALL' }],
+            logtraffic: 'all',
+            'global-label': `${name} (${ifaceName})`,
+            comments: `Auto-created for ${name} (${ifaceName})`,
+          });
+          if (policyRes?.mkey) {
+            createdPolicyId = policyRes.mkey;
+            policyIds.push(policyRes.mkey);
+          }
+          console.log(`[provision] Created policy id=${policyRes?.mkey} with sequence group "${name} (${ifaceName})"`);
+        }
+      }
+
+      // ── Step 4: Static route in root VDOM ─────────────────────────────────────
+      const rootRoutes = await this.getStaticRoutes(rootVdom);
+      const existingRoute = rootRoutes.find(r => r.dst === `${subnet.networkIp} ${subnet.netmask}`);
+      if (existingRoute) {
+        staticRouteId = existingRoute['seq-num'] || existingRoute.seq_num;
+        console.log(`[provision] Static route for ${subnet.network} already exists in ${rootVdom} (seq-num: ${staticRouteId}), skipping`);
+      } else {
         const routeRes = await this.createStaticRoute(
           subnet.networkIp, subnet.netmask,
           routeGateway, rootVdomLink,
           rootVdom
         );
-        if (routeRes?.mkey) staticRouteId = routeRes.mkey;
+        if (routeRes?.mkey) {
+          createdRouteId = routeRes.mkey;
+          staticRouteId = routeRes.mkey;
+        }
         console.log(`[provision] Created static route in ${rootVdom}: ${subnet.network} via ${routeGateway} dev ${rootVdomLink}`);
-      } catch (e) {
-        console.warn(`[provision] Static route creation warning:`, e.message);
       }
+
+      // ── Optional: DHCP server ────────────────────────────────────────────────
+      if (opts.enableDhcp !== false) {
+        const allDhcp = await this.getDhcpServers();
+        const existingDhcp = allDhcp.find(d => d.interface === ifaceName);
+        if (existingDhcp) {
+          dhcpServerId = existingDhcp.id;
+          console.log(`[provision] DHCP server for ${ifaceName} already exists (id: ${dhcpServerId}), skipping`);
+        } else {
+          const dhcpRes = await this.createDhcpServer(
+            ifaceName, subnet.gateway, subnet.netmask,
+            subnet.dhcpStart, subnet.dhcpEnd
+          );
+          if (dhcpRes?.mkey) {
+            createdDhcpId = dhcpRes.mkey;
+            dhcpServerId = dhcpRes.mkey;
+          }
+          console.log(`[provision] Created DHCP server id=${dhcpServerId}`);
+        }
+      }
+    } catch (err) {
+      await rollback(err.message);
+      throw err;
     }
 
-    // ── Optional: DHCP server ────────────────────────────────────────────────
-    if (opts.enableDhcp !== false) {
-      const allDhcp = await this.getDhcpServers();
-      const existingDhcp = allDhcp.find(d => d.interface === ifaceName);
-      if (existingDhcp) {
-        dhcpServerId = existingDhcp.id;
-        console.log(`[provision] DHCP server for ${ifaceName} already exists (id: ${dhcpServerId}), skipping`);
-      } else {
-        const dhcpRes = await this.createDhcpServer(
-          ifaceName, subnet.gateway, subnet.netmask,
-          subnet.dhcpStart, subnet.dhcpEnd
-        );
-        if (dhcpRes?.mkey) dhcpServerId = dhcpRes.mkey;
-        console.log(`[provision] Created DHCP server id=${dhcpServerId}`);
-      }
-    }
+    // ── Non-critical steps (no rollback on failure) ──────────────────────────
 
-    // ── Step 5: Add VLAN to trunk switch port's allowed-vlans ──────────────
+    // Add VLAN to trunk switch port's allowed-vlans
     if (opts.trunkSwitchSerial && opts.trunkSwitchPort) {
       try {
         await this.updateManagedSwitchPort(
@@ -494,7 +564,7 @@ export class FortiGateAPI {
       }
     }
 
-    // ── Step 6: Switch-controller VLAN registration in root ─────────────────
+    // Switch-controller VLAN registration in root
     // FortiLink automatically creates an internal switch-controller entry when
     // a VLAN interface is created under the fortilink parent. These implicit
     // entries do NOT appear in the cmdb/switch-controller/vlan GET response,
@@ -544,7 +614,7 @@ export class FortiGateAPI {
       const existing = await this.getAddressObject(addrObjName);
       if (existing) {
         try { await this.deleteAddressObject(addrObjName); console.log(`[deprovision] Deleted address object ${addrObjName}`); }
-        catch (e) { console.warn(`[deprovision] Address object ${addrObjName} delete warning:`, e.message); }
+        catch (e) { errors.push(`address object ${addrObjName}: ${e.message}`); }
       }
     }
 

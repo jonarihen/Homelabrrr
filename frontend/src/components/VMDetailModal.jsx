@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import Modal from './Modal.jsx';
+import useSSHConfig from '../hooks/useSSHConfig.js';
 import api from '../api.js';
 
 function fmt(bytes) {
@@ -137,14 +138,7 @@ export default function VMDetailModal({ vm, onClose }) {
   const [rrd, setRrd] = useState(null);
   const [timeframe, setTimeframe] = useState('hour');
   const [loading, setLoading] = useState(true);
-  const [sshCfg, setSshCfg] = useState({ host: '', port: 22, username: 'root' });
-  const [sshSaved, setSshSaved] = useState(false);
-
-  useEffect(() => {
-    api.get(`/ssh/config/${vm.node}/${vm.vmid}`)
-      .then(r => { if (r.data) setSshCfg({ host: r.data.host, port: r.data.port, username: r.data.username }); })
-      .catch(() => {});
-  }, [vm.node, vm.vmid]);
+  const { sshCfg, setSshCfg, sshSaved, sshSavingError, scanningFingerprint, saveSshConfig, scanSshFingerprint } = useSSHConfig(vm.node, vm.vmid);
 
   useEffect(() => {
     let cancelled = false;
@@ -155,15 +149,6 @@ export default function VMDetailModal({ vm, onClose }) {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [vm.node, vm.vmid, timeframe]);
-
-  const saveSshConfig = async () => {
-    setSshSaved(false);
-    try {
-      await api.put(`/ssh/config/${vm.node}/${vm.vmid}`, sshCfg);
-      setSshSaved(true);
-      setTimeout(() => setSshSaved(false), 2000);
-    } catch { /* ignore */ }
-  };
 
   const cpuData = rrd?.map(d => d.cpu != null ? d.cpu * 100 : null) || [];
   const memData = rrd?.map(d => d.mem != null && d.maxmem ? (d.mem / d.maxmem) * 100 : null) || [];
@@ -316,16 +301,39 @@ export default function VMDetailModal({ vm, onClose }) {
                 />
               </div>
             </div>
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs text-gray-500">Host Key Fingerprint</label>
+                <button
+                  onClick={scanSshFingerprint}
+                  disabled={scanningFingerprint}
+                  className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
+                >
+                  {scanningFingerprint ? 'Scanning...' : 'Scan fingerprint'}
+                </button>
+              </div>
+              <input
+                type="text"
+                value={sshCfg.hostFingerprint}
+                onChange={e => setSshCfg(c => ({ ...c, hostFingerprint: e.target.value }))}
+                placeholder="SHA256:..."
+                className="w-full bg-gray-900 border border-gray-700 rounded px-2.5 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+              />
+              <p className="text-xs text-gray-500 mt-1.5">
+                Save a pinned fingerprint so SSH connections can verify the server identity.
+              </p>
+            </div>
             <div className="flex items-center gap-3 mt-3">
               <button
                 onClick={saveSshConfig}
-                disabled={!sshCfg.host}
+                disabled={!sshCfg.host || !sshCfg.hostFingerprint}
                 className="text-xs px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded transition-colors"
               >
                 Save
               </button>
               {sshSaved && <span className="text-xs text-green-400">Saved</span>}
             </div>
+            {sshSavingError && <p className="mt-3 text-xs text-red-400 bg-red-900/20 rounded p-2">{sshSavingError}</p>}
           </div>
         </div>
       </div>

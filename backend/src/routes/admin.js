@@ -44,7 +44,7 @@ function ensureCanManageTargetUser(req, res, userId) {
 router.get('/users', pUsers, (req, res) => {
   const windowStart = Date.now() - LOCKOUT_WINDOW_MS;
   const users = db.prepare(`
-    SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_provision, u.totp_enabled, u.require_2fa,
+    SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_provision, u.can_create_vms, u.totp_enabled, u.require_2fa,
       u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_vlans, u.can_manage_policies,
       u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log,
       u.created_at,
@@ -53,7 +53,7 @@ router.get('/users', pUsers, (req, res) => {
     FROM users u
     ORDER BY u.username
   `).all(windowStart);
-  res.json(users.map(u => ({ ...u, locked: u.recent_failures >= LOCKOUT_MAX, twoFactorEnabled: !!u.totp_enabled, require2fa: !!u.require_2fa, canProvision: !!u.can_provision })));
+  res.json(users.map(u => ({ ...u, locked: u.recent_failures >= LOCKOUT_MAX, twoFactorEnabled: !!u.totp_enabled, require2fa: !!u.require_2fa, canProvision: !!u.can_provision, canCreateVms: !!u.can_create_vms })));
 });
 
 router.post('/users', pUsers, (req, res) => {
@@ -80,6 +80,8 @@ router.post('/users', pUsers, (req, res) => {
 });
 
 router.post('/users/:id/reset-2fa', requireAdmin, (req, res) => {
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
   db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.params.id);
   logAudit(req, 'admin_reset_2fa', req.params.id, '');
   res.json({ ok: true });
@@ -120,18 +122,24 @@ router.put('/users/:id/password', pUsers, (req, res) => {
 });
 
 router.put('/users/:id/require-2fa', requireAdmin, (req, res) => {
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
   const { enabled } = req.body;
   db.prepare('UPDATE users SET require_2fa = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
   res.json({ ok: true });
 });
 
 router.put('/users/:id/see-all-vms', requireAdmin, (req, res) => {
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
   const { enabled } = req.body;
   db.prepare('UPDATE users SET see_all_vms = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
   res.json({ ok: true });
 });
 
 router.put('/users/:id/can-provision', requireAdmin, (req, res) => {
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
   const { enabled } = req.body;
   db.prepare('UPDATE users SET can_provision = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
   res.json({ ok: true });
@@ -139,8 +147,10 @@ router.put('/users/:id/can-provision', requireAdmin, (req, res) => {
 
 // Permission toggle endpoint for all granular permissions
 router.put('/users/:id/permission', requireAdmin, (req, res) => {
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
   const { permission, enabled } = req.body;
-  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log'];
+  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log', 'can_create_vms'];
   if (!validPerms.includes(permission)) {
     return res.status(400).json({ error: `Invalid permission: ${permission}` });
   }
@@ -219,6 +229,58 @@ router.delete('/assignments/:id', pAssignments, (req, res) => {
 
 // ─── VLANs ───────────────────────────────────────────────────────────────────
 
+function findNextAvailableVlanTag() {
+  const usedTags = new Set(
+    db.prepare('SELECT tag FROM vlans ORDER BY tag').all()
+      .map(row => parseInt(row.tag, 10))
+      .filter(Number.isInteger)
+  );
+
+  const ranges = db.prepare('SELECT vlan_range_start, vlan_range_end FROM firewalls ORDER BY vlan_range_start, vlan_range_end').all()
+    .map(row => ({
+      start: row.vlan_range_start || 1001,
+      end: row.vlan_range_end || 1999,
+    }));
+
+  const pools = ranges.length > 0 ? ranges : [{ start: 1001, end: 1999 }];
+
+  for (const pool of pools) {
+    for (let tag = pool.start; tag <= pool.end; tag += 1) {
+      if (!usedTags.has(tag)) return tag;
+    }
+  }
+
+  return null;
+}
+
+function isValidCidr(cidr = '') {
+  const trimmed = String(cidr).trim();
+  if (!trimmed) return true;
+  const match = trimmed.match(/^(\d{1,3})(?:\.(\d{1,3})){3}\/(\d{1,2})$/);
+  if (!match) return false;
+  const [ip, prefix] = trimmed.split('/');
+  const octets = ip.split('.').map(Number);
+  const prefixNum = Number(prefix);
+  return octets.length === 4
+    && octets.every(octet => Number.isInteger(octet) && octet >= 0 && octet <= 255)
+    && Number.isInteger(prefixNum)
+    && prefixNum >= 0
+    && prefixNum <= 32;
+}
+
+function serializeVlanSubnet(vlan) {
+  if (vlan.mode === 'tagged_only') {
+    if (!vlan.subnet_cidr) return null;
+    return {
+      network: vlan.subnet_cidr,
+      gateway: '',
+      dhcp: '',
+      custom: true,
+    };
+  }
+  return vlanTagToSubnet(vlan.tag);
+}
+
 // VLANs read also needed by policies page and assignments page
 // Non-admins only see VLANs assigned to them via user_vlans
 router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies', 'can_manage_assignments'), (req, res) => {
@@ -242,19 +304,47 @@ router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies'
     syncMap[s.vlan_id].push({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name });
   });
   const fwRanges = db.prepare('SELECT id, name, vlan_range_start, vlan_range_end FROM firewalls').all();
-  res.json(vlans.map(v => ({ ...v, firewallSync: syncMap[v.id] || [], subnet: vlanTagToSubnet(v.tag), firewallRanges: fwRanges })));
+  res.json(vlans.map(v => ({ ...v, firewallSync: syncMap[v.id] || [], subnet: serializeVlanSubnet(v), firewallRanges: fwRanges })));
 });
 
 router.post('/vlans', pVlans, (req, res) => {
-  const { name, tag, description } = req.body;
-  if (!name || tag === undefined) {
-    return res.status(400).json({ error: 'Name and tag required' });
+  const { name, tag, description, mode = 'managed', subnetCidr = '' } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: 'Name is required' });
   }
+  if (!['managed', 'tagged_only'].includes(mode)) {
+    return res.status(400).json({ error: 'Invalid VLAN mode' });
+  }
+  if (!req.session.isAdmin && mode !== 'managed') {
+    return res.status(403).json({ error: 'Only admins can create tagged-only VLANs' });
+  }
+
+  const trimmedSubnetCidr = String(subnetCidr || '').trim();
+  if (mode === 'tagged_only' && !trimmedSubnetCidr) {
+    return res.status(400).json({ error: 'Subnet CIDR is required for tagged-only VLANs' });
+  }
+  if (mode === 'tagged_only' && !isValidCidr(trimmedSubnetCidr)) {
+    return res.status(400).json({ error: 'Invalid subnet CIDR' });
+  }
+
+  let vlanTag;
+  if (req.session.isAdmin) {
+    if (tag === undefined) {
+      return res.status(400).json({ error: 'Tag required' });
+    }
+    vlanTag = parseInt(tag, 10);
+  } else {
+    vlanTag = findNextAvailableVlanTag();
+    if (!vlanTag) {
+      return res.status(409).json({ error: 'No VLAN tags are available in the configured firewall pools' });
+    }
+  }
+
   try {
     const r = db.prepare(
-      'INSERT INTO vlans (name, tag, description) VALUES (?, ?, ?)'
-    ).run(name, parseInt(tag), description || '');
-    res.json({ id: r.lastInsertRowid, name, tag: parseInt(tag), description: description || '' });
+      'INSERT INTO vlans (name, tag, mode, subnet_cidr, description) VALUES (?, ?, ?, ?, ?)'
+    ).run(name, vlanTag, mode, mode === 'tagged_only' ? trimmedSubnetCidr : '', description || '');
+    res.json({ id: r.lastInsertRowid, name, tag: vlanTag, mode, subnet_cidr: mode === 'tagged_only' ? trimmedSubnetCidr : '', description: description || '' });
   } catch (err) {
     if (err.message.includes('UNIQUE')) {
       return res.status(400).json({ error: 'VLAN tag already exists' });
@@ -264,14 +354,49 @@ router.post('/vlans', pVlans, (req, res) => {
 });
 
 router.put('/vlans/:id', pVlans, (req, res) => {
-  const { name, tag, description } = req.body;
-  if (!name || tag === undefined) {
-    return res.status(400).json({ error: 'Name and tag required' });
+  const { name, tag, description, mode, subnetCidr } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: 'Name is required' });
   }
+
+  const existing = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'VLAN not found' });
+
+  const nextMode = mode || existing.mode || 'managed';
+  if (!['managed', 'tagged_only'].includes(nextMode)) {
+    return res.status(400).json({ error: 'Invalid VLAN mode' });
+  }
+  if (!req.session.isAdmin && nextMode !== existing.mode) {
+    return res.status(403).json({ error: 'Only admins can change VLAN type' });
+  }
+
+  const requestedTag = tag === undefined ? existing.tag : parseInt(tag, 10);
+  if (!req.session.isAdmin && requestedTag !== existing.tag) {
+    return res.status(403).json({ error: 'Only admins can change VLAN tags' });
+  }
+  if (!req.session.isAdmin && subnetCidr !== undefined && String(subnetCidr || '').trim() !== (existing.subnet_cidr || '')) {
+    return res.status(403).json({ error: 'Only admins can change VLAN subnets' });
+  }
+
+  const syncCount = db.prepare('SELECT COUNT(*) as count FROM firewall_vlan_sync WHERE vlan_id = ?').get(req.params.id).count;
+  if (syncCount > 0 && nextMode !== existing.mode) {
+    return res.status(400).json({ error: 'Unsync this VLAN from firewalls before changing its type' });
+  }
+
+  const nextSubnetCidr = nextMode === 'tagged_only'
+    ? String(subnetCidr ?? existing.subnet_cidr ?? '').trim()
+    : '';
+  if (nextMode === 'tagged_only' && !nextSubnetCidr) {
+    return res.status(400).json({ error: 'Subnet CIDR is required for tagged-only VLANs' });
+  }
+  if (nextMode === 'tagged_only' && !isValidCidr(nextSubnetCidr)) {
+    return res.status(400).json({ error: 'Invalid subnet CIDR' });
+  }
+
   try {
     db.prepare(
-      'UPDATE vlans SET name = ?, tag = ?, description = ? WHERE id = ?'
-    ).run(name, parseInt(tag), description || '', req.params.id);
+      'UPDATE vlans SET name = ?, tag = ?, mode = ?, subnet_cidr = ?, description = ? WHERE id = ?'
+    ).run(name, requestedTag, nextMode, nextSubnetCidr, description || '', req.params.id);
     res.json({ ok: true });
   } catch (err) {
     if (err.message.includes('UNIQUE')) {
@@ -462,6 +587,7 @@ router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_p
     root_vdom: f.root_vdom, root_vdom_link: f.root_vdom_link,
     route_gateway: f.route_gateway, trunk_switch_serial: f.trunk_switch_serial,
     trunk_switch_port: f.trunk_switch_port, verify_tls: f.verify_tls,
+    external_ip: f.external_ip || '', root_wan_zone: f.root_wan_zone || 'underlay',
     created_at: f.created_at,
   })));
 });
@@ -510,7 +636,7 @@ router.get('/firewalls/:id/switches', pFirewalls, async (req, res) => {
 });
 
 router.post('/firewalls', pFirewalls, (req, res) => {
-  const { name, type = 'fortigate', host, port = 443, apiKey, vdom = 'root', parentInterface = 'fortilink', wanInterface = 'wan1', vlanRangeStart = 1001, vlanRangeEnd = 1999, labVdomLink = 'lab-root0', rootVdom = 'root', rootVdomLink = 'lab-root1', routeGateway = '10.255.254.2', trunkSwitchSerial = '', trunkSwitchPort = '', verifyTls = true } = req.body;
+  const { name, type = 'fortigate', host, port = 443, apiKey, vdom = 'root', parentInterface = 'fortilink', wanInterface = 'wan1', vlanRangeStart = 1001, vlanRangeEnd = 1999, labVdomLink = 'lab-root0', rootVdom = 'root', rootVdomLink = 'lab-root1', routeGateway = '10.255.254.2', trunkSwitchSerial = '', trunkSwitchPort = '', verifyTls = true, externalIp = '', rootWanZone = 'underlay' } = req.body;
   if (!name || !host || !apiKey) {
     return res.status(400).json({ error: 'Name, host, and API key are required' });
   }
@@ -519,8 +645,8 @@ router.post('/firewalls', pFirewalls, (req, res) => {
   }
   try {
     const r = db.prepare(
-      'INSERT INTO firewalls (name, type, host, port, api_key, vdom, parent_interface, wan_interface, vlan_range_start, vlan_range_end, lab_vdom_link, root_vdom, root_vdom_link, route_gateway, trunk_switch_serial, trunk_switch_port, verify_tls) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(name, type, host, port, apiKey, vdom, parentInterface, wanInterface, vlanRangeStart, vlanRangeEnd, labVdomLink, rootVdom, rootVdomLink, routeGateway, trunkSwitchSerial, trunkSwitchPort, verifyTls ? 1 : 0);
+      'INSERT INTO firewalls (name, type, host, port, api_key, vdom, parent_interface, wan_interface, vlan_range_start, vlan_range_end, lab_vdom_link, root_vdom, root_vdom_link, route_gateway, trunk_switch_serial, trunk_switch_port, verify_tls, external_ip, root_wan_zone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(name, type, host, port, apiKey, vdom, parentInterface, wanInterface, vlanRangeStart, vlanRangeEnd, labVdomLink, rootVdom, rootVdomLink, routeGateway, trunkSwitchSerial, trunkSwitchPort, verifyTls ? 1 : 0, externalIp, rootWanZone);
     logAudit(req, 'admin_create_firewall', name, `${host}:${port} vdom=${vdom}`);
     res.json({ id: r.lastInsertRowid, name, host, port });
   } catch (err) {
@@ -546,12 +672,14 @@ router.put('/firewalls/:id', pFirewalls, (req, res) => {
   const trunkSerial   = req.body.trunkSwitchSerial ?? existing.trunk_switch_serial ?? '';
   const trunkPort     = req.body.trunkSwitchPort   ?? existing.trunk_switch_port   ?? '';
   const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== 0 : !!verifyTls;
+  const extIp       = req.body.externalIp   ?? existing.external_ip   ?? '';
+  const wanZone     = req.body.rootWanZone  ?? existing.root_wan_zone ?? 'underlay';
   if (rangeStart >= rangeEnd || rangeStart < 1 || rangeEnd > 4094) {
     return res.status(400).json({ error: 'Invalid VLAN range (must be 1–4094, start < end)' });
   }
   db.prepare(
-    'UPDATE firewalls SET name = ?, host = ?, port = ?, api_key = ?, vdom = ?, parent_interface = ?, wan_interface = ?, vlan_range_start = ?, vlan_range_end = ?, lab_vdom_link = ?, root_vdom = ?, root_vdom_link = ?, route_gateway = ?, trunk_switch_serial = ?, trunk_switch_port = ?, verify_tls = ? WHERE id = ?'
-  ).run(name, host, port, key, vdom || existing.vdom, parentInterface || existing.parent_interface, wanInterface || existing.wan_interface, rangeStart, rangeEnd, labLink, rootVd, rootLink, routeGw, trunkSerial, trunkPort, verifyTlsEnabled ? 1 : 0, req.params.id);
+    'UPDATE firewalls SET name = ?, host = ?, port = ?, api_key = ?, vdom = ?, parent_interface = ?, wan_interface = ?, vlan_range_start = ?, vlan_range_end = ?, lab_vdom_link = ?, root_vdom = ?, root_vdom_link = ?, route_gateway = ?, trunk_switch_serial = ?, trunk_switch_port = ?, verify_tls = ?, external_ip = ?, root_wan_zone = ? WHERE id = ?'
+  ).run(name, host, port, key, vdom || existing.vdom, parentInterface || existing.parent_interface, wanInterface || existing.wan_interface, rangeStart, rangeEnd, labLink, rootVd, rootLink, routeGw, trunkSerial, trunkPort, verifyTlsEnabled ? 1 : 0, extIp, wanZone, req.params.id);
   logAudit(req, 'admin_update_firewall', name, `${host}:${port}`);
   res.json({ ok: true });
 });
@@ -579,6 +707,9 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
   try {
     const vlan = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
     if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
+    if (vlan.mode === 'tagged_only') {
+      return res.status(400).json({ error: 'Tagged-only VLANs cannot be pushed to firewalls' });
+    }
 
     const { firewallId, allowInternet = true, enableDhcp = true } = req.body;
     const fwRows = firewallId
@@ -997,6 +1128,246 @@ router.delete('/objects/services/:name', requireAdmin, async (req, res) => {
   }
 });
 
+// ─── Port Forwarding (VIPs in root VDOM) ─────────────────────────────────
+
+// Quick helper to get firewall + client for root VDOM ops
+function getRootClient(fw) {
+  const client = createClient(fw);
+  return { client, rootVdom: fw.root_vdom || 'root' };
+}
+
+// Update WAN config (external IP + WAN zone) from the port forwarding page
+router.put('/firewalls/:id/wan-config', pFirewalls, (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  const { externalIp, rootWanZone } = req.body;
+  db.prepare('UPDATE firewalls SET external_ip = ?, root_wan_zone = ? WHERE id = ?')
+    .run(externalIp ?? fw.external_ip ?? '', rootWanZone ?? fw.root_wan_zone ?? 'underlay', req.params.id);
+  logAudit(req, 'admin_update_wan_config', fw.name, `extIp=${externalIp} wanZone=${rootWanZone}`);
+  res.json({ ok: true });
+});
+
+// List all VIPs from root VDOM with managed/unmanaged status
+router.get('/firewalls/:id/vips', pFirewalls, async (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const { client, rootVdom } = getRootClient(fw);
+    const allVips = await client.getVips(rootVdom);
+    const managedNames = new Set(
+      db.prepare('SELECT vip_name FROM managed_vips WHERE firewall_id = ?').all(fw.id).map(v => v.vip_name)
+    );
+
+    const vips = allVips
+      .filter(v => v.portforward === 'enable')
+      .map(v => {
+        const mappedIp = (v.mappedip || []).map(m => {
+          const r = m.range || '';
+          return r.includes('-') ? r.split('-')[0] : r;
+        }).join(', ');
+        return {
+          name: v.name,
+          extip: v.extip || '',
+          extport: v.extport || '',
+          mappedip: mappedIp,
+          mappedport: v.mappedport || '',
+          protocol: v.protocol || 'tcp',
+          extintf: v.extintf || 'any',
+          managed: managedNames.has(v.name),
+        };
+      });
+    res.json(vips);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Root VDOM interfaces for destination zone dropdown
+router.get('/firewalls/:id/root-interfaces', pFirewalls, async (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const { client, rootVdom } = getRootClient(fw);
+    const interfaces = await client.getInterfaces(rootVdom);
+    const wanZone = fw.root_wan_zone || 'underlay';
+    const skipTypes = ['tunnel', 'loopback'];
+    const skipNames = ['npu', 'ha', 'mgmt', 'modem', 'ssl.', 'fortilink'];
+
+    const filtered = interfaces
+      .filter(i => {
+        if (i.name === wanZone) return false; // exclude the WAN interface itself
+        if (skipTypes.some(t => (i.type || '').includes(t))) return false;
+        if (skipNames.some(s => (i.name || '').toLowerCase().startsWith(s))) return false;
+        return true;
+      })
+      .map(i => ({
+        name: i.name,
+        type: i.type || '',
+        ip: i.ip || '',
+        vdom: i.vdom || '',
+        description: i.description || i.alias || '',
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json(filtered);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Root VDOM address objects + groups for source restriction dropdown
+router.get('/firewalls/:id/root-addresses', pFirewalls, async (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const { client, rootVdom } = getRootClient(fw);
+    const [addresses, groups] = await Promise.all([
+      client.getAddressObjects(rootVdom),
+      client.getAddressGroups(rootVdom),
+    ]);
+    res.json({
+      addresses: addresses.map(a => ({ name: a.name, type: a.type, subnet: a.subnet || '' })),
+      groups: groups.map(g => ({ name: g.name, members: (g.member || []).map(m => m.name) })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Create a new port forward (VIP + firewall policy in root VDOM)
+router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+
+  const { name, protocol = 'tcp', extPort, mappedIp, mappedPort, dstInterface, srcAddresses = ['all'] } = req.body;
+  if (!name || !extPort || !mappedIp || !mappedPort || !dstInterface) {
+    return res.status(400).json({ error: 'name, extPort, mappedIp, mappedPort, and dstInterface are required' });
+  }
+
+  const externalIp = fw.external_ip || '';
+  if (!externalIp) {
+    return res.status(400).json({ error: 'Firewall has no external IP configured. Set it in WAN config first.' });
+  }
+
+  try {
+    const { client, rootVdom } = getRootClient(fw);
+    const wanZone = fw.root_wan_zone || 'underlay';
+
+    // Check for port conflict across ALL existing VIPs
+    const allVips = await client.getVips(rootVdom);
+    const conflict = allVips.find(v =>
+      v.portforward === 'enable' &&
+      String(v.extport) === String(extPort) &&
+      (v.protocol || 'tcp') === protocol
+    );
+    if (conflict) {
+      return res.status(409).json({
+        error: `External port ${extPort}/${protocol.toUpperCase()} is already in use by "${conflict.name}"`
+      });
+    }
+
+    // Check for duplicate VIP name
+    const existingVip = await client.getVip(name, rootVdom);
+    if (existingVip) {
+      return res.status(409).json({ error: `A VIP named "${name}" already exists` });
+    }
+
+    // 1. Create the VIP
+    const vipPayload = {
+      name,
+      extip: externalIp,
+      mappedip: [{ range: mappedIp }],
+      extintf: 'any',
+      portforward: 'enable',
+      extport: String(extPort),
+      mappedport: String(mappedPort),
+    };
+    // Only set protocol if UDP (FortiGate defaults to tcp)
+    if (protocol === 'udp') vipPayload.protocol = 'udp';
+
+    await client.createVip(vipPayload, rootVdom);
+
+    // 2. Create the firewall policy in root VDOM
+    let policyId = null;
+    try {
+      const service = protocol === 'udp' ? 'ALL_UDP' : 'ALL_TCP';
+      const policyRes = await client.createPolicy({
+        name: `PF: ${name}`,
+        srcintf: [{ name: wanZone }],
+        dstintf: [{ name: dstInterface }],
+        srcaddr: srcAddresses.map(a => ({ name: a })),
+        dstaddr: [{ name }],
+        action: 'accept',
+        schedule: 'always',
+        service: [{ name: service }],
+        logtraffic: 'all',
+        'global-label': 'Port Forwarding (VM Manager)',
+        comments: `Auto-created by VM Manager for ${name}`,
+      }, rootVdom);
+      policyId = policyRes?.mkey || null;
+    } catch (policyErr) {
+      // Rollback: delete the VIP we just created
+      try { await client.deleteVip(name, rootVdom); } catch {}
+      throw policyErr;
+    }
+
+    // 3. Track in DB
+    db.prepare(
+      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, protocol, ext_port, mapped_ip, mapped_port, dst_interface) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(fw.id, name, policyId, protocol, extPort, mappedIp, mappedPort, dstInterface);
+
+    logAudit(req, 'admin_create_port_forward', name, `${protocol}/${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}`);
+    res.json({ ok: true, vipName: name, policyId });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Delete a managed port forward (VIP + policy)
+router.delete('/firewalls/:id/vips/:name', pFirewalls, async (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+
+  const vipName = req.params.name;
+  const managed = db.prepare('SELECT * FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').get(fw.id, vipName);
+  if (!managed) {
+    return res.status(403).json({ error: 'Cannot delete unmanaged VIPs. This was not created through VM Manager.' });
+  }
+
+  try {
+    const { client, rootVdom } = getRootClient(fw);
+
+    // Delete policy first (VIP can't be deleted while referenced)
+    if (managed.policy_id) {
+      try { await client.deletePolicy(managed.policy_id, rootVdom); }
+      catch (e) { console.warn(`[vip-delete] Policy ${managed.policy_id} delete warning:`, e.message); }
+    }
+
+    // Also search for any other policies referencing this VIP (stale ID safety)
+    try {
+      const policies = await client.getPolicies(rootVdom);
+      const refs = policies.filter(p =>
+        (p.dstaddr || []).some(a => a.name === vipName) &&
+        String(p.policyid) !== String(managed.policy_id)
+      );
+      for (const p of refs) {
+        try { await client.deletePolicy(p.policyid, rootVdom); }
+        catch (e) { console.warn(`[vip-delete] Extra policy ${p.policyid} warning:`, e.message); }
+      }
+    } catch (e) { console.warn(`[vip-delete] Policy search warning:`, e.message); }
+
+    // Delete VIP
+    await client.deleteVip(vipName, rootVdom);
+
+    // Remove from DB
+    db.prepare('DELETE FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').run(fw.id, vipName);
+
+    logAudit(req, 'admin_delete_port_forward', vipName, `Firewall: ${fw.name}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
 // Helper: compute subnet for a VLAN tag
 router.get('/vlans/subnet/:tag', pVlans, (req, res) => {
   const subnet = vlanTagToSubnet(parseInt(req.params.tag));
@@ -1007,8 +1378,8 @@ router.get('/vlans/subnet/:tag', pVlans, (req, res) => {
 // ─── Audit Log ──────────────────────────────────────────────────────────────
 
 router.get('/audit-log', pAudit, (req, res) => {
-  const page = parseInt(req.query.page) || 1;
-  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.max(Math.min(parseInt(req.query.limit, 10) || 50, 200), 1);
   const offset = (page - 1) * limit;
   const action = req.query.action || '';
 

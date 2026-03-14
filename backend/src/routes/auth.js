@@ -39,6 +39,7 @@ function serializeUser(user) {
     twoFactorEnabled: !!user.totp_enabled,
     require2fa: !!user.require_2fa,
     canProvision: !!user.can_provision,
+    canCreateVms: !!user.can_create_vms,
     permissions: {
       canManageHosts: !!user.can_manage_hosts,
       canManageFirewalls: !!user.can_manage_firewalls,
@@ -219,7 +220,7 @@ router.get('/me', (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const user = db.prepare(`
-    SELECT id, username, is_admin, totp_enabled, require_2fa, can_provision,
+    SELECT id, username, is_admin, totp_enabled, require_2fa, can_provision, can_create_vms,
       can_manage_hosts, can_manage_firewalls, can_manage_vlans, can_manage_policies,
       can_manage_templates, can_manage_users, can_manage_assignments, can_view_audit_log
     FROM users

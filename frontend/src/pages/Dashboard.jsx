@@ -153,16 +153,24 @@ export default function Dashboard() {
     setBulkLoading(true);
     setBulkError('');
     try {
-      await Promise.allSettled(
+      const results = await Promise.allSettled(
         selectedVms.map(vm =>
           api.post(`/vms/${vm.node}/${vm.vmid}/action`, { action })
+            .catch(e => { throw { vmName: vm.name || `VM ${vm.vmid}`, message: e.response?.data?.error || e.message }; })
         )
       );
+      const failed = results
+        .filter(r => r.status === 'rejected')
+        .map(r => r.reason);
+      if (failed.length > 0) {
+        const detail = failed.map(f => `${f.vmName}: ${f.message}`).join('; ');
+        setBulkError(`${failed.length} of ${selectedVms.length} failed — ${detail}`);
+      }
       setSelected(new Set());
       // Reload after a brief delay to let Proxmox process
       setTimeout(load, 2000);
     } catch (e) {
-      setBulkError('Some actions failed. Check individual VM status.');
+      setBulkError('Bulk action failed unexpectedly.');
     } finally {
       setBulkLoading(false);
     }

@@ -11,17 +11,24 @@ const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-
 export default function ProvisionPage() {
   useDocumentTitle('New VM');
   const { user } = useAuth();
-  const [tab, setTab] = useState('template');
+  const canTemplate = user?.isAdmin || user?.canProvision;
+  const canCreate = user?.isAdmin || user?.canCreateVms;
+  const showTabs = canTemplate && canCreate;
+  const [tab, setTab] = useState(() => canTemplate ? 'template' : 'create');
 
   return (
     <Layout>
       <div className="p-6 lg:p-8 max-w-3xl mx-auto space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Create Virtual Machine</h1>
-          <p className="text-sm text-gray-500 mt-1">Provision a new VM from a template or create one from scratch</p>
+          <p className="text-sm text-gray-500 mt-1">
+            {showTabs ? 'Provision a new VM from a template or create one from scratch'
+              : canCreate ? 'Create a new VM with custom hardware settings'
+              : 'Provision a new VM from a template'}
+          </p>
         </div>
 
-        {user?.isAdmin && (
+        {showTabs && (
           <div className="flex gap-1 bg-gray-900 rounded-xl p-1 w-fit">
             <button onClick={() => setTab('template')} className={tabCls(tab === 'template')}>
               <span className="flex items-center gap-2">
@@ -42,7 +49,8 @@ export default function ProvisionPage() {
           </div>
         )}
 
-        {tab === 'template' ? <CloneForm /> : <CreateForm />}
+        {tab === 'template' && canTemplate && <CloneForm />}
+        {tab === 'create' && canCreate && <CreateForm />}
 
         <RecentProvisions />
       </div>
@@ -270,6 +278,7 @@ function CloneForm() {
 
 function CreateForm() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [nodes, setNodes] = useState([]);
   const [storages, setStorages] = useState([]);
   const [isos, setIsos] = useState([]);
@@ -286,8 +295,10 @@ function CreateForm() {
 
   useEffect(() => {
     api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
-    api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
-  }, []);
+    if (user?.isAdmin) {
+      api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
+    }
+  }, [user?.isAdmin]);
 
   useEffect(() => {
     if (!form.node) return;
@@ -341,7 +352,7 @@ function CreateForm() {
         </div>
         <div>
           <h3 className="text-white font-semibold">Create from Scratch</h3>
-          <p className="text-xs text-gray-500">Full VM configuration — admin only</p>
+          <p className="text-xs text-gray-500">Full VM configuration with custom hardware settings</p>
         </div>
       </div>
 
@@ -438,13 +449,15 @@ function CreateForm() {
           </div>
         </details>
 
-        <div>
-          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
-          <select value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
-            <option value="">Myself</option>
-            {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
-          </select>
-        </div>
+        {user?.isAdmin && (
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
+            <select value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
+              <option value="">Myself</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
+            </select>
+          </div>
+        )}
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5 font-medium">Description (optional)</label>

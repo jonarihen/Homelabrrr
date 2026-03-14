@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
@@ -453,6 +453,15 @@ export default function PoliciesPage() {
   const [animatedNodePositions, setAnimatedNodePositions] = useState({});
   const animationFrameRef = useRef(null);
   const animatedPositionsRef = useRef({});
+  const targetPositionsRef = useRef({});
+
+  // ── Drag-to-move nodes ──────────────────────────────────────────────────────
+  const [dragOverrides, setDragOverrides] = useState({});
+  const dragRef = useRef(null); // { tag, startX, startY, origX, origY, moved }
+
+  // ── Pan viewport ────────────────────────────────────────────────────────────
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const panRef = useRef(null); // { startX, startY, origPanX, origPanY }
 
   useEffect(() => {
     api.get('/admin/firewalls').then(r => {
@@ -531,15 +540,22 @@ export default function PoliciesPage() {
     };
   }, []);
 
-  const graph = buildPolicyGraph(policies);
+  const graph = useMemo(() => buildPolicyGraph(policies), [policies]);
   const degreeMap = graph.degree;
   const peerMap = graph.peers;
   const selectedTag = srcVlan?.tag || null;
   const peerTags = new Set(selectedTag ? Array.from(peerMap.get(selectedTag) || []) : []);
   const meshMinHeight = Math.max(620, 620 + (Math.max(0, vlans.length - 10) * 30));
-  const targetNodePositions = buildNodePositions(vlans, policies, selectedTag, canvasSize.width, canvasSize.height);
-  const nodePositions = Object.keys(animatedNodePositions).length > 0 ? animatedNodePositions : targetNodePositions;
-  const lines = buildLineModels(policies, nodePositions, selectedTag);
+  const targetNodePositions = useMemo(
+    () => buildNodePositions(vlans, policies, selectedTag, canvasSize.width, canvasSize.height),
+    [vlans, policies, selectedTag, canvasSize.width, canvasSize.height]
+  );
+  const basePositions = Object.keys(animatedNodePositions).length > 0 ? animatedNodePositions : targetNodePositions;
+  const nodePositions = useMemo(() => {
+    if (Object.keys(dragOverrides).length === 0) return basePositions;
+    return { ...basePositions, ...dragOverrides };
+  }, [basePositions, dragOverrides]);
+  const lines = useMemo(() => buildLineModels(policies, nodePositions, selectedTag), [policies, nodePositions, selectedTag]);
   const selectedLineCount = selectedTag
     ? policies.filter(p => p.srcVlan?.tag === selectedTag || p.dstVlan?.tag === selectedTag).length
     : null;
@@ -551,8 +567,11 @@ export default function PoliciesPage() {
   const policyCountPreview = bidirectional ? 2 : 1;
 
   const handleCardClick = (vlan) => {
+    // Ignore click if user was dragging the node
+    if (dragRef.current?.moved) return;
     if (!srcVlan) {
       setSrcVlan(vlan);
+      setDragOverrides({});
       return;
     }
     if (srcVlan.tag === vlan.tag) {
@@ -566,11 +585,89 @@ export default function PoliciesPage() {
     setShowModal(true);
   };
 
+  const handleNodePointerDown = (e, vlan) => {
+    // Only primary button
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const pos = nodePositions[vlan.tag];
+    if (!pos) return;
+    dragRef.current = {
+      tag: vlan.tag,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: pos.x,
+      origY: pos.y,
+      moved: false,
+    };
+  };
+
+  const handleCanvasPointerDown = (e) => {
+    // Only start pan if clicking on the canvas background (not on a node button)
+    if (e.button !== 0) return;
+    if (dragRef.current) return;
+    if (e.target.closest('button')) return;
+    panRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      origPanX: panOffset.x,
+      origPanY: panOffset.y,
+    };
+  };
+
+  useEffect(() => {
+    const DRAG_THRESHOLD = 5;
+
+    const onPointerMove = (e) => {
+      // Node drag
+      if (dragRef.current) {
+        const dx = e.clientX - dragRef.current.startX;
+        const dy = e.clientY - dragRef.current.startY;
+        if (!dragRef.current.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        dragRef.current.moved = true;
+        setDragOverrides(prev => ({
+          ...prev,
+          [dragRef.current.tag]: {
+            x: dragRef.current.origX + dx,
+            y: dragRef.current.origY + dy,
+          },
+        }));
+        return;
+      }
+      // Canvas pan
+      if (panRef.current) {
+        const dx = e.clientX - panRef.current.startX;
+        const dy = e.clientY - panRef.current.startY;
+        setPanOffset({
+          x: panRef.current.origPanX + dx,
+          y: panRef.current.origPanY + dy,
+        });
+      }
+    };
+
+    const onPointerUp = () => {
+      dragRef.current = null;
+      panRef.current = null;
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+  }, []);
+
   const cancelSelection = () => {
     setSrcVlan(null);
     setDstVlan(null);
     setShowModal(false);
     setError('');
+    setDragOverrides({});
+  };
+
+  const recenterView = () => {
+    setPanOffset({ x: 0, y: 0 });
+    setDragOverrides({});
   };
 
   const toggleService = (svc) => {
@@ -616,12 +713,18 @@ export default function PoliciesPage() {
     }
   };
 
-  const grouped = {};
-  policies.forEach((policy) => {
-    const key = policy.globalLabel || policy.srcintf;
-    if (!grouped[key]) grouped[key] = { label: key, policies: [] };
-    grouped[key].policies.push(policy);
-  });
+  const grouped = useMemo(() => {
+    const g = {};
+    policies.forEach((policy) => {
+      const key = policy.globalLabel || policy.srcintf;
+      if (!g[key]) g[key] = { label: key, policies: [] };
+      g[key].policies.push(policy);
+    });
+    return g;
+  }, [policies]);
+
+  // Keep targetPositionsRef in sync so the animation frame always reads fresh targets
+  targetPositionsRef.current = targetNodePositions;
 
   useEffect(() => {
     const tags = Object.keys(targetNodePositions);
@@ -658,10 +761,12 @@ export default function PoliciesPage() {
       const progress = Math.min(1, (now - startTime) / duration);
       const eased = 1 - ((1 - progress) ** 3);
       const nextPositions = {};
+      // Read from ref so mid-animation target changes are picked up immediately
+      const latestTargets = targetPositionsRef.current;
 
       tags.forEach((tag) => {
         const start = startPositions[tag];
-        const target = targetNodePositions[tag];
+        const target = latestTargets[tag] || start;
         nextPositions[tag] = {
           x: start.x + ((target.x - start.x) * eased),
           y: start.y + ((target.y - start.y) * eased),
@@ -686,7 +791,7 @@ export default function PoliciesPage() {
         animationFrameRef.current = null;
       }
     };
-  }, [vlans, policies, selectedTag, canvasSize.width, canvasSize.height]);
+  }, [targetNodePositions]);
 
   if (loading) {
     return (
@@ -746,13 +851,26 @@ export default function PoliciesPage() {
           <div
             ref={canvasRef}
             className="relative mt-6 overflow-hidden rounded-[28px] border border-slate-800 bg-[radial-gradient(circle_at_center,_rgba(30,41,59,0.75),_rgba(2,6,23,0.98)_68%)] px-4 py-4 min-h-[620px]"
-            style={{ minHeight: `${meshMinHeight}px` }}
+            style={{ minHeight: `${meshMinHeight}px`, cursor: panRef.current ? 'grabbing' : 'grab' }}
             onMouseLeave={() => setHoveredLine(null)}
+            onPointerDown={handleCanvasPointerDown}
           >
-            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.05)_1px,transparent_1px)] bg-[size:72px_72px]" />
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(56,189,248,0.12),_transparent_46%)]" />
+            {/* Recenter button */}
+            {(panOffset.x !== 0 || panOffset.y !== 0 || Object.keys(dragOverrides).length > 0) && (
+              <button
+                onClick={(e) => { e.stopPropagation(); recenterView(); }}
+                className="absolute top-3 right-3 z-20 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-300 backdrop-blur-sm transition-colors hover:bg-slate-800 hover:text-white"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" />
+                </svg>
+                Recenter
+              </button>
+            )}
+            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.05)_1px,transparent_1px)] bg-[size:72px_72px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }} />
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(56,189,248,0.12),_transparent_46%)]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }} />
             {selectedTag && (
-              <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center">
+              <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }}>
                 <div
                   className="absolute rounded-full border border-cyan-400/15"
                   style={{
@@ -790,6 +908,7 @@ export default function PoliciesPage() {
             ) : (
               <>
                 <svg className="absolute inset-0 z-[3] h-full w-full" style={{ overflow: 'visible' }}>
+                  <g transform={`translate(${panOffset.x}, ${panOffset.y})`}>
                   <defs>
                     {lines.map(line => (
                       <g key={`defs-${line.id}`}>
@@ -952,6 +1071,7 @@ export default function PoliciesPage() {
                       </g>
                     );
                   })}
+                  </g>
                 </svg>
 
                 {hoveredLine && (() => {
@@ -1001,7 +1121,7 @@ export default function PoliciesPage() {
                   );
                 })()}
 
-                <div className="relative z-[4] min-h-[588px]">
+                <div className="relative z-[4] min-h-[588px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }}>
                   {vlans.map((vlan) => {
                     const position = nodePositions[vlan.tag];
                     if (!position) return null;
@@ -1026,7 +1146,8 @@ export default function PoliciesPage() {
                       <button
                         key={vlan.tag}
                         onClick={() => handleCardClick(vlan)}
-                        className={`absolute z-[5] h-36 w-36 rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 sm:h-40 sm:w-40 ${
+                        onPointerDown={(e) => handleNodePointerDown(e, vlan)}
+                        className={`absolute z-[5] h-36 w-36 cursor-grab rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${
                           isSource
                             ? 'border-cyan-300/80 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.22),0_0_0_12px_rgba(8,145,178,0.08),0_26px_60px_rgba(8,145,178,0.24)]'
                             : isDestination

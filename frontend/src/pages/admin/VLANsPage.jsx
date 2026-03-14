@@ -2,6 +2,23 @@ import { useState, useEffect } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import { useAuth } from '../../contexts/AuthContext.jsx';
+
+function buildManagedSubnet(tag) {
+  const parsedTag = parseInt(tag, 10);
+  if (!parsedTag || String(parsedTag).length !== 4) return null;
+
+  const padded = String(parsedTag).padStart(4, '0');
+  const octet2 = parseInt(padded.substring(0, 2), 10);
+  const octet3 = parseInt(padded.substring(2, 4), 10);
+  if (octet2 > 255 || octet3 > 255) return null;
+
+  return {
+    network: `10.${octet2}.${octet3}.0/24`,
+    gateway: `10.${octet2}.${octet3}.1`,
+    dhcp: `10.${octet2}.${octet3}.10 - 10.${octet2}.${octet3}.254`,
+  };
+}
 
 function findNextAvailableVlanTag(vlans, firewalls) {
   const usedTags = new Set(vlans.map(vlan => parseInt(vlan.tag, 10)).filter(Number.isInteger));
@@ -29,6 +46,7 @@ function findNextAvailableVlanTag(vlans, firewalls) {
 
 export default function VLANsPage() {
   useDocumentTitle('VLANs');
+  const { user } = useAuth();
   const [vlans, setVlans]       = useState([]);
   const [firewalls, setFirewalls] = useState([]);
   const [loading, setLoading]   = useState(true);
@@ -118,7 +136,14 @@ export default function VLANsPage() {
               {vlans.map(v => (
                 <tr key={v.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 transition-colors">
                   <td className="px-4 py-3">
-                    <span className="font-mono text-blue-400 bg-blue-900/20 px-2 py-0.5 rounded text-xs">{v.tag}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-blue-400 bg-blue-900/20 px-2 py-0.5 rounded text-xs">{v.tag}</span>
+                      {v.mode === 'tagged_only' && (
+                        <span className="text-[10px] uppercase tracking-wider text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/20 px-2 py-0.5 rounded-full">
+                          Tagged only
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-white font-medium">
                     {v.name}
@@ -126,7 +151,12 @@ export default function VLANsPage() {
                   </td>
                   <td className="px-4 py-3">
                     {v.subnet ? (
-                      <span className="font-mono text-xs text-gray-400">{v.subnet.network}</span>
+                      <div className="space-y-1">
+                        <span className="font-mono text-xs text-gray-400">{v.subnet.network}</span>
+                        {v.mode === 'tagged_only' && (
+                          <p className="text-[11px] text-fuchsia-300/80">Custom tagged subnet</p>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-xs text-gray-600">N/A</span>
                     )}
@@ -139,6 +169,8 @@ export default function VLANsPage() {
                           {v.firewallSync.map(s => s.firewallName).join(', ')}
                         </span>
                       </div>
+                    ) : v.mode === 'tagged_only' ? (
+                      <span className="text-xs text-fuchsia-300/80">Tagged only</span>
                     ) : firewalls.length > 0 ? (
                       <button
                         onClick={() => setSyncModalVlan(v)}
@@ -152,7 +184,7 @@ export default function VLANsPage() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      {v.firewallSync.length > 0 && (
+                      {v.mode !== 'tagged_only' && v.firewallSync.length > 0 && (
                         <button
                           onClick={() => setSyncModalVlan(v)}
                           className="text-xs text-orange-400 hover:text-orange-300 px-2 py-1 rounded hover:bg-gray-700 transition-colors"
@@ -183,6 +215,7 @@ export default function VLANsPage() {
 
       {modalOpen && (
         <VLANFormModal
+          user={user}
           vlan={editVlan}
           vlans={vlans}
           firewalls={firewalls}
@@ -203,11 +236,14 @@ export default function VLANsPage() {
   );
 }
 
-function VLANFormModal({ vlan, vlans, firewalls, onClose, onSaved }) {
+function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
+  const isAdmin = !!user?.isAdmin;
   const suggestedTag = !vlan ? findNextAvailableVlanTag(vlans, firewalls) : null;
   const [form, setForm] = useState({
     name: vlan?.name || '',
     tag: vlan?.tag || suggestedTag || '',
+    mode: vlan?.mode || 'managed',
+    subnetCidr: vlan?.subnet_cidr || '',
     description: vlan?.description || '',
   });
   const [syncToFw, setSyncToFw] = useState(!vlan && firewalls.length > 0);
@@ -216,21 +252,24 @@ function VLANFormModal({ vlan, vlans, firewalls, onClose, onSaved }) {
   const [error, setError]   = useState('');
   const [saving, setSaving] = useState(false);
   const [subnet, setSubnet] = useState(null);
+  const isTaggedOnly = form.mode === 'tagged_only';
 
   // Compute subnet preview when tag changes
   useEffect(() => {
-    const t = parseInt(form.tag);
-    if (t && String(t).length === 4) {
-      const s = String(t).padStart(4, '0');
-      const o2 = parseInt(s.substring(0, 2));
-      const o3 = parseInt(s.substring(2, 4));
-      if (o2 <= 255 && o3 <= 255) {
-        setSubnet({ network: `10.${o2}.${o3}.0/24`, gateway: `10.${o2}.${o3}.1`, dhcp: `10.${o2}.${o3}.10 - 10.${o2}.${o3}.254` });
-        return;
-      }
+    if (isTaggedOnly) {
+      setSubnet(form.subnetCidr ? { network: form.subnetCidr, gateway: '', dhcp: '', custom: true } : null);
+      return;
     }
-    setSubnet(null);
-  }, [form.tag]);
+    setSubnet(buildManagedSubnet(form.tag));
+  }, [form.tag, form.mode, form.subnetCidr, isTaggedOnly]);
+
+  useEffect(() => {
+    if (isTaggedOnly) {
+      setSyncToFw(false);
+    } else if (!vlan && firewalls.length > 0) {
+      setSyncToFw(true);
+    }
+  }, [firewalls.length, isTaggedOnly, vlan]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -239,14 +278,30 @@ function VLANFormModal({ vlan, vlans, firewalls, onClose, onSaved }) {
     try {
       let vlanId = vlan?.id;
       if (vlan) {
-        await api.put(`/admin/vlans/${vlan.id}`, form);
+        await api.put(`/admin/vlans/${vlan.id}`, {
+          name: form.name,
+          description: form.description,
+          ...(isAdmin ? {
+            tag: form.tag,
+            mode: form.mode,
+            subnetCidr: form.mode === 'tagged_only' ? form.subnetCidr : '',
+          } : {}),
+        });
       } else {
-        const r = await api.post('/admin/vlans', form);
+        const r = await api.post('/admin/vlans', {
+          name: form.name,
+          description: form.description,
+          ...(isAdmin ? {
+            tag: form.tag,
+            mode: form.mode,
+            subnetCidr: form.mode === 'tagged_only' ? form.subnetCidr : '',
+          } : {}),
+        });
         vlanId = r.data.id;
       }
 
       // Sync to firewalls if requested (only on create)
-      if (!vlan && syncToFw && vlanId) {
+      if (!vlan && !isTaggedOnly && syncToFw && vlanId) {
         const syncRes = await api.post(`/admin/vlans/${vlanId}/sync`, { allowInternet, enableDhcp });
         const failed = syncRes.data?.filter(r => r.status === 'error');
         if (failed?.length > 0) {
@@ -270,28 +325,68 @@ function VLANFormModal({ vlan, vlans, firewalls, onClose, onSaved }) {
     <Modal title={vlan ? `Edit VLAN ${vlan.tag}` : 'New VLAN'} onClose={onClose} size="sm">
       <form onSubmit={submit} className="p-5 space-y-4">
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5">VLAN Tag (1000–4094 recommended)</label>
-          <input
-            type="number"
-            min="1" max="4094"
-            required
-            value={form.tag}
-            onChange={e => setForm(f => ({ ...f, tag: e.target.value }))}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
-            placeholder="e.g. 1126"
-            autoFocus
-          />
-          {!vlan && suggestedTag && String(form.tag) === String(suggestedTag) && (
+          <label className="block text-xs text-gray-400 mb-1.5">VLAN Type</label>
+          {isAdmin ? (
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setForm(f => ({ ...f, mode: 'managed', subnetCidr: '' }))}
+                className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${!isTaggedOnly ? 'border-blue-500 bg-blue-500/10 text-blue-300' : 'border-gray-700 bg-gray-800 text-gray-300 hover:border-gray-600'}`}
+              >
+                <span className="block text-sm font-medium">Managed</span>
+                <span className="block text-xs text-gray-500 mt-1">Uses the lab tag scheme and can be pushed to the firewall.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setForm(f => ({ ...f, mode: 'tagged_only' }))}
+                className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${isTaggedOnly ? 'border-fuchsia-500 bg-fuchsia-500/10 text-fuchsia-300' : 'border-gray-700 bg-gray-800 text-gray-300 hover:border-gray-600'}`}
+              >
+                <span className="block text-sm font-medium">Tagged Only</span>
+                <span className="block text-xs text-gray-500 mt-1">Custom tag and subnet. Stays local and never syncs to the firewall.</span>
+              </button>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-emerald-800/40 bg-emerald-900/10 px-3 py-2.5 text-sm text-emerald-300">
+              {isTaggedOnly ? 'Tagged-only VLAN' : 'Managed VLAN'}
+            </div>
+          )}
+        </div>
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">
+            VLAN Tag {isTaggedOnly ? '(1–4094)' : '(1000–4094 recommended)'}
+          </label>
+          {isAdmin ? (
+            <input
+              type="number"
+              min="1" max="4094"
+              required
+              value={form.tag}
+              onChange={e => setForm(f => ({ ...f, tag: e.target.value }))}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+              placeholder={isTaggedOnly ? 'e.g. 11' : 'e.g. 1126'}
+              autoFocus
+            />
+          ) : (
+            <div className="w-full rounded-lg border border-emerald-800/40 bg-emerald-900/10 px-3 py-2.5 text-sm text-emerald-300">
+              {form.tag || 'Auto-assigned on create'}
+            </div>
+          )}
+          {!vlan && !isAdmin && suggestedTag && (
+            <p className="mt-2 text-xs text-emerald-400">
+              Non-admin VLAN managers are assigned the next free tag automatically from the firewall pool.
+            </p>
+          )}
+          {!vlan && !isAdmin && !suggestedTag && (
+            <p className="mt-2 text-xs text-amber-400">
+              No free VLAN tags were found in the configured firewall pools. Ask an admin to expand the range or free a tag.
+            </p>
+          )}
+          {!vlan && !isTaggedOnly && isAdmin && suggestedTag && String(form.tag) === String(suggestedTag) && (
             <p className="mt-2 text-xs text-emerald-400">
               Suggested next available tag from the configured firewall ranges.
             </p>
           )}
-          {!vlan && !suggestedTag && (
-            <p className="mt-2 text-xs text-amber-400">
-              No free VLAN tags were found in the configured firewall pools. Pick a tag manually.
-            </p>
-          )}
-          {subnet && (
+          {!isTaggedOnly && subnet && (
             <div className="mt-2 bg-blue-900/20 border border-blue-800/30 rounded-lg px-3 py-2 text-xs space-y-0.5">
               <p className="text-blue-400">Auto subnet: <span className="font-mono">{subnet.network}</span></p>
               <p className="text-gray-500">Gateway: <span className="font-mono text-gray-400">{subnet.gateway}</span></p>
@@ -299,6 +394,22 @@ function VLANFormModal({ vlan, vlans, firewalls, onClose, onSaved }) {
             </div>
           )}
         </div>
+        {isTaggedOnly && (
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5">Subnet CIDR</label>
+            <input
+              type="text"
+              required
+              value={form.subnetCidr}
+              onChange={e => setForm(f => ({ ...f, subnetCidr: e.target.value }))}
+              placeholder="e.g. 192.168.11.0/24"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-fuchsia-500 transition-colors"
+            />
+            <p className="mt-2 text-xs text-fuchsia-300/80">
+              Tagged-only VLANs use your custom subnet and are kept out of the firewall sync flow.
+            </p>
+          </div>
+        )}
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Name</label>
           <input
@@ -321,7 +432,7 @@ function VLANFormModal({ vlan, vlans, firewalls, onClose, onSaved }) {
         </div>
 
         {/* Firewall sync options (only on create) */}
-        {!vlan && firewalls.length > 0 && (() => {
+        {!vlan && !isTaggedOnly && firewalls.length > 0 && (() => {
           const tag = parseInt(form.tag);
           const inRange = firewalls.filter(f => tag >= (f.vlan_range_start || 1001) && tag <= (f.vlan_range_end || 1999));
           const outOfRange = tag && inRange.length === 0;
@@ -359,7 +470,7 @@ function VLANFormModal({ vlan, vlans, firewalls, onClose, onSaved }) {
 
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <button type="submit" disabled={saving} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors">
-          {saving ? 'Saving...' : vlan ? 'Save Changes' : syncToFw ? 'Create VLAN & Push to Firewall' : 'Create VLAN'}
+          {saving ? 'Saving...' : vlan ? 'Save Changes' : !isTaggedOnly && syncToFw ? 'Create VLAN & Push to Firewall' : 'Create VLAN'}
         </button>
       </form>
     </Modal>

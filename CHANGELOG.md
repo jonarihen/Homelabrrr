@@ -1,5 +1,69 @@
 # Changelog
 
+## 2026-03-14 — Port Forwarding / WAN VIP management (WIP)
+
+### Port forwarding admin page
+- New admin page at `/admin/port-forwarding` for managing FortiGate VIPs (port forwards) on the root VDOM
+- Displays all existing VIPs from the FortiGate with managed/external badges — external (pre-existing) VIPs are read-only, managed ones can be deleted
+- Create form with live port conflict checking: warns immediately if an external port + protocol combo is already in use by another VIP
+- Source address restriction dropdown populated from root VDOM address objects and groups
+- Destination zone dropdown populated from root VDOM interfaces (filtered to exclude WAN, tunnel, loopback, management)
+
+### Backend: FortiGate VIP API
+- Added VIP CRUD methods to `fortigate.js`: `getVips()`, `getVip()`, `createVip()`, `deleteVip()` — all accept `vdomOverride` for cross-VDOM access
+- Added `getAddressGroups()` for source restriction dropdown
+- Updated `getInterfaces()` and `getAddressObjects()` to accept optional `vdomOverride` parameter
+- New admin routes: `GET/POST/DELETE /admin/firewalls/:id/vips`, `GET /admin/firewalls/:id/root-interfaces`, `GET /admin/firewalls/:id/root-addresses`
+- `PUT /admin/firewalls/:id/wan-config` for setting external IP and WAN zone from the port forwarding page
+
+### Backend: VIP creation flow
+- Creates VIP in root VDOM with port forwarding enabled (extip → mappedip:mappedport)
+- Auto-creates matching firewall policy in root VDOM (srcintf=WAN zone, dstintf=selected destination zone, dstaddr=VIP)
+- Validates against all existing VIPs for port+protocol conflicts before creation
+- Rolls back VIP if policy creation fails
+- Tracks managed VIPs in `managed_vips` DB table for safe deletion (policy + VIP cleanup)
+
+### Database changes
+- New `managed_vips` table: tracks VIPs created through the UI with their associated policy IDs for cleanup
+- New `firewalls` columns: `external_ip` (public IP for VIPs), `root_wan_zone` (WAN interface name in root VDOM, default 'underlay')
+- Firewall CRUD routes updated to read/write the new fields
+
+### Frontend wiring
+- New `PortForwardingPage.jsx` component with firewall selector, WAN config panel, VIP table, and create form
+- Sidebar link under Networking section (requires `canManageFirewalls` permission)
+- Route added at `/admin/port-forwarding`
+
+### Status: WIP
+- Core implementation complete but not yet tested end-to-end against live FortiGate
+- Needs debugging in next session — page loads but functionality not verified against the API yet
+
+## 2026-03-12 — VM SSH config panel fix
+
+### Inline SSH config updates
+- Fixed the VM page and VM detail modal SSH save panels so they now load and submit the pinned SSH host fingerprint required by the hardened backend
+- Added fingerprint scanning directly in those inline SSH config panels, not just the dedicated SSH modal
+- Save errors now surface in the panel instead of failing silently when the SSH fingerprint is missing or invalid
+
+## 2026-03-12 — Tagged-only VLANs for custom prod networks
+
+### Flexible VLAN modes
+- Added a tagged-only VLAN mode for admin-created VLANs that stay local to the portal and are never pushed to FortiGate
+- Tagged-only VLANs support arbitrary VLAN IDs like `11`, `12`, and `13` instead of being tied to the lab firewall pool ranges
+- Tagged-only VLANs now store and display a custom subnet CIDR instead of forcing the derived `10.xx.xx.0/24` lab subnet scheme
+
+### VLAN UI and guardrails
+- The VLAN modal now lets admins choose between managed VLANs and tagged-only VLANs with mode-specific guidance
+- Tagged-only VLANs now show clearly in the VLAN list and no longer offer firewall sync actions
+- Non-admin VLAN managers remain restricted to managed VLAN creation with the next available pooled tag assigned automatically by the backend
+
+## 2026-03-12 — Admin-only manual VLAN tag selection
+
+### VLAN creation permissions
+- Non-admin users with VLAN management permissions can no longer choose arbitrary VLAN tags
+- The backend now assigns the next available tag from the configured firewall pools for non-admin VLAN creation
+- Only admins can manually choose a specific VLAN tag or change an existing VLAN tag
+- The VLAN modal now shows auto-assigned tag behavior clearly for non-admin users
+
 ## 2026-03-12 — Safer VLAN deletion cleanup
 
 ### VLAN delete behavior

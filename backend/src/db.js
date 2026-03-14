@@ -32,6 +32,8 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     tag INTEGER NOT NULL UNIQUE,
+    mode TEXT DEFAULT 'managed',
+    subnet_cidr TEXT DEFAULT '',
     description TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
   );
@@ -122,6 +124,8 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 try { db.exec("ALTER TABLE vm_ssh_configs ADD COLUMN host_fingerprint TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE vlans ADD COLUMN mode TEXT DEFAULT 'managed'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE vlans ADD COLUMN subnet_cidr TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN see_all_vms INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0'); } catch { /* exists */ }
@@ -175,6 +179,7 @@ try { db.exec('ALTER TABLE users ADD COLUMN can_manage_templates INTEGER DEFAULT
 try { db.exec('ALTER TABLE users ADD COLUMN can_manage_users INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_manage_assignments INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_view_audit_log INTEGER DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE users ADD COLUMN can_create_vms INTEGER DEFAULT 0'); } catch { /* exists */ }
 
 // Audit log
 try { db.exec(`
@@ -234,6 +239,26 @@ try { db.exec(`
     UNIQUE(firewall_id, vlan_id)
   )
 `); } catch { /* exists */ }
+
+// Port forwarding: managed VIPs created through the UI
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS managed_vips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    firewall_id INTEGER NOT NULL REFERENCES firewalls(id) ON DELETE CASCADE,
+    vip_name TEXT NOT NULL,
+    policy_id INTEGER,
+    protocol TEXT DEFAULT 'tcp',
+    ext_port INTEGER NOT NULL,
+    mapped_ip TEXT NOT NULL,
+    mapped_port INTEGER NOT NULL,
+    dst_interface TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(firewall_id, vip_name)
+  )
+`); } catch { /* exists */ }
+
+try { db.exec("ALTER TABLE firewalls ADD COLUMN external_ip TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE firewalls ADD COLUMN root_wan_zone TEXT DEFAULT 'underlay'"); } catch { /* exists */ }
 
 // Create default admin on first run
 const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get();

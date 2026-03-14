@@ -6,6 +6,7 @@ import VNCModal from '../components/VNCModal.jsx';
 import VLANModal from '../components/VLANModal.jsx';
 import SSHModal from '../components/SSHModal.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
+import useSSHConfig from '../hooks/useSSHConfig.js';
 import api from '../api.js';
 
 // ── Formatters ───────────────────────────────────────────────────────────────
@@ -133,8 +134,7 @@ export default function VMPage() {
   const [rrdLoading, setRrdLoading] = useState(true);
   const [timeframe, setTimeframe] = useState('hour');
 
-  const [sshCfg, setSshCfg] = useState({ host: '', port: 22, username: 'root' });
-  const [sshSaved, setSshSaved] = useState(false);
+  const { sshCfg, setSshCfg, sshSaved, sshSavingError, scanningFingerprint, saveSshConfig, scanSshFingerprint } = useSSHConfig(node, vmid);
 
   const [disks, setDisks] = useState([]);
   const [vncModal, setVncModal] = useState(false);
@@ -160,11 +160,6 @@ export default function VMPage() {
     return () => clearInterval(interval);
   }, [loadVm]);
 
-  useEffect(() => {
-    api.get(`/ssh/config/${node}/${vmid}`)
-      .then(r => { if (r.data) setSshCfg({ host: r.data.host, port: r.data.port, username: r.data.username }); })
-      .catch(() => {});
-  }, [node, vmid]);
 
   useEffect(() => {
     api.get(`/vms/${node}/${vmid}/config`).then(r => {
@@ -199,15 +194,6 @@ export default function VMPage() {
     } catch (e) {
       setActionError(e.response?.data?.error || 'Action failed');
     } finally { setActionLoading(false); }
-  };
-
-  const saveSshConfig = async () => {
-    setSshSaved(false);
-    try {
-      await api.put(`/ssh/config/${node}/${vmid}`, sshCfg);
-      setSshSaved(true);
-      setTimeout(() => setSshSaved(false), 2000);
-    } catch { /* ignore */ }
   };
 
   const isRunning = vm?.status === 'running';
@@ -467,10 +453,32 @@ export default function VMPage() {
               <InputField label="Port" type="number" value={sshCfg.port} onChange={v => setSshCfg(c => ({ ...c, port: parseInt(v) || 22 }))} />
               <InputField label="Username" value={sshCfg.username} onChange={v => setSshCfg(c => ({ ...c, username: v }))} />
             </div>
+            <div className="mt-4">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs text-gray-500">Host Key Fingerprint</label>
+                <button
+                  onClick={scanSshFingerprint}
+                  disabled={scanningFingerprint}
+                  className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
+                >
+                  {scanningFingerprint ? 'Scanning...' : 'Scan fingerprint'}
+                </button>
+              </div>
+              <input
+                type="text"
+                value={sshCfg.hostFingerprint}
+                onChange={e => setSshCfg(c => ({ ...c, hostFingerprint: e.target.value }))}
+                placeholder="SHA256:..."
+                className="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+              />
+              <p className="mt-1.5 text-xs text-gray-500">
+                This pinned fingerprint is required so the backend can verify the SSH server identity before connecting.
+              </p>
+            </div>
             <div className="flex items-center gap-3 mt-4">
               <button
                 onClick={saveSshConfig}
-                disabled={!sshCfg.host}
+                disabled={!sshCfg.host || !sshCfg.hostFingerprint}
                 className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors"
               >
                 Save Config
@@ -482,6 +490,9 @@ export default function VMPage() {
                 </span>
               )}
             </div>
+            {sshSavingError && (
+              <p className="mt-3 text-xs text-red-400 bg-red-900/20 rounded-lg p-3">{sshSavingError}</p>
+            )}
           </div>
         </div>
       </div>

@@ -125,7 +125,7 @@ router.post('/clone', async (req, res) => {
 
 // ─── Full VM creation (admin only) ──────────────────────────────────────────
 
-router.post('/create', requireAdmin, async (req, res) => {
+router.post('/create', requirePermission('can_create_vms'), async (req, res) => {
   const {
     node, name, cores = 2, memory = 2048,
     diskSize = '20G', storage = 'local-lvm',
@@ -162,8 +162,8 @@ router.post('/create', requireAdmin, async (req, res) => {
       'INSERT INTO provisioned_vms (user_id, node, vmid, name, status, upid) VALUES (?, ?, ?, ?, ?, ?)'
     ).run(req.session.userId, node, vmid, name, 'creating', upid || '');
 
-    // Assign to target user if specified
-    const targetUser = assignTo || req.session.userId;
+    // Assign to target user — only admins can assign to someone else
+    const targetUser = (assignTo && req.session.isAdmin) ? assignTo : req.session.userId;
     try {
       db.prepare('INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)')
         .run(targetUser, node, vmid);
