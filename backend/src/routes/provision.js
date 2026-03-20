@@ -23,7 +23,7 @@ router.get('/templates', (req, res) => {
 
 // ─── Proxmox resources (for form dropdowns) ─────────────────────────────────
 
-router.get('/nodes', async (req, res) => {
+router.get('/nodes', requirePermission('can_manage_templates'), async (req, res) => {
   try {
     res.json(await getNodes());
   } catch (err) {
@@ -40,7 +40,7 @@ router.get('/nodes/:node/storages', async (req, res) => {
   }
 });
 
-router.get('/nodes/:node/isos/:storage', async (req, res) => {
+router.get('/nodes/:node/isos/:storage', requireAdmin, async (req, res) => {
   try {
     res.json(await getISOImages(req.params.node, req.params.storage));
   } catch (err) {
@@ -48,7 +48,7 @@ router.get('/nodes/:node/isos/:storage', async (req, res) => {
   }
 });
 
-router.get('/nodes/:node/networks', async (req, res) => {
+router.get('/nodes/:node/networks', requireAdmin, async (req, res) => {
   try {
     res.json(await getNetworks(req.params.node));
   } catch (err) {
@@ -125,7 +125,7 @@ router.post('/clone', async (req, res) => {
 
 // ─── Full VM creation (admin only) ──────────────────────────────────────────
 
-router.post('/create', requirePermission('can_create_vms'), async (req, res) => {
+router.post('/create', requireAdmin, async (req, res) => {
   const {
     node, name, cores = 2, memory = 2048,
     diskSize = '20G', storage = 'local-lvm',

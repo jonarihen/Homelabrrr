@@ -12,9 +12,24 @@ export default function ProvisionPage() {
   useDocumentTitle('New VM');
   const { user } = useAuth();
   const canTemplate = user?.isAdmin || user?.canProvision;
-  const canCreate = user?.isAdmin || user?.canCreateVms;
+  const canCreate = user?.isAdmin;
   const showTabs = canTemplate && canCreate;
   const [tab, setTab] = useState(() => canTemplate ? 'template' : 'create');
+
+  if (!canTemplate && !canCreate) {
+    return (
+      <Layout>
+        <div className="p-6 lg:p-8 max-w-3xl mx-auto">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
+            <p className="text-white font-semibold">Provisioning access required</p>
+            <p className="text-sm text-gray-500 mt-2">
+              Ask an admin to grant template provisioning access if you need to create VMs through the portal.
+            </p>
+          </div>
+        </div>
+      </Layout>
+    );
+  }
 
   return (
     <Layout>

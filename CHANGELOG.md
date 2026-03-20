@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-03-20 — Secrets-at-rest and upstream trust hardening
+
+### Encrypted secret storage
+- Sensitive values stored in SQLite are now encrypted at rest with an application master key instead of being left in plaintext
+- This covers stored SSH private keys, Proxmox API token secrets, FortiGate API keys, and TOTP secrets
+- Existing plaintext values are migrated in place automatically on startup once `SECRET_ENCRYPTION_KEY` is configured
+
+### Upstream TLS enforcement
+- Proxmox and FortiGate management connections now reject saved records with TLS verification disabled unless an explicit break-glass override is enabled
+- New host and firewall records still default to TLS verification enabled, and admin forms now block disabling it unless `ALLOW_INSECURE_UPSTREAM_TLS=true` is set
+- Legacy Proxmox host records created before the secure-default change are migrated toward verified TLS by default
+
+### Console websocket tightening
+- Browser VNC and SSH console tokens are no longer sent in URL query strings during normal operation
+- Console websocket authentication now uses websocket subprotocols, keeping tokens out of common URL logging paths while preserving the existing single-use/session-bound checks
+
+### Permission and inventory scoping
+- Full manual VM creation is now admin-only; delegated users can continue using the template provisioning flow without getting unrestricted infrastructure placement controls
+- Delegated VLAN and policy managers no longer receive full firewall management-plane inventory details when loading the shared firewall list
+
+### Deployment note
+- Deployments now require `SECRET_ENCRYPTION_KEY` to be set for the backend to start
+- `ALLOW_INSECURE_UPSTREAM_TLS` is available as a temporary exception for environments that still depend on self-signed or otherwise untrusted upstream management certificates
+
 ## 2026-03-14 — Port forwarding stabilization
 
 ### Page load fix

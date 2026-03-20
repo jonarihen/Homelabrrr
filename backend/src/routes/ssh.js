@@ -8,6 +8,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
 import { normalizeSshHostFingerprint, scanSshHostFingerprint } from '../utils/sshHostKey.js';
+import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 
 // Convert a PPK key (any version) to OpenSSH PEM using puttygen.
 // passphrase is the PPK decryption passphrase (empty string if unencrypted).
@@ -52,13 +53,18 @@ router.get('/keys', (req, res) => {
     'SELECT id, name, private_key, public_key, created_at FROM ssh_keys WHERE user_id = ? ORDER BY name'
   ).all(req.session.userId);
   // Don't send private key to client — just add encrypted flag
-  res.json(keys.map(k => ({
-    id: k.id,
-    name: k.name,
-    public_key: k.public_key,
-    created_at: k.created_at,
-    encrypted: k.private_key.includes('ENCRYPTED') || k.private_key.includes('aes256-cbc') || k.private_key.includes('Encryption: aes'),
-  })));
+  res.json(keys.map(k => {
+    const privateKey = decryptSecret(k.private_key);
+    return {
+      id: k.id,
+      name: k.name,
+      public_key: k.public_key,
+      created_at: k.created_at,
+      encrypted: privateKey.includes('ENCRYPTED')
+        || privateKey.includes('aes256-cbc')
+        || privateKey.includes('Encryption: aes'),
+    };
+  }));
 });
 
 router.post('/keys', async (req, res) => {
@@ -83,7 +89,7 @@ router.post('/keys', async (req, res) => {
   try {
     const r = db.prepare(
       'INSERT INTO ssh_keys (user_id, name, private_key, public_key) VALUES (?, ?, ?, ?)'
-    ).run(req.session.userId, name, finalKey, publicKey || '');
+    ).run(req.session.userId, name, encryptSecret(finalKey), publicKey || '');
     res.json({ id: r.lastInsertRowid, name });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -205,7 +211,7 @@ router.post('/connect', (req, res) => {
     userId: req.session.userId,
     sessionId: req.sessionID,
     host, port, username, hostFingerprint,
-    privateKey: key.private_key,
+    privateKey: decryptSecret(key.private_key),
     passphrase,
     expires: Date.now() + 120_000,
   });

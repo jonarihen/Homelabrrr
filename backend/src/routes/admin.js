@@ -6,6 +6,7 @@ import { createClient, vlanTagToSubnet } from '../fortigate.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
+import { encryptSecret } from '../utils/secrets.js';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -20,6 +21,7 @@ const pVlans       = requirePermission('can_manage_vlans');
 const pPolicies    = requirePermission('can_manage_policies');
 const pTemplates   = requirePermission('can_manage_templates');
 const pAudit       = requirePermission('can_view_audit_log');
+const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 
@@ -150,7 +152,7 @@ router.put('/users/:id/permission', requireAdmin, (req, res) => {
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { permission, enabled } = req.body;
-  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log', 'can_create_vms'];
+  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log'];
   if (!validPerms.includes(permission)) {
     return res.status(400).json({ error: `Invalid permission: ${permission}` });
   }
@@ -537,10 +539,13 @@ router.post('/pve-hosts', pHosts, (req, res) => {
   if (!name || !host || !tokenId || !tokenSecret) {
     return res.status(400).json({ error: 'Name, host, tokenId and tokenSecret are required' });
   }
+  if (!verifyTls && !ALLOW_INSECURE_UPSTREAM_TLS) {
+    return res.status(400).json({ error: 'Disabling Proxmox TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
+  }
   try {
     const r = db.prepare(
       'INSERT INTO pve_hosts (name, host, port, token_id, token_secret, verify_tls) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(name, host, port, tokenId, tokenSecret, verifyTls ? 1 : 0);
+    ).run(name, host, port, tokenId, encryptSecret(tokenSecret), verifyTls ? 1 : 0);
     res.json({ id: r.lastInsertRowid, name, host, port });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -556,8 +561,11 @@ router.put('/pve-hosts/:id', pHosts, (req, res) => {
   if (!existing) return res.status(404).json({ error: 'Host not found' });
 
   // If tokenSecret is empty, keep the existing one
-  const secret = tokenSecret || existing.token_secret;
+  const secret = tokenSecret ? encryptSecret(tokenSecret) : existing.token_secret;
   const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== 0 : !!verifyTls;
+  if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {
+    return res.status(400).json({ error: 'Disabling Proxmox TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
+  }
   db.prepare(
     'UPDATE pve_hosts SET name = ?, host = ?, port = ?, token_id = ?, token_secret = ?, verify_tls = ? WHERE id = ?'
   ).run(name, host, port, tokenId, secret, verifyTlsEnabled ? 1 : 0, req.params.id);
@@ -578,17 +586,32 @@ router.delete('/pve-hosts/:id', pHosts, (req, res) => {
 // Firewalls read also needed by policies page and vlans page
 router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_policies', 'can_manage_vlans'), (req, res) => {
   const firewalls = db.prepare('SELECT * FROM firewalls ORDER BY name').all();
+  const user = db.prepare('SELECT can_manage_firewalls FROM users WHERE id = ?').get(req.session.userId);
+  const canSeeSensitiveFields = req.session.isAdmin || user?.can_manage_firewalls === 1;
   // Don't expose api_key to frontend
   res.json(firewalls.map(f => ({
-    id: f.id, name: f.name, type: f.type, host: f.host, port: f.port,
-    vdom: f.vdom, parent_interface: f.parent_interface,
-    wan_interface: f.wan_interface, vlan_range_start: f.vlan_range_start,
-    vlan_range_end: f.vlan_range_end, lab_vdom_link: f.lab_vdom_link,
-    root_vdom: f.root_vdom, root_vdom_link: f.root_vdom_link,
-    route_gateway: f.route_gateway, trunk_switch_serial: f.trunk_switch_serial,
-    trunk_switch_port: f.trunk_switch_port, verify_tls: f.verify_tls,
-    external_ip: f.external_ip || '', root_wan_zone: f.root_wan_zone || 'underlay',
+    id: f.id,
+    name: f.name,
+    type: f.type,
+    vlan_range_start: f.vlan_range_start,
+    vlan_range_end: f.vlan_range_end,
     created_at: f.created_at,
+    ...(canSeeSensitiveFields ? {
+      host: f.host,
+      port: f.port,
+      vdom: f.vdom,
+      parent_interface: f.parent_interface,
+      wan_interface: f.wan_interface,
+      lab_vdom_link: f.lab_vdom_link,
+      root_vdom: f.root_vdom,
+      root_vdom_link: f.root_vdom_link,
+      route_gateway: f.route_gateway,
+      trunk_switch_serial: f.trunk_switch_serial,
+      trunk_switch_port: f.trunk_switch_port,
+      verify_tls: f.verify_tls,
+      external_ip: f.external_ip || '',
+      root_wan_zone: f.root_wan_zone || 'underlay',
+    } : {}),
   })));
 });
 
@@ -640,13 +663,16 @@ router.post('/firewalls', pFirewalls, (req, res) => {
   if (!name || !host || !apiKey) {
     return res.status(400).json({ error: 'Name, host, and API key are required' });
   }
+  if (!verifyTls && !ALLOW_INSECURE_UPSTREAM_TLS) {
+    return res.status(400).json({ error: 'Disabling firewall TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
+  }
   if (vlanRangeStart >= vlanRangeEnd || vlanRangeStart < 1 || vlanRangeEnd > 4094) {
     return res.status(400).json({ error: 'Invalid VLAN range (must be 1–4094, start < end)' });
   }
   try {
     const r = db.prepare(
       'INSERT INTO firewalls (name, type, host, port, api_key, vdom, parent_interface, wan_interface, vlan_range_start, vlan_range_end, lab_vdom_link, root_vdom, root_vdom_link, route_gateway, trunk_switch_serial, trunk_switch_port, verify_tls, external_ip, root_wan_zone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(name, type, host, port, apiKey, vdom, parentInterface, wanInterface, vlanRangeStart, vlanRangeEnd, labVdomLink, rootVdom, rootVdomLink, routeGateway, trunkSwitchSerial, trunkSwitchPort, verifyTls ? 1 : 0, externalIp, rootWanZone);
+    ).run(name, type, host, port, encryptSecret(apiKey), vdom, parentInterface, wanInterface, vlanRangeStart, vlanRangeEnd, labVdomLink, rootVdom, rootVdomLink, routeGateway, trunkSwitchSerial, trunkSwitchPort, verifyTls ? 1 : 0, externalIp, rootWanZone);
     logAudit(req, 'admin_create_firewall', name, `${host}:${port} vdom=${vdom}`);
     res.json({ id: r.lastInsertRowid, name, host, port });
   } catch (err) {
@@ -662,7 +688,7 @@ router.put('/firewalls/:id', pFirewalls, (req, res) => {
   const existing = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Firewall not found' });
 
-  const key = apiKey || existing.api_key;
+  const key = apiKey ? encryptSecret(apiKey) : existing.api_key;
   const rangeStart    = req.body.vlanRangeStart ?? existing.vlan_range_start;
   const rangeEnd      = req.body.vlanRangeEnd   ?? existing.vlan_range_end;
   const labLink       = req.body.labVdomLink    || existing.lab_vdom_link   || 'lab-root0';
@@ -674,6 +700,9 @@ router.put('/firewalls/:id', pFirewalls, (req, res) => {
   const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== 0 : !!verifyTls;
   const extIp       = req.body.externalIp   ?? existing.external_ip   ?? '';
   const wanZone     = req.body.rootWanZone  ?? existing.root_wan_zone ?? 'underlay';
+  if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {
+    return res.status(400).json({ error: 'Disabling firewall TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
+  }
   if (rangeStart >= rangeEnd || rangeStart < 1 || rangeEnd > 4094) {
     return res.status(400).json({ error: 'Invalid VLAN range (must be 1–4094, start < end)' });
   }

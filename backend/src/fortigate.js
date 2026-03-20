@@ -1,5 +1,8 @@
 import https from 'https';
 import http from 'http';
+import { decryptSecret } from './utils/secrets.js';
+
+const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
 /**
  * Convert a 4-digit VLAN tag to subnet info.
@@ -41,6 +44,10 @@ export class FortiGateAPI {
    * @param {string|null} vdomOverride - VDOM name, or 'global' for ?global=1
    */
   async request(method, path, data = null, vdomOverride = null) {
+    if (!this.verifyTls && !ALLOW_INSECURE_UPSTREAM_TLS) {
+      throw new Error('FortiGate TLS verification is disabled. Re-enable TLS verification or set ALLOW_INSECURE_UPSTREAM_TLS=true as a temporary exception.');
+    }
+
     let scopeParam;
     if (vdomOverride === 'global') {
       scopeParam = 'global=1';
@@ -673,7 +680,7 @@ export function createClient(firewall) {
   return new FortiGateAPI(
     firewall.host,
     firewall.port,
-    firewall.api_key,
+    decryptSecret(firewall.api_key),
     firewall.vdom,
     firewall.verify_tls !== 0
   );

@@ -18,6 +18,7 @@ import vmRoutes, { vncSessions } from './routes/vms.js';
 import sshRoutes, { sshSessions } from './routes/ssh.js';
 import provisionRoutes from './routes/provision.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
+import { decryptSecret, encryptSecret } from './utils/secrets.js';
 
 const app = express();
 const server = createServer(app);
@@ -105,7 +106,13 @@ const vncWss = new WebSocketServer({
 
 // ─── SSH WebSocket Proxy ──────────────────────────────────────────────────────
 
-const sshWss = new WebSocketServer({ noServer: true });
+const sshWss = new WebSocketServer({
+  noServer: true,
+  handleProtocols: (protocols) => {
+    if (protocols.has('vmmgr-shell')) return 'vmmgr-shell';
+    return false;
+  },
+});
 
 function rejectUpgrade(socket, code, message) {
   socket.write(`HTTP/1.1 ${code} ${message}\r\nConnection: close\r\n\r\n`);
@@ -122,6 +129,24 @@ function isAllowedUpgradeOrigin(request) {
   } catch {
     return false;
   }
+}
+
+function requestedWebSocketProtocols(request) {
+  const raw = request.headers['sec-websocket-protocol'];
+  if (!raw) return [];
+  return String(raw)
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+}
+
+function extractUpgradeToken(request, url) {
+  const protocolToken = requestedWebSocketProtocols(request)
+    .find(protocol => protocol.startsWith('vmmgr-token-'));
+  if (protocolToken) {
+    return protocolToken.slice('vmmgr-token-'.length);
+  }
+  return url.searchParams.get('token');
 }
 
 function loadUpgradeSession(request) {
@@ -164,7 +189,7 @@ server.on('upgrade', async (request, socket, head) => {
   }
 
   if (url.pathname === '/api/vnc') {
-    const token = url.searchParams.get('token');
+    const token = extractUpgradeToken(request, url);
     const sess = vncSessions.get(token);
     if (!sess || sess.expires < Date.now() || sess._consumed) {
       rejectUpgrade(socket, 401, 'Unauthorized');
@@ -182,7 +207,7 @@ server.on('upgrade', async (request, socket, head) => {
       vncWss.emit('connection', ws, sess);
     });
   } else if (url.pathname === '/api/ssh') {
-    const token = url.searchParams.get('token');
+    const token = extractUpgradeToken(request, url);
     const sess = sshSessions.get(token);
     if (!sess || sess.expires < Date.now() || sess._consumed) {
       rejectUpgrade(socket, 401, 'Unauthorized');
@@ -385,11 +410,13 @@ async function convertPpkKey(ppkContent) {
   }
 }
 
-const ppkKeys = db.prepare("SELECT id, private_key FROM ssh_keys WHERE private_key LIKE 'PuTTY-User-Key-File%'").all();
+const ppkKeys = db.prepare('SELECT id, private_key FROM ssh_keys').all();
 for (const k of ppkKeys) {
   try {
-    const openssh = await convertPpkKey(k.private_key);
-    db.prepare('UPDATE ssh_keys SET private_key = ? WHERE id = ?').run(openssh, k.id);
+    const privateKey = decryptSecret(k.private_key);
+    if (!privateKey.startsWith('PuTTY-User-Key-File')) continue;
+    const openssh = await convertPpkKey(privateKey);
+    db.prepare('UPDATE ssh_keys SET private_key = ? WHERE id = ?').run(encryptSecret(openssh), k.id);
     console.log(`Migrated PPK key id=${k.id} to OpenSSH format`);
   } catch (err) {
     console.warn(`Could not auto-convert PPK key id=${k.id} (may be encrypted): ${err.message}`);

@@ -109,7 +109,7 @@ export default function UsersPage() {
                     {u.is_admin
                       ? <span className="text-xs text-blue-400">Full access</span>
                       : (() => {
-                        const count = PERM_DEFS.filter(p => u[p.key]).length + (u.can_provision ? 1 : 0) + (u.can_create_vms ? 1 : 0);
+                        const count = PERM_DEFS.filter(p => u[p.key]).length + (u.can_provision ? 1 : 0);
                         return count > 0
                           ? <span className="text-xs text-purple-400">{count} granted</span>
                           : <span className="text-xs text-gray-600">None</span>;
@@ -262,7 +262,6 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
   const [userVLANs, setUserVLANs] = useState([]);
   const [seeAllVMs, setSeeAllVMs] = useState(!!user.see_all_vms);
   const [canProvision, setCanProvision] = useState(!!user.canProvision);
-  const [canCreateVms, setCanCreateVms] = useState(!!user.canCreateVms);
   const [require2fa, setRequire2fa] = useState(!!user.require2fa);
   const [perms, setPerms]       = useState(() => {
     const p = {};
@@ -298,13 +297,6 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
     try {
       await api.put(`/admin/users/${user.id}/can-provision`, { enabled });
       setCanProvision(enabled);
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const toggleCanCreateVms = async (enabled) => {
-    try {
-      await api.put(`/admin/users/${user.id}/permission`, { permission: 'can_create_vms', enabled });
-      setCanCreateVms(enabled);
     } catch (e) { setError(e.response?.data?.error || 'Failed'); }
   };
 
@@ -430,12 +422,6 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
                     desc="Allow this user to create VMs from templates"
                     checked={canProvision}
                     onChange={toggleCanProvision}
-                  />
-                  <PermToggle
-                    label="Create VMs from Scratch"
-                    desc="Allow this user to create VMs with full hardware configuration"
-                    checked={canCreateVms}
-                    onChange={toggleCanCreateVms}
                   />
                 </div>
 

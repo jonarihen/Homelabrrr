@@ -31,13 +31,14 @@ export default function VNCPage() {
         if (cancelled) return;
 
         const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-        const wsUrl = `${proto}://${window.location.host}/api/vnc?token=${data.token}`;
+        const wsUrl = `${proto}://${window.location.host}/api/vnc`;
 
         const { default: RFB } = await import('@novnc/novnc/lib/rfb.js');
         if (cancelled || !containerRef.current) return;
 
         const rfb = new RFB(containerRef.current, wsUrl, {
           credentials: { password: data.ticket },
+          wsProtocols: ['binary', `vmmgr-token-${data.token}`],
         });
 
         rfb.scaleViewport  = true;

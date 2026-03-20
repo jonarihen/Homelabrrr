@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
+import { assertSecretEncryptionKey, encryptSecret, secretNeedsMigration } from './utils/secrets.js';
 
 const DB_PATH = process.env.DB_PATH || '/app/data/db.sqlite';
 const INITIAL_ADMIN_USERNAME = process.env.INITIAL_ADMIN_USERNAME || '';
@@ -261,6 +262,47 @@ try { db.exec(`
 try { db.exec("ALTER TABLE managed_vips ADD COLUMN service_name TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE firewalls ADD COLUMN external_ip TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE firewalls ADD COLUMN root_wan_zone TEXT DEFAULT 'underlay'"); } catch { /* exists */ }
+
+assertSecretEncryptionKey();
+
+function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {
+  const rows = db.prepare(`SELECT ${idColumn} as id, ${secretColumn} as value FROM ${table} WHERE ${where}`).all();
+  const update = db.prepare(`UPDATE ${table} SET ${secretColumn} = ? WHERE ${idColumn} = ?`);
+  let migrated = 0;
+
+  for (const row of rows) {
+    if (!secretNeedsMigration(row.value)) continue;
+    update.run(encryptSecret(row.value), row.id);
+    migrated += 1;
+  }
+
+  return migrated;
+}
+
+const migrateSecrets = db.transaction(() => {
+  const counts = {
+    sshKeys: migrateEncryptedColumn('ssh_keys', 'id', 'private_key'),
+    pveHosts: migrateEncryptedColumn('pve_hosts', 'id', 'token_secret'),
+    users: migrateEncryptedColumn('users', 'id', 'totp_secret'),
+    firewalls: migrateEncryptedColumn('firewalls', 'id', 'api_key'),
+  };
+
+  const pveTlsMigrationKey = 'pve_verify_tls_secure_default_v1';
+  const pveTlsMigrated = db.prepare('SELECT value FROM settings WHERE key = ?').get(pveTlsMigrationKey);
+  if (!pveTlsMigrated) {
+    db.prepare("UPDATE pve_hosts SET verify_tls = 1 WHERE verify_tls = 0 AND created_at < '2026-03-12'").run();
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(pveTlsMigrationKey, '1');
+  }
+
+  return counts;
+});
+
+const migratedSecrets = migrateSecrets();
+const migratedSecretCount = Object.values(migratedSecrets).reduce((sum, count) => sum + count, 0);
+if (migratedSecretCount > 0) {
+  console.log(`[security] Encrypted ${migratedSecretCount} existing secret value(s) at rest`);
+}
 
 // Create default admin on first run
 const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get();

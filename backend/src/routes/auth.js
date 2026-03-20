@@ -6,6 +6,7 @@ import QRCode from 'qrcode';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { logAudit } from '../utils/audit.js';
+import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 
 const router = Router();
 
@@ -184,7 +185,7 @@ router.post('/verify-2fa', verifyTwoFactorLimiter, async (req, res, next) => {
     return res.status(400).json({ error: 'Invalid state' });
   }
 
-  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: user.totp_secret });
+  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: decryptSecret(user.totp_secret) });
   if (!isValid) {
     const attempts = recordTwoFactorFailure(pendingUsername);
     const remaining = TWO_FACTOR_MAX - attempts;
@@ -274,7 +275,7 @@ router.post('/2fa/setup', requireAuth, async (req, res) => {
   const otpauth = authenticator.keyuri(user.username, 'VM Manager', secret);
 
   // Store secret temporarily — not active until /2fa/enable confirms it
-  db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').run(secret, req.session.userId);
+  db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').run(encryptSecret(secret), req.session.userId);
 
   try {
     const qrDataUrl = await QRCode.toDataURL(otpauth);
@@ -293,7 +294,7 @@ router.post('/2fa/enable', requireAuth, (req, res) => {
   if (!user?.totp_secret) return res.status(400).json({ error: 'Run setup first' });
   if (user.totp_enabled) return res.status(400).json({ error: '2FA is already enabled' });
 
-  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: user.totp_secret });
+  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: decryptSecret(user.totp_secret) });
   if (!isValid) return res.status(400).json({ error: 'Invalid code — try again' });
 
   db.prepare('UPDATE users SET totp_enabled = 1 WHERE id = ?').run(req.session.userId);
@@ -310,7 +311,7 @@ router.post('/2fa/disable', requireAuth, (req, res) => {
   if (!user?.totp_enabled) return res.status(400).json({ error: '2FA is not enabled' });
   if (user.require_2fa) return res.status(403).json({ error: 'Your account is required to keep 2FA enabled' });
 
-  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: user.totp_secret });
+  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: decryptSecret(user.totp_secret) });
   if (!isValid) return res.status(400).json({ error: 'Invalid code' });
 
   db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.session.userId);

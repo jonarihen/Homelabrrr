@@ -1,7 +1,17 @@
 import https from 'https';
 import db from './db.js';
+import { decryptSecret } from './utils/secrets.js';
+
+const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
+
+function assertSecureTls(host, label = 'Proxmox host') {
+  if (host.verify_tls === 0 && !ALLOW_INSECURE_UPSTREAM_TLS) {
+    throw new Error(`${label} TLS verification is disabled. Re-enable TLS verification or set ALLOW_INSECURE_UPSTREAM_TLS=true as a temporary exception.`);
+  }
+}
 
 function agentForHost(host) {
+  assertSecureTls(host);
   return new https.Agent({ rejectUnauthorized: host.verify_tls !== 0 });
 }
 
@@ -9,7 +19,7 @@ function agentForHost(host) {
 
 function makeRequest(host, method, path, body) {
   const url = new URL(`https://${host.host}:${host.port}/api2/json${path}`);
-  const authHeader = `PVEAPIToken=${host.token_id}=${host.token_secret}`;
+  const authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
   const payload = body && method !== 'DELETE' ? JSON.stringify(body) : null;
 
   return new Promise((resolve, reject) => {
@@ -339,7 +349,7 @@ export async function downloadBackupFile(node, storage, volid, filepath) {
   const host = await hostForNode(node);
   const params = new URLSearchParams({ volume: volid, filepath });
   const baseUrl = `https://${host.host}:${host.port}/api2/json`;
-  const authHeader = `PVEAPIToken=${host.token_id}=${host.token_secret}`;
+  const authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
   const url = `${baseUrl}/nodes/${node}/storage/${storage}/file-restore/download?${params}`;
 
   // Use Node https module for proper TLS handling (fetch doesn't support agent)
@@ -366,11 +376,12 @@ export async function downloadBackupFile(node, storage, volid, filepath) {
 
 export async function getHostForNode(nodeName) {
   const host = await hostForNode(nodeName);
+  assertSecureTls(host, `Proxmox node host ${host.name || host.host}`);
   return {
     host: host.host,
     port: host.port,
     tokenId: host.token_id,
-    tokenSecret: host.token_secret,
+    tokenSecret: decryptSecret(host.token_secret),
     verifyTls: host.verify_tls !== 0,
   };
 }
