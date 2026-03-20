@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-03-14 — Port forwarding stabilization
+
+### Page load fix
+- Fixed the port forwarding page API calls so they use the shared frontend API client correctly instead of requesting `/api/api/...`
+- This resolves the immediate `Failed to load firewalls` error on the new port forwarding page
+
+### Exact per-forward policy services
+- Managed port forwards no longer create broad root-VDOM policies using `ALL_TCP` or `ALL_UDP`
+- Each UI-created port forward now creates or uses a dedicated custom FortiGate service object tied to that specific forwarded port and protocol
+- The root-VDOM firewall policy for a managed port forward now references that exact service object, making the rule explicit and easier to audit
+- Managed port forward cleanup now removes the associated custom service object along with the VIP and policy
+
 ## 2026-03-14 — Port Forwarding / WAN VIP management (WIP)
 
 ### Port forwarding admin page

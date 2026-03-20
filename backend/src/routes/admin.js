@@ -1136,6 +1136,26 @@ function getRootClient(fw) {
   return { client, rootVdom: fw.root_vdom || 'root' };
 }
 
+function buildManagedVipServiceName(vipName, protocol, extPort) {
+  const safeName = String(vipName || 'vip')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32) || 'vip';
+  return `VMM-PF-${protocol.toUpperCase()}-${extPort}-${safeName}`;
+}
+
+function managedVipServiceMatches(service, protocol, extPort) {
+  const port = String(extPort);
+  const tcpRange = String(service?.['tcp-portrange'] || '').trim();
+  const udpRange = String(service?.['udp-portrange'] || '').trim();
+
+  if (protocol === 'udp') {
+    return udpRange === port && !tcpRange;
+  }
+  return tcpRange === port && !udpRange;
+}
+
 // Update WAN config (external IP + WAN zone) from the port forwarding page
 router.put('/firewalls/:id/wan-config', pFirewalls, (req, res) => {
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
@@ -1248,6 +1268,11 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
     return res.status(400).json({ error: 'Firewall has no external IP configured. Set it in WAN config first.' });
   }
 
+  const serviceName = buildManagedVipServiceName(name, protocol, extPort);
+  let createdService = false;
+  let vipCreated = false;
+  let policyId = null;
+
   try {
     const { client, rootVdom } = getRootClient(fw);
     const wanZone = fw.root_wan_zone || 'underlay';
@@ -1271,6 +1296,19 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
       return res.status(409).json({ error: `A VIP named "${name}" already exists` });
     }
 
+    const existingService = await client.getServiceObject(serviceName, rootVdom);
+    if (existingService && !managedVipServiceMatches(existingService, protocol, extPort)) {
+      return res.status(409).json({ error: `A managed service object named "${serviceName}" already exists with different port settings` });
+    }
+    if (!existingService) {
+      await client.createServiceObject({
+        name: serviceName,
+        comment: `Managed port forward service for ${name}`,
+        ...(protocol === 'udp' ? { 'udp-portrange': String(extPort) } : { 'tcp-portrange': String(extPort) }),
+      }, rootVdom);
+      createdService = true;
+    }
+
     // 1. Create the VIP
     const vipPayload = {
       name,
@@ -1285,39 +1323,53 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
     if (protocol === 'udp') vipPayload.protocol = 'udp';
 
     await client.createVip(vipPayload, rootVdom);
+    vipCreated = true;
 
     // 2. Create the firewall policy in root VDOM
-    let policyId = null;
-    try {
-      const service = protocol === 'udp' ? 'ALL_UDP' : 'ALL_TCP';
-      const policyRes = await client.createPolicy({
-        name: `PF: ${name}`,
-        srcintf: [{ name: wanZone }],
-        dstintf: [{ name: dstInterface }],
-        srcaddr: srcAddresses.map(a => ({ name: a })),
-        dstaddr: [{ name }],
-        action: 'accept',
-        schedule: 'always',
-        service: [{ name: service }],
-        logtraffic: 'all',
-        'global-label': 'Port Forwarding (VM Manager)',
-        comments: `Auto-created by VM Manager for ${name}`,
-      }, rootVdom);
-      policyId = policyRes?.mkey || null;
-    } catch (policyErr) {
-      // Rollback: delete the VIP we just created
-      try { await client.deleteVip(name, rootVdom); } catch {}
-      throw policyErr;
-    }
+    const policyRes = await client.createPolicy({
+      name: `PF: ${name}`,
+      srcintf: [{ name: wanZone }],
+      dstintf: [{ name: dstInterface }],
+      srcaddr: srcAddresses.map(a => ({ name: a })),
+      dstaddr: [{ name }],
+      action: 'accept',
+      schedule: 'always',
+      service: [{ name: serviceName }],
+      logtraffic: 'all',
+      'global-label': 'Port Forwarding (VM Manager)',
+      comments: `Auto-created by VM Manager for ${name}`,
+    }, rootVdom);
+    policyId = policyRes?.mkey || null;
 
     // 3. Track in DB
     db.prepare(
-      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, protocol, ext_port, mapped_ip, mapped_port, dst_interface) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(fw.id, name, policyId, protocol, extPort, mappedIp, mappedPort, dstInterface);
+      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, service_name, protocol, ext_port, mapped_ip, mapped_port, dst_interface) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(fw.id, name, policyId, serviceName, protocol, extPort, mappedIp, mappedPort, dstInterface);
 
     logAudit(req, 'admin_create_port_forward', name, `${protocol}/${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}`);
-    res.json({ ok: true, vipName: name, policyId });
+    res.json({ ok: true, vipName: name, policyId, serviceName });
   } catch (err) {
+    const { client, rootVdom } = getRootClient(fw);
+    try {
+      const existingManaged = db.prepare('SELECT policy_id, service_name FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').get(fw.id, name);
+      const cleanupPolicyId = existingManaged?.policy_id || policyId;
+      const cleanupServiceName = existingManaged?.service_name || (createdService ? serviceName : '');
+
+      if (cleanupPolicyId) {
+        try { await client.deletePolicy(cleanupPolicyId, rootVdom); } catch {}
+      }
+      if (vipCreated || existingManaged) {
+        try { await client.deleteVip(name, rootVdom); } catch {}
+      }
+      if (cleanupServiceName) {
+        try { await client.deleteServiceObject(cleanupServiceName, rootVdom); } catch {}
+      }
+      if (existingManaged) {
+        db.prepare('DELETE FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').run(fw.id, name);
+      }
+    } catch {
+      // Best-effort rollback only.
+    }
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
@@ -1357,6 +1409,14 @@ router.delete('/firewalls/:id/vips/:name', pFirewalls, async (req, res) => {
 
     // Delete VIP
     await client.deleteVip(vipName, rootVdom);
+
+    if (managed.service_name) {
+      try {
+        await client.deleteServiceObject(managed.service_name, rootVdom);
+      } catch (e) {
+        console.warn(`[vip-delete] Service ${managed.service_name} warning:`, e.message);
+      }
+    }
 
     // Remove from DB
     db.prepare('DELETE FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').run(fw.id, vipName);

@@ -233,28 +233,28 @@ export class FortiGateAPI {
 
   // ─── Firewall Service Objects ─────────────────────────────────────────────
 
-  async getServiceObjects() {
-    const res = await this.request('GET', 'cmdb/firewall.service/custom');
+  async getServiceObjects(vdomOverride = null) {
+    const res = await this.request('GET', 'cmdb/firewall.service/custom', null, vdomOverride);
     return res.results || [];
   }
 
-  async getServiceObject(name) {
+  async getServiceObject(name, vdomOverride = null) {
     try {
-      const res = await this.request('GET', `cmdb/firewall.service/custom/${encodeURIComponent(name)}`);
+      const res = await this.request('GET', `cmdb/firewall.service/custom/${encodeURIComponent(name)}`, null, vdomOverride);
       return res.results?.[0] || null;
     } catch { return null; }
   }
 
-  async createServiceObject(data) {
-    return this.request('POST', 'cmdb/firewall.service/custom', data);
+  async createServiceObject(data, vdomOverride = null) {
+    return this.request('POST', 'cmdb/firewall.service/custom', data, vdomOverride);
   }
 
-  async updateServiceObject(name, data) {
-    return this.request('PUT', `cmdb/firewall.service/custom/${encodeURIComponent(name)}`, data);
+  async updateServiceObject(name, data, vdomOverride = null) {
+    return this.request('PUT', `cmdb/firewall.service/custom/${encodeURIComponent(name)}`, data, vdomOverride);
   }
 
-  async deleteServiceObject(name) {
-    return this.request('DELETE', `cmdb/firewall.service/custom/${encodeURIComponent(name)}`);
+  async deleteServiceObject(name, vdomOverride = null) {
+    return this.request('DELETE', `cmdb/firewall.service/custom/${encodeURIComponent(name)}`, null, vdomOverride);
   }
 
   // ─── Virtual IPs (Port Forwarding) ──────────────────────────────────────────

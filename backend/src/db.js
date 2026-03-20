@@ -247,6 +247,7 @@ try { db.exec(`
     firewall_id INTEGER NOT NULL REFERENCES firewalls(id) ON DELETE CASCADE,
     vip_name TEXT NOT NULL,
     policy_id INTEGER,
+    service_name TEXT DEFAULT '',
     protocol TEXT DEFAULT 'tcp',
     ext_port INTEGER NOT NULL,
     mapped_ip TEXT NOT NULL,
@@ -257,6 +258,7 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+try { db.exec("ALTER TABLE managed_vips ADD COLUMN service_name TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE firewalls ADD COLUMN external_ip TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE firewalls ADD COLUMN root_wan_zone TEXT DEFAULT 'underlay'"); } catch { /* exists */ }
 

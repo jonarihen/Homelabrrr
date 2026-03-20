@@ -33,7 +33,7 @@ export default function PortForwardingPage() {
 
   // Load firewalls
   useEffect(() => {
-    api.get('/api/admin/firewalls')
+    api.get('/admin/firewalls')
       .then(r => {
         setFirewalls(r.data);
         if (r.data.length > 0) setSelectedFw(r.data[0].id);
@@ -54,9 +54,9 @@ export default function PortForwardingPage() {
         setWanForm({ externalIp: fw.external_ip || '', rootWanZone: fw.root_wan_zone || 'underlay' });
       }
       const [vipsRes, ifacesRes, addrsRes] = await Promise.all([
-        api.get(`/api/admin/firewalls/${selectedFw}/vips`),
-        api.get(`/api/admin/firewalls/${selectedFw}/root-interfaces`),
-        api.get(`/api/admin/firewalls/${selectedFw}/root-addresses`),
+        api.get(`/admin/firewalls/${selectedFw}/vips`),
+        api.get(`/admin/firewalls/${selectedFw}/root-interfaces`),
+        api.get(`/admin/firewalls/${selectedFw}/root-addresses`),
       ]);
       setVips(vipsRes.data);
       setInterfaces(ifacesRes.data);
@@ -84,7 +84,7 @@ export default function PortForwardingPage() {
   const saveWanConfig = async () => {
     setSavingWan(true);
     try {
-      await api.put(`/api/admin/firewalls/${selectedFw}/wan-config`, {
+      await api.put(`/admin/firewalls/${selectedFw}/wan-config`, {
         externalIp: wanForm.externalIp,
         rootWanZone: wanForm.rootWanZone,
       });
@@ -106,7 +106,7 @@ export default function PortForwardingPage() {
     setCreating(true);
     setCreateError('');
     try {
-      await api.post(`/api/admin/firewalls/${selectedFw}/vips`, {
+      await api.post(`/admin/firewalls/${selectedFw}/vips`, {
         name: form.name,
         protocol: form.protocol,
         extPort: parseInt(form.extPort),
@@ -129,7 +129,7 @@ export default function PortForwardingPage() {
     if (!confirm(`Delete port forward "${vipName}"?\nThis will remove the VIP and its firewall policy from the root VDOM.`)) return;
     setDeleting(vipName);
     try {
-      await api.delete(`/api/admin/firewalls/${selectedFw}/vips/${encodeURIComponent(vipName)}`);
+      await api.delete(`/admin/firewalls/${selectedFw}/vips/${encodeURIComponent(vipName)}`);
       await loadData();
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to delete port forward');
