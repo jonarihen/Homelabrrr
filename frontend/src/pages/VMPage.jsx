@@ -145,12 +145,12 @@ export default function VMPage() {
 
   const loadVm = useCallback(async () => {
     try {
-      const r = await api.get('/vms');
-      const found = r.data.find(v => v.node === node && String(v.vmid) === vmid);
-      if (found) { setVm(found); setError(''); }
-      else setError('VM not found or not assigned to you');
+      const r = await api.get(`/vms/${node}/${vmid}/status`);
+      setVm({ ...r.data, node, vmid: parseInt(vmid) });
+      setError('');
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to load VM');
+      if (e.response?.status === 403) setError('VM not found or not assigned to you');
+      else setError(e.response?.data?.error || 'Failed to load VM');
     } finally { setLoading(false); }
   }, [node, vmid]);
 

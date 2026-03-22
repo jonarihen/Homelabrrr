@@ -77,10 +77,12 @@ export default function ProvisionPage() {
 
 function CloneForm() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [templates, setTemplates] = useState([]);
   const [selected, setSelected] = useState(null);
   const [storages, setStorages] = useState([]);
-  const [form, setForm] = useState({ name: '', cores: '', memory: '', diskGb: '', storage: '', description: '' });
+  const [users, setUsers] = useState([]);
+  const [form, setForm] = useState({ name: '', cores: '', memory: '', diskGb: '', storage: '', description: '', assignTo: '' });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -90,7 +92,10 @@ function CloneForm() {
       .then(r => setTemplates(r.data))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+    if (user?.isAdmin) {
+      api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
+    }
+  }, [user?.isAdmin]);
 
   // Fetch storages when a template is selected
   useEffect(() => {
@@ -124,6 +129,7 @@ function CloneForm() {
         diskGb: parseInt(form.diskGb),
         storage: form.storage,
         description: form.description,
+        assignTo: form.assignTo || undefined,
       });
       navigate(`/vm/${r.data.node}/${r.data.vmid}`);
     } catch (e) {
@@ -263,6 +269,17 @@ function CloneForm() {
               <input type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" />
             )}
           </div>
+
+          {user?.isAdmin && (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
+              <select value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
+                <option value="">No assignment</option>
+                {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
+              </select>
+              <p className="text-xs text-gray-600 mt-1">Admins can see all VMs without an assignment.</p>
+            </div>
+          )}
 
           <div>
             <label className="block text-xs text-gray-400 mb-1.5 font-medium">Description (optional)</label>
@@ -468,9 +485,10 @@ function CreateForm() {
           <div>
             <label className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
             <select value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
-              <option value="">Myself</option>
+              <option value="">No assignment</option>
               {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
             </select>
+            <p className="text-xs text-gray-600 mt-1">Admins can see all VMs without an assignment.</p>
           </div>
         )}
 

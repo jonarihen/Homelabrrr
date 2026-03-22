@@ -11,6 +11,10 @@ export function normalizeSshHostFingerprint(value = '') {
   return trimmed.startsWith('SHA256:') ? trimmed : `SHA256:${trimmed}`;
 }
 
+/**
+ * Scan an SSH server's host key fingerprint without authenticating.
+ * Rejects the host key immediately after capturing it so no auth is attempted.
+ */
 export function scanSshHostFingerprint(host, port = 22) {
   return new Promise((resolve, reject) => {
     const conn = new SSHClient();
@@ -25,12 +29,9 @@ export function scanSshHostFingerprint(host, port = 22) {
       else resolve(value);
     };
 
-    conn.on('ready', () => {
-      if (fingerprint) finish(null, fingerprint);
-      else finish(new Error('SSH host key scan finished without a fingerprint'));
-    });
-
     conn.on('error', (err) => {
+      // If we already captured the fingerprint, the error is expected
+      // (host key rejected) — resolve with the fingerprint.
       if (fingerprint) finish(null, fingerprint);
       else finish(new Error(`SSH host key scan failed: ${err.message}`));
     });
@@ -44,12 +45,13 @@ export function scanSshHostFingerprint(host, port = 22) {
       conn.connect({
         host,
         port,
-        username: '__fingerprint_scan__',
-        password: '__fingerprint_scan__',
+        username: 'none',
         readyTimeout: 10000,
         hostVerifier: (key) => {
           fingerprint = sshHostFingerprint(key);
-          return true;
+          // Reject the host key so ssh2 disconnects before authenticating.
+          // This prevents any auth attempt from appearing in the server's logs.
+          return false;
         },
       });
     } catch (err) {

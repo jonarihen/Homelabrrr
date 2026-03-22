@@ -94,7 +94,14 @@ export const hostGet  = (host, path)       => makeRequest(host, 'GET', path);
 export const hostPost = (host, path, body) => makeRequest(host, 'POST', path, body ?? {});
 export const hostPut  = (host, path, body) => makeRequest(host, 'PUT', path, body ?? {});
 
+// Short-lived cache for getAllVMs — avoids hammering Proxmox on every poll
+let _vmCache = { data: null, expires: 0 };
+const VM_CACHE_TTL = 5000; // 5 seconds
+
 export async function getAllVMs() {
+  const now = Date.now();
+  if (_vmCache.data && now < _vmCache.expires) return _vmCache.data;
+
   const hosts = getHosts();
   const allVms = [];
   for (const h of hosts) {
@@ -105,6 +112,7 @@ export async function getAllVMs() {
       console.warn(`Failed to fetch VMs from ${h.name} (${h.host}): ${err.message}`);
     }
   }
+  _vmCache = { data: allVms, expires: now + VM_CACHE_TTL };
   return allVms;
 }
 

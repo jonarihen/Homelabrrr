@@ -65,7 +65,7 @@ router.post('/clone', async (req, res) => {
     return res.status(403).json({ error: 'You do not have permission to provision VMs' });
   }
 
-  const { templateId, name, cores, memory, diskGb, storage, description } = req.body;
+  const { templateId, name, cores, memory, diskGb, storage, description, assignTo } = req.body;
   if (!templateId || !name) {
     return res.status(400).json({ error: 'Template and name are required' });
   }
@@ -90,11 +90,14 @@ router.post('/clone', async (req, res) => {
       'INSERT INTO provisioned_vms (user_id, node, vmid, name, template_id, status, upid) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(req.session.userId, template.node, newVmid, name, template.id, 'cloning', upid || '');
 
-    // Auto-assign VM to user
-    try {
-      db.prepare('INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)')
-        .run(req.session.userId, template.node, newVmid);
-    } catch { /* may already be assigned */ }
+    // Assign VM — admins only get an assignment if they explicitly pick a target user
+    const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
+    if (targetUser) {
+      try {
+        db.prepare('INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)')
+          .run(targetUser, template.node, newVmid);
+      } catch { /* may already be assigned */ }
+    }
 
     // Queue post-clone config update (cores, memory, cloud-init)
     const finalCores = cores || template.default_cores;
@@ -162,12 +165,14 @@ router.post('/create', requireAdmin, async (req, res) => {
       'INSERT INTO provisioned_vms (user_id, node, vmid, name, status, upid) VALUES (?, ?, ?, ?, ?, ?)'
     ).run(req.session.userId, node, vmid, name, 'creating', upid || '');
 
-    // Assign to target user — only admins can assign to someone else
-    const targetUser = (assignTo && req.session.isAdmin) ? assignTo : req.session.userId;
-    try {
-      db.prepare('INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)')
-        .run(targetUser, node, vmid);
-    } catch { /* already assigned */ }
+    // Assign VM — admins only get an assignment if they explicitly pick a target user
+    const targetUser = req.session.isAdmin ? (assignTo || null) : req.session.userId;
+    if (targetUser) {
+      try {
+        db.prepare('INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)')
+          .run(targetUser, node, vmid);
+      } catch { /* already assigned */ }
+    }
 
     // Poll for completion
     if (upid) {

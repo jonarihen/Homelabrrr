@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-03-22 — Performance, provisioning, and SSH improvements
+
+### API response caching
+- `getAllVMs()` now has a 5-second TTL cache so concurrent/frequent polls from multiple browser tabs don't hammer the Proxmox API on every request
+- VM detail page now fetches only the single VM it needs (`/vms/:node/:vmid/status`) instead of the entire VM list, reducing backend load and improving page responsiveness
+
+### Provisioning assignment fix
+- Admin users no longer get auto-assigned to VMs they create or clone — admins already see all VMs, and the spurious assignment (combined with the one-user-per-VM unique constraint) was blocking subsequent assignment to the intended user
+- Clone form now includes an "Assign to User" dropdown for admins, matching the create form
+- Both forms default to "No assignment" for admins with a hint that admins see all VMs without one
+
+### SSH fingerprint scanner cleanup
+- Host key fingerprint scanning no longer sends fake credentials to the target server — it rejects the host key immediately after capturing the fingerprint, so no authentication attempt reaches the server's auth log
+
 ## 2026-03-20 — Secrets-at-rest and upstream trust hardening
 
 ### Encrypted secret storage
