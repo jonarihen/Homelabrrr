@@ -280,12 +280,49 @@ router.get('/admin/templates', requirePermission('can_manage_templates'), (req, 
   res.json(db.prepare('SELECT * FROM vm_templates ORDER BY name').all());
 });
 
-router.get('/admin/pve-templates/:node', requirePermission('can_manage_templates'), async (req, res) => {
-  // List VMs on a node that are marked as templates in Proxmox
+router.get('/admin/pve-vms/:node', requirePermission('can_manage_templates'), async (req, res) => {
+  // List all qemu VMs on a node — both templates and regular VMs — so admin can pick a source
   try {
     const vms = await getAllVMs();
-    const templates = vms.filter(v => v.template && v.node === req.params.node);
-    res.json(templates);
+    const nodeVms = vms
+      .filter(v => v.type === 'qemu' && v.node === req.params.node)
+      .map(v => ({ vmid: v.vmid, name: v.name, status: v.status, template: !!v.template }))
+      .sort((a, b) => (b.template ? 1 : 0) - (a.template ? 1 : 0) || a.vmid - b.vmid);
+    res.json(nodeVms);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.get('/admin/pve-vms/:node/:vmid/config', requirePermission('can_manage_templates'), async (req, res) => {
+  // Fetch a VM's config so we can auto-populate template defaults
+  try {
+    const cfg = await getVMConfig(req.params.node, parseInt(req.params.vmid));
+    const cores = (cfg.sockets || 1) * (cfg.cores || 1);
+    const memoryMb = cfg.memory || 2048;
+    // Try to extract disk size from scsi0 or virtio0
+    let diskGb = 20;
+    const diskKey = cfg.scsi0 || cfg.virtio0 || '';
+    const sizeMatch = diskKey.match(/size=(\d+)G/);
+    if (sizeMatch) diskGb = parseInt(sizeMatch[1]);
+    // Extract storage from disk string (format: "storage:size" or "storage:vm-xxx-disk-0,size=20G")
+    let storage = 'local-lvm';
+    const storageMatch = diskKey.match(/^([^:]+):/);
+    if (storageMatch) storage = storageMatch[1];
+    // Check for cloud-init drive
+    const hasCloudInit = Object.keys(cfg).some(k => {
+      const val = typeof cfg[k] === 'string' ? cfg[k] : '';
+      return val.includes('cloudinit');
+    });
+    res.json({
+      cores,
+      memoryMb,
+      diskGb,
+      storage,
+      cloudInit: hasCloudInit,
+      name: cfg.name || '',
+      description: cfg.description || '',
+    });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }

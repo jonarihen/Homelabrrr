@@ -151,16 +151,16 @@ function TemplateFormModal({ template, onClose, onSaved }) {
   const isEdit = !!template;
   const [nodes, setNodes] = useState([]);
   const [storages, setStorages] = useState([]);
-  const [pveTemplates, setPveTemplates] = useState([]);
-  const [allVMs, setAllVMs] = useState([]);
+  const [pveVms, setPveVms] = useState([]);
   const [loadingPve, setLoadingPve] = useState(false);
+  const [loadingConfig, setLoadingConfig] = useState(false);
   const [form, setForm] = useState({
     name: template?.name || '',
     description: template?.description || '',
     node: template?.node || '',
     vmid: template?.vmid || '',
     defaultCores: template?.default_cores || 2,
-    defaultMemory: template?.default_memory || 2048,
+    defaultMemoryGb: template ? Math.round(template.default_memory / 1024 * 10) / 10 : 2,
     defaultDiskGb: template?.default_disk_gb || 20,
     defaultStorage: template?.default_storage || 'local-lvm',
     cloudInit: template?.cloud_init || false,
@@ -173,7 +173,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
     api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
   }, []);
 
-  // Fetch storages whenever we have a node (for both add and edit)
+  // Fetch storages whenever we have a node
   useEffect(() => {
     if (!form.node) return;
     api.get(`/provision/nodes/${form.node}/storages`)
@@ -181,35 +181,49 @@ function TemplateFormModal({ template, onClose, onSaved }) {
       .catch(() => setStorages([]));
   }, [form.node]);
 
-  // Fetch Proxmox templates and all VMs when adding new (not editing)
+  // Fetch all qemu VMs on the selected node (templates + regular)
   useEffect(() => {
     if (!form.node || isEdit) return;
     setLoadingPve(true);
-    Promise.all([
-      api.get(`/provision/admin/pve-templates/${form.node}`).then(r => r.data).catch(() => []),
-      api.get('/admin/vms').then(r => r.data.filter(v => v.node === form.node && !v.template)).catch(() => []),
-    ]).then(([templates, vms]) => {
-      setPveTemplates(templates);
-      setAllVMs(vms);
-    }).finally(() => setLoadingPve(false));
+    setPveVms([]);
+    api.get(`/provision/admin/pve-vms/${form.node}`)
+      .then(r => setPveVms(r.data))
+      .catch(() => setPveVms([]))
+      .finally(() => setLoadingPve(false));
   }, [form.node, isEdit]);
 
-  // For edit mode, fetch storages for the template's node
-  useEffect(() => {
-    if (!isEdit || !template?.node) return;
-    api.get(`/provision/nodes/${template.node}/storages`)
-      .then(r => setStorages(r.data))
-      .catch(() => setStorages([]));
-  }, [isEdit, template?.node]);
-
-  const selectPveTemplate = (vmid) => {
-    const t = pveTemplates.find(p => String(p.vmid) === String(vmid));
-    if (t) {
+  // When a source VM is selected, fetch its config and auto-populate defaults
+  const selectSourceVm = async (vmid) => {
+    if (!vmid) {
+      setForm(f => ({ ...f, vmid: '' }));
+      return;
+    }
+    const vm = pveVms.find(v => String(v.vmid) === String(vmid));
+    setForm(f => ({ ...f, vmid }));
+    setLoadingConfig(true);
+    try {
+      const r = await api.get(`/provision/admin/pve-vms/${form.node}/${vmid}/config`);
+      const cfg = r.data;
       setForm(f => ({
         ...f,
-        vmid: t.vmid,
-        name: f.name || t.name || `Template ${t.vmid}`,
+        vmid,
+        name: f.name || cfg.name || vm?.name || `Template ${vmid}`,
+        description: f.description || cfg.description || '',
+        defaultCores: cfg.cores || f.defaultCores,
+        defaultMemoryGb: cfg.memoryMb ? Math.round(cfg.memoryMb / 1024 * 10) / 10 : f.defaultMemoryGb,
+        defaultDiskGb: cfg.diskGb || f.defaultDiskGb,
+        defaultStorage: cfg.storage || f.defaultStorage,
+        cloudInit: cfg.cloudInit || f.cloudInit,
       }));
+    } catch {
+      // Couldn't fetch config — just set vmid and name
+      setForm(f => ({
+        ...f,
+        vmid,
+        name: f.name || vm?.name || `Template ${vmid}`,
+      }));
+    } finally {
+      setLoadingConfig(false);
     }
   };
 
@@ -217,10 +231,15 @@ function TemplateFormModal({ template, onClose, onSaved }) {
     e.preventDefault();
     setSaving(true); setError('');
     try {
+      const payload = {
+        ...form,
+        defaultMemory: Math.round(parseFloat(form.defaultMemoryGb) * 1024),
+      };
+      delete payload.defaultMemoryGb;
       if (isEdit) {
-        await api.put(`/provision/admin/templates/${template.id}`, form);
+        await api.put(`/provision/admin/templates/${template.id}`, payload);
       } else {
-        await api.post('/provision/admin/templates', form);
+        await api.post('/provision/admin/templates', payload);
       }
       onSaved();
     } catch (e) {
@@ -229,6 +248,8 @@ function TemplateFormModal({ template, onClose, onSaved }) {
   };
 
   const uniqueNodes = [...new Set(nodes.map(n => n.node))];
+  const templateVms = pveVms.filter(v => v.template);
+  const regularVms = pveVms.filter(v => !v.template);
 
   return (
     <Modal title={isEdit ? 'Edit Template' : 'Add Template'} onClose={onClose} size="md">
@@ -239,7 +260,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
               <label className="block text-xs text-gray-400 mb-1.5">Node</label>
               <select
                 value={form.node}
-                onChange={e => setForm(f => ({ ...f, node: e.target.value, vmid: '' }))}
+                onChange={e => { setForm(f => ({ ...f, node: e.target.value, vmid: '' })); setPveVms([]); }}
                 className={inputCls}
                 required
               >
@@ -253,33 +274,38 @@ function TemplateFormModal({ template, onClose, onSaved }) {
                 <label className="block text-xs text-gray-400 mb-1.5">Source VM</label>
                 {loadingPve ? (
                   <div className="text-xs text-gray-500 py-2">Loading VMs from Proxmox...</div>
+                ) : pveVms.length === 0 ? (
+                  <div className="text-xs text-gray-500 py-2">No qemu VMs found on this node</div>
                 ) : (
-                  <select
-                    value={form.vmid}
-                    onChange={e => selectPveTemplate(e.target.value)}
-                    className={inputCls}
-                    required
-                  >
-                    <option value="">Select a VM...</option>
-                    {pveTemplates.length > 0 && (
-                      <optgroup label="Templates">
-                        {pveTemplates.map(t => (
-                          <option key={`t-${t.vmid}`} value={t.vmid}>
-                            {t.name || `VM ${t.vmid}`} (VMID {t.vmid})
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                    {allVMs.length > 0 && (
-                      <optgroup label="Regular VMs">
-                        {allVMs.map(v => (
-                          <option key={`v-${v.vmid}`} value={v.vmid}>
-                            {v.name || `VM ${v.vmid}`} (VMID {v.vmid})
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                  </select>
+                  <>
+                    <select
+                      value={form.vmid}
+                      onChange={e => selectSourceVm(e.target.value)}
+                      className={inputCls}
+                      required
+                    >
+                      <option value="">Select a VM...</option>
+                      {templateVms.length > 0 && (
+                        <optgroup label="Proxmox Templates">
+                          {templateVms.map(v => (
+                            <option key={v.vmid} value={v.vmid}>
+                              {v.name || `VM ${v.vmid}`} (VMID {v.vmid})
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {regularVms.length > 0 && (
+                        <optgroup label="Regular VMs">
+                          {regularVms.map(v => (
+                            <option key={v.vmid} value={v.vmid}>
+                              {v.name || `VM ${v.vmid}`} (VMID {v.vmid}) {v.status !== 'running' ? `[${v.status}]` : ''}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                    {loadingConfig && <p className="text-xs text-blue-400 mt-1">Reading VM config...</p>}
+                  </>
                 )}
               </div>
             )}
@@ -314,8 +340,8 @@ function TemplateFormModal({ template, onClose, onSaved }) {
             <input type="number" min="1" value={form.defaultCores} onChange={e => setForm(f => ({ ...f, defaultCores: e.target.value }))} className={inputCls} />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Default RAM (MB)</label>
-            <input type="number" min="128" step="128" value={form.defaultMemory} onChange={e => setForm(f => ({ ...f, defaultMemory: e.target.value }))} className={inputCls} />
+            <label className="block text-xs text-gray-400 mb-1.5">Default RAM (GB)</label>
+            <input type="number" min="0.5" step="0.5" value={form.defaultMemoryGb} onChange={e => setForm(f => ({ ...f, defaultMemoryGb: e.target.value }))} className={inputCls} />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Default Disk (GB)</label>

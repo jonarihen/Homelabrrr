@@ -2,6 +2,14 @@
 
 ## 2026-03-23 — Scoped VLAN management for delegated users
 
+### Rebuilt template registration form
+- The "Add Template" modal now lists all qemu VMs on the selected node — both Proxmox templates and regular VMs — fixing the bug where the source VM picker was empty (the old code fetched from a non-existent `/admin/vms` endpoint)
+- Selecting a source VM auto-populates defaults (cores, memory, disk, storage, cloud-init) by reading the VM's actual Proxmox config — no more guessing at values
+- New backend routes: `GET /provision/admin/pve-vms/:node` lists all qemu VMs, `GET /provision/admin/pve-vms/:node/:vmid/config` returns parsed VM config with computed defaults
+- VMs in the dropdown are grouped into "Proxmox Templates" and "Regular VMs" with status shown for stopped VMs
+- Memory field now uses GB (matching the provisioning forms) and converts to MB for storage
+- Edit mode also uses GB for the memory field
+
 ### Memory input in GB
 - Provisioning forms (clone and create) now accept memory in GB instead of MB — e.g. entering `32` gives the VM 32768 MiB
 - Backend converts GB → MiB (`Math.round(gb * 1024)`) before passing to the Proxmox API
