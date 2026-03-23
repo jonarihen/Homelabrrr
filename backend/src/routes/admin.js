@@ -23,6 +23,11 @@ const pTemplates   = requirePermission('can_manage_templates');
 const pAudit       = requirePermission('can_view_audit_log');
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
+// Check if a non-admin user has access to a VLAN via user_vlans
+function userOwnsVlan(userId, vlanId) {
+  return !!db.prepare('SELECT 1 FROM user_vlans WHERE user_id = ? AND vlan_id = ?').get(userId, vlanId);
+}
+
 // ─── Users ────────────────────────────────────────────────────────────────────
 
 const LOCKOUT_WINDOW_MS = 10 * 60 * 1000;
@@ -346,6 +351,14 @@ router.post('/vlans', pVlans, (req, res) => {
     const r = db.prepare(
       'INSERT INTO vlans (name, tag, mode, subnet_cidr, description) VALUES (?, ?, ?, ?, ?)'
     ).run(name, vlanTag, mode, mode === 'tagged_only' ? trimmedSubnetCidr : '', description || '');
+
+    // Auto-assign to creating non-admin so they can immediately see and manage it
+    if (!req.session.isAdmin) {
+      try {
+        db.prepare('INSERT INTO user_vlans (user_id, vlan_id) VALUES (?, ?)').run(req.session.userId, r.lastInsertRowid);
+      } catch { /* ignore duplicate */ }
+    }
+
     res.json({ id: r.lastInsertRowid, name, tag: vlanTag, mode, subnet_cidr: mode === 'tagged_only' ? trimmedSubnetCidr : '', description: description || '' });
   } catch (err) {
     if (err.message.includes('UNIQUE')) {
@@ -363,6 +376,9 @@ router.put('/vlans/:id', pVlans, (req, res) => {
 
   const existing = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'VLAN not found' });
+  if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, existing.id)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
 
   const nextMode = mode || existing.mode || 'managed';
   if (!['managed', 'tagged_only'].includes(nextMode)) {
@@ -411,6 +427,9 @@ router.put('/vlans/:id', pVlans, (req, res) => {
 router.delete('/vlans/:id', pVlans, async (req, res) => {
   const vlan = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
   if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
+  if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, vlan.id)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
 
   const syncs = db.prepare(`
     SELECT fvs.*, f.name as fw_name, f.host, f.port, f.api_key, f.vdom, f.verify_tls, f.root_vdom, f.trunk_switch_serial, f.trunk_switch_port
@@ -723,6 +742,9 @@ router.delete('/firewalls/:id', pFirewalls, (req, res) => {
 // ─── VLAN ↔ Firewall Sync ─────────────────────────────────────────────────
 
 router.get('/vlans/:id/sync', pVlans, (req, res) => {
+  if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, req.params.id)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
   const syncs = db.prepare(`
     SELECT fvs.*, f.name as firewall_name, f.host as firewall_host
     FROM firewall_vlan_sync fvs
@@ -736,6 +758,9 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
   try {
     const vlan = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
     if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
+    if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, vlan.id)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     if (vlan.mode === 'tagged_only') {
       return res.status(400).json({ error: 'Tagged-only VLANs cannot be pushed to firewalls' });
     }
@@ -794,6 +819,9 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
 });
 
 router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
+  if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, req.params.id)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
   const sync = db.prepare(
     'SELECT fvs.*, f.* FROM firewall_vlan_sync fvs JOIN firewalls f ON f.id = fvs.firewall_id WHERE fvs.vlan_id = ? AND fvs.firewall_id = ?'
   ).get(req.params.id, req.params.firewallId);

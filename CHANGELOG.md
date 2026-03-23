@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-03-23 — Scoped VLAN management for delegated users
+
+### VLAN ownership enforcement
+- Non-admin users with `can_manage_vlans` can now only see and manage VLANs assigned to them via `user_vlans`, matching the existing policy-manager scoping model
+- All VLAN mutation routes (edit, delete, sync, unsync) now verify the non-admin user owns the VLAN before proceeding
+- New VLANs created by non-admin users are automatically assigned to the creating user so they can immediately manage them
+- Non-admin users still cannot pick a VLAN tag (auto-assigned from the next available in firewall pools) or create tagged-only VLANs
+
+### Frontend fixes
+- VLANs page no longer fails for non-admin VLAN managers who lack `can_manage_firewalls` — firewall ranges are extracted from the VLAN response as a fallback
+- Empty state messaging is now role-aware
+
 ## 2026-03-22 — Performance, provisioning, and SSH improvements
 
 ### API response caching

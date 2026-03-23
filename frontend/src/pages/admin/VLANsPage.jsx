@@ -57,12 +57,18 @@ export default function VLANsPage() {
 
   const load = async () => {
     try {
-      const [vlanRes, fwRes] = await Promise.all([
-        api.get('/admin/vlans'),
-        api.get('/admin/firewalls'),
-      ]);
+      const vlanRes = await api.get('/admin/vlans');
       setVlans(vlanRes.data);
-      setFirewalls(fwRes.data);
+      // Extract firewall ranges from VLAN data (always available)
+      // Full firewall list only loads for users with can_manage_firewalls
+      try {
+        const fwRes = await api.get('/admin/firewalls');
+        setFirewalls(fwRes.data);
+      } catch {
+        // Non-admin VLAN managers won't have firewall access — use ranges from VLAN data
+        const ranges = vlanRes.data[0]?.firewallRanges || [];
+        setFirewalls(ranges);
+      }
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to load');
     } finally {
@@ -117,8 +123,8 @@ export default function VLANsPage() {
         </div>
       ) : vlans.length === 0 ? (
         <div className="text-center py-20 text-gray-500">
-          <p>No VLANs defined yet.</p>
-          <p className="text-sm mt-1">Create a VLAN and then assign it to users.</p>
+          <p>No VLANs {user?.isAdmin ? 'defined' : 'assigned to you'} yet.</p>
+          <p className="text-sm mt-1">{user?.isAdmin ? 'Create a VLAN and then assign it to users.' : 'Create a new VLAN or ask an admin to assign one to you.'}</p>
         </div>
       ) : (
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
