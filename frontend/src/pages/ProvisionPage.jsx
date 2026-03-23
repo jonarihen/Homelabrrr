@@ -112,7 +112,7 @@ function CloneForm() {
     setForm({
       name: '',
       cores: t.default_cores,
-      memory: t.default_memory,
+      memory: Math.round(t.default_memory / 1024),
       diskGb: t.default_disk_gb,
       storage: t.default_storage,
       description: '',
@@ -127,7 +127,7 @@ function CloneForm() {
         templateId: selected.id,
         name: form.name,
         cores: parseInt(form.cores),
-        memory: parseInt(form.memory),
+        memoryGb: parseFloat(form.memory),
         diskGb: parseInt(form.diskGb),
         storage: form.storage,
         description: form.description,
@@ -244,8 +244,8 @@ function CloneForm() {
               <input type="number" min="1" max="64" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (MB)</label>
-              <input type="number" min="128" step="128" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
+              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
+              <input type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
             </div>
             <div>
               <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk (GB)</label>
@@ -331,7 +331,7 @@ function CreateForm() {
   const [users, setUsers] = useState([]);
   const [vlans, setVlans] = useState([]);
   const [form, setForm] = useState({
-    node: '', name: '', cores: 2, memory: 2048,
+    node: '', name: '', cores: 2, memory: 2,
     diskSize: '20', storage: '', iso: '', bridge: 'vmbr0',
     ostype: 'l26', bios: 'seabios', scsihw: 'virtio-scsi-single',
     description: '', assignTo: '', vlanTag: '',
@@ -376,8 +376,10 @@ function CreateForm() {
     e.preventDefault();
     setSaving(true); setError('');
     try {
+      const { memory, ...rest } = form;
       const r = await api.post('/provision/create', {
-        ...form,
+        ...rest,
+        memoryGb: parseFloat(memory),
         diskSize: `${form.diskSize}G`,
         assignTo: form.assignTo || undefined,
         vlanTag: form.vlanTag || undefined,
@@ -425,8 +427,8 @@ function CreateForm() {
             <input type="number" min="1" max="128" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (MB)</label>
-            <input type="number" min="128" step="128" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
+            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
+            <input type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Size (GB)</label>

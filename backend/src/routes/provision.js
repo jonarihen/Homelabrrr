@@ -92,7 +92,7 @@ router.post('/clone', async (req, res) => {
     return res.status(403).json({ error: 'You do not have permission to provision VMs' });
   }
 
-  const { templateId, name, cores, memory, diskGb, storage, description, assignTo, vlanTag } = req.body;
+  const { templateId, name, cores, memoryGb, diskGb, storage, description, assignTo, vlanTag } = req.body;
   if (!templateId || !name) {
     return res.status(400).json({ error: 'Template and name are required' });
   }
@@ -145,7 +145,7 @@ router.post('/clone', async (req, res) => {
 
     // Queue post-clone config update (cores, memory, cloud-init)
     const finalCores = cores || template.default_cores;
-    const finalMem = memory || template.default_memory;
+    const finalMem = memoryGb ? Math.round(parseFloat(memoryGb) * 1024) : template.default_memory;
     const finalDisk = diskGb || template.default_disk_gb;
 
     // Do config changes after clone finishes — poll in background
@@ -175,7 +175,7 @@ router.post('/clone', async (req, res) => {
 
 router.post('/create', requireAdmin, async (req, res) => {
   const {
-    node, name, cores = 2, memory = 2048,
+    node, name, cores = 2, memoryGb = 2,
     diskSize = '20G', storage = 'local-lvm',
     iso, bridge = 'vmbr0', ostype = 'l26',
     bios = 'seabios', scsihw = 'virtio-scsi-single',
@@ -195,7 +195,7 @@ router.post('/create', requireAdmin, async (req, res) => {
       name,
       sockets: cpuLayout.sockets,
       cores: cpuLayout.cores,
-      memory: parseInt(memory),
+      memory: Math.round(parseFloat(memoryGb) * 1024),
       ostype,
       bios,
       scsihw,

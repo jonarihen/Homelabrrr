@@ -2,6 +2,12 @@
 
 ## 2026-03-23 — Scoped VLAN management for delegated users
 
+### Memory input in GB
+- Provisioning forms (clone and create) now accept memory in GB instead of MB — e.g. entering `32` gives the VM 32768 MiB
+- Backend converts GB → MiB (`Math.round(gb * 1024)`) before passing to the Proxmox API
+- Template defaults are stored in MB in the database and auto-converted to GB for display
+- Supports half-GB increments (0.5 GB step) for fine-grained sizing
+
 ### Globally unique VMIDs across all hosts
 - `getNextVmid()` now collects all used VMIDs from every connected Proxmox host before picking the next free ID
 - Previously it asked a single host for `/cluster/nextid`, which only checked within that host's cluster — causing VMID collisions when provisioning across independent hosts (e.g. VM 101 on pve01 → pve02 also tries 101)
