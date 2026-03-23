@@ -300,13 +300,19 @@ router.get('/admin/pve-vms/:node/:vmid/config', requirePermission('can_manage_te
     const cfg = await getVMConfig(req.params.node, parseInt(req.params.vmid));
     const cores = (cfg.sockets || 1) * (cfg.cores || 1);
     const memoryMb = cfg.memory || 2048;
-    // Try to extract disk size from scsi0 or virtio0
+    // Find the primary disk — check common bus types in priority order
     let diskGb = 20;
-    const diskKey = cfg.scsi0 || cfg.virtio0 || '';
+    let storage = 'local-lvm';
+    const diskBuses = ['scsi0', 'virtio0', 'sata0', 'ide0', 'scsi1', 'virtio1', 'sata1'];
+    const diskKey = diskBuses.reduce((found, key) => {
+      if (found) return found;
+      const val = cfg[key];
+      // Skip cloud-init and CD-ROM drives
+      if (typeof val === 'string' && !val.includes('cloudinit') && !val.includes('media=cdrom')) return val;
+      return found;
+    }, '') || '';
     const sizeMatch = diskKey.match(/size=(\d+)G/);
     if (sizeMatch) diskGb = parseInt(sizeMatch[1]);
-    // Extract storage from disk string (format: "storage:size" or "storage:vm-xxx-disk-0,size=20G")
-    let storage = 'local-lvm';
     const storageMatch = diskKey.match(/^([^:]+):/);
     if (storageMatch) storage = storageMatch[1];
     // Check for cloud-init drive

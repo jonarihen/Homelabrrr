@@ -112,7 +112,7 @@ function CloneForm() {
     setForm({
       name: '',
       cores: t.default_cores,
-      memory: Math.round(t.default_memory / 1024),
+      memory: Math.round(t.default_memory / 1024 * 10) / 10,
       diskGb: t.default_disk_gb,
       storage: t.default_storage,
       description: '',

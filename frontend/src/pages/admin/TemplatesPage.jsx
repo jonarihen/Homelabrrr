@@ -213,7 +213,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
         defaultMemoryGb: cfg.memoryMb ? Math.round(cfg.memoryMb / 1024 * 10) / 10 : f.defaultMemoryGb,
         defaultDiskGb: cfg.diskGb || f.defaultDiskGb,
         defaultStorage: cfg.storage || f.defaultStorage,
-        cloudInit: cfg.cloudInit || f.cloudInit,
+        cloudInit: !!cfg.cloudInit,
       }));
     } catch {
       // Couldn't fetch config — just set vmid and name
