@@ -2,6 +2,11 @@
 
 ## 2026-03-23 — Scoped VLAN management for delegated users
 
+### Globally unique VMIDs across all hosts
+- `getNextVmid()` now collects all used VMIDs from every connected Proxmox host before picking the next free ID
+- Previously it asked a single host for `/cluster/nextid`, which only checked within that host's cluster — causing VMID collisions when provisioning across independent hosts (e.g. VM 101 on pve01 → pve02 also tries 101)
+- The new logic scans all hosts' `/cluster/resources?type=vm`, builds a global set of used IDs, and picks the lowest free VMID starting at 100
+
 ### Automatic CPU topology matching
 - VMs are now created with 2 sockets and cores spread evenly across them, matching the physical host's socket layout
 - The max cores per socket is capped at the host's actual cores-per-socket (fetched from `/nodes/{node}/status` at provision time)

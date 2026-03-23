@@ -216,13 +216,24 @@ export async function getHostStatus(host) {
 
 export async function getNextVmid() {
   const hosts = getHosts();
-  // Get next free ID from the first reachable host (cluster-wide)
+  // Collect all used VMIDs across every connected host so IDs are globally unique
+  const usedIds = new Set();
   for (const h of hosts) {
     try {
-      return await makeRequest(h, 'GET', '/cluster/nextid');
-    } catch { /* try next */ }
+      const resources = await makeRequest(h, 'GET', '/cluster/resources?type=vm');
+      for (const r of resources) usedIds.add(r.vmid);
+    } catch { /* skip unreachable host */ }
   }
-  throw new Error('No reachable PVE hosts');
+  if (usedIds.size === 0) {
+    // No VMs anywhere — ask any reachable host for its default next ID
+    for (const h of hosts) {
+      try { return await makeRequest(h, 'GET', '/cluster/nextid'); } catch { /* next */ }
+    }
+  }
+  // Find the lowest free VMID starting at 100 (Proxmox minimum)
+  let vmid = 100;
+  while (usedIds.has(vmid)) vmid++;
+  return vmid;
 }
 
 export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {
