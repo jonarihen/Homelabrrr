@@ -2,6 +2,12 @@
 
 ## 2026-03-23 — Scoped VLAN management for delegated users
 
+### VLAN picker in VM provisioning
+- Both clone and create-from-scratch forms now include a VLAN dropdown so the VM's network can be tagged at creation time
+- Admins see all VLANs; non-admin users only see VLANs assigned to them via `user_vlans`
+- Backend validates non-admin VLAN access before applying the tag
+- Clone applies the VLAN tag after the post-clone configuration step; create sets it directly on `net0`
+
 ### VLAN ownership enforcement
 - Non-admin users with `can_manage_vlans` can now only see and manage VLANs assigned to them via `user_vlans`, matching the existing policy-manager scoping model
 - All VLAN mutation routes (edit, delete, sync, unsync) now verify the non-admin user owns the VLAN before proceeding

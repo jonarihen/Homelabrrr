@@ -82,7 +82,8 @@ function CloneForm() {
   const [selected, setSelected] = useState(null);
   const [storages, setStorages] = useState([]);
   const [users, setUsers] = useState([]);
-  const [form, setForm] = useState({ name: '', cores: '', memory: '', diskGb: '', storage: '', description: '', assignTo: '' });
+  const [vlans, setVlans] = useState([]);
+  const [form, setForm] = useState({ name: '', cores: '', memory: '', diskGb: '', storage: '', description: '', assignTo: '', vlanTag: '' });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -92,6 +93,7 @@ function CloneForm() {
       .then(r => setTemplates(r.data))
       .catch(() => {})
       .finally(() => setLoading(false));
+    api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     if (user?.isAdmin) {
       api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
     }
@@ -130,6 +132,7 @@ function CloneForm() {
         storage: form.storage,
         description: form.description,
         assignTo: form.assignTo || undefined,
+        vlanTag: form.vlanTag || undefined,
       });
       navigate(`/vm/${r.data.node}/${r.data.vmid}`);
     } catch (e) {
@@ -270,6 +273,16 @@ function CloneForm() {
             )}
           </div>
 
+          {vlans.length > 0 && (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
+              <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
+                <option value="">No VLAN (untagged)</option>
+                {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
+              </select>
+            </div>
+          )}
+
           {user?.isAdmin && (
             <div>
               <label className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
@@ -316,17 +329,19 @@ function CreateForm() {
   const [isos, setIsos] = useState([]);
   const [bridges, setBridges] = useState([]);
   const [users, setUsers] = useState([]);
+  const [vlans, setVlans] = useState([]);
   const [form, setForm] = useState({
     node: '', name: '', cores: 2, memory: 2048,
     diskSize: '20', storage: '', iso: '', bridge: 'vmbr0',
     ostype: 'l26', bios: 'seabios', scsihw: 'virtio-scsi-single',
-    description: '', assignTo: '',
+    description: '', assignTo: '', vlanTag: '',
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
+    api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     if (user?.isAdmin) {
       api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
     }
@@ -365,6 +380,7 @@ function CreateForm() {
         ...form,
         diskSize: `${form.diskSize}G`,
         assignTo: form.assignTo || undefined,
+        vlanTag: form.vlanTag || undefined,
       });
       navigate(`/vm/${r.data.node}/${r.data.vmid}`);
     } catch (e) {
@@ -436,6 +452,16 @@ function CreateForm() {
             </select>
           </div>
         </div>
+
+        {vlans.length > 0 && (
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
+            <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
+              <option value="">No VLAN (untagged)</option>
+              {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
+            </select>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-4">
           <div>

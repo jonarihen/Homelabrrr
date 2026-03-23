@@ -3,7 +3,7 @@ import db from '../db.js';
 import {
   getNextVmid, cloneVM, createVM, updateVMConfig, resizeVMDisk,
   getStorages, getISOImages, getNetworks, getNodes, getTaskStatus,
-  getAllVMs,
+  getAllVMs, getVMConfig,
 } from '../proxmox.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
@@ -65,13 +65,21 @@ router.post('/clone', async (req, res) => {
     return res.status(403).json({ error: 'You do not have permission to provision VMs' });
   }
 
-  const { templateId, name, cores, memory, diskGb, storage, description, assignTo } = req.body;
+  const { templateId, name, cores, memory, diskGb, storage, description, assignTo, vlanTag } = req.body;
   if (!templateId || !name) {
     return res.status(400).json({ error: 'Template and name are required' });
   }
 
   const template = db.prepare('SELECT * FROM vm_templates WHERE id = ? AND enabled = 1').get(templateId);
   if (!template) return res.status(404).json({ error: 'Template not found' });
+
+  // Validate VLAN access for non-admins
+  if (vlanTag && !user.is_admin) {
+    const allowed = db.prepare(
+      'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
+    ).get(req.session.userId, parseInt(vlanTag));
+    if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
+  }
 
   try {
     const newVmid = await getNextVmid();
@@ -111,6 +119,7 @@ router.post('/clone', async (req, res) => {
       diskGb: finalDisk,
       cloudInit: template.cloud_init,
       description,
+      vlanTag: vlanTag ? parseInt(vlanTag) : null,
     });
 
     logAudit(req, 'vm_clone', `${template.node}/${newVmid}`, `template:${template.name}`);
@@ -135,7 +144,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     iso, bridge = 'vmbr0', ostype = 'l26',
     bios = 'seabios', scsihw = 'virtio-scsi-single',
     description = '',
-    assignTo,
+    assignTo, vlanTag,
   } = req.body;
 
   if (!node || !name) {
@@ -153,7 +162,7 @@ router.post('/create', requireAdmin, async (req, res) => {
       bios,
       scsihw,
       scsi0: `${storage}:${diskSize.toString().replace(/[^0-9]/g, '')}`,
-      net0: `virtio,bridge=${bridge}`,
+      net0: vlanTag ? `virtio,bridge=${bridge},tag=${parseInt(vlanTag)}` : `virtio,bridge=${bridge}`,
       ...(iso && { ide2: `${iso},media=cdrom` }),
       ...(description && { description }),
     };
@@ -339,6 +348,22 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
       } catch {
         // Try virtio0 if scsi0 doesn't exist
         try { await resizeVMDisk(node, vmid, 'virtio0', `${opts.diskGb}G`); } catch { /* ignore */ }
+      }
+    }
+
+    // Apply VLAN tag to net0 if requested
+    if (opts.vlanTag) {
+      try {
+        const vmCfg = await getVMConfig(node, vmid);
+        const net0 = vmCfg.net0 || '';
+        if (net0) {
+          let parts = net0.split(',');
+          parts = parts.filter(p => !p.startsWith('tag='));
+          parts.push(`tag=${opts.vlanTag}`);
+          await updateVMConfig(node, vmid, { net0: parts.join(',') });
+        }
+      } catch (err) {
+        console.error(`Failed to set VLAN tag ${opts.vlanTag} on VM ${vmid}:`, err.message);
       }
     }
 
