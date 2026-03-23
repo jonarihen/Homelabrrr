@@ -3,7 +3,7 @@ import db from '../db.js';
 import {
   getNextVmid, cloneVM, createVM, updateVMConfig, resizeVMDisk,
   getStorages, getISOImages, getNetworks, getNodes, getTaskStatus,
-  getAllVMs, getVMConfig,
+  getAllVMs, getVMConfig, getNodeCpuInfo,
 } from '../proxmox.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
@@ -11,6 +11,24 @@ import { logAudit } from '../utils/audit.js';
 
 const router = Router();
 router.use(requireAuth);
+
+/**
+ * Compute VM CPU topology to match the physical host layout.
+ * Always 2 sockets, cores spread evenly, capped at the host's cores-per-socket.
+ * Returns { sockets, cores } for the Proxmox VM config.
+ */
+async function computeCpuTopology(node, requestedCores) {
+  const vcpus = parseInt(requestedCores) || 2;
+  try {
+    const cpuInfo = await getNodeCpuInfo(node);
+    const maxPerSocket = cpuInfo.coresPerSocket || 12;
+    const coresPerSocket = Math.min(Math.ceil(vcpus / 2), maxPerSocket);
+    return { sockets: 2, cores: coresPerSocket };
+  } catch {
+    // Fallback if node status unavailable — still use 2 sockets
+    return { sockets: 2, cores: Math.ceil(vcpus / 2) };
+  }
+}
 
 // ─── Templates (public, read-only for users) ────────────────────────────────
 
@@ -153,10 +171,12 @@ router.post('/create', requireAdmin, async (req, res) => {
 
   try {
     const vmid = await getNextVmid();
+    const cpuLayout = await computeCpuTopology(node, cores);
 
     const config = {
       name,
-      cores: parseInt(cores),
+      sockets: cpuLayout.sockets,
+      cores: cpuLayout.cores,
       memory: parseInt(memory),
       ostype,
       bios,
@@ -325,7 +345,11 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
 
   try {
     const config = {};
-    if (opts.cores) config.cores = parseInt(opts.cores);
+    if (opts.cores) {
+      const cpuLayout = await computeCpuTopology(node, opts.cores);
+      config.sockets = cpuLayout.sockets;
+      config.cores = cpuLayout.cores;
+    }
     if (opts.memory) config.memory = parseInt(opts.memory);
     if (opts.description) config.description = opts.description;
 

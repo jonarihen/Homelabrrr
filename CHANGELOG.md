@@ -2,6 +2,13 @@
 
 ## 2026-03-23 — Scoped VLAN management for delegated users
 
+### Automatic CPU topology matching
+- VMs are now created with 2 sockets and cores spread evenly across them, matching the physical host's socket layout
+- The max cores per socket is capped at the host's actual cores-per-socket (fetched from `/nodes/{node}/status` at provision time)
+- This is fully transparent — users/admins still just pick a total core count, and the backend computes the optimal `sockets × cores` split
+- Example: requesting 8 cores on a 2×12 host → VM gets `sockets=2, cores=4`
+- Applies to both clone and create-from-scratch provisioning
+
 ### VLAN picker in VM provisioning
 - Both clone and create-from-scratch forms now include a VLAN dropdown so the VM's network can be tagged at creation time
 - Admins see all VLANs; non-admin users only see VLANs assigned to them via `user_vlans`

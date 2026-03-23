@@ -176,6 +176,20 @@ export async function getVMRRD(node, vmid, type = 'qemu', timeframe = 'hour') {
   return makeRequest(host, 'GET', `/nodes/${node}/${type}/${vmid}/rrddata?timeframe=${timeframe}`);
 }
 
+// ── Node CPU topology ────────────────────────────────────────────────────────
+
+export async function getNodeCpuInfo(node) {
+  const host = await hostForNode(node);
+  const status = await makeRequest(host, 'GET', `/nodes/${node}/status`);
+  const info = status.cpuinfo || {};
+  return {
+    sockets: info.sockets || 1,
+    coresPerSocket: info.cores || 1,
+    threads: info.cpus || 1,
+    model: info.model || '',
+  };
+}
+
 // ── Host status check ────────────────────────────────────────────────────────
 
 export async function getHostStatus(host) {
