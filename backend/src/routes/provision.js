@@ -15,18 +15,27 @@ router.use(requireAuth);
 /**
  * Compute VM CPU topology to match the physical host layout.
  * Always 2 sockets, cores spread evenly, capped at the host's cores-per-socket.
- * Returns { sockets, cores } for the Proxmox VM config.
+ * Returns { sockets, cores, totalVcpus, maxCores } for the Proxmox VM config.
+ * Throws if the request exceeds the node's physical cores.
  */
 async function computeCpuTopology(node, requestedCores) {
   const vcpus = parseInt(requestedCores) || 2;
   try {
     const cpuInfo = await getNodeCpuInfo(node);
-    const maxPerSocket = cpuInfo.coresPerSocket || 12;
-    const coresPerSocket = Math.min(Math.ceil(vcpus / 2), maxPerSocket);
-    return { sockets: 2, cores: coresPerSocket };
-  } catch {
+    const physSockets = cpuInfo.sockets || 2;
+    const physCoresPerSocket = cpuInfo.coresPerSocket || 12;
+    const maxCores = physSockets * physCoresPerSocket;
+    if (vcpus > maxCores) {
+      const err = new Error(`Requested ${vcpus} cores exceeds this node's ${maxCores} physical cores (${physSockets}×${physCoresPerSocket})`);
+      err.status = 400;
+      throw err;
+    }
+    const coresPerSocket = Math.min(Math.ceil(vcpus / 2), physCoresPerSocket);
+    return { sockets: 2, cores: coresPerSocket, totalVcpus: 2 * coresPerSocket, maxCores };
+  } catch (err) {
+    if (err.status) throw err; // re-throw validation errors
     // Fallback if node status unavailable — still use 2 sockets
-    return { sockets: 2, cores: Math.ceil(vcpus / 2) };
+    return { sockets: 2, cores: Math.ceil(vcpus / 2), totalVcpus: Math.ceil(vcpus / 2) * 2, maxCores: null };
   }
 }
 
@@ -97,6 +106,15 @@ router.post('/clone', async (req, res) => {
       'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
     ).get(req.session.userId, parseInt(vlanTag));
     if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
+  }
+
+  // Validate CPU count against node's physical cores before cloning
+  const finalCores = cores || template.default_cores;
+  try {
+    await computeCpuTopology(template.node, finalCores);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    // Non-validation errors are fine — we'll fall back in pollAndConfigure
   }
 
   try {
@@ -213,7 +231,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     logAudit(req, 'vm_create', `${node}/${vmid}`, name);
     res.json({ id: row.lastInsertRowid, vmid, node, status: 'creating', upid });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    res.status(err.status || 500).json({ error: err.status ? err.message : sanitizeError(err.message) });
   }
 });
 

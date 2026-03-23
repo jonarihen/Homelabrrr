@@ -7,6 +7,7 @@
 - The max cores per socket is capped at the host's actual cores-per-socket (fetched from `/nodes/{node}/status` at provision time)
 - This is fully transparent — users/admins still just pick a total core count, and the backend computes the optimal `sockets × cores` split
 - Example: requesting 8 cores on a 2×12 host → VM gets `sockets=2, cores=4`
+- Clone route validates the CPU count against the target node *before* starting the clone, returning an immediate 400 error if the request exceeds physical cores
 - Applies to both clone and create-from-scratch provisioning
 
 ### VLAN picker in VM provisioning
