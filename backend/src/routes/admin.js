@@ -1343,10 +1343,15 @@ router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
       if (r.status === 'fulfilled') vlanTagMap.set(r.value.key, r.value.vlanTag);
     }
 
+    // Port forward policies live in the root VDOM — the dst interface must be
+    // the inter-VDOM link to the lab VDOM, not the VLAN interface itself
+    const rootDstInterface = fw.root_vdom_link || 'lab-root1';
+
     const targets = vmList.map(v => {
       const ssh = sshMap.get(`${v.node}/${v.vmid}`);
       const vlanTag = vlanTagMap.get(`${v.node}/${v.vmid}`) || null;
-      const dstInterface = vlanTag ? (tagToInterface.get(vlanTag) || '') : '';
+      // VM is on a synced VLAN → we know traffic can reach it via the inter-VDOM link
+      const onSyncedVlan = vlanTag ? tagToInterface.has(vlanTag) : false;
       return {
         node: v.node,
         vmid: v.vmid,
@@ -1356,7 +1361,7 @@ router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
         ip: ssh?.host || '',
         sshPort: ssh?.port || 22,
         vlanTag,
-        dstInterface,
+        dstInterface: onSyncedVlan ? rootDstInterface : '',
       };
     }).sort((a, b) => a.name.localeCompare(b.name));
 
