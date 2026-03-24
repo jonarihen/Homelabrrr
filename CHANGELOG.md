@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-03-24 — Dedicated port forwarding permission
+
+### New user permission
+- Added a dedicated `can_manage_port_forwards` user permission so admins can grant scoped port-forward access without also granting full firewall-management rights
+- The new permission is exposed through `/auth/me`, the admin user list, and the user permission editor in the UI
+- Admin routing and sidebar navigation now recognize the dedicated port-forward permission as its own admin-area capability
+
 ## 2026-03-24 — Scoped port forwarding access
 
 ### Policy-style access scoping for port forwarding

@@ -44,6 +44,7 @@ function serializeUser(user) {
     permissions: {
       canManageHosts: !!user.can_manage_hosts,
       canManageFirewalls: !!user.can_manage_firewalls,
+      canManagePortForwards: !!user.can_manage_port_forwards,
       canManageVlans: !!user.can_manage_vlans,
       canManagePolicies: !!user.can_manage_policies,
       canManageTemplates: !!user.can_manage_templates,
@@ -222,7 +223,7 @@ router.get('/me', (req, res) => {
   }
   const user = db.prepare(`
     SELECT id, username, is_admin, totp_enabled, require_2fa, can_provision, can_create_vms,
-      can_manage_hosts, can_manage_firewalls, can_manage_vlans, can_manage_policies,
+      can_manage_hosts, can_manage_firewalls, can_manage_port_forwards, can_manage_vlans, can_manage_policies,
       can_manage_templates, can_manage_users, can_manage_assignments, can_view_audit_log
     FROM users
     WHERE id = ?

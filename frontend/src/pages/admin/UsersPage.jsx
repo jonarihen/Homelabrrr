@@ -248,6 +248,7 @@ function CreateUserModal({ canCreateAdmin, onClose, onCreated }) {
 const PERM_DEFS = [
   { key: 'can_manage_hosts',       label: 'Manage PVE Hosts',   desc: 'Add, edit, and remove Proxmox hypervisor connections' },
   { key: 'can_manage_firewalls',   label: 'Manage Firewalls',   desc: 'Configure FortiGate firewalls and switch discovery' },
+  { key: 'can_manage_port_forwards', label: 'Manage Port Forwards', desc: 'Create and remove scoped WAN port forwards for assigned VMs and VLANs' },
   { key: 'can_manage_vlans',       label: 'Manage VLANs',       desc: 'Create, edit, delete VLANs and sync to firewalls' },
   { key: 'can_manage_policies',    label: 'Manage Policies',    desc: 'Create and remove firewall policies between assigned VLANs' },
   { key: 'can_manage_templates',   label: 'Manage Templates',   desc: 'Register and configure VM provisioning templates' },

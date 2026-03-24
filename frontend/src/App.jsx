@@ -51,6 +51,7 @@ function AdminIndexRedirect() {
   if (can('canManageTemplates')) return <Navigate to="/admin/templates" replace />;
   if (can('canManageVlans')) return <Navigate to="/admin/vlans" replace />;
   if (can('canManagePolicies')) return <Navigate to="/admin/policies" replace />;
+  if (can('canManagePortForwards')) return <Navigate to="/admin/port-forwarding" replace />;
   if (can('canManageAssignments')) return <Navigate to="/admin/assignments" replace />;
   if (can('canViewAuditLog')) return <Navigate to="/admin/audit-log" replace />;
   return <Navigate to="/dashboard" replace />;

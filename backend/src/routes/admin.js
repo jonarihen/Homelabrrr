@@ -19,7 +19,7 @@ const pUsers       = requirePermission('can_manage_users');
 const pAssignments = requirePermission('can_manage_assignments', 'can_manage_users');
 const pHosts       = requirePermission('can_manage_hosts');
 const pFirewalls   = requirePermission('can_manage_firewalls');
-const pPortForwards = requirePermission('can_manage_firewalls', 'can_manage_policies');
+const pPortForwards = requirePermission('can_manage_firewalls', 'can_manage_port_forwards');
 const pVlans       = requirePermission('can_manage_vlans');
 const pPolicies    = requirePermission('can_manage_policies');
 const pTemplates   = requirePermission('can_manage_templates');
@@ -158,7 +158,7 @@ router.get('/users', pUsers, (req, res) => {
   const windowStart = Date.now() - LOCKOUT_WINDOW_MS;
   const users = db.prepare(`
     SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_provision, u.can_create_vms, u.totp_enabled, u.require_2fa,
-      u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_vlans, u.can_manage_policies,
+      u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_port_forwards, u.can_manage_vlans, u.can_manage_policies,
       u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log,
       u.created_at,
       (SELECT COUNT(*) FROM vm_assignments WHERE user_id = u.id) as vm_count,
@@ -263,7 +263,7 @@ router.put('/users/:id/permission', requireAdmin, (req, res) => {
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { permission, enabled } = req.body;
-  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log'];
+  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log'];
   if (!validPerms.includes(permission)) {
     return res.status(400).json({ error: `Invalid permission: ${permission}` });
   }
@@ -778,7 +778,7 @@ router.delete('/pve-hosts/:id', pHosts, (req, res) => {
 // ─── Firewalls ─────────────────────────────────────────────────────────────
 
 // Firewalls read also needed by policies page and vlans page
-router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_policies', 'can_manage_vlans'), (req, res) => {
+router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_policies', 'can_manage_vlans'), (req, res) => {
   const firewalls = db.prepare('SELECT * FROM firewalls ORDER BY name').all();
   const user = db.prepare('SELECT can_manage_firewalls FROM users WHERE id = ?').get(req.session.userId);
   const canSeeSensitiveFields = req.session.isAdmin || user?.can_manage_firewalls === 1;

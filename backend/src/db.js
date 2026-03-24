@@ -176,6 +176,7 @@ try { db.exec('ALTER TABLE users ADD COLUMN can_provision INTEGER DEFAULT 0'); }
 // Granular permissions (admin bypass all)
 try { db.exec('ALTER TABLE users ADD COLUMN can_manage_hosts INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_manage_firewalls INTEGER DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE users ADD COLUMN can_manage_port_forwards INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_manage_vlans INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_manage_policies INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_manage_templates INTEGER DEFAULT 0'); } catch { /* exists */ }
