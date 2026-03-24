@@ -161,6 +161,11 @@ export class FortiGateAPI {
     return this.request('DELETE', `cmdb/firewall/policy/${policyId}`, null, vdomOverride);
   }
 
+  async movePolicy(policyId, position, refPolicyId, vdomOverride = null) {
+    // position: 'before' or 'after'
+    return this.request('PUT', `cmdb/firewall/policy/${policyId}?action=move&${position}=${refPolicyId}`, null, vdomOverride);
+  }
+
   // ─── Static Routes ─────────────────────────────────────────────────────────
 
   async getStaticRoutes(vdomOverride = null) {

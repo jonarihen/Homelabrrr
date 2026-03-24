@@ -2,6 +2,16 @@
 
 ## 2026-03-24 — Object-based port forwarding
 
+### Dual-VDOM port forwarding with sequence grouping
+- Port forwards now create **two** firewall policies: one in the root VDOM (WAN → inter-VDOM link) and one in the lab VDOM (inter-VDOM link → VLAN interface)
+- The lab VDOM policy is placed in the correct sequence group using `global-label: Port Forwarding (vlanXXXX)` and moved next to existing policies in that group
+- Destination interface for the root VDOM policy uses `root_vdom_link` (e.g. `lab-root1`) instead of the VLAN interface name, which only exists in the lab VDOM
+- Lab VDOM policy source interface uses `lab_vdom_link` (e.g. `lab-root0`)
+- Both policy IDs are tracked in `managed_vips` (`policy_id` + `lab_policy_id`) for clean deletion
+- Delete cleans up both VDOM policies, the VIP, and the service object
+- New `movePolicy` method in FortiGate API wrapper for policy reordering
+- Rollback on creation failure also cleans up the lab VDOM policy
+
 ### Port forwarding redesign
 - The create form is now VM-centric: pick a target VM, pick a service, set the external port — everything else is auto-resolved
 - VM dropdown is populated from VMs that have SSH configs (which means they have a known internal IP)

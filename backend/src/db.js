@@ -260,6 +260,8 @@ try { db.exec(`
 `); } catch { /* exists */ }
 
 try { db.exec("ALTER TABLE managed_vips ADD COLUMN service_name TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE managed_vips ADD COLUMN lab_policy_id INTEGER"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE managed_vips ADD COLUMN vlan_interface TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE firewalls ADD COLUMN external_ip TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE firewalls ADD COLUMN root_wan_zone TEXT DEFAULT 'underlay'"); } catch { /* exists */ }
 

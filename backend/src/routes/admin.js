@@ -1350,8 +1350,7 @@ router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
     const targets = vmList.map(v => {
       const ssh = sshMap.get(`${v.node}/${v.vmid}`);
       const vlanTag = vlanTagMap.get(`${v.node}/${v.vmid}`) || null;
-      // VM is on a synced VLAN → we know traffic can reach it via the inter-VDOM link
-      const onSyncedVlan = vlanTag ? tagToInterface.has(vlanTag) : false;
+      const vlanInterface = vlanTag ? (tagToInterface.get(vlanTag) || '') : '';
       return {
         node: v.node,
         vmid: v.vmid,
@@ -1361,7 +1360,8 @@ router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
         ip: ssh?.host || '',
         sshPort: ssh?.port || 22,
         vlanTag,
-        dstInterface: onSyncedVlan ? rootDstInterface : '',
+        dstInterface: vlanInterface ? rootDstInterface : '',
+        vlanInterface, // lab VDOM interface for the lab-side policy
       };
     }).sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1376,7 +1376,7 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
-  const { name, protocol = 'tcp', extPort, mappedIp, mappedPort, dstInterface, srcAddresses = ['all'] } = req.body;
+  const { name, protocol = 'tcp', extPort, mappedIp, mappedPort, dstInterface, vlanInterface, srcAddresses = ['all'] } = req.body;
   if (!name || !extPort || !mappedIp || !mappedPort || !dstInterface) {
     return res.status(400).json({ error: 'name, extPort, mappedIp, mappedPort, and dstInterface are required' });
   }
@@ -1443,7 +1443,7 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
     await client.createVip(vipPayload, rootVdom);
     vipCreated = true;
 
-    // 2. Create the firewall policy in root VDOM
+    // 2. Create the firewall policy in root VDOM (WAN → inter-VDOM link)
     const policyRes = await client.createPolicy({
       name: `PF: ${name}`,
       srcintf: [{ name: wanZone }],
@@ -1459,19 +1459,63 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
     }, rootVdom);
     policyId = policyRes?.mkey || null;
 
-    // 3. Track in DB
-    db.prepare(
-      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, service_name, protocol, ext_port, mapped_ip, mapped_port, dst_interface) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(fw.id, name, policyId, serviceName, protocol, extPort, mappedIp, mappedPort, dstInterface);
+    // 3. Create the lab VDOM policy (inter-VDOM link → VLAN interface)
+    let labPolicyId = null;
+    if (vlanInterface) {
+      const labVdom = fw.vdom || 'lab';
+      const labSrcInterface = fw.lab_vdom_link || 'lab-root0';
 
-    logAudit(req, 'admin_create_port_forward', name, `${protocol}/${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}`);
-    res.json({ ok: true, vipName: name, policyId, serviceName });
+      // Find the VLAN's global-label for sequence grouping
+      const labPolicies = await client.getPolicies(labVdom);
+      const vlanGroupLabel = `Port Forwarding (${vlanInterface})`;
+
+      // Create the lab policy
+      const labPolicyRes = await client.createPolicy({
+        name: `PF: ${name}`,
+        srcintf: [{ name: labSrcInterface }],
+        dstintf: [{ name: vlanInterface }],
+        srcaddr: [{ name: 'all' }],
+        dstaddr: [{ name: 'all' }],
+        action: 'accept',
+        schedule: 'always',
+        service: [{ name: 'ALL' }],
+        logtraffic: 'all',
+        'global-label': vlanGroupLabel,
+        comments: `Auto-created by VM Manager for ${name}`,
+      }, labVdom);
+      labPolicyId = labPolicyRes?.mkey || null;
+
+      // Move the new policy next to other policies in the same VLAN group
+      if (labPolicyId) {
+        const existingGroupPolicy = labPolicies.find(p =>
+          (p['global-label'] || '') === vlanGroupLabel && String(p.policyid) !== String(labPolicyId)
+        );
+        if (existingGroupPolicy) {
+          try { await client.movePolicy(labPolicyId, 'after', existingGroupPolicy.policyid, labVdom); } catch { /* best effort */ }
+        }
+      }
+    }
+
+    // 4. Track in DB
+    db.prepare(
+      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, service_name, protocol, ext_port, mapped_ip, mapped_port, dst_interface, lab_policy_id, vlan_interface) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(fw.id, name, policyId, serviceName, protocol, extPort, mappedIp, mappedPort, dstInterface, labPolicyId, vlanInterface || '');
+
+    logAudit(req, 'admin_create_port_forward', name, `${protocol}/${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}/${vlanInterface}`);
+    res.json({ ok: true, vipName: name, policyId, labPolicyId, serviceName });
   } catch (err) {
     const { client, rootVdom } = getRootClient(fw);
     try {
-      const existingManaged = db.prepare('SELECT policy_id, service_name FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').get(fw.id, name);
+      const existingManaged = db.prepare('SELECT policy_id, lab_policy_id, service_name FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').get(fw.id, name);
       const cleanupPolicyId = existingManaged?.policy_id || policyId;
       const cleanupServiceName = existingManaged?.service_name || (createdService ? serviceName : '');
+
+      // Clean up lab VDOM policy
+      const cleanupLabPolicyId = existingManaged?.lab_policy_id;
+      if (cleanupLabPolicyId) {
+        const labVdom = fw.vdom || 'lab';
+        try { await client.deletePolicy(cleanupLabPolicyId, labVdom); } catch {}
+      }
 
       if (cleanupPolicyId) {
         try { await client.deletePolicy(cleanupPolicyId, rootVdom); } catch {}
@@ -1506,7 +1550,14 @@ router.delete('/firewalls/:id/vips/:name', pFirewalls, async (req, res) => {
   try {
     const { client, rootVdom } = getRootClient(fw);
 
-    // Delete policy first (VIP can't be deleted while referenced)
+    // Delete lab VDOM policy first
+    if (managed.lab_policy_id) {
+      const labVdom = fw.vdom || 'lab';
+      try { await client.deletePolicy(managed.lab_policy_id, labVdom); }
+      catch (e) { console.warn(`[vip-delete] Lab policy ${managed.lab_policy_id} delete warning:`, e.message); }
+    }
+
+    // Delete root VDOM policy (VIP can't be deleted while referenced by a policy)
     if (managed.policy_id) {
       try { await client.deletePolicy(managed.policy_id, rootVdom); }
       catch (e) { console.warn(`[vip-delete] Policy ${managed.policy_id} delete warning:`, e.message); }

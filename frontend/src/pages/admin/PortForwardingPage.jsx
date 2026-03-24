@@ -37,7 +37,7 @@ export default function PortForwardingPage() {
   const [form, setForm] = useState({
     vmKey: '', service: 'SSH', protocol: 'tcp',
     extPort: '', mappedPort: '22', name: '',
-    dstInterface: '', mappedIp: '',
+    dstInterface: '', vlanInterface: '', mappedIp: '',
     customProtocol: 'tcp',
   });
   const [attempted, setAttempted] = useState(false);
@@ -104,6 +104,7 @@ export default function PortForwardingPage() {
       vmKey,
       mappedIp: vm.ip,
       dstInterface: vm.dstInterface || f.dstInterface,
+      vlanInterface: vm.vlanInterface || '',
       name: `${vm.name} - ${svcLabel}`,
     }));
   };
@@ -181,13 +182,14 @@ export default function PortForwardingPage() {
         mappedIp: form.mappedIp,
         mappedPort: parseInt(form.mappedPort),
         dstInterface: form.dstInterface,
+        vlanInterface: form.vlanInterface,
         srcAddresses: ['all'],
       });
       setShowCreate(false);
       setForm({
         vmKey: '', service: 'SSH', protocol: 'tcp',
         extPort: '', mappedPort: '22', name: '',
-        dstInterface: '', mappedIp: '', customProtocol: 'tcp',
+        dstInterface: '', vlanInterface: '', mappedIp: '', customProtocol: 'tcp',
       });
       setAttempted(false);
       await loadData();
