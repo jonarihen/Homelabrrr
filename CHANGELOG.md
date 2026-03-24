@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-03-24 — Scoped port forwarding access
+
+### Policy-style access scoping for port forwarding
+- Users who reach the port forwarding page through delegated networking permissions are now scoped the same way as the policy manager instead of getting full firewall-wide visibility
+- Scoped users only see port-forward target VMs that they already have VM access to **and** that sit on VLANs assigned to them through `user_vlans`
+- Scoped users only see managed port forwards that belong to their own VLAN interfaces; unmanaged/external VIPs and other users' managed forwards are hidden
+- Scoped users can only create port forwards for their own VM targets on their own synced VLANs, and the backend now derives the allowed internal IP/interface from the selected VM instead of trusting freeform client input
+- Scoped users can only delete managed port forwards tied to VLAN interfaces they own; firewall admins and full admins keep unrestricted visibility/edit access
+
+### UI alignment
+- The Port Forwarding page now works for policy-scoped users without requesting root-interface data they are not allowed to manage
+- WAN config editing remains reserved for firewall admins, while scoped users get a read-only view and a clearer message when WAN configuration is missing
+- The sidebar now shows `Port Forwarding` for users with either firewall-management or policy-management access
+
 ## 2026-03-24 — Multi-host VM identity and provisioning correctness pass
 
 ### Host-aware VM identity across the UI and API

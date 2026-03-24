@@ -8,6 +8,7 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
+import { userCanAccessVm } from '../utils/vmAccess.js';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -18,6 +19,7 @@ const pUsers       = requirePermission('can_manage_users');
 const pAssignments = requirePermission('can_manage_assignments', 'can_manage_users');
 const pHosts       = requirePermission('can_manage_hosts');
 const pFirewalls   = requirePermission('can_manage_firewalls');
+const pPortForwards = requirePermission('can_manage_firewalls', 'can_manage_policies');
 const pVlans       = requirePermission('can_manage_vlans');
 const pPolicies    = requirePermission('can_manage_policies');
 const pTemplates   = requirePermission('can_manage_templates');
@@ -35,6 +37,101 @@ function serializeNodeIdentity(nodeValue) {
     node: nodeName || String(nodeValue || ''),
     nodeRef: nodeRef || String(nodeValue || ''),
   };
+}
+
+function canManageAllPortForwards(req) {
+  if (req.session.isAdmin) return true;
+  const user = db.prepare('SELECT can_manage_firewalls FROM users WHERE id = ?').get(req.session.userId);
+  return user?.can_manage_firewalls === 1;
+}
+
+function getScopedFirewallSyncs(userId, firewallId, unrestricted = false) {
+  if (unrestricted) {
+    return db.prepare(`
+      SELECT fvs.interface_name, v.id as vlan_id, v.name as vlan_name, v.tag as vlan_tag
+      FROM firewall_vlan_sync fvs
+      JOIN vlans v ON v.id = fvs.vlan_id
+      WHERE fvs.firewall_id = ?
+    `).all(firewallId);
+  }
+
+  return db.prepare(`
+    SELECT fvs.interface_name, v.id as vlan_id, v.name as vlan_name, v.tag as vlan_tag
+    FROM firewall_vlan_sync fvs
+    JOIN vlans v ON v.id = fvs.vlan_id
+    JOIN user_vlans uv ON uv.vlan_id = v.id AND uv.user_id = ?
+    WHERE fvs.firewall_id = ?
+  `).all(userId, firewallId);
+}
+
+async function getScopedPortForwardTargets(req, fw) {
+  const unrestricted = canManageAllPortForwards(req);
+  const scopedSyncs = getScopedFirewallSyncs(req.session.userId, fw.id, unrestricted);
+  const tagToInterface = new Map(scopedSyncs.map(sync => [sync.vlan_tag, sync.interface_name]));
+
+  const vms = await getAllVMs();
+  const sshConfigs = db.prepare('SELECT node, vmid, host, port FROM vm_ssh_configs').all();
+  const sshMap = new Map(sshConfigs.map(config => [`${config.node}/${config.vmid}`, config]));
+  const rawVmCounts = new Map();
+  vms.forEach(vm => {
+    const key = `${vm.node}/${vm.vmid}`;
+    rawVmCounts.set(key, (rawVmCounts.get(key) || 0) + 1);
+  });
+
+  const vmList = vms.filter(vm => {
+    if (vm.type !== 'qemu' && vm.type !== 'lxc') return false;
+    const hasSshConfig = sshMap.has(`${vm.nodeRef || vm.node}/${vm.vmid}`)
+      || (rawVmCounts.get(`${vm.node}/${vm.vmid}`) === 1 && sshMap.has(`${vm.node}/${vm.vmid}`));
+    if (!hasSshConfig) return false;
+    if (unrestricted) return true;
+    return userCanAccessVm(req.session.userId, vm.nodeRef || vm.node, vm.vmid, req.session.isAdmin);
+  });
+
+  const configResults = await Promise.allSettled(
+    vmList.map(async vm => {
+      const routeNode = vm.nodeRef || vm.node;
+      try {
+        const cfg = await getVMConfig(routeNode, vm.vmid);
+        const net0 = cfg.net0 || '';
+        const tagMatch = net0.match(/tag=(\d+)/);
+        return { key: `${routeNode}/${vm.vmid}`, vlanTag: tagMatch ? parseInt(tagMatch[1], 10) : null };
+      } catch {
+        return { key: `${routeNode}/${vm.vmid}`, vlanTag: null };
+      }
+    })
+  );
+
+  const vlanTagMap = new Map();
+  for (const result of configResults) {
+    if (result.status === 'fulfilled') vlanTagMap.set(result.value.key, result.value.vlanTag);
+  }
+
+  const rootDstInterface = fw.root_vdom_link || 'lab-root1';
+
+  return vmList
+    .map(vm => {
+      const routeNode = vm.nodeRef || vm.node;
+      const rawKey = `${vm.node}/${vm.vmid}`;
+      const ssh = sshMap.get(`${routeNode}/${vm.vmid}`)
+        || (rawVmCounts.get(rawKey) === 1 ? sshMap.get(rawKey) : null);
+      const vlanTag = vlanTagMap.get(`${routeNode}/${vm.vmid}`) || null;
+      const vlanInterface = vlanTag ? (tagToInterface.get(vlanTag) || '') : '';
+      return {
+        node: vm.node,
+        nodeRef: routeNode,
+        vmid: vm.vmid,
+        name: vm.name || `VM ${vm.vmid}`,
+        status: vm.status,
+        type: vm.type,
+        ip: ssh?.host || '',
+        sshPort: ssh?.port || 22,
+        vlanTag,
+        dstInterface: vlanInterface ? rootDstInterface : '',
+        vlanInterface,
+      };
+    })
+    .filter(target => unrestricted || !!target.vlanInterface)
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────
@@ -693,6 +790,8 @@ router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_p
     vlan_range_start: f.vlan_range_start,
     vlan_range_end: f.vlan_range_end,
     created_at: f.created_at,
+    external_ip: f.external_ip || '',
+    root_wan_zone: f.root_wan_zone || 'underlay',
     ...(canSeeSensitiveFields ? {
       host: f.host,
       port: f.port,
@@ -706,8 +805,6 @@ router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_p
       trunk_switch_serial: f.trunk_switch_serial,
       trunk_switch_port: f.trunk_switch_port,
       verify_tls: f.verify_tls,
-      external_ip: f.external_ip || '',
-      root_wan_zone: f.root_wan_zone || 'underlay',
     } : {}),
   })));
 });
@@ -1322,19 +1419,28 @@ router.put('/firewalls/:id/wan-config', pFirewalls, (req, res) => {
 });
 
 // List all VIPs from root VDOM with managed/unmanaged status
-router.get('/firewalls/:id/vips', pFirewalls, async (req, res) => {
+router.get('/firewalls/:id/vips', pPortForwards, async (req, res) => {
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const { client, rootVdom } = getRootClient(fw);
     const allVips = await client.getVips(rootVdom);
-    const managedNames = new Set(
-      db.prepare('SELECT vip_name FROM managed_vips WHERE firewall_id = ?').all(fw.id).map(v => v.vip_name)
-    );
+    const unrestricted = canManageAllPortForwards(req);
+    const managedRows = db.prepare('SELECT vip_name, vlan_interface FROM managed_vips WHERE firewall_id = ?').all(fw.id);
+    const managedMap = new Map(managedRows.map(row => [row.vip_name, row]));
+    const allowedInterfaces = unrestricted
+      ? null
+      : new Set(getScopedFirewallSyncs(req.session.userId, fw.id, false).map(sync => sync.interface_name));
 
     const vips = allVips
-      .filter(v => v.portforward === 'enable')
+      .filter(v => {
+        if (v.portforward !== 'enable') return false;
+        if (unrestricted) return true;
+        const managed = managedMap.get(v.name);
+        return !!(managed?.vlan_interface && allowedInterfaces.has(managed.vlan_interface));
+      })
       .map(v => {
+        const managed = managedMap.get(v.name);
         const mappedIp = (v.mappedip || []).map(m => {
           const r = m.range || '';
           return r.includes('-') ? r.split('-')[0] : r;
@@ -1347,7 +1453,7 @@ router.get('/firewalls/:id/vips', pFirewalls, async (req, res) => {
           mappedport: v.mappedport || '',
           protocol: v.protocol || 'tcp',
           extintf: v.extintf || 'any',
-          managed: managedNames.has(v.name),
+          managed: !!managed,
         };
       });
     res.json(vips);
@@ -1408,75 +1514,11 @@ router.get('/firewalls/:id/root-addresses', pFirewalls, async (req, res) => {
 });
 
 // VM targets for port forwarding — returns VMs with their SSH IPs, VLAN tags, and resolved interfaces
-router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
+router.get('/firewalls/:id/vm-targets', pPortForwards, async (req, res) => {
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
-    const vms = await getAllVMs();
-    const sshConfigs = db.prepare('SELECT node, vmid, host, port FROM vm_ssh_configs').all();
-    const sshMap = new Map(sshConfigs.map(config => [`${config.node}/${config.vmid}`, config]));
-    const vlanSyncs = db.prepare(
-      'SELECT fvs.interface_name, v.tag FROM firewall_vlan_sync fvs JOIN vlans v ON v.id = fvs.vlan_id WHERE fvs.firewall_id = ?'
-    ).all(fw.id);
-    const tagToInterface = new Map(vlanSyncs.map(vs => [vs.tag, vs.interface_name]));
-    const rawVmCounts = new Map();
-    vms.forEach(vm => {
-      const key = `${vm.node}/${vm.vmid}`;
-      rawVmCounts.set(key, (rawVmCounts.get(key) || 0) + 1);
-    });
-
-    // Fetch VM configs in parallel to get VLAN tags
-    const vmList = vms.filter(v =>
-      (v.type === 'qemu' || v.type === 'lxc')
-      && (
-        sshMap.has(`${v.nodeRef || v.node}/${v.vmid}`)
-        || (rawVmCounts.get(`${v.node}/${v.vmid}`) === 1 && sshMap.has(`${v.node}/${v.vmid}`))
-      )
-    );
-    const configResults = await Promise.allSettled(
-      vmList.map(async v => {
-        const routeNode = v.nodeRef || v.node;
-        try {
-          const cfg = await getVMConfig(routeNode, v.vmid);
-          const net0 = cfg.net0 || '';
-          const tagMatch = net0.match(/tag=(\d+)/);
-          return { key: `${routeNode}/${v.vmid}`, vlanTag: tagMatch ? parseInt(tagMatch[1], 10) : null };
-        } catch {
-          return { key: `${routeNode}/${v.vmid}`, vlanTag: null };
-        }
-      })
-    );
-    const vlanTagMap = new Map();
-    for (const r of configResults) {
-      if (r.status === 'fulfilled') vlanTagMap.set(r.value.key, r.value.vlanTag);
-    }
-
-    // Port forward policies live in the root VDOM — the dst interface must be
-    // the inter-VDOM link to the lab VDOM, not the VLAN interface itself
-    const rootDstInterface = fw.root_vdom_link || 'lab-root1';
-
-    const targets = vmList.map(v => {
-      const routeNode = v.nodeRef || v.node;
-      const rawKey = `${v.node}/${v.vmid}`;
-      const ssh = sshMap.get(`${routeNode}/${v.vmid}`)
-        || (rawVmCounts.get(rawKey) === 1 ? sshMap.get(rawKey) : null);
-      const vlanTag = vlanTagMap.get(`${routeNode}/${v.vmid}`) || null;
-      const vlanInterface = vlanTag ? (tagToInterface.get(vlanTag) || '') : '';
-      return {
-        node: v.node,
-        nodeRef: routeNode,
-        vmid: v.vmid,
-        name: v.name || `VM ${v.vmid}`,
-        status: v.status,
-        type: v.type,
-        ip: ssh?.host || '',
-        sshPort: ssh?.port || 22,
-        vlanTag,
-        dstInterface: vlanInterface ? rootDstInterface : '',
-        vlanInterface, // lab VDOM interface for the lab-side policy
-      };
-    }).sort((a, b) => a.name.localeCompare(b.name));
-
+    const targets = await getScopedPortForwardTargets(req, fw);
     res.json({ targets });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -1484,30 +1526,56 @@ router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
 });
 
 // Create a new port forward (VIP + firewall policy in root VDOM)
-router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
+router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
-  const { name, protocol = 'tcp', extPort, mappedIp, mappedPort, dstInterface, vlanInterface, srcAddresses = ['all'] } = req.body;
-  if (!name || !extPort || !mappedIp || !mappedPort || !dstInterface) {
-    return res.status(400).json({ error: 'name, extPort, mappedIp, mappedPort, and dstInterface are required' });
-  }
-
-  const externalIp = fw.external_ip || '';
-  if (!externalIp) {
-    return res.status(400).json({ error: 'Firewall has no external IP configured. Set it in WAN config first.' });
+  let { name, protocol = 'tcp', extPort, mappedIp, mappedPort, dstInterface, vlanInterface, srcAddresses = ['all'], node, vmid } = req.body;
+  const unrestricted = canManageAllPortForwards(req);
+  if (!name || !extPort || !mappedPort) {
+    return res.status(400).json({ error: 'name, extPort, and mappedPort are required' });
   }
 
   const serviceName = buildManagedVipServiceName(name, protocol, mappedPort);
-  const labAddressName = vlanInterface ? buildManagedVipAddressName(name, mappedIp) : '';
   let createdRootService = false;
   let createdLabService = false;
   let createdLabAddress = false;
   let vipCreated = false;
   let policyId = null;
   let labPolicyId = null;
+  let labAddressName = '';
 
   try {
+    if (!unrestricted) {
+      if (!node || !vmid) {
+        return res.status(400).json({ error: 'node and vmid are required for scoped port forwards' });
+      }
+
+      const targets = await getScopedPortForwardTargets(req, fw);
+      const target = targets.find(t => (t.nodeRef || t.node) === node && String(t.vmid) === String(vmid));
+      if (!target) {
+        return res.status(403).json({ error: 'You can only create port forwards for your own VMs on VLANs assigned to you' });
+      }
+      if (!target.ip || !target.vlanInterface || !target.dstInterface) {
+        return res.status(400).json({ error: 'This VM is not on a VLAN you can publish through this firewall' });
+      }
+
+      mappedIp = target.ip;
+      dstInterface = target.dstInterface;
+      vlanInterface = target.vlanInterface;
+      srcAddresses = ['all'];
+    }
+
+    if (!mappedIp || !dstInterface) {
+      return res.status(400).json({ error: 'mappedIp and dstInterface are required' });
+    }
+
+    const externalIp = fw.external_ip || '';
+    if (!externalIp) {
+      return res.status(400).json({ error: 'Firewall has no external IP configured. Set it in WAN config first.' });
+    }
+
+    labAddressName = vlanInterface ? buildManagedVipAddressName(name, mappedIp) : '';
     const { client, rootVdom } = getRootClient(fw);
     const wanZone = fw.root_wan_zone || 'underlay';
     const labVdom = fw.vdom || 'lab';
@@ -1678,7 +1746,7 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
 });
 
 // Delete a managed port forward (VIP + policy)
-router.delete('/firewalls/:id/vips/:name', pFirewalls, async (req, res) => {
+router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
@@ -1686,6 +1754,12 @@ router.delete('/firewalls/:id/vips/:name', pFirewalls, async (req, res) => {
   const managed = db.prepare('SELECT * FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').get(fw.id, vipName);
   if (!managed) {
     return res.status(403).json({ error: 'Cannot delete unmanaged VIPs. This was not created through VM Manager.' });
+  }
+  if (!canManageAllPortForwards(req)) {
+    const allowedInterfaces = new Set(getScopedFirewallSyncs(req.session.userId, fw.id, false).map(sync => sync.interface_name));
+    if (!managed.vlan_interface || !allowedInterfaces.has(managed.vlan_interface)) {
+      return res.status(403).json({ error: 'You do not have access to this port forward' });
+    }
   }
 
   try {

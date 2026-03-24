@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
+import { useAuth } from '../../contexts/AuthContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
 
@@ -15,6 +16,8 @@ const SERVICE_PRESETS = [
 
 export default function PortForwardingPage() {
   useDocumentTitle('Port Forwarding');
+  const { user } = useAuth();
+  const canManageAllPortForwards = !!(user?.isAdmin || user?.permissions?.canManageFirewalls);
 
   const [firewalls, setFirewalls] = useState([]);
   const [selectedFw, setSelectedFw] = useState(null);
@@ -69,7 +72,9 @@ export default function PortForwardingPage() {
       }
       const [vipsRes, ifacesRes, targetsRes] = await Promise.all([
         api.get(`/admin/firewalls/${selectedFw}/vips`),
-        api.get(`/admin/firewalls/${selectedFw}/root-interfaces`),
+        canManageAllPortForwards
+          ? api.get(`/admin/firewalls/${selectedFw}/root-interfaces`)
+          : Promise.resolve({ data: [] }),
         api.get(`/admin/firewalls/${selectedFw}/vm-targets`),
       ]);
       setVips(vipsRes.data);
@@ -80,7 +85,7 @@ export default function PortForwardingPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedFw, firewalls]);
+  }, [selectedFw, firewalls, canManageAllPortForwards]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -177,6 +182,8 @@ export default function PortForwardingPage() {
     const proto = form.service === 'Custom' ? form.customProtocol : form.protocol;
     try {
       await api.post(`/admin/firewalls/${selectedFw}/vips`, {
+        node: selectedVm?.nodeRef || selectedVm?.node,
+        vmid: selectedVm?.vmid,
         name: form.name,
         protocol: proto,
         extPort: parseInt(form.extPort),
@@ -232,7 +239,11 @@ export default function PortForwardingPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Port Forwarding</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage WAN VIP rules on the root VDOM</p>
+          <p className="text-sm text-gray-500 mt-1">
+            {canManageAllPortForwards
+              ? 'Manage WAN VIP rules on the root VDOM'
+              : 'Create and manage WAN VIP rules for VMs on VLANs assigned to you'}
+          </p>
         </div>
         {!needsWanConfig && !loading && (
           <button
@@ -302,10 +313,14 @@ export default function PortForwardingPage() {
               </svg>
               <p className="text-yellow-400 text-sm font-medium mb-1">External IP not configured</p>
               <p className="text-gray-500 text-xs mb-4">Set your public IP address to enable port forwarding.</p>
-              <button onClick={() => setEditingWan(true)}
-                className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white text-sm font-medium rounded-lg transition-colors">
-                Configure WAN
-              </button>
+              {canManageAllPortForwards ? (
+                <button onClick={() => setEditingWan(true)}
+                  className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white text-sm font-medium rounded-lg transition-colors">
+                  Configure WAN
+                </button>
+              ) : (
+                <p className="text-xs text-gray-600">Ask a firewall admin to configure the WAN settings for this firewall.</p>
+              )}
             </div>
           ) : (
             <div className="flex items-center justify-between">
@@ -324,10 +339,12 @@ export default function PortForwardingPage() {
                   {managedCount > 0 && <span className="text-gray-600 ml-1">({managedCount} managed)</span>}
                 </div>
               </div>
-              <button onClick={() => setEditingWan(true)}
-                className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
-                Edit
-              </button>
+              {canManageAllPortForwards ? (
+                <button onClick={() => setEditingWan(true)}
+                  className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
+                  Edit
+                </button>
+              ) : <span />}
             </div>
           )}
         </div>
@@ -360,7 +377,11 @@ export default function PortForwardingPage() {
                   ))}
                 </select>
                 {vmTargets.length === 0 && !loading && (
-                  <p className="text-[11px] text-gray-600 mt-1">No VMs with SSH configs found. Configure SSH on a VM first.</p>
+                  <p className="text-[11px] text-gray-600 mt-1">
+                    {canManageAllPortForwards
+                      ? 'No VMs with SSH configs found. Configure SSH on a VM first.'
+                      : 'No accessible VMs with SSH configs on your assigned VLANs were found.'}
+                  </p>
                 )}
               </div>
               <div>
@@ -425,7 +446,7 @@ export default function PortForwardingPage() {
                   <label className="block text-[11px] text-gray-500 mb-0.5">Destination Interface</label>
                   {form.dstInterface ? (
                     <span className="text-sm text-white font-mono">{form.dstInterface}</span>
-                  ) : (
+                  ) : canManageAllPortForwards ? (
                     <select value={form.dstInterface} onChange={e => setForm(f => ({ ...f, dstInterface: e.target.value }))}
                       className="bg-gray-800 border border-yellow-600/40 text-white text-sm rounded px-2 py-0.5 text-xs">
                       <option value="">Select manually...</option>
@@ -433,9 +454,15 @@ export default function PortForwardingPage() {
                         <option key={i.name} value={i.name}>{i.name}</option>
                       ))}
                     </select>
+                  ) : (
+                    <span className="text-xs text-yellow-500/80">Auto-detection required</span>
                   )}
                   {!form.dstInterface && (
-                    <p className="text-[11px] text-yellow-500/80 mt-0.5">Could not auto-detect from VM VLAN</p>
+                    <p className="text-[11px] text-yellow-500/80 mt-0.5">
+                      {canManageAllPortForwards
+                        ? 'Could not auto-detect from VM VLAN'
+                        : 'This VM is not on a firewall-synced VLAN assigned to you'}
+                    </p>
                   )}
                 </div>
                 <div>
