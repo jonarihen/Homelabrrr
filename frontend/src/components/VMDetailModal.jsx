@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import Modal from './Modal.jsx';
 import useSSHConfig from '../hooks/useSSHConfig.js';
 import api from '../api.js';
+import { displayNode, routeNode } from '../utils/nodeRef.js';
 
 function fmt(bytes) {
   if (bytes === undefined || bytes === null) return '—';
@@ -138,17 +139,18 @@ export default function VMDetailModal({ vm, onClose }) {
   const [rrd, setRrd] = useState(null);
   const [timeframe, setTimeframe] = useState('hour');
   const [loading, setLoading] = useState(true);
-  const { sshCfg, setSshCfg, sshSaved, sshSavingError, scanningFingerprint, saveSshConfig, scanSshFingerprint } = useSSHConfig(vm.node, vm.vmid);
+  const vmNode = routeNode(vm);
+  const { sshCfg, setSshCfg, sshSaved, sshSavingError, scanningFingerprint, saveSshConfig, scanSshFingerprint } = useSSHConfig(vmNode, vm.vmid);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    api.get(`/vms/${vm.node}/${vm.vmid}/rrddata?timeframe=${timeframe}`)
+    api.get(`/vms/${vmNode}/${vm.vmid}/rrddata?timeframe=${timeframe}`)
       .then(r => { if (!cancelled) setRrd(r.data); })
       .catch(() => { if (!cancelled) setRrd([]); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [vm.node, vm.vmid, timeframe]);
+  }, [vmNode, vm.vmid, timeframe]);
 
   const cpuData = rrd?.map(d => d.cpu != null ? d.cpu * 100 : null) || [];
   const memData = rrd?.map(d => d.mem != null && d.maxmem ? (d.mem / d.maxmem) * 100 : null) || [];
@@ -169,7 +171,7 @@ export default function VMDetailModal({ vm, onClose }) {
               {vm.status}
             </span>
           } />
-          <StatBox label="VMID" value={vm.vmid} sub={vm.node} />
+          <StatBox label="VMID" value={vm.vmid} sub={displayNode(vm.node)} />
           <StatBox label="vCPUs" value={vm.maxcpu || vm.cpus || '—'} />
           <StatBox label="Uptime" value={fmtUptime(vm.uptime)} />
         </div>

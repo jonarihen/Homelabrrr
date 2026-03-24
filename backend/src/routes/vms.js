@@ -12,6 +12,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
+import { decodeNodeRef } from '../utils/nodeRef.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -23,6 +24,14 @@ function checkAccess(userId, node, vmid, isAdmin) {
   return userCanAccessVm(userId, node, vmid, isAdmin);
 }
 
+function serializeNodeIdentity(nodeValue) {
+  const { nodeName, nodeRef } = decodeNodeRef(nodeValue);
+  return {
+    node: nodeName || String(nodeValue || ''),
+    nodeRef: nodeRef || String(nodeValue || ''),
+  };
+}
+
 // ─── User's assigned VMs ──────────────────────────────────────────────────────
 
 router.get('/', async (req, res) => {
@@ -31,7 +40,10 @@ router.get('/', async (req, res) => {
   if (user?.see_all_vms) {
     try {
       const vms = await getAllVMs();
-      return res.json(vms.map(vm => ({ ...vm, node: vm.node })));
+      return res.json(vms.map(vm => ({
+        ...vm,
+        ...serializeNodeIdentity(vm.nodeRef || vm.node),
+      })));
     } catch (err) {
       return res.status(500).json({ error: sanitizeError(err.message) });
     }
@@ -40,11 +52,12 @@ router.get('/', async (req, res) => {
   const assignments = db.prepare('SELECT * FROM vm_assignments WHERE user_id = ?').all(req.session.userId);
 
   const results = await Promise.all(assignments.map(async (a) => {
+    const nodeIdentity = serializeNodeIdentity(a.node);
     try {
       const status = await getVMStatus(a.node, a.vmid);
-      return { ...status, node: a.node, assignmentId: a.id };
+      return { ...status, ...nodeIdentity, assignmentId: a.id };
     } catch {
-      return { vmid: a.vmid, node: a.node, name: `VM ${a.vmid}`, status: 'error', assignmentId: a.id };
+      return { vmid: a.vmid, ...nodeIdentity, name: `VM ${a.vmid}`, status: 'error', assignmentId: a.id };
     }
   }));
 
@@ -59,10 +72,11 @@ router.get('/:node/:vmid/status', async (req, res) => {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
+    const nodeIdentity = serializeNodeIdentity(node);
     try {
-      res.json({ ...(await getVMStatus(node, vmid)), type: 'qemu' });
+      res.json({ ...(await getVMStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'qemu' });
     } catch {
-      res.json({ ...(await getLXCStatus(node, vmid)), type: 'lxc' });
+      res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'lxc' });
     }
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -167,10 +181,11 @@ router.get('/:node/:vmid/config', async (req, res) => {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
+    const nodeIdentity = serializeNodeIdentity(node);
     try {
-      res.json(await getVMConfig(node, vmid));
+      res.json({ ...(await getVMConfig(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10) });
     } catch {
-      res.json(await getLXCConfig(node, vmid));
+      res.json({ ...(await getLXCConfig(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10) });
     }
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });

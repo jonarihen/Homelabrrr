@@ -5,6 +5,7 @@ import VMCard from '../components/VMCard.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
+import { routeNode, vmIdentityKey } from '../utils/nodeRef.js';
 
 const STATUS_FILTERS = ['All', 'Running', 'Stopped'];
 const TYPE_FILTERS = ['All', 'VM', 'LXC'];
@@ -117,7 +118,7 @@ export default function Dashboard() {
   const memPct = totalMaxMem > 0 ? (totalMem / totalMaxMem * 100) : 0;
 
   // Bulk selection helpers
-  const vmKey = (vm) => `${vm.node}-${vm.vmid}`;
+  const vmKey = (vm) => vmIdentityKey(vm);
 
   const toggleSelect = useCallback((vm) => {
     setSelected(prev => {
@@ -155,7 +156,7 @@ export default function Dashboard() {
     try {
       const results = await Promise.allSettled(
         selectedVms.map(vm =>
-          api.post(`/vms/${vm.node}/${vm.vmid}/action`, { action })
+          api.post(`/vms/${routeNode(vm)}/${vm.vmid}/action`, { action })
             .catch(e => { throw { vmName: vm.name || `VM ${vm.vmid}`, message: e.response?.data?.error || e.message }; })
         )
       );

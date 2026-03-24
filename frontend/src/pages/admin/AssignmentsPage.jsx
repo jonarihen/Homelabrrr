@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import api from '../../api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import { displayNode, vmIdentityKey } from '../../utils/nodeRef.js';
 
 export default function AssignmentsPage() {
   useDocumentTitle('Assignments');
@@ -72,9 +73,9 @@ export default function AssignmentsPage() {
             </thead>
             <tbody>
               {vms.map(vm => (
-                <tr key={`${vm.node}-${vm.vmid}`} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 transition-colors">
+                <tr key={vmIdentityKey(vm)} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 transition-colors">
                   <td className="px-4 py-3 text-white font-medium">{vm.name || `VM ${vm.vmid}`}</td>
-                  <td className="px-4 py-3 text-gray-500 text-xs font-mono">{vm.node} / {vm.vmid}</td>
+                  <td className="px-4 py-3 text-gray-500 text-xs font-mono">{displayNode(vm.node)} / {vm.vmid}</td>
                   <td className="px-4 py-3"><StatusBadge status={vm.status} /></td>
                   <td className="px-4 py-3">
                     {vm.assignment

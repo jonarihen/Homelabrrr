@@ -161,12 +161,14 @@ try { db.exec(`
     name TEXT NOT NULL,
     template_id INTEGER,
     status TEXT DEFAULT 'creating',
+    status_detail TEXT DEFAULT '',
     upid TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (template_id) REFERENCES vm_templates(id) ON DELETE SET NULL
   )
 `); } catch { /* exists */ }
+try { db.exec("ALTER TABLE provisioned_vms ADD COLUMN status_detail TEXT DEFAULT ''"); } catch { /* exists */ }
 
 // Allow users to provision VMs (per-user permission)
 try { db.exec('ALTER TABLE users ADD COLUMN can_provision INTEGER DEFAULT 0'); } catch { /* exists */ }

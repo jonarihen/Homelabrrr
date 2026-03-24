@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
 import Modal from './Modal.jsx';
 import api from '../api.js';
+import { routeNode } from '../utils/nodeRef.js';
 
 export default function VLANModal({ vm, onClose, onSaved }) {
+  const vmNode = routeNode(vm);
   const [vlans, setVlans]           = useState([]);
   const [config, setConfig]         = useState(null);
   const [selectedTag, setSelectedTag] = useState('');
@@ -16,7 +18,7 @@ export default function VLANModal({ vm, onClose, onSaved }) {
   useEffect(() => {
     Promise.all([
       api.get('/vms/my-vlans'),
-      api.get(`/vms/${vm.node}/${vm.vmid}/config`),
+      api.get(`/vms/${vmNode}/${vm.vmid}/config`),
     ]).then(([vlanRes, cfgRes]) => {
       setVlans(vlanRes.data);
       setConfig(cfgRes.data);
@@ -27,7 +29,7 @@ export default function VLANModal({ vm, onClose, onSaved }) {
       const tagMatch = netStr.match(/tag=(\d+)/);
       if (tagMatch) setSelectedTag(tagMatch[1]);
     }).catch(e => setError(e.response?.data?.error || 'Failed to load')).finally(() => setLoading(false));
-  }, [vm.node, vm.vmid]);
+  }, [vmNode, vm.vmid]);
 
   // Detect available net interfaces from config
   const netInterfaces = config
@@ -41,12 +43,12 @@ export default function VLANModal({ vm, onClose, onSaved }) {
     setSaving(true);
     setError('');
     try {
-      await api.put(`/vms/${vm.node}/${vm.vmid}/vlan`, {
+      await api.put(`/vms/${vmNode}/${vm.vmid}/vlan`, {
         netInterface: netIface,
         vlanTag: selectedTag === '' ? null : parseInt(selectedTag),
       });
       if (reboot) {
-        await api.post(`/vms/${vm.node}/${vm.vmid}/action`, { action: 'reboot' });
+        await api.post(`/vms/${vmNode}/${vm.vmid}/action`, { action: 'reboot' });
       }
       onSaved?.();
       onClose();

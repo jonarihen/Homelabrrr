@@ -8,9 +8,25 @@ import {
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
+import { decodeNodeRef } from '../utils/nodeRef.js';
 
 const router = Router();
 router.use(requireAuth);
+
+function serializeNodeIdentity(nodeValue) {
+  const { nodeName, nodeRef } = decodeNodeRef(nodeValue);
+  return {
+    node: nodeName || String(nodeValue || ''),
+    nodeRef: nodeRef || String(nodeValue || ''),
+  };
+}
+
+function serializeProvisionRow(row) {
+  return {
+    ...row,
+    ...serializeNodeIdentity(row.node),
+  };
+}
 
 /**
  * Compute VM CPU topology to match the physical host layout.
@@ -22,20 +38,28 @@ async function computeCpuTopology(node, requestedCores) {
   const vcpus = parseInt(requestedCores) || 2;
   try {
     const cpuInfo = await getNodeCpuInfo(node);
-    const physSockets = cpuInfo.sockets || 2;
-    const physCoresPerSocket = cpuInfo.coresPerSocket || 12;
+    const physSockets = Math.max(1, cpuInfo.sockets || 1);
+    const physCoresPerSocket = Math.max(1, cpuInfo.coresPerSocket || 1);
     const maxCores = physSockets * physCoresPerSocket;
     if (vcpus > maxCores) {
       const err = new Error(`Requested ${vcpus} cores exceeds this node's ${maxCores} physical cores (${physSockets}×${physCoresPerSocket})`);
       err.status = 400;
       throw err;
     }
-    const coresPerSocket = Math.min(Math.ceil(vcpus / 2), physCoresPerSocket);
-    return { sockets: 2, cores: coresPerSocket, totalVcpus: 2 * coresPerSocket, maxCores };
+    const validSockets = [];
+    for (let sockets = 1; sockets <= Math.min(physSockets, vcpus); sockets += 1) {
+      if (vcpus % sockets !== 0) continue;
+      const coresPerSocket = vcpus / sockets;
+      if (coresPerSocket <= physCoresPerSocket) {
+        validSockets.push(sockets);
+      }
+    }
+    const sockets = validSockets.length > 0 ? Math.max(...validSockets) : 1;
+    const coresPerSocket = Math.ceil(vcpus / sockets);
+    return { sockets, cores: coresPerSocket, totalVcpus: sockets * coresPerSocket, maxCores };
   } catch (err) {
     if (err.status) throw err; // re-throw validation errors
-    // Fallback if node status unavailable — still use 2 sockets
-    return { sockets: 2, cores: Math.ceil(vcpus / 2), totalVcpus: Math.ceil(vcpus / 2) * 2, maxCores: null };
+    return { sockets: 1, cores: vcpus, totalVcpus: vcpus, maxCores: null };
   }
 }
 
@@ -45,7 +69,11 @@ router.get('/templates', (req, res) => {
   const templates = db.prepare(
     'SELECT * FROM vm_templates WHERE enabled = 1 ORDER BY name'
   ).all();
-  res.json(templates);
+  res.json(templates.map(t => ({
+    ...t,
+    nodeRef: t.node,
+    node: decodeNodeRef(t.node).nodeName || t.node,
+  })));
 });
 
 // ─── Proxmox resources (for form dropdowns) ─────────────────────────────────
@@ -162,12 +190,13 @@ router.post('/clone', async (req, res) => {
     res.json({
       id: row.lastInsertRowid,
       vmid: newVmid,
-      node: template.node,
+      ...serializeNodeIdentity(template.node),
       status: 'cloning',
       upid,
     });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    const status = err.message?.includes('globally unique VMID') ? 503 : 500;
+    res.status(status).json({ error: sanitizeError(err.message) });
   }
 });
 
@@ -225,13 +254,14 @@ router.post('/create', requireAdmin, async (req, res) => {
     if (upid) {
       pollTaskCompletion(row.lastInsertRowid, node, upid);
     } else {
-      db.prepare('UPDATE provisioned_vms SET status = ? WHERE id = ?').run('ready', row.lastInsertRowid);
+      db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?').run('ready', '', row.lastInsertRowid);
     }
 
     logAudit(req, 'vm_create', `${node}/${vmid}`, name);
-    res.json({ id: row.lastInsertRowid, vmid, node, status: 'creating', upid });
+    res.json({ id: row.lastInsertRowid, vmid, ...serializeNodeIdentity(node), status: 'creating', upid });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.status ? err.message : sanitizeError(err.message) });
+    const status = err.status || (err.message?.includes('globally unique VMID') ? 503 : 500);
+    res.status(status).json({ error: err.status ? err.message : sanitizeError(err.message) });
   }
 });
 
@@ -249,7 +279,7 @@ router.get('/status', (req, res) => {
     ORDER BY pv.created_at DESC
     LIMIT 50
   `).all(...params);
-  res.json(rows);
+  res.json(rows.map(serializeProvisionRow));
 });
 
 router.get('/status/:id', async (req, res) => {
@@ -265,27 +295,36 @@ router.get('/status/:id', async (req, res) => {
       const task = await getTaskStatus(row.node, row.upid);
       if (task.status === 'stopped') {
         const newStatus = task.exitstatus === 'OK' ? 'ready' : 'error';
-        db.prepare('UPDATE provisioned_vms SET status = ? WHERE id = ?').run(newStatus, row.id);
+        db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+          .run(newStatus, task.exitstatus === 'OK' ? '' : (task.exitstatus || 'Task failed'), row.id);
         row.status = newStatus;
+        row.status_detail = task.exitstatus === 'OK' ? '' : (task.exitstatus || 'Task failed');
       }
     } catch { /* ignore */ }
   }
 
-  res.json(row);
+  res.json(serializeProvisionRow(row));
 });
 
 // ─── Admin: template CRUD ────────────────────────────────────────────────────
 
 router.get('/admin/templates', requirePermission('can_manage_templates'), (req, res) => {
-  res.json(db.prepare('SELECT * FROM vm_templates ORDER BY name').all());
+  const rows = db.prepare('SELECT * FROM vm_templates ORDER BY name').all();
+  res.json(rows.map(t => ({
+    ...t,
+    nodeRef: t.node,
+    node: decodeNodeRef(t.node).nodeName || t.node,
+  })));
 });
 
 router.get('/admin/pve-vms/:node', requirePermission('can_manage_templates'), async (req, res) => {
   // List all qemu VMs on a node — both templates and regular VMs — so admin can pick a source
   try {
     const vms = await getAllVMs();
+    const requestedNodeRef = req.params.node;
+    const requestedNodeName = decodeNodeRef(requestedNodeRef).nodeName || requestedNodeRef;
     const nodeVms = vms
-      .filter(v => v.type === 'qemu' && v.node === req.params.node)
+      .filter(v => v.type === 'qemu' && (v.nodeRef === requestedNodeRef || v.node === requestedNodeName))
       .map(v => ({ vmid: v.vmid, name: v.name, status: v.status, template: !!v.template }))
       .sort((a, b) => (b.template ? 1 : 0) - (a.template ? 1 : 0) || a.vmid - b.vmid);
     res.json(nodeVms);
@@ -385,12 +424,14 @@ async function pollTaskCompletion(provisionId, node, upid, maxAttempts = 120) {
       const task = await getTaskStatus(node, upid);
       if (task.status === 'stopped') {
         const newStatus = task.exitstatus === 'OK' ? 'ready' : 'error';
-        db.prepare('UPDATE provisioned_vms SET status = ? WHERE id = ?').run(newStatus, provisionId);
+        db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+          .run(newStatus, task.exitstatus === 'OK' ? '' : (task.exitstatus || 'Task failed'), provisionId);
         return task.exitstatus === 'OK';
       }
     } catch { /* keep polling */ }
   }
-  db.prepare('UPDATE provisioned_vms SET status = ? WHERE id = ?').run('timeout', provisionId);
+  db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+    .run('timeout', 'Timed out while waiting for the Proxmox task to finish', provisionId);
   return false;
 }
 
@@ -402,10 +443,12 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
   }
 
   // Apply post-clone configuration
-  db.prepare('UPDATE provisioned_vms SET status = ? WHERE id = ?').run('configuring', provisionId);
+  db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+    .run('configuring', '', provisionId);
 
   try {
     const config = {};
+    const warnings = [];
     if (opts.cores) {
       const cpuLayout = await computeCpuTopology(node, opts.cores);
       config.sockets = cpuLayout.sockets;
@@ -432,7 +475,11 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
         await resizeVMDisk(node, vmid, 'scsi0', `${opts.diskGb}G`);
       } catch {
         // Try virtio0 if scsi0 doesn't exist
-        try { await resizeVMDisk(node, vmid, 'virtio0', `${opts.diskGb}G`); } catch { /* ignore */ }
+        try {
+          await resizeVMDisk(node, vmid, 'virtio0', `${opts.diskGb}G`);
+        } catch {
+          warnings.push(`Disk resize to ${opts.diskGb}G failed`);
+        }
       }
     }
 
@@ -449,14 +496,21 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
         }
       } catch (err) {
         console.error(`Failed to set VLAN tag ${opts.vlanTag} on VM ${vmid}:`, err.message);
+        warnings.push(`Failed to apply VLAN tag ${opts.vlanTag}`);
       }
     }
 
-    db.prepare('UPDATE provisioned_vms SET status = ? WHERE id = ?').run('ready', provisionId);
+    if (warnings.length > 0) {
+      db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+        .run('warning', warnings.join('; '), provisionId);
+    } else {
+      db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+        .run('ready', '', provisionId);
+    }
   } catch (err) {
     console.error(`Post-clone config failed for VM ${vmid}:`, err.message);
-    db.prepare('UPDATE provisioned_vms SET status = ? WHERE id = ?').run('ready', provisionId);
-    // Still mark ready — the VM exists, just config may not have been fully applied
+    db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+      .run('warning', err.message || 'Post-clone configuration failed', provisionId);
   }
 }
 

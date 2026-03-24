@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import Modal from './Modal.jsx';
 import api from '../api.js';
+import { routeNode } from '../utils/nodeRef.js';
 
 export default function SSHModal({ vm, onClose }) {
+  const vmNode = routeNode(vm);
   const [step, setStep] = useState('config'); // 'config' | 'terminal'
   const [keys, setKeys] = useState([]);
   const [form, setForm] = useState({ keyId: '', host: '', port: 22, username: 'root', hostFingerprint: '', passphrase: '' });
@@ -15,7 +17,7 @@ export default function SSHModal({ vm, onClose }) {
   useEffect(() => {
     Promise.all([
       api.get('/ssh/keys'),
-      api.get(`/ssh/config/${vm.node}/${vm.vmid}`),
+      api.get(`/ssh/config/${vmNode}/${vm.vmid}`),
     ]).then(([keysRes, configRes]) => {
       setKeys(keysRes.data);
       const cfg = configRes.data;
@@ -34,7 +36,7 @@ export default function SSHModal({ vm, onClose }) {
     }).catch(e => {
       setError(e.response?.data?.error || 'Failed to load SSH config');
     }).finally(() => setLoading(false));
-  }, [vm.node, vm.vmid]);
+  }, [vmNode, vm.vmid]);
 
   const connect = async (e) => {
     e.preventDefault();
@@ -45,7 +47,7 @@ export default function SSHModal({ vm, onClose }) {
 
     try {
       // Save config for this VM
-      await api.put(`/ssh/config/${vm.node}/${vm.vmid}`, {
+      await api.put(`/ssh/config/${vmNode}/${vm.vmid}`, {
         host: form.host,
         port: form.port,
         username: form.username,
@@ -53,7 +55,7 @@ export default function SSHModal({ vm, onClose }) {
       });
       // Get connection token
       const { data } = await api.post('/ssh/connect', {
-        node: vm.node, vmid: vm.vmid,
+        node: vmNode, vmid: vm.vmid,
         keyId: form.keyId,
         passphrase: form.passphrase,
       });
@@ -73,7 +75,7 @@ export default function SSHModal({ vm, onClose }) {
     setScanningFingerprint(true);
     setError('');
     try {
-      const { data } = await api.post(`/ssh/config/${vm.node}/${vm.vmid}/scan-fingerprint`, {
+      const { data } = await api.post(`/ssh/config/${vmNode}/${vm.vmid}/scan-fingerprint`, {
         host: form.host,
         port: form.port,
       });

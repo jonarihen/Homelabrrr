@@ -64,6 +64,19 @@ const sessionMiddleware = session({
 app.use(sessionMiddleware);
 
 app.use((req, res, next) => {
+  if (!req.session?.userId) return next();
+
+  const user = db.prepare('SELECT username, is_admin FROM users WHERE id = ?').get(req.session.userId);
+  if (!user) {
+    return req.session.destroy(() => next());
+  }
+
+  req.session.username = user.username;
+  req.session.isAdmin = user.is_admin === 1;
+  next();
+});
+
+app.use((req, res, next) => {
   if (!req.session?.twoFactorEnrollmentOnly) return next();
 
   const allowedPaths = new Set([

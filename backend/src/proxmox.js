@@ -1,6 +1,7 @@
 import https from 'https';
 import db from './db.js';
 import { decryptSecret } from './utils/secrets.js';
+import { decodeNodeRef, encodeNodeRef } from './utils/nodeRef.js';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
@@ -13,6 +14,14 @@ function assertSecureTls(host, label = 'Proxmox host') {
 function agentForHost(host) {
   assertSecureTls(host);
   return new https.Agent({ rejectUnauthorized: host.verify_tls !== 0 });
+}
+
+function getHostById(hostId) {
+  const host = db.prepare('SELECT * FROM pve_hosts WHERE id = ?').get(hostId);
+  if (!host) {
+    throw new Error(`Configured Proxmox host ${hostId} was not found`);
+  }
+  return host;
 }
 
 // ── Per-host API request ─────────────────────────────────────────────────────
@@ -70,17 +79,57 @@ function defaultHost() {
   return host;
 }
 
-// Find the host that owns a given node name
-async function hostForNode(nodeName) {
+async function findHostsForNodeName(nodeName) {
   const hosts = getHosts();
+  const matches = [];
   for (const h of hosts) {
     try {
       const nodes = await makeRequest(h, 'GET', '/nodes');
-      if (nodes.some(n => n.node === nodeName)) return h;
+      if (nodes.some(n => n.node === nodeName)) matches.push(h);
     } catch { /* skip unreachable host */ }
   }
-  // Fallback to default
-  return defaultHost();
+  return matches;
+}
+
+async function hostForNode(nodeRef, opts = {}) {
+  const { vmid = null } = opts;
+  const { hostId, nodeName } = decodeNodeRef(nodeRef);
+  if (!nodeName) throw new Error('Node is required');
+
+  if (hostId) return getHostById(hostId);
+
+  const matches = await findHostsForNodeName(nodeName);
+  if (matches.length === 1) return matches[0];
+
+  if (matches.length > 1 && vmid !== null && vmid !== undefined) {
+    const vmMatches = [];
+    for (const h of matches) {
+      try {
+        const resources = await makeRequest(h, 'GET', '/cluster/resources?type=vm');
+        if (resources.some(r => r.node === nodeName && Number.parseInt(r.vmid, 10) === Number.parseInt(vmid, 10))) {
+          vmMatches.push(h);
+        }
+      } catch { /* skip unreachable host */ }
+    }
+    if (vmMatches.length === 1) return vmMatches[0];
+    if (vmMatches.length > 1) {
+      throw new Error(`VM ${vmid} on node ${nodeName} exists on multiple configured hosts. Use a host-specific node reference.`);
+    }
+  }
+
+  if (matches.length === 0) {
+    const hosts = getHosts();
+    if (hosts.length === 1) return hosts[0];
+    throw new Error(`Node ${nodeName} was not found on any configured Proxmox host`);
+  }
+
+  throw new Error(`Node ${nodeName} exists on multiple configured Proxmox hosts. Use a host-specific node reference.`);
+}
+
+async function resolveNode(nodeRef, opts = {}) {
+  const { nodeName } = decodeNodeRef(nodeRef);
+  const host = await hostForNode(nodeRef, opts);
+  return { host, nodeName };
 }
 
 // ── Proxmox API wrappers ─────────────────────────────────────────────────────
@@ -97,6 +146,32 @@ export const hostPut  = (host, path, body) => makeRequest(host, 'PUT', path, bod
 // Short-lived cache for getAllVMs — avoids hammering Proxmox on every poll
 let _vmCache = { data: null, expires: 0 };
 const VM_CACHE_TTL = 5000; // 5 seconds
+const _vmConfigCache = new Map();
+const VM_CONFIG_CACHE_TTL = 5000;
+
+function vmConfigCacheKey(nodeRef, vmid, type = 'qemu') {
+  const { hostId, nodeName } = decodeNodeRef(nodeRef);
+  return `${type}:${hostId || 'auto'}:${nodeName}:${Number.parseInt(vmid, 10)}`;
+}
+
+function getCachedVmConfig(nodeRef, vmid, type = 'qemu') {
+  const key = vmConfigCacheKey(nodeRef, vmid, type);
+  const entry = _vmConfigCache.get(key);
+  if (entry && entry.expires > Date.now()) return entry.data;
+  if (entry) _vmConfigCache.delete(key);
+  return null;
+}
+
+function setCachedVmConfig(nodeRef, vmid, data, type = 'qemu') {
+  _vmConfigCache.set(vmConfigCacheKey(nodeRef, vmid, type), {
+    data,
+    expires: Date.now() + VM_CONFIG_CACHE_TTL,
+  });
+}
+
+function clearCachedVmConfig(nodeRef, vmid, type = 'qemu') {
+  _vmConfigCache.delete(vmConfigCacheKey(nodeRef, vmid, type));
+}
 
 export async function getAllVMs() {
   const now = Date.now();
@@ -107,7 +182,14 @@ export async function getAllVMs() {
   for (const h of hosts) {
     try {
       const resources = await makeRequest(h, 'GET', '/cluster/resources?type=vm');
-      allVms.push(...resources.filter(r => r.type === 'qemu' || r.type === 'lxc'));
+      allVms.push(...resources
+        .filter(r => r.type === 'qemu' || r.type === 'lxc')
+        .map(r => ({
+          ...r,
+          hostId: h.id,
+          hostName: h.name,
+          nodeRef: encodeNodeRef(h.id, r.node),
+        })));
     } catch (err) {
       console.warn(`Failed to fetch VMs from ${h.name} (${h.host}): ${err.message}`);
     }
@@ -117,70 +199,80 @@ export async function getAllVMs() {
 }
 
 export async function getVMStatus(node, vmid) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'GET', `/nodes/${node}/qemu/${vmid}/status/current`);
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'GET', `/nodes/${nodeName}/qemu/${vmid}/status/current`);
 }
 
 export async function vmAction(node, vmid, action) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'POST', `/nodes/${node}/qemu/${vmid}/status/${action}`, {});
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${vmid}/status/${action}`, {});
 }
 
 export async function getVNCTicket(node, vmid) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'POST', `/nodes/${node}/qemu/${vmid}/vncproxy`, { websocket: 1 });
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${vmid}/vncproxy`, { websocket: 1 });
 }
 
 export async function getVMConfig(node, vmid) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'GET', `/nodes/${node}/qemu/${vmid}/config`);
+  const cached = getCachedVmConfig(node, vmid, 'qemu');
+  if (cached) return cached;
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  const config = await makeRequest(host, 'GET', `/nodes/${nodeName}/qemu/${vmid}/config`);
+  setCachedVmConfig(node, vmid, config, 'qemu');
+  return config;
 }
 
 export async function updateVMConfig(node, vmid, config) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'PUT', `/nodes/${node}/qemu/${vmid}/config`, config);
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  clearCachedVmConfig(node, vmid, 'qemu');
+  return makeRequest(host, 'PUT', `/nodes/${nodeName}/qemu/${vmid}/config`, config);
 }
 
 export async function getLXCStatus(node, vmid) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'GET', `/nodes/${node}/lxc/${vmid}/status/current`);
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'GET', `/nodes/${nodeName}/lxc/${vmid}/status/current`);
 }
 
 export async function lxcAction(node, vmid, action) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'POST', `/nodes/${node}/lxc/${vmid}/status/${action}`, {});
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/lxc/${vmid}/status/${action}`, {});
 }
 
 export async function getLXCConfig(node, vmid) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'GET', `/nodes/${node}/lxc/${vmid}/config`);
+  const cached = getCachedVmConfig(node, vmid, 'lxc');
+  if (cached) return cached;
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  const config = await makeRequest(host, 'GET', `/nodes/${nodeName}/lxc/${vmid}/config`);
+  setCachedVmConfig(node, vmid, config, 'lxc');
+  return config;
 }
 
 export async function updateLXCConfig(node, vmid, config) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'PUT', `/nodes/${node}/lxc/${vmid}/config`, config);
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  clearCachedVmConfig(node, vmid, 'lxc');
+  return makeRequest(host, 'PUT', `/nodes/${nodeName}/lxc/${vmid}/config`, config);
 }
 
 export async function getLXCRRD(node, vmid, timeframe = 'hour') {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'GET', `/nodes/${node}/lxc/${vmid}/rrddata?timeframe=${timeframe}`);
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'GET', `/nodes/${nodeName}/lxc/${vmid}/rrddata?timeframe=${timeframe}`);
 }
 
 export async function getLXCVNCTicket(node, vmid) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'POST', `/nodes/${node}/lxc/${vmid}/vncproxy`, { websocket: 1 });
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/lxc/${vmid}/vncproxy`, { websocket: 1 });
 }
 
 export async function getVMRRD(node, vmid, type = 'qemu', timeframe = 'hour') {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'GET', `/nodes/${node}/${type}/${vmid}/rrddata?timeframe=${timeframe}`);
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'GET', `/nodes/${nodeName}/${type}/${vmid}/rrddata?timeframe=${timeframe}`);
 }
 
 // ── Node CPU topology ────────────────────────────────────────────────────────
 
 export async function getNodeCpuInfo(node) {
-  const host = await hostForNode(node);
-  const status = await makeRequest(host, 'GET', `/nodes/${node}/status`);
+  const { host, nodeName } = await resolveNode(node);
+  const status = await makeRequest(host, 'GET', `/nodes/${nodeName}/status`);
   const info = status.cpuinfo || {};
   return {
     sockets: info.sockets || 1,
@@ -218,11 +310,17 @@ export async function getNextVmid() {
   const hosts = getHosts();
   // Collect all used VMIDs across every connected host so IDs are globally unique
   const usedIds = new Set();
+  const failedHosts = [];
   for (const h of hosts) {
     try {
       const resources = await makeRequest(h, 'GET', '/cluster/resources?type=vm');
       for (const r of resources) usedIds.add(r.vmid);
-    } catch { /* skip unreachable host */ }
+    } catch {
+      failedHosts.push(h.name || h.host);
+    }
+  }
+  if (failedHosts.length > 0) {
+    throw new Error(`Cannot allocate a globally unique VMID while these Proxmox hosts are unreachable: ${failedHosts.join(', ')}`);
   }
   if (usedIds.size === 0) {
     // No VMs anywhere — ask any reachable host for its default next ID
@@ -237,7 +335,7 @@ export async function getNextVmid() {
 }
 
 export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {
-  const host = await hostForNode(node);
+  const { host, nodeName } = await resolveNode(node, { vmid: templateVmid });
   const body = {
     newid: newVmid,
     name,
@@ -246,34 +344,34 @@ export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {
     ...(opts.storage && { storage: opts.storage }),
     ...(opts.description && { description: opts.description }),
   };
-  return makeRequest(host, 'POST', `/nodes/${node}/qemu/${templateVmid}/clone`, body);
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${templateVmid}/clone`, body);
 }
 
 export async function createVM(node, vmid, config) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'POST', `/nodes/${node}/qemu`, { vmid, ...config });
+  const { host, nodeName } = await resolveNode(node);
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu`, { vmid, ...config });
 }
 
 export async function resizeVMDisk(node, vmid, disk, size) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'PUT', `/nodes/${node}/qemu/${vmid}/resize`, { disk, size });
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'PUT', `/nodes/${nodeName}/qemu/${vmid}/resize`, { disk, size });
 }
 
 export async function getStorages(node) {
-  const host = await hostForNode(node);
-  const storages = await makeRequest(host, 'GET', `/nodes/${node}/storage`);
+  const { host, nodeName } = await resolveNode(node);
+  const storages = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage`);
   return storages.filter(s => s.active && s.enabled);
 }
 
 export async function getISOImages(node, storage) {
-  const host = await hostForNode(node);
-  const content = await makeRequest(host, 'GET', `/nodes/${node}/storage/${storage}/content?content=iso`);
+  const { host, nodeName } = await resolveNode(node);
+  const content = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${storage}/content?content=iso`);
   return content || [];
 }
 
 export async function getNetworks(node) {
-  const host = await hostForNode(node);
-  const nets = await makeRequest(host, 'GET', `/nodes/${node}/network`);
+  const { host, nodeName } = await resolveNode(node);
+  const nets = await makeRequest(host, 'GET', `/nodes/${nodeName}/network`);
   return (nets || []).filter(n => n.type === 'bridge');
 }
 
@@ -283,51 +381,51 @@ export async function getNodes() {
   for (const h of hosts) {
     try {
       const nodes = await makeRequest(h, 'GET', '/nodes');
-      allNodes.push(...nodes.map(n => ({ ...n, hostId: h.id, hostName: h.name })));
+      allNodes.push(...nodes.map(n => ({ ...n, hostId: h.id, hostName: h.name, nodeRef: encodeNodeRef(h.id, n.node) })));
     } catch { /* skip */ }
   }
   return allNodes;
 }
 
 export async function getTaskStatus(node, upid) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'GET', `/nodes/${node}/tasks/${encodeURIComponent(upid)}/status`);
+  const { host, nodeName } = await resolveNode(node);
+  return makeRequest(host, 'GET', `/nodes/${nodeName}/tasks/${encodeURIComponent(upid)}/status`);
 }
 
 // ── Snapshot helpers ─────────────────────────────────────────────────────────
 
 export async function getSnapshots(node, vmid, vmtype = 'qemu') {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'GET', `/nodes/${node}/${vmtype}/${vmid}/snapshot`);
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'GET', `/nodes/${nodeName}/${vmtype}/${vmid}/snapshot`);
 }
 
 export async function createSnapshot(node, vmid, vmtype = 'qemu', name, description = '', vmstate = false) {
-  const host = await hostForNode(node);
+  const { host, nodeName } = await resolveNode(node, { vmid });
   const body = { snapname: name, ...(description && { description }), ...(vmtype === 'qemu' && { vmstate: vmstate ? 1 : 0 }) };
-  return makeRequest(host, 'POST', `/nodes/${node}/${vmtype}/${vmid}/snapshot`, body);
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/${vmtype}/${vmid}/snapshot`, body);
 }
 
 export async function deleteSnapshot(node, vmid, vmtype = 'qemu', snapname) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'DELETE', `/nodes/${node}/${vmtype}/${vmid}/snapshot/${encodeURIComponent(snapname)}`);
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'DELETE', `/nodes/${nodeName}/${vmtype}/${vmid}/snapshot/${encodeURIComponent(snapname)}`);
 }
 
 export async function rollbackSnapshot(node, vmid, vmtype = 'qemu', snapname) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'POST', `/nodes/${node}/${vmtype}/${vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`, {});
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/${vmtype}/${vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`, {});
 }
 
 // ── Backup helpers ──────────────────────────────────────────────────────────
 
 export async function getVMBackups(node, vmid) {
-  const host = await hostForNode(node);
+  const { host, nodeName } = await resolveNode(node, { vmid });
   // List all storages, then check each backup-capable one for this VM's backups
-  const storages = await makeRequest(host, 'GET', `/nodes/${node}/storage`);
+  const storages = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage`);
   const backupStorages = storages.filter(s => s.active && s.enabled && s.content?.includes('backup'));
   const allBackups = [];
   for (const s of backupStorages) {
     try {
-      const content = await makeRequest(host, 'GET', `/nodes/${node}/storage/${s.storage}/content?content=backup&vmid=${vmid}`);
+      const content = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${s.storage}/content?content=backup&vmid=${vmid}`);
       if (content) allBackups.push(...content.map(b => ({ ...b, storage: s.storage })));
     } catch { /* skip */ }
   }
@@ -337,7 +435,7 @@ export async function getVMBackups(node, vmid) {
 }
 
 export async function createVMBackup(node, vmid, opts = {}) {
-  const host = await hostForNode(node);
+  const { host, nodeName } = await resolveNode(node, { vmid });
   const body = {
     vmid: parseInt(vmid),
     mode: opts.mode || 'snapshot',
@@ -345,45 +443,45 @@ export async function createVMBackup(node, vmid, opts = {}) {
     ...(opts.storage && { storage: opts.storage }),
     ...(opts.notes && { 'notes-template': opts.notes }),
   };
-  return makeRequest(host, 'POST', `/nodes/${node}/vzdump`, body);
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/vzdump`, body);
 }
 
 export async function restoreVMBackup(node, vmid, archive, storage, vmtype = 'qemu') {
-  const host = await hostForNode(node);
+  const { host, nodeName } = await resolveNode(node, { vmid });
   const body = {
     vmid: parseInt(vmid),
     archive,
     force: 1,
     ...(storage && { storage }),
   };
-  return makeRequest(host, 'POST', `/nodes/${node}/${vmtype}`, body);
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/${vmtype}`, body);
 }
 
 export async function deleteVMBackup(node, storage, volid) {
-  const host = await hostForNode(node);
-  return makeRequest(host, 'DELETE', `/nodes/${node}/storage/${storage}/content/${encodeURIComponent(volid)}`);
+  const { host, nodeName } = await resolveNode(node);
+  return makeRequest(host, 'DELETE', `/nodes/${nodeName}/storage/${storage}/content/${encodeURIComponent(volid)}`);
 }
 
 export async function getBackupStorages(node) {
-  const host = await hostForNode(node);
-  const storages = await makeRequest(host, 'GET', `/nodes/${node}/storage`);
+  const { host, nodeName } = await resolveNode(node);
+  const storages = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage`);
   return storages.filter(s => s.active && s.enabled && s.content?.includes('backup'));
 }
 
 // ── File-level restore from backups ─────────────────────────────────────────
 
 export async function listBackupFiles(node, storage, volid, filepath = '/') {
-  const host = await hostForNode(node);
+  const { host, nodeName } = await resolveNode(node);
   const params = new URLSearchParams({ volume: volid, filepath });
-  return makeRequest(host, 'GET', `/nodes/${node}/storage/${storage}/file-restore/list?${params}`);
+  return makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${storage}/file-restore/list?${params}`);
 }
 
 export async function downloadBackupFile(node, storage, volid, filepath) {
-  const host = await hostForNode(node);
+  const { host, nodeName } = await resolveNode(node);
   const params = new URLSearchParams({ volume: volid, filepath });
   const baseUrl = `https://${host.host}:${host.port}/api2/json`;
   const authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
-  const url = `${baseUrl}/nodes/${node}/storage/${storage}/file-restore/download?${params}`;
+  const url = `${baseUrl}/nodes/${nodeName}/storage/${storage}/file-restore/download?${params}`;
 
   // Use Node https module for proper TLS handling (fetch doesn't support agent)
   return new Promise((resolve, reject) => {

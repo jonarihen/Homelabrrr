@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal.jsx';
 import api from '../api.js';
+import { routeNode } from '../utils/nodeRef.js';
 
 // Request a full (non-incremental) framebuffer update from the VNC server.
 // noVNC's initial full request can be missed if the canvas isn't sized yet,
@@ -20,6 +21,7 @@ function forceFullRefresh(rfb) {
 }
 
 export default function VNCModal({ vm, onClose }) {
+  const vmNode = routeNode(vm);
   const containerRef = useRef(null);
   const rfbRef       = useRef(null);
   const [status, setStatus]  = useState('Connecting...');
@@ -30,7 +32,7 @@ export default function VNCModal({ vm, onClose }) {
 
     async function connect() {
       try {
-        const { data } = await api.post(`/vms/${vm.node}/${vm.vmid}/vnc-ticket`);
+        const { data } = await api.post(`/vms/${vmNode}/${vm.vmid}/vnc-ticket`);
         if (cancelled) return;
 
         const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -68,7 +70,7 @@ export default function VNCModal({ vm, onClose }) {
       cancelled = true;
       rfbRef.current?.disconnect();
     };
-  }, [vm.node, vm.vmid]);
+  }, [vmNode, vm.vmid]);
 
   const sendCtrlAltDel = () => rfbRef.current?.sendCtrlAltDel();
 

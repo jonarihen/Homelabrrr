@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import { displayNode, routeNode } from '../../utils/nodeRef.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
 
@@ -86,7 +87,7 @@ export default function PortForwardingPage() {
   // Selected VM details
   const selectedVm = useMemo(() => {
     if (!form.vmKey) return null;
-    return vmTargets.find(v => `${v.node}/${v.vmid}` === form.vmKey) || null;
+    return vmTargets.find(v => `${routeNode(v)}/${v.vmid}` === form.vmKey) || null;
   }, [form.vmKey, vmTargets]);
 
   // When VM selection changes, auto-fill IP, interface, and name from pre-resolved data
@@ -95,7 +96,7 @@ export default function PortForwardingPage() {
       setForm(f => ({ ...f, vmKey: '', mappedIp: '', dstInterface: '', name: '' }));
       return;
     }
-    const vm = vmTargets.find(v => `${v.node}/${v.vmid}` === vmKey);
+    const vm = vmTargets.find(v => `${routeNode(v)}/${v.vmid}` === vmKey);
     if (!vm) return;
 
     const svcLabel = form.service === 'Custom' ? 'Custom' : form.service;
@@ -353,8 +354,8 @@ export default function PortForwardingPage() {
                   className={inputCls} required>
                   <option value="">Select a VM...</option>
                   {vmTargets.map(v => (
-                    <option key={`${v.node}/${v.vmid}`} value={`${v.node}/${v.vmid}`}>
-                      {v.name} ({v.ip})
+                    <option key={`${routeNode(v)}/${v.vmid}`} value={`${routeNode(v)}/${v.vmid}`}>
+                      {v.name} ({v.ip}) · {displayNode(v.node)} / {v.vmid}
                     </option>
                   ))}
                 </select>

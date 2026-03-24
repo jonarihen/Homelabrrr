@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-03-24 — Multi-host VM identity and provisioning correctness pass
+
+### Host-aware VM identity across the UI and API
+- Added a canonical host-aware `nodeRef` format (`{hostId}~{node}`) so VM actions, assignments, SSH config, VNC, VLAN changes, template selection, and port-forward target selection no longer rely on plain node names alone
+- Proxmox wrappers now resolve nodes by host-aware reference and stop falling back to the first configured host when a node name is ambiguous across multiple Proxmox endpoints
+- Dashboard, VM details, admin assignments, user VM assignment management, provisioning forms, template registration, and port forwarding now route requests with the stable `nodeRef` while still showing the human-readable node name in the UI
+- Legacy plain-node rows remain readable for compatibility, but exact host-aware matches are now preferred everywhere
+
+### Provisioning correctness improvements
+- CPU topology calculation now preserves the requested vCPU count instead of over-allocating cores when the requested total does not divide cleanly into the old fixed socket layout
+- Global VMID allocation now refuses to hand out a “globally unique” VMID while any configured Proxmox host is unreachable, instead of silently skipping failed hosts and risking a duplicate VMID
+- Clone/create tracking now records `status_detail`, and post-clone configuration failures no longer lie with a `ready` state when disk resize, VLAN tagging, or later config steps fail
+- Provisioning status responses now carry both display node names and `nodeRef`, and the Recent Provisions UI now highlights warning states and shows the backend warning detail directly
+
+### Admin session + lookup cleanup
+- Admin role state is refreshed from the database on each authenticated request, so demoting an admin takes effect on active sessions without waiting for logout
+- Port-forward VM target discovery now reuses the normal Proxmox config helper instead of dynamic per-row imports, and it only falls back to legacy plain-node SSH configs when the VM identity is unambiguous
+- Added a short-lived VM config cache in the Proxmox client so hot admin screens do not repeatedly hammer the same VM config endpoints
+
 ## 2026-03-24 — Port forwarding policy specificity fix
 
 ### Correct service and destination matching

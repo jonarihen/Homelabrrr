@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import StatusBadge from './StatusBadge.jsx';
+import { displayNode, routeNode } from '../utils/nodeRef.js';
 
 function fmt(bytes) {
   if (!bytes) return '—';
@@ -16,7 +17,7 @@ export default function VMCard({ vm, selected, onSelect }) {
 
   return (
     <div
-      onClick={() => navigate(`/vm/${vm.node}/${vm.vmid}`)}
+      onClick={() => navigate(`/vm/${routeNode(vm)}/${vm.vmid}`)}
       className={`relative bg-gray-900 border rounded-2xl p-5 flex flex-col gap-4 hover:border-gray-600 hover:shadow-lg hover:shadow-black/20 transition-all duration-200 cursor-pointer group overflow-hidden ${selected ? 'border-blue-500/60 bg-blue-950/20' : 'border-gray-800'}`}
     >
       {/* Subtle gradient accent at top */}
@@ -51,7 +52,7 @@ export default function VMCard({ vm, selected, onSelect }) {
               </span>
             )}
           </h3>
-          <p className="text-xs text-gray-500 mt-0.5 font-mono">ID {vm.vmid} / {vm.node}</p>
+          <p className="text-xs text-gray-500 mt-0.5 font-mono">ID {vm.vmid} / {displayNode(vm.node)}</p>
         </div>
         <StatusBadge status={vm.status} />
       </div>

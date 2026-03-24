@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import db from '../db.js';
-import { getAllVMs, getHostStatus, getHosts, getHost } from '../proxmox.js';
+import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig } from '../proxmox.js';
 import { createClient, vlanTagToSubnet } from '../fortigate.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
+import { decodeNodeRef } from '../utils/nodeRef.js';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -26,6 +27,14 @@ const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 
 // Check if a non-admin user has access to a VLAN via user_vlans
 function userOwnsVlan(userId, vlanId) {
   return !!db.prepare('SELECT 1 FROM user_vlans WHERE user_id = ? AND vlan_id = ?').get(userId, vlanId);
+}
+
+function serializeNodeIdentity(nodeValue) {
+  const { nodeName, nodeRef } = decodeNodeRef(nodeValue);
+  return {
+    node: nodeName || String(nodeValue || ''),
+    nodeRef: nodeRef || String(nodeValue || ''),
+  };
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────
@@ -185,14 +194,25 @@ router.get('/vms', pAssignments, async (req, res) => {
       SELECT va.*, u.username FROM vm_assignments va
       JOIN users u ON u.id = va.user_id
     `).all();
+    const rawVmCounts = new Map();
+    vms.forEach(vm => {
+      const key = `${vm.node}-${vm.vmid}`;
+      rawVmCounts.set(key, (rawVmCounts.get(key) || 0) + 1);
+    });
 
-    const assignedMap = {};
-    assignments.forEach(a => { assignedMap[`${a.node}-${a.vmid}`] = a; });
+    const assignedMap = new Map(assignments.map(a => [`${a.node}-${a.vmid}`, a]));
 
-    const enriched = vms.map(vm => ({
-      ...vm,
-      assignment: assignedMap[`${vm.node}-${vm.vmid}`] || null,
-    }));
+    const enriched = vms.map(vm => {
+      const exactKey = `${vm.nodeRef || vm.node}-${vm.vmid}`;
+      const rawKey = `${vm.node}-${vm.vmid}`;
+      const assignment = assignedMap.get(exactKey)
+        || (rawVmCounts.get(rawKey) === 1 ? assignedMap.get(rawKey) : null)
+        || null;
+      return {
+        ...vm,
+        assignment,
+      };
+    });
 
     res.json(enriched);
   } catch (err) {
@@ -208,7 +228,7 @@ router.get('/assignments', pAssignments, (req, res) => {
     JOIN users u ON u.id = va.user_id
     ORDER BY u.username
   `).all();
-  res.json(rows);
+  res.json(rows.map(row => ({ ...row, ...serializeNodeIdentity(row.node) })));
 });
 
 router.post('/assignments', pAssignments, (req, res) => {
@@ -573,7 +593,8 @@ router.delete('/users/:id/vlans/:vlanId', pAssignments, (req, res) => {
 // ─── User VM assignments ──────────────────────────────────────────────────────
 
 router.get('/users/:id/vms', pAssignments, (req, res) => {
-  res.json(db.prepare('SELECT * FROM vm_assignments WHERE user_id = ?').all(req.params.id));
+  const rows = db.prepare('SELECT * FROM vm_assignments WHERE user_id = ? ORDER BY vmid').all(req.params.id);
+  res.json(rows.map(row => ({ ...row, ...serializeNodeIdentity(row.node) })));
 });
 
 // ─── Settings ───────────────────────────────────────────────────────────────
@@ -1393,24 +1414,35 @@ router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
   try {
     const vms = await getAllVMs();
     const sshConfigs = db.prepare('SELECT node, vmid, host, port FROM vm_ssh_configs').all();
-    const sshMap = new Map(sshConfigs.map(s => [`${s.node}/${s.vmid}`, s]));
+    const sshMap = new Map(sshConfigs.map(config => [`${config.node}/${config.vmid}`, config]));
     const vlanSyncs = db.prepare(
       'SELECT fvs.interface_name, v.tag FROM firewall_vlan_sync fvs JOIN vlans v ON v.id = fvs.vlan_id WHERE fvs.firewall_id = ?'
     ).all(fw.id);
     const tagToInterface = new Map(vlanSyncs.map(vs => [vs.tag, vs.interface_name]));
+    const rawVmCounts = new Map();
+    vms.forEach(vm => {
+      const key = `${vm.node}/${vm.vmid}`;
+      rawVmCounts.set(key, (rawVmCounts.get(key) || 0) + 1);
+    });
 
     // Fetch VM configs in parallel to get VLAN tags
-    const vmList = vms.filter(v => (v.type === 'qemu' || v.type === 'lxc') && sshMap.has(`${v.node}/${v.vmid}`));
+    const vmList = vms.filter(v =>
+      (v.type === 'qemu' || v.type === 'lxc')
+      && (
+        sshMap.has(`${v.nodeRef || v.node}/${v.vmid}`)
+        || (rawVmCounts.get(`${v.node}/${v.vmid}`) === 1 && sshMap.has(`${v.node}/${v.vmid}`))
+      )
+    );
     const configResults = await Promise.allSettled(
       vmList.map(async v => {
+        const routeNode = v.nodeRef || v.node;
         try {
-          const { getVMConfig } = await import('../proxmox.js');
-          const cfg = await getVMConfig(v.node, v.vmid);
+          const cfg = await getVMConfig(routeNode, v.vmid);
           const net0 = cfg.net0 || '';
           const tagMatch = net0.match(/tag=(\d+)/);
-          return { key: `${v.node}/${v.vmid}`, vlanTag: tagMatch ? parseInt(tagMatch[1]) : null };
+          return { key: `${routeNode}/${v.vmid}`, vlanTag: tagMatch ? parseInt(tagMatch[1], 10) : null };
         } catch {
-          return { key: `${v.node}/${v.vmid}`, vlanTag: null };
+          return { key: `${routeNode}/${v.vmid}`, vlanTag: null };
         }
       })
     );
@@ -1424,11 +1456,15 @@ router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
     const rootDstInterface = fw.root_vdom_link || 'lab-root1';
 
     const targets = vmList.map(v => {
-      const ssh = sshMap.get(`${v.node}/${v.vmid}`);
-      const vlanTag = vlanTagMap.get(`${v.node}/${v.vmid}`) || null;
+      const routeNode = v.nodeRef || v.node;
+      const rawKey = `${v.node}/${v.vmid}`;
+      const ssh = sshMap.get(`${routeNode}/${v.vmid}`)
+        || (rawVmCounts.get(rawKey) === 1 ? sshMap.get(rawKey) : null);
+      const vlanTag = vlanTagMap.get(`${routeNode}/${v.vmid}`) || null;
       const vlanInterface = vlanTag ? (tagToInterface.get(vlanTag) || '') : '';
       return {
         node: v.node,
+        nodeRef: routeNode,
         vmid: v.vmid,
         name: v.name || `VM ${v.vmid}`,
         status: v.status,

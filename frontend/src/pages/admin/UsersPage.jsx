@@ -3,6 +3,7 @@ import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { displayNode, routeNode, vmIdentityKey } from '../../utils/nodeRef.js';
 
 export default function UsersPage() {
   useDocumentTitle('Users');
@@ -316,7 +317,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
 
   const assignVM = async (vm) => {
     try {
-      await api.post('/admin/assignments', { userId: user.id, node: vm.node, vmid: vm.vmid });
+      await api.post('/admin/assignments', { userId: user.id, node: routeNode(vm), vmid: vm.vmid });
       loadUserData();
     } catch (e) { setError(e.response?.data?.error || 'Failed'); }
   };
@@ -366,10 +367,10 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
     } catch (e) { setPwMsg('Failed: ' + (e.response?.data?.error || e.message)); }
   };
 
-  const assignedVMIds = new Set(userVMs.map(v => `${v.node}-${v.vmid}`));
+  const assignedVMIds = new Set(userVMs.map(vmIdentityKey));
   const assignedVLANIds = new Set(userVLANs.map(v => v.id));
 
-  const unassignedVMs = allVMs.filter(v => !assignedVMIds.has(`${v.node}-${v.vmid}`));
+  const unassignedVMs = allVMs.filter(v => !assignedVMIds.has(vmIdentityKey(v)));
   const unassignedVLANs = allVLANs.filter(v => !assignedVLANIds.has(v.id));
 
   return (
@@ -465,12 +466,12 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
                   {userVMs.length === 0
                     ? <Empty text="No VMs assigned" />
                     : userVMs.map(a => {
-                      const vm = allVMs.find(v => v.node === a.node && v.vmid === a.vmid);
+                      const vm = allVMs.find(v => vmIdentityKey(v) === vmIdentityKey(a));
                       return (
                         <Row
                           key={a.id}
                           label={vm?.name || `VM ${a.vmid}`}
-                          sub={`${a.node} · VMID ${a.vmid}`}
+                          sub={`${displayNode(a.node)} · VMID ${a.vmid}`}
                           badge={vm?.status}
                           action={<DangerBtn onClick={() => unassignVM(a)}>Remove</DangerBtn>}
                         />
@@ -483,9 +484,9 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
                     ? <Empty text="All VMs are assigned" />
                     : unassignedVMs.map(vm => (
                       <Row
-                        key={`${vm.node}-${vm.vmid}`}
+                        key={vmIdentityKey(vm)}
                         label={vm.name || `VM ${vm.vmid}`}
-                        sub={`${vm.node} · VMID ${vm.vmid}`}
+                        sub={`${displayNode(vm.node)} · VMID ${vm.vmid}`}
                         badge={vm.status}
                         action={<BlueBtn onClick={() => assignVM(vm)}>Assign</BlueBtn>}
                       />

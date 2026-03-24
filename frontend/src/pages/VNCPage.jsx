@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
+import { displayNode } from '../utils/nodeRef.js';
 
 function forceFullRefresh(rfb) {
   if (!rfb) return;
@@ -79,7 +80,7 @@ export default function VNCPage() {
         </button>
 
         <span className="text-gray-400 text-sm">
-          VNC — {node}/{vmid}
+          VNC — {displayNode(node)}/{vmid}
         </span>
 
         <span className={`text-xs px-2 py-0.5 rounded ml-1 ${

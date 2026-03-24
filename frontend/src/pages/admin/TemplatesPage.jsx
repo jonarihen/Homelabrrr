@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import { displayNode, routeNode } from '../../utils/nodeRef.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
@@ -86,7 +87,7 @@ export default function TemplatesPage() {
                   </div>
                   <div>
                     <h3 className="text-white font-semibold">{t.name}</h3>
-                    <p className="text-xs text-gray-500 font-mono">VMID {t.vmid} / {t.node}</p>
+                    <p className="text-xs text-gray-500 font-mono">VMID {t.vmid} / {displayNode(t.node)}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -157,7 +158,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
   const [form, setForm] = useState({
     name: template?.name || '',
     description: template?.description || '',
-    node: template?.node || '',
+    node: template?.nodeRef || template?.node || '',
     vmid: template?.vmid || '',
     defaultCores: template?.default_cores || 2,
     defaultMemoryGb: template ? Math.round(template.default_memory / 1024 * 10) / 10 : 2,
@@ -247,7 +248,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
     } finally { setSaving(false); }
   };
 
-  const uniqueNodes = [...new Set(nodes.map(n => n.node))];
+  const uniqueNodes = nodes;
   const templateVms = pveVms.filter(v => v.template);
   const regularVms = pveVms.filter(v => !v.template);
 
@@ -265,7 +266,11 @@ function TemplateFormModal({ template, onClose, onSaved }) {
                 required
               >
                 <option value="">Select node...</option>
-                {uniqueNodes.map(n => <option key={n} value={n}>{n}</option>)}
+                {uniqueNodes.map(n => (
+                  <option key={routeNode(n)} value={routeNode(n)}>
+                    {displayNode(n.node)}{n.hostName ? ` (${n.hostName})` : ''}
+                  </option>
+                ))}
               </select>
             </div>
 

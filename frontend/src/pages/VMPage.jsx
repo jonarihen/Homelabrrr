@@ -8,6 +8,7 @@ import SSHModal from '../components/SSHModal.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import useSSHConfig from '../hooks/useSSHConfig.js';
 import api from '../api.js';
+import { displayNode, routeNode } from '../utils/nodeRef.js';
 
 // ── Formatters ───────────────────────────────────────────────────────────────
 
@@ -146,7 +147,12 @@ export default function VMPage() {
   const loadVm = useCallback(async () => {
     try {
       const r = await api.get(`/vms/${node}/${vmid}/status`);
-      setVm({ ...r.data, node, vmid: parseInt(vmid) });
+      setVm({
+        ...r.data,
+        nodeRef: r.data.nodeRef || node,
+        node: r.data.node || displayNode(node),
+        vmid: parseInt(vmid, 10),
+      });
       setError('');
     } catch (e) {
       if (e.response?.status === 403) setError('VM not found or not assigned to you');
@@ -248,7 +254,7 @@ export default function VMPage() {
             </button>
             <div>
               <h1 className="text-2xl font-bold text-white tracking-tight">{vm.name || `VM ${vm.vmid}`}</h1>
-              <p className="text-sm text-gray-500 font-mono mt-0.5">VMID {vm.vmid} / {vm.node}</p>
+              <p className="text-sm text-gray-500 font-mono mt-0.5">VMID {vm.vmid} / {displayNode(vm.node)}</p>
             </div>
           </div>
           <StatusBadge status={vm.status} />
@@ -291,7 +297,7 @@ export default function VMPage() {
                 <ActionBtn color="blue" onClick={() => setVncModal(true)} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" strokeLinecap="round" /></svg>
                 }>VNC</ActionBtn>
-                <ActionBtn color="blue" onClick={() => window.open(`/vnc/${vm.node}/${vm.vmid}`, '_blank', 'noopener')} icon={
+                <ActionBtn color="blue" onClick={() => window.open(`/vnc/${routeNode(vm)}/${vm.vmid}`, '_blank', 'noopener')} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
                 }>VNC Tab</ActionBtn>
                 <ActionBtn color="blue" onClick={() => setSshModal(true)} icon={

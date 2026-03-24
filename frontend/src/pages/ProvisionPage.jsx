@@ -4,6 +4,7 @@ import Layout from '../components/Layout.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
+import { displayNode, routeNode } from '../utils/nodeRef.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-all ${active ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`;
@@ -102,7 +103,7 @@ function CloneForm() {
   // Fetch storages when a template is selected
   useEffect(() => {
     if (!selected) return;
-    api.get(`/provision/nodes/${selected.node}/storages`)
+    api.get(`/provision/nodes/${routeNode(selected)}/storages`)
       .then(r => setStorages(r.data))
       .catch(() => setStorages([]));
   }, [selected]);
@@ -134,7 +135,7 @@ function CloneForm() {
         assignTo: form.assignTo || undefined,
         vlanTag: form.vlanTag || undefined,
       });
-      navigate(`/vm/${r.data.node}/${r.data.vmid}`);
+      navigate(`/vm/${routeNode(r.data)}/${r.data.vmid}`);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to create VM');
     } finally { setSaving(false); }
@@ -177,7 +178,7 @@ function CloneForm() {
                 </div>
                 <div>
                   <h3 className="text-white font-semibold group-hover:text-blue-400 transition-colors">{t.name}</h3>
-                  <p className="text-xs text-gray-500 font-mono">{t.node} / VMID {t.vmid}</p>
+                  <p className="text-xs text-gray-500 font-mono">{displayNode(t.node)} / VMID {t.vmid}</p>
                 </div>
               </div>
               {t.description && <p className="text-xs text-gray-500 mb-2">{t.description}</p>}
@@ -220,7 +221,7 @@ function CloneForm() {
           </div>
           <div>
             <h3 className="text-white font-semibold">Cloning: {selected.name}</h3>
-            <p className="text-xs text-gray-500 font-mono">{selected.node} / VMID {selected.vmid}</p>
+            <p className="text-xs text-gray-500 font-mono">{displayNode(selected.node)} / VMID {selected.vmid}</p>
           </div>
         </div>
 
@@ -384,13 +385,13 @@ function CreateForm() {
         assignTo: form.assignTo || undefined,
         vlanTag: form.vlanTag || undefined,
       });
-      navigate(`/vm/${r.data.node}/${r.data.vmid}`);
+      navigate(`/vm/${routeNode(r.data)}/${r.data.vmid}`);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to create VM');
     } finally { setSaving(false); }
   };
 
-  const uniqueNodes = [...new Set(nodes.map(n => n.node))];
+  const uniqueNodes = nodes;
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
@@ -412,7 +413,11 @@ function CreateForm() {
             <label className="block text-xs text-gray-400 mb-1.5 font-medium">Node</label>
             <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
               <option value="">Select node...</option>
-              {uniqueNodes.map(n => <option key={n} value={n}>{n}</option>)}
+              {uniqueNodes.map(n => (
+                <option key={routeNode(n)} value={routeNode(n)}>
+                  {displayNode(n.node)}{n.hostName ? ` (${n.hostName})` : ''}
+                </option>
+              ))}
             </select>
           </div>
           <div>
@@ -556,6 +561,7 @@ function RecentProvisions() {
     creating: 'bg-yellow-500/10 text-yellow-400 ring-yellow-500/20',
     configuring: 'bg-blue-500/10 text-blue-400 ring-blue-500/20',
     ready: 'bg-green-500/10 text-green-400 ring-green-500/20',
+    warning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
     error: 'bg-red-500/10 text-red-400 ring-red-500/20',
     timeout: 'bg-red-500/10 text-red-400 ring-red-500/20',
   };
@@ -579,9 +585,16 @@ function RecentProvisions() {
               <tr
                 key={j.id}
                 className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 cursor-pointer transition-colors"
-                onClick={() => j.status === 'ready' && navigate(`/vm/${j.node}/${j.vmid}`)}
+                onClick={() => ['ready', 'warning'].includes(j.status) && navigate(`/vm/${routeNode(j)}/${j.vmid}`)}
               >
-                <td className="px-4 py-3 text-white font-medium">{j.name}</td>
+                <td className="px-4 py-3">
+                  <p className="text-white font-medium">{j.name}</p>
+                  {j.status_detail && (
+                    <p className={`text-xs mt-1 ${j.status === 'warning' ? 'text-amber-400' : 'text-gray-500'}`}>
+                      {j.status_detail}
+                    </p>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-gray-400 font-mono">{j.vmid}</td>
                 <td className="px-4 py-3 text-gray-500 text-xs">{j.template_name || '—'}</td>
                 <td className="px-4 py-3">

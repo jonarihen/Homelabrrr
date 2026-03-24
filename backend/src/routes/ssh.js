@@ -7,6 +7,7 @@ import { join } from 'path';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
+import { nodeLookupCandidates } from '../utils/nodeRef.js';
 import { normalizeSshHostFingerprint, scanSshHostFingerprint } from '../utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 
@@ -45,6 +46,28 @@ router.use(requireAuth);
 
 // SSH session store (token → { host, port, username, privateKey, expires })
 export const sshSessions = new Map();
+
+function getGlobalSshConfig(node, vmid) {
+  const parsedVmid = parseInt(vmid, 10);
+  for (const candidate of nodeLookupCandidates(node)) {
+    const row = db.prepare(
+      'SELECT host, port, host_fingerprint FROM vm_ssh_configs WHERE node = ? AND vmid = ?'
+    ).get(candidate, parsedVmid);
+    if (row) return row;
+  }
+  return null;
+}
+
+function getUserSshConfig(userId, node, vmid) {
+  const parsedVmid = parseInt(vmid, 10);
+  for (const candidate of nodeLookupCandidates(node)) {
+    const row = db.prepare(
+      'SELECT username FROM vm_ssh_user_configs WHERE user_id = ? AND node = ? AND vmid = ?'
+    ).get(userId, candidate, parsedVmid);
+    if (row) return row;
+  }
+  return null;
+}
 
 // ─── SSH Keys ────────────────────────────────────────────────────────────────
 
@@ -111,10 +134,8 @@ router.get('/config/:node/:vmid', (req, res) => {
   if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const global = db.prepare('SELECT host, port, host_fingerprint FROM vm_ssh_configs WHERE node = ? AND vmid = ?')
-    .get(node, parseInt(vmid));
-  const userRow = db.prepare('SELECT username FROM vm_ssh_user_configs WHERE user_id = ? AND node = ? AND vmid = ?')
-    .get(req.session.userId, node, parseInt(vmid));
+  const global = getGlobalSshConfig(node, vmid);
+  const userRow = getUserSshConfig(req.session.userId, node, vmid);
   if (!global && !userRow) return res.json(null);
   res.json({
     host: global?.host || null,
@@ -184,10 +205,8 @@ router.post('/connect', (req, res) => {
     .get(keyId, req.session.userId);
   if (!key) return res.status(404).json({ error: 'SSH key not found' });
 
-  const global = db.prepare('SELECT host, port, host_fingerprint FROM vm_ssh_configs WHERE node = ? AND vmid = ?')
-    .get(node, parseInt(vmid));
-  const userRow = db.prepare('SELECT username FROM vm_ssh_user_configs WHERE user_id = ? AND node = ? AND vmid = ?')
-    .get(req.session.userId, node, parseInt(vmid));
+  const global = getGlobalSshConfig(node, vmid);
+  const userRow = getUserSshConfig(req.session.userId, node, vmid);
 
   if (!global?.host) {
     return res.status(400).json({ error: 'SSH host is not configured for this VM' });
