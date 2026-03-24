@@ -1,6 +1,16 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+
+const inputCls = 'w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
+
+const SERVICE_PRESETS = [
+  { label: 'SSH',    port: 22,   protocol: 'tcp' },
+  { label: 'HTTP',   port: 80,   protocol: 'tcp' },
+  { label: 'HTTPS',  port: 443,  protocol: 'tcp' },
+  { label: 'RDP',    port: 3389, protocol: 'tcp' },
+  { label: 'Custom', port: null, protocol: 'tcp' },
+];
 
 export default function PortForwardingPage() {
   useDocumentTitle('Port Forwarding');
@@ -11,7 +21,8 @@ export default function PortForwardingPage() {
 
   const [vips, setVips] = useState([]);
   const [interfaces, setInterfaces] = useState([]);
-  const [addressObjects, setAddressObjects] = useState([]);
+  const [vmTargets, setVmTargets] = useState([]);
+  const [tagToInterface, setTagToInterface] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -25,8 +36,10 @@ export default function PortForwardingPage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
   const [form, setForm] = useState({
-    name: '', protocol: 'tcp', extPort: '', mappedIp: '', mappedPort: '',
-    dstInterface: '', srcAddresses: 'all',
+    vmKey: '', service: 'SSH', protocol: 'tcp',
+    extPort: '', mappedPort: '', name: '',
+    dstInterface: '', mappedIp: '',
+    customProtocol: 'tcp',
   });
 
   const [deleting, setDeleting] = useState(null);
@@ -42,7 +55,7 @@ export default function PortForwardingPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Load VIPs + interfaces when firewall changes
+  // Load VIPs + interfaces + VM targets when firewall changes
   const loadData = useCallback(async () => {
     if (!selectedFw) return;
     setLoading(true);
@@ -53,20 +66,15 @@ export default function PortForwardingPage() {
         setFwConfig({ external_ip: fw.external_ip || '', root_wan_zone: fw.root_wan_zone || 'underlay' });
         setWanForm({ externalIp: fw.external_ip || '', rootWanZone: fw.root_wan_zone || 'underlay' });
       }
-      const [vipsRes, ifacesRes, addrsRes] = await Promise.all([
+      const [vipsRes, ifacesRes, targetsRes] = await Promise.all([
         api.get(`/admin/firewalls/${selectedFw}/vips`),
         api.get(`/admin/firewalls/${selectedFw}/root-interfaces`),
-        api.get(`/admin/firewalls/${selectedFw}/root-addresses`),
+        api.get(`/admin/firewalls/${selectedFw}/vm-targets`),
       ]);
       setVips(vipsRes.data);
       setInterfaces(ifacesRes.data);
-      // Combine address objects + groups for dropdown
-      const addrs = [
-        { name: 'all', label: 'all (no restriction)' },
-        ...(addrsRes.data.groups || []).map(g => ({ name: g.name, label: `[Group] ${g.name}` })),
-        ...(addrsRes.data.addresses || []).map(a => ({ name: a.name, label: a.name })),
-      ];
-      setAddressObjects(addrs);
+      setVmTargets(targetsRes.data.targets || []);
+      setTagToInterface(targetsRes.data.tagToInterface || {});
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load port forwarding data');
     } finally {
@@ -76,9 +84,78 @@ export default function PortForwardingPage() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Selected VM details
+  const selectedVm = useMemo(() => {
+    if (!form.vmKey) return null;
+    return vmTargets.find(v => `${v.node}/${v.vmid}` === form.vmKey) || null;
+  }, [form.vmKey, vmTargets]);
+
+  // Resolve VLAN tag → dst interface when VM changes
+  const resolveVmInterface = useCallback(async (node, vmid) => {
+    try {
+      const r = await api.get(`/vms/${node}/${vmid}/config`);
+      const cfg = r.data;
+      const net0 = cfg.net0 || '';
+      const tagMatch = net0.match(/tag=(\d+)/);
+      if (tagMatch) {
+        const tag = parseInt(tagMatch[1]);
+        const iface = tagToInterface[tag];
+        if (iface) return { dstInterface: iface, vlanTag: tag };
+      }
+    } catch { /* ignore */ }
+    return { dstInterface: '', vlanTag: null };
+  }, [tagToInterface]);
+
+  // When VM selection changes, auto-fill IP, interface, and name
+  const handleVmChange = async (vmKey) => {
+    if (!vmKey) {
+      setForm(f => ({ ...f, vmKey: '', mappedIp: '', dstInterface: '', name: '' }));
+      return;
+    }
+    const vm = vmTargets.find(v => `${v.node}/${v.vmid}` === vmKey);
+    if (!vm) return;
+
+    setForm(f => ({ ...f, vmKey, mappedIp: vm.ip }));
+
+    const { dstInterface } = await resolveVmInterface(vm.node, vm.vmid);
+    const preset = SERVICE_PRESETS.find(s => s.label === form.service);
+    const svcLabel = form.service === 'Custom' ? 'Custom' : form.service;
+    setForm(f => ({
+      ...f,
+      vmKey,
+      mappedIp: vm.ip,
+      dstInterface: dstInterface || f.dstInterface,
+      name: `${vm.name} - ${svcLabel}`,
+    }));
+  };
+
+  // When service selection changes, update ports and name
+  const handleServiceChange = (serviceLabel) => {
+    const preset = SERVICE_PRESETS.find(s => s.label === serviceLabel);
+    const vm = selectedVm;
+    const vmName = vm?.name || '';
+    if (preset && preset.port) {
+      setForm(f => ({
+        ...f,
+        service: serviceLabel,
+        protocol: preset.protocol,
+        mappedPort: String(preset.port),
+        extPort: f.extPort || String(preset.port),
+        name: vmName ? `${vmName} - ${serviceLabel}` : f.name,
+      }));
+    } else {
+      setForm(f => ({
+        ...f,
+        service: serviceLabel,
+        mappedPort: '',
+        name: vmName ? `${vmName} - Custom` : f.name,
+      }));
+    }
+  };
+
   // Live port conflict check
   const portConflict = form.extPort
-    ? vips.find(v => String(v.extport) === String(form.extPort) && (v.protocol || 'tcp') === form.protocol)
+    ? vips.find(v => String(v.extport) === String(form.extPort) && (v.protocol || 'tcp') === (form.service === 'Custom' ? form.customProtocol : form.protocol))
     : null;
 
   const saveWanConfig = async () => {
@@ -105,18 +182,23 @@ export default function PortForwardingPage() {
     if (portConflict) return;
     setCreating(true);
     setCreateError('');
+    const proto = form.service === 'Custom' ? form.customProtocol : form.protocol;
     try {
       await api.post(`/admin/firewalls/${selectedFw}/vips`, {
         name: form.name,
-        protocol: form.protocol,
+        protocol: proto,
         extPort: parseInt(form.extPort),
         mappedIp: form.mappedIp,
         mappedPort: parseInt(form.mappedPort),
         dstInterface: form.dstInterface,
-        srcAddresses: form.srcAddresses === 'all' ? ['all'] : [form.srcAddresses],
+        srcAddresses: ['all'],
       });
       setShowCreate(false);
-      setForm({ name: '', protocol: 'tcp', extPort: '', mappedIp: '', mappedPort: '', dstInterface: '', srcAddresses: 'all' });
+      setForm({
+        vmKey: '', service: 'SSH', protocol: 'tcp',
+        extPort: '', mappedPort: '', name: '',
+        dstInterface: '', mappedIp: '', customProtocol: 'tcp',
+      });
       await loadData();
     } catch (err) {
       setCreateError(err.response?.data?.error || 'Failed to create port forward');
@@ -146,6 +228,9 @@ export default function PortForwardingPage() {
   const needsWanConfig = !fwConfig?.external_ip;
   const managedCount = vips.filter(v => v.managed).length;
   const externalCount = vips.filter(v => !v.managed).length;
+
+  const isCustom = form.service === 'Custom';
+  const canSubmit = form.name && form.extPort && form.mappedIp && form.mappedPort && form.dstInterface && !portConflict;
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
@@ -194,23 +279,15 @@ export default function PortForwardingPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">External IP (public IP for VIPs)</label>
-                  <input
-                    type="text"
-                    value={wanForm.externalIp}
+                  <input type="text" value={wanForm.externalIp}
                     onChange={e => setWanForm(p => ({ ...p, externalIp: e.target.value }))}
-                    placeholder="e.g. 46.32.144.243"
-                    className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                  />
+                    placeholder="e.g. 46.32.144.243" className={inputCls} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">WAN zone / interface (root VDOM)</label>
-                  <input
-                    type="text"
-                    value={wanForm.rootWanZone}
+                  <input type="text" value={wanForm.rootWanZone}
                     onChange={e => setWanForm(p => ({ ...p, rootWanZone: e.target.value }))}
-                    placeholder="e.g. underlay"
-                    className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                  />
+                    placeholder="e.g. underlay" className={inputCls} />
                 </div>
               </div>
               <div className="flex gap-2">
@@ -270,91 +347,112 @@ export default function PortForwardingPage() {
         </div>
       )}
 
-      {/* Create form */}
+      {/* Create form — object-based */}
       {showCreate && !needsWanConfig && (
         <div className="bg-gray-900/50 border border-blue-500/20 rounded-xl p-5">
           <h3 className="text-sm font-semibold text-white mb-4">New Port Forward</h3>
           <form onSubmit={handleCreate} className="space-y-4">
+            {/* Row 1: VM + Service */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Name</label>
-                <input type="text" required value={form.name}
-                  onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
-                  placeholder="e.g. WebServer - HTTP"
-                  className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Protocol</label>
-                <select value={form.protocol}
-                  onChange={e => setForm(p => ({ ...p, protocol: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
-                  <option value="tcp">TCP</option>
-                  <option value="udp">UDP</option>
+                <label className="block text-xs text-gray-400 mb-1">Target VM</label>
+                <select value={form.vmKey} onChange={e => handleVmChange(e.target.value)}
+                  className={inputCls} required>
+                  <option value="">Select a VM...</option>
+                  {vmTargets.map(v => (
+                    <option key={`${v.node}/${v.vmid}`} value={`${v.node}/${v.vmid}`}>
+                      {v.name} ({v.ip})
+                    </option>
+                  ))}
                 </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">External Port</label>
-                <input type="number" required min="1" max="65535" value={form.extPort}
-                  onChange={e => setForm(p => ({ ...p, extPort: e.target.value }))}
-                  placeholder="e.g. 8080"
-                  className={`w-full bg-gray-800 border text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 ${
-                    portConflict ? 'border-red-500 focus:ring-red-500 focus:border-red-500' : 'border-gray-700 focus:border-blue-500'
-                  }`}
-                />
-                {portConflict && (
-                  <p className="text-xs text-red-400 mt-1">
-                    Port {form.extPort}/{form.protocol.toUpperCase()} used by &ldquo;{portConflict.name}&rdquo;
-                  </p>
+                {vmTargets.length === 0 && !loading && (
+                  <p className="text-[11px] text-gray-600 mt-1">No VMs with SSH configs found. Configure SSH on a VM first.</p>
                 )}
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Internal IP</label>
-                <input type="text" required value={form.mappedIp}
-                  onChange={e => setForm(p => ({ ...p, mappedIp: e.target.value }))}
-                  placeholder="e.g. 172.21.12.32"
-                  className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Internal Port</label>
-                <input type="number" required min="1" max="65535" value={form.mappedPort}
-                  onChange={e => setForm(p => ({ ...p, mappedPort: e.target.value }))}
-                  placeholder="e.g. 80"
-                  className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Destination Zone (root VDOM interface)</label>
-                <select required value={form.dstInterface}
-                  onChange={e => setForm(p => ({ ...p, dstInterface: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
-                  <option value="">Select interface...</option>
-                  {interfaces.map(i => (
-                    <option key={i.name} value={i.name}>
-                      {i.name}{i.description ? ` (${i.description})` : ''}
+                <label className="block text-xs text-gray-400 mb-1">Service</label>
+                <select value={form.service} onChange={e => handleServiceChange(e.target.value)}
+                  className={inputCls}>
+                  {SERVICE_PRESETS.map(s => (
+                    <option key={s.label} value={s.label}>
+                      {s.label}{s.port ? ` (${s.protocol.toUpperCase()}/${s.port})` : ''}
                     </option>
                   ))}
                 </select>
               </div>
+            </div>
+
+            {/* Row 2: External port + protocol (custom only) + internal port */}
+            <div className={`grid gap-4 ${isCustom ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-1 sm:grid-cols-2'}`}>
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Source Restriction</label>
-                <select value={form.srcAddresses}
-                  onChange={e => setForm(p => ({ ...p, srcAddresses: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
-                  {addressObjects.map(a => (
-                    <option key={a.name} value={a.name}>{a.label || a.name}</option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-gray-600 mt-1">Address object or group to restrict source IPs</p>
+                <label className="block text-xs text-gray-400 mb-1">External Port</label>
+                <input type="number" required min="1" max="65535" value={form.extPort}
+                  onChange={e => setForm(f => ({ ...f, extPort: e.target.value }))}
+                  placeholder="e.g. 2222"
+                  className={`${inputCls} ${portConflict ? '!border-red-500 !focus:ring-red-500' : ''}`}
+                />
+                {portConflict && (
+                  <p className="text-xs text-red-400 mt-1">
+                    Port {form.extPort}/{(isCustom ? form.customProtocol : form.protocol).toUpperCase()} used by &ldquo;{portConflict.name}&rdquo;
+                  </p>
+                )}
+              </div>
+              {isCustom && (
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Protocol</label>
+                  <select value={form.customProtocol}
+                    onChange={e => setForm(f => ({ ...f, customProtocol: e.target.value }))}
+                    className={inputCls}>
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                </div>
+              )}
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Internal Port</label>
+                <input type="number" required min="1" max="65535" value={form.mappedPort}
+                  onChange={e => setForm(f => ({ ...f, mappedPort: e.target.value }))}
+                  placeholder={isCustom ? 'e.g. 8080' : ''}
+                  className={inputCls}
+                  readOnly={!isCustom}
+                />
+                {!isCustom && <p className="text-[11px] text-gray-600 mt-1">Set by service preset</p>}
               </div>
             </div>
+
+            {/* Auto-resolved fields — shown as read-only context */}
+            {selectedVm && (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-gray-800/30 rounded-lg p-3 border border-gray-800/50">
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-0.5">Internal IP (from SSH config)</label>
+                  <span className="text-sm text-white font-mono">{form.mappedIp || '—'}</span>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-0.5">Destination Interface</label>
+                  {form.dstInterface ? (
+                    <span className="text-sm text-white font-mono">{form.dstInterface}</span>
+                  ) : (
+                    <select value={form.dstInterface} onChange={e => setForm(f => ({ ...f, dstInterface: e.target.value }))}
+                      className="bg-gray-800 border border-yellow-600/40 text-white text-sm rounded px-2 py-0.5 text-xs">
+                      <option value="">Select manually...</option>
+                      {interfaces.map(i => (
+                        <option key={i.name} value={i.name}>{i.name}</option>
+                      ))}
+                    </select>
+                  )}
+                  {!form.dstInterface && (
+                    <p className="text-[11px] text-yellow-500/80 mt-0.5">Could not auto-detect from VM VLAN</p>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-0.5">Rule Name</label>
+                  <input type="text" value={form.name}
+                    onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                    className="bg-transparent border-none text-sm text-white p-0 focus:outline-none focus:ring-0 w-full"
+                    required />
+                </div>
+              </div>
+            )}
 
             {createError && (
               <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-sm text-red-400">
@@ -363,7 +461,7 @@ export default function PortForwardingPage() {
             )}
 
             <div className="flex gap-2 pt-1">
-              <button type="submit" disabled={creating || !!portConflict}
+              <button type="submit" disabled={creating || !canSubmit}
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors">
                 {creating ? 'Creating...' : 'Create Port Forward'}
               </button>

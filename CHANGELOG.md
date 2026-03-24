@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-03-24 — Object-based port forwarding
+
+### Port forwarding redesign
+- The create form is now VM-centric: pick a target VM, pick a service, set the external port — everything else is auto-resolved
+- VM dropdown is populated from VMs that have SSH configs (which means they have a known internal IP)
+- Service presets (SSH, HTTP, HTTPS, RDP) auto-fill internal port and protocol; "Custom" allows free entry of port and protocol
+- Internal IP is auto-filled from the VM's SSH config; destination interface is auto-resolved from the VM's VLAN tag via the `firewall_vlan_sync` table
+- Rule name is auto-generated as `{VM name} - {Service}` but remains editable
+- If the VLAN→interface mapping can't be resolved (VM not on a synced VLAN), a manual interface picker falls back
+- New backend endpoint `GET /admin/firewalls/:id/vm-targets` returns all VMs with SSH IPs and VLAN-to-interface mappings
+- Removed source address restriction from the create form (always `all`) — this was rarely used and added complexity
+- VIP table, WAN config, managed/external badges, port conflict detection, and delete flow are unchanged
+
 ## 2026-03-23 — Scoped VLAN management for delegated users
 
 ### Rebuilt template registration form
