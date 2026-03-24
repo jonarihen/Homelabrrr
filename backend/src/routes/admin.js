@@ -1310,13 +1310,12 @@ router.get('/firewalls/:id/root-addresses', pFirewalls, async (req, res) => {
   }
 });
 
-// VM targets for port forwarding — returns VMs with their SSH IPs and VLAN info
+// VM targets for port forwarding — returns VMs with their SSH IPs, VLAN tags, and resolved interfaces
 router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const vms = await getAllVMs();
-    // Get all SSH configs and VLAN sync info
     const sshConfigs = db.prepare('SELECT node, vmid, host, port FROM vm_ssh_configs').all();
     const sshMap = new Map(sshConfigs.map(s => [`${s.node}/${s.vmid}`, s]));
     const vlanSyncs = db.prepare(
@@ -1324,24 +1323,44 @@ router.get('/firewalls/:id/vm-targets', pFirewalls, async (req, res) => {
     ).all(fw.id);
     const tagToInterface = new Map(vlanSyncs.map(vs => [vs.tag, vs.interface_name]));
 
-    const targets = vms
-      .filter(v => v.type === 'qemu' || v.type === 'lxc')
-      .map(v => {
-        const ssh = sshMap.get(`${v.node}/${v.vmid}`);
-        return {
-          node: v.node,
-          vmid: v.vmid,
-          name: v.name || `VM ${v.vmid}`,
-          status: v.status,
-          type: v.type,
-          ip: ssh?.host || '',
-          sshPort: ssh?.port || 22,
-        };
+    // Fetch VM configs in parallel to get VLAN tags
+    const vmList = vms.filter(v => (v.type === 'qemu' || v.type === 'lxc') && sshMap.has(`${v.node}/${v.vmid}`));
+    const configResults = await Promise.allSettled(
+      vmList.map(async v => {
+        try {
+          const { getVMConfig } = await import('../proxmox.js');
+          const cfg = await getVMConfig(v.node, v.vmid);
+          const net0 = cfg.net0 || '';
+          const tagMatch = net0.match(/tag=(\d+)/);
+          return { key: `${v.node}/${v.vmid}`, vlanTag: tagMatch ? parseInt(tagMatch[1]) : null };
+        } catch {
+          return { key: `${v.node}/${v.vmid}`, vlanTag: null };
+        }
       })
-      .filter(v => v.ip) // only VMs with a configured SSH IP
-      .sort((a, b) => a.name.localeCompare(b.name));
+    );
+    const vlanTagMap = new Map();
+    for (const r of configResults) {
+      if (r.status === 'fulfilled') vlanTagMap.set(r.value.key, r.value.vlanTag);
+    }
 
-    res.json({ targets, tagToInterface: Object.fromEntries(tagToInterface) });
+    const targets = vmList.map(v => {
+      const ssh = sshMap.get(`${v.node}/${v.vmid}`);
+      const vlanTag = vlanTagMap.get(`${v.node}/${v.vmid}`) || null;
+      const dstInterface = vlanTag ? (tagToInterface.get(vlanTag) || '') : '';
+      return {
+        node: v.node,
+        vmid: v.vmid,
+        name: v.name || `VM ${v.vmid}`,
+        status: v.status,
+        type: v.type,
+        ip: ssh?.host || '',
+        sshPort: ssh?.port || 22,
+        vlanTag,
+        dstInterface,
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({ targets });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }

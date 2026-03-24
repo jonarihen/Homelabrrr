@@ -22,7 +22,6 @@ export default function PortForwardingPage() {
   const [vips, setVips] = useState([]);
   const [interfaces, setInterfaces] = useState([]);
   const [vmTargets, setVmTargets] = useState([]);
-  const [tagToInterface, setTagToInterface] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -37,10 +36,11 @@ export default function PortForwardingPage() {
   const [createError, setCreateError] = useState('');
   const [form, setForm] = useState({
     vmKey: '', service: 'SSH', protocol: 'tcp',
-    extPort: '', mappedPort: '', name: '',
+    extPort: '', mappedPort: '22', name: '',
     dstInterface: '', mappedIp: '',
     customProtocol: 'tcp',
   });
+  const [attempted, setAttempted] = useState(false);
 
   const [deleting, setDeleting] = useState(null);
 
@@ -74,7 +74,6 @@ export default function PortForwardingPage() {
       setVips(vipsRes.data);
       setInterfaces(ifacesRes.data);
       setVmTargets(targetsRes.data.targets || []);
-      setTagToInterface(targetsRes.data.tagToInterface || {});
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load port forwarding data');
     } finally {
@@ -90,24 +89,8 @@ export default function PortForwardingPage() {
     return vmTargets.find(v => `${v.node}/${v.vmid}` === form.vmKey) || null;
   }, [form.vmKey, vmTargets]);
 
-  // Resolve VLAN tag → dst interface when VM changes
-  const resolveVmInterface = useCallback(async (node, vmid) => {
-    try {
-      const r = await api.get(`/vms/${node}/${vmid}/config`);
-      const cfg = r.data;
-      const net0 = cfg.net0 || '';
-      const tagMatch = net0.match(/tag=(\d+)/);
-      if (tagMatch) {
-        const tag = parseInt(tagMatch[1]);
-        const iface = tagToInterface[tag];
-        if (iface) return { dstInterface: iface, vlanTag: tag };
-      }
-    } catch { /* ignore */ }
-    return { dstInterface: '', vlanTag: null };
-  }, [tagToInterface]);
-
-  // When VM selection changes, auto-fill IP, interface, and name
-  const handleVmChange = async (vmKey) => {
+  // When VM selection changes, auto-fill IP, interface, and name from pre-resolved data
+  const handleVmChange = (vmKey) => {
     if (!vmKey) {
       setForm(f => ({ ...f, vmKey: '', mappedIp: '', dstInterface: '', name: '' }));
       return;
@@ -115,16 +98,12 @@ export default function PortForwardingPage() {
     const vm = vmTargets.find(v => `${v.node}/${v.vmid}` === vmKey);
     if (!vm) return;
 
-    setForm(f => ({ ...f, vmKey, mappedIp: vm.ip }));
-
-    const { dstInterface } = await resolveVmInterface(vm.node, vm.vmid);
-    const preset = SERVICE_PRESETS.find(s => s.label === form.service);
     const svcLabel = form.service === 'Custom' ? 'Custom' : form.service;
     setForm(f => ({
       ...f,
       vmKey,
       mappedIp: vm.ip,
-      dstInterface: dstInterface || f.dstInterface,
+      dstInterface: vm.dstInterface || f.dstInterface,
       name: `${vm.name} - ${svcLabel}`,
     }));
   };
@@ -177,9 +156,20 @@ export default function PortForwardingPage() {
     }
   };
 
+  // Compute missing fields for validation feedback
+  const missingFields = [];
+  if (!form.vmKey) missingFields.push('Target VM');
+  if (!form.extPort) missingFields.push('External Port');
+  if (!form.mappedPort) missingFields.push('Internal Port');
+  if (!form.mappedIp) missingFields.push('Internal IP');
+  if (!form.dstInterface) missingFields.push('Destination Interface');
+  if (!form.name) missingFields.push('Rule Name');
+  if (portConflict) missingFields.push(`Port ${form.extPort} already in use`);
+
   const handleCreate = async (e) => {
     e.preventDefault();
-    if (portConflict) return;
+    setAttempted(true);
+    if (missingFields.length > 0) return;
     setCreating(true);
     setCreateError('');
     const proto = form.service === 'Custom' ? form.customProtocol : form.protocol;
@@ -196,9 +186,10 @@ export default function PortForwardingPage() {
       setShowCreate(false);
       setForm({
         vmKey: '', service: 'SSH', protocol: 'tcp',
-        extPort: '', mappedPort: '', name: '',
+        extPort: '', mappedPort: '22', name: '',
         dstInterface: '', mappedIp: '', customProtocol: 'tcp',
       });
+      setAttempted(false);
       await loadData();
     } catch (err) {
       setCreateError(err.response?.data?.error || 'Failed to create port forward');
@@ -230,7 +221,7 @@ export default function PortForwardingPage() {
   const externalCount = vips.filter(v => !v.managed).length;
 
   const isCustom = form.service === 'Custom';
-  const canSubmit = form.name && form.extPort && form.mappedIp && form.mappedPort && form.dstInterface && !portConflict;
+  const canSubmit = missingFields.length === 0;
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
@@ -242,7 +233,7 @@ export default function PortForwardingPage() {
         </div>
         {!needsWanConfig && !loading && (
           <button
-            onClick={() => { setShowCreate(!showCreate); setCreateError(''); }}
+            onClick={() => { setShowCreate(!showCreate); setCreateError(''); setAttempted(false); }}
             className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
               showCreate
                 ? 'bg-gray-700 hover:bg-gray-600 text-gray-300'
@@ -460,12 +451,18 @@ export default function PortForwardingPage() {
               </div>
             )}
 
+            {attempted && !canSubmit && (
+              <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2 text-sm text-yellow-400">
+                Missing: {missingFields.join(', ')}
+              </div>
+            )}
+
             <div className="flex gap-2 pt-1">
-              <button type="submit" disabled={creating || !canSubmit}
+              <button type="submit" disabled={creating}
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors">
                 {creating ? 'Creating...' : 'Create Port Forward'}
               </button>
-              <button type="button" onClick={() => { setShowCreate(false); setCreateError(''); }}
+              <button type="button" onClick={() => { setShowCreate(false); setCreateError(''); setAttempted(false); }}
                 className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">
                 Cancel
               </button>
