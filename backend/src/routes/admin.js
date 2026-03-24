@@ -460,7 +460,11 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
             try { await client.deletePolicy(pf.policy_id, rootVdom); }
             catch (e) { console.warn(`[delete-vlan] Root policy ${pf.policy_id} cleanup:`, e.message); }
           }
-          // Lab policy will be cleaned up by deprovisionVlan's policy sweep below
+          if (pf.lab_policy_id) {
+            const labVdom = sync.vdom || 'lab';
+            try { await client.deletePolicy(pf.lab_policy_id, labVdom); }
+            catch (e) { console.warn(`[delete-vlan] Lab policy ${pf.lab_policy_id} cleanup:`, e.message); }
+          }
           // Delete VIP from root VDOM
           try { await client.deleteVip(pf.vip_name, rootVdom); }
           catch (e) { console.warn(`[delete-vlan] VIP ${pf.vip_name} cleanup:`, e.message); }
@@ -468,6 +472,15 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
           if (pf.service_name) {
             try { await client.deleteServiceObject(pf.service_name, rootVdom); }
             catch (e) { console.warn(`[delete-vlan] Service ${pf.service_name} cleanup:`, e.message); }
+            const labVdom = sync.vdom || 'lab';
+            try { await client.deleteServiceObject(pf.service_name, labVdom); }
+            catch (e) { console.warn(`[delete-vlan] Lab service ${pf.service_name} cleanup:`, e.message); }
+          }
+          if (pf.vlan_interface) {
+            const labVdom = sync.vdom || 'lab';
+            const labAddressName = buildManagedVipAddressName(pf.vip_name, pf.mapped_ip);
+            try { await client.deleteAddressObject(labAddressName, labVdom); }
+            catch (e) { console.warn(`[delete-vlan] Lab address ${labAddressName} cleanup:`, e.message); }
           }
           // Remove DB record
           db.prepare('DELETE FROM managed_vips WHERE id = ?').run(pf.id);
@@ -1246,8 +1259,8 @@ function buildManagedVipServiceName(vipName, protocol, extPort) {
   return `VMM-PF-${protocol.toUpperCase()}-${extPort}-${safeName}`;
 }
 
-function managedVipServiceMatches(service, protocol, extPort) {
-  const port = String(extPort);
+function managedVipServiceMatches(service, protocol, portNumber) {
+  const port = String(portNumber);
   const tcpRange = String(service?.['tcp-portrange'] || '').trim();
   const udpRange = String(service?.['udp-portrange'] || '').trim();
 
@@ -1255,6 +1268,25 @@ function managedVipServiceMatches(service, protocol, extPort) {
     return udpRange === port && !tcpRange;
   }
   return tcpRange === port && !udpRange;
+}
+
+function buildManagedVipAddressName(vipName, mappedIp) {
+  const safeName = String(vipName || 'vip')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24) || 'vip';
+  const safeIp = String(mappedIp || '')
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24) || 'host';
+  return `VMM-PF-HOST-${safeIp}-${safeName}`;
+}
+
+function managedVipAddressMatches(address, mappedIp) {
+  const subnet = String(address?.subnet || '').trim();
+  return String(address?.type || 'ipmask') === 'ipmask' && subnet === `${mappedIp} 255.255.255.255`;
 }
 
 // Update WAN config (external IP + WAN zone) from the port forwarding page
@@ -1430,14 +1462,19 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
     return res.status(400).json({ error: 'Firewall has no external IP configured. Set it in WAN config first.' });
   }
 
-  const serviceName = buildManagedVipServiceName(name, protocol, extPort);
-  let createdService = false;
+  const serviceName = buildManagedVipServiceName(name, protocol, mappedPort);
+  const labAddressName = vlanInterface ? buildManagedVipAddressName(name, mappedIp) : '';
+  let createdRootService = false;
+  let createdLabService = false;
+  let createdLabAddress = false;
   let vipCreated = false;
   let policyId = null;
+  let labPolicyId = null;
 
   try {
     const { client, rootVdom } = getRootClient(fw);
     const wanZone = fw.root_wan_zone || 'underlay';
+    const labVdom = fw.vdom || 'lab';
 
     // Check for port conflict across ALL existing VIPs
     const allVips = await client.getVips(rootVdom);
@@ -1459,16 +1496,45 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
     }
 
     const existingService = await client.getServiceObject(serviceName, rootVdom);
-    if (existingService && !managedVipServiceMatches(existingService, protocol, extPort)) {
+    if (existingService && !managedVipServiceMatches(existingService, protocol, mappedPort)) {
       return res.status(409).json({ error: `A managed service object named "${serviceName}" already exists with different port settings` });
     }
     if (!existingService) {
       await client.createServiceObject({
         name: serviceName,
         comment: `Managed port forward service for ${name}`,
-        ...(protocol === 'udp' ? { 'udp-portrange': String(extPort) } : { 'tcp-portrange': String(extPort) }),
+        ...(protocol === 'udp' ? { 'udp-portrange': String(mappedPort) } : { 'tcp-portrange': String(mappedPort) }),
       }, rootVdom);
-      createdService = true;
+      createdRootService = true;
+    }
+
+    if (vlanInterface) {
+      const existingLabService = await client.getServiceObject(serviceName, labVdom);
+      if (existingLabService && !managedVipServiceMatches(existingLabService, protocol, mappedPort)) {
+        return res.status(409).json({ error: `A lab VDOM service object named "${serviceName}" already exists with different port settings` });
+      }
+      if (!existingLabService) {
+        await client.createServiceObject({
+          name: serviceName,
+          comment: `Managed port forward service for ${name}`,
+          ...(protocol === 'udp' ? { 'udp-portrange': String(mappedPort) } : { 'tcp-portrange': String(mappedPort) }),
+        }, labVdom);
+        createdLabService = true;
+      }
+
+      const existingLabAddress = await client.getAddressObject(labAddressName, labVdom);
+      if (existingLabAddress && !managedVipAddressMatches(existingLabAddress, mappedIp)) {
+        return res.status(409).json({ error: `A lab VDOM address object named "${labAddressName}" already exists with a different IP` });
+      }
+      if (!existingLabAddress) {
+        await client.createAddressObject({
+          name: labAddressName,
+          type: 'ipmask',
+          subnet: `${mappedIp} 255.255.255.255`,
+          comment: `Managed port forward destination for ${name}`,
+        }, '', labVdom);
+        createdLabAddress = true;
+      }
     }
 
     // 1. Create the VIP
@@ -1504,9 +1570,7 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
     policyId = policyRes?.mkey || null;
 
     // 3. Create the lab VDOM policy (inter-VDOM link → VLAN interface)
-    let labPolicyId = null;
     if (vlanInterface) {
-      const labVdom = fw.vdom || 'lab';
       const labSrcInterface = fw.lab_vdom_link || 'lab-root0';
 
       // Find the VLAN's global-label for sequence grouping
@@ -1519,10 +1583,10 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
         srcintf: [{ name: labSrcInterface }],
         dstintf: [{ name: vlanInterface }],
         srcaddr: [{ name: 'all' }],
-        dstaddr: [{ name: 'all' }],
+        dstaddr: [{ name: labAddressName }],
         action: 'accept',
         schedule: 'always',
-        service: [{ name: 'ALL' }],
+        service: [{ name: serviceName }],
         logtraffic: 'all',
         'global-label': vlanGroupLabel,
         comments: `Auto-created by VM Manager for ${name}`,
@@ -1550,28 +1614,25 @@ router.post('/firewalls/:id/vips', pFirewalls, async (req, res) => {
   } catch (err) {
     const { client, rootVdom } = getRootClient(fw);
     try {
-      const existingManaged = db.prepare('SELECT policy_id, lab_policy_id, service_name FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').get(fw.id, name);
-      const cleanupPolicyId = existingManaged?.policy_id || policyId;
-      const cleanupServiceName = existingManaged?.service_name || (createdService ? serviceName : '');
-
-      // Clean up lab VDOM policy
-      const cleanupLabPolicyId = existingManaged?.lab_policy_id;
-      if (cleanupLabPolicyId) {
-        const labVdom = fw.vdom || 'lab';
-        try { await client.deletePolicy(cleanupLabPolicyId, labVdom); } catch {}
+      const labVdom = fw.vdom || 'lab';
+      if (labPolicyId) {
+        try { await client.deletePolicy(labPolicyId, labVdom); } catch {}
       }
 
-      if (cleanupPolicyId) {
-        try { await client.deletePolicy(cleanupPolicyId, rootVdom); } catch {}
+      if (policyId) {
+        try { await client.deletePolicy(policyId, rootVdom); } catch {}
       }
-      if (vipCreated || existingManaged) {
+      if (vipCreated) {
         try { await client.deleteVip(name, rootVdom); } catch {}
       }
-      if (cleanupServiceName) {
-        try { await client.deleteServiceObject(cleanupServiceName, rootVdom); } catch {}
+      if (createdLabAddress && labAddressName) {
+        try { await client.deleteAddressObject(labAddressName, labVdom); } catch {}
       }
-      if (existingManaged) {
-        db.prepare('DELETE FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').run(fw.id, name);
+      if (createdLabService && serviceName) {
+        try { await client.deleteServiceObject(serviceName, labVdom); } catch {}
+      }
+      if (createdRootService && serviceName) {
+        try { await client.deleteServiceObject(serviceName, rootVdom); } catch {}
       }
     } catch {
       // Best-effort rollback only.
@@ -1628,6 +1689,24 @@ router.delete('/firewalls/:id/vips/:name', pFirewalls, async (req, res) => {
         await client.deleteServiceObject(managed.service_name, rootVdom);
       } catch (e) {
         console.warn(`[vip-delete] Service ${managed.service_name} warning:`, e.message);
+      }
+      if (managed.vlan_interface) {
+        const labVdom = fw.vdom || 'lab';
+        try {
+          await client.deleteServiceObject(managed.service_name, labVdom);
+        } catch (e) {
+          console.warn(`[vip-delete] Lab service ${managed.service_name} warning:`, e.message);
+        }
+      }
+    }
+
+    if (managed.vlan_interface) {
+      const labVdom = fw.vdom || 'lab';
+      const labAddressName = buildManagedVipAddressName(managed.vip_name, managed.mapped_ip);
+      try {
+        await client.deleteAddressObject(labAddressName, labVdom);
+      } catch (e) {
+        console.warn(`[vip-delete] Lab address ${labAddressName} warning:`, e.message);
       }
     }
 

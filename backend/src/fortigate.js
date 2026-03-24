@@ -217,14 +217,14 @@ export class FortiGateAPI {
     return res.results || [];
   }
 
-  async getAddressObject(name) {
+  async getAddressObject(name, vdomOverride = null) {
     try {
-      const res = await this.request('GET', `cmdb/firewall/address/${encodeURIComponent(name)}`);
+      const res = await this.request('GET', `cmdb/firewall/address/${encodeURIComponent(name)}`, null, vdomOverride);
       return res.results?.[0] || null;
     } catch { return null; }
   }
 
-  async createAddressObject(nameOrData, subnet = '') {
+  async createAddressObject(nameOrData, subnet = '', vdomOverride = null) {
     const payload = typeof nameOrData === 'object'
       ? nameOrData
       : {
@@ -232,15 +232,15 @@ export class FortiGateAPI {
           type: 'ipmask',
           subnet,
         };
-    return this.request('POST', 'cmdb/firewall/address', payload);
+    return this.request('POST', 'cmdb/firewall/address', payload, vdomOverride);
   }
 
-  async updateAddressObject(name, data) {
-    return this.request('PUT', `cmdb/firewall/address/${encodeURIComponent(name)}`, data);
+  async updateAddressObject(name, data, vdomOverride = null) {
+    return this.request('PUT', `cmdb/firewall/address/${encodeURIComponent(name)}`, data, vdomOverride);
   }
 
-  async deleteAddressObject(name) {
-    return this.request('DELETE', `cmdb/firewall/address/${encodeURIComponent(name)}`);
+  async deleteAddressObject(name, vdomOverride = null) {
+    return this.request('DELETE', `cmdb/firewall/address/${encodeURIComponent(name)}`, null, vdomOverride);
   }
 
   // ─── Firewall Service Objects ─────────────────────────────────────────────

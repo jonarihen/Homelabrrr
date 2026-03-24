@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-03-24 — Port forwarding policy specificity fix
+
+### Correct service and destination matching
+- Managed port forward service objects now use the mapped internal port instead of the external WAN-facing port, so a forward like `2222 -> 22` generates `TCP/22` policy objects instead of `TCP/2222`
+- The lab VDOM policy for a managed port forward is no longer created as broad `all -> all / ALL`
+- Lab-side rules now target a managed host address object for the mapped internal IP and use the same exact per-forward service object as the root VDOM policy
+
+### Cleanup updates
+- Deleting a managed port forward now also removes the lab VDOM service object and the managed lab-side destination address object
+- VLAN deletion cleanup now removes both root and lab port-forward objects before deprovisioning the VLAN itself
+
 ## 2026-03-24 — Object-based port forwarding
 
 ### VLAN deletion now cleans up port forwards
