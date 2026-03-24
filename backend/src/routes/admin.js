@@ -432,13 +432,56 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
   }
 
   const syncs = db.prepare(`
-    SELECT fvs.*, f.name as fw_name, f.host, f.port, f.api_key, f.vdom, f.verify_tls, f.root_vdom, f.trunk_switch_serial, f.trunk_switch_port
+    SELECT fvs.*, f.id as fw_id, f.name as fw_name, f.host, f.port, f.api_key, f.vdom, f.verify_tls,
+           f.root_vdom, f.root_wan_zone, f.root_vdom_link, f.trunk_switch_serial, f.trunk_switch_port
     FROM firewall_vlan_sync fvs
     JOIN firewalls f ON f.id = fvs.firewall_id
     WHERE fvs.vlan_id = ?
   `).all(req.params.id);
 
   const fwResults = [];
+
+  // 1. Clean up port forwards that target this VLAN's interface
+  for (const sync of syncs) {
+    const vlanIfaceName = sync.interface_name; // e.g. vlan1008
+    const portForwards = db.prepare(
+      'SELECT * FROM managed_vips WHERE firewall_id = ? AND vlan_interface = ?'
+    ).all(sync.fw_id, vlanIfaceName);
+
+    if (portForwards.length > 0) {
+      console.log(`[delete-vlan] Cleaning up ${portForwards.length} port forward(s) on ${sync.fw_name} for ${vlanIfaceName}`);
+      const client = createClient(sync);
+      const rootVdom = sync.root_vdom || 'root';
+
+      for (const pf of portForwards) {
+        try {
+          // Delete root VDOM policy
+          if (pf.policy_id) {
+            try { await client.deletePolicy(pf.policy_id, rootVdom); }
+            catch (e) { console.warn(`[delete-vlan] Root policy ${pf.policy_id} cleanup:`, e.message); }
+          }
+          // Lab policy will be cleaned up by deprovisionVlan's policy sweep below
+          // Delete VIP from root VDOM
+          try { await client.deleteVip(pf.vip_name, rootVdom); }
+          catch (e) { console.warn(`[delete-vlan] VIP ${pf.vip_name} cleanup:`, e.message); }
+          // Delete service object from root VDOM
+          if (pf.service_name) {
+            try { await client.deleteServiceObject(pf.service_name, rootVdom); }
+            catch (e) { console.warn(`[delete-vlan] Service ${pf.service_name} cleanup:`, e.message); }
+          }
+          // Remove DB record
+          db.prepare('DELETE FROM managed_vips WHERE id = ?').run(pf.id);
+          console.log(`[delete-vlan] Cleaned up port forward "${pf.vip_name}"`);
+        } catch (e) {
+          console.warn(`[delete-vlan] Failed to fully clean port forward "${pf.vip_name}":`, e.message);
+          // Still remove from DB — the FortiGate objects are best-effort
+          db.prepare('DELETE FROM managed_vips WHERE id = ?').run(pf.id);
+        }
+      }
+    }
+  }
+
+  // 2. Deprovision VLAN from each synced firewall (interface, address obj, DHCP, routes, policies, switch)
   for (const sync of syncs) {
     console.log(`[delete-vlan] Deprovisioning VLAN ${vlan.tag} (${sync.interface_name}) from ${sync.fw_name}`);
     try {
@@ -477,6 +520,7 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
     });
   }
 
+  // 3. Delete the VLAN from DB (CASCADE removes user_vlans and firewall_vlan_sync)
   db.prepare('DELETE FROM vlans WHERE id = ?').run(req.params.id);
   logAudit(req, 'admin_delete_vlan', `VLAN ${vlan.tag}`, fwResults.length ? `FW cleanup: ${fwResults.map(r => `${r.firewall}=${r.status}`).join(', ')}` : '');
   res.json({ ok: true, firewallCleanup: fwResults });

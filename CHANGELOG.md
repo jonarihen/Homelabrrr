@@ -2,6 +2,13 @@
 
 ## 2026-03-24 — Object-based port forwarding
 
+### VLAN deletion now cleans up port forwards
+- Deleting a VLAN now first removes all port forwards targeting that VLAN's interface before deprovisioning the VLAN itself
+- For each port forward: root VDOM policy, VIP, and service object are deleted; the lab VDOM policy is swept by `deprovisionVlan`'s policy search
+- `managed_vips` DB records are removed so no orphaned entries remain
+- Port forward cleanup is best-effort per item — if one fails, the rest still proceed and the DB record is still removed
+- Order: port forwards first → VLAN deprovision (interface, address object, DHCP, routes, policies, switch) → DB delete (CASCADE removes `user_vlans` and `firewall_vlan_sync`)
+
 ### Dual-VDOM port forwarding with sequence grouping
 - Port forwards now create **two** firewall policies: one in the root VDOM (WAN → inter-VDOM link) and one in the lab VDOM (inter-VDOM link → VLAN interface)
 - The lab VDOM policy is placed in the correct sequence group using `global-label: Port Forwarding (vlanXXXX)` and moved next to existing policies in that group
