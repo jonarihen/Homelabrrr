@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
+import { ConsoleSessionsProvider } from './contexts/ConsoleSessionsContext.jsx';
 import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import VMPage from './pages/VMPage.jsx';
@@ -68,34 +69,36 @@ export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
+        <ConsoleSessionsProvider>
+          <Routes>
+            <Route path="/login" element={<Login />} />
 
-          <Route path="/" element={<PrivateRoute><RootRedirect /></PrivateRoute>} />
+            <Route path="/" element={<PrivateRoute><RootRedirect /></PrivateRoute>} />
 
-          <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
+            <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
 
-          <Route path="/vm/:node/:vmid" element={<PrivateRoute><VMPage /></PrivateRoute>} />
-          <Route path="/vnc/:node/:vmid" element={<PrivateRoute><VNCPage /></PrivateRoute>} />
-          <Route path="/provision" element={<PrivateRoute><ProvisionPage /></PrivateRoute>} />
-          <Route path="/ssh-keys" element={<PrivateRoute><SSHKeysPage /></PrivateRoute>} />
-          <Route path="/account" element={<PrivateRoute allow2faBypass><AccountPage /></PrivateRoute>} />
+            <Route path="/vm/:node/:vmid" element={<PrivateRoute><VMPage /></PrivateRoute>} />
+            <Route path="/vnc/:node/:vmid" element={<PrivateRoute><VNCPage /></PrivateRoute>} />
+            <Route path="/provision" element={<PrivateRoute><ProvisionPage /></PrivateRoute>} />
+            <Route path="/ssh-keys" element={<PrivateRoute><SSHKeysPage /></PrivateRoute>} />
+            <Route path="/account" element={<PrivateRoute allow2faBypass><AccountPage /></PrivateRoute>} />
 
-          <Route path="/admin" element={<AdminRoute><AdminLayout /></AdminRoute>}>
-            <Route index element={<AdminIndexRedirect />} />
-            <Route path="users" element={<UsersPage />} />
-            <Route path="vlans" element={<VLANsPage />} />
-            <Route path="assignments" element={<AssignmentsPage />} />
-            <Route path="hosts" element={<PVEHostsPage />} />
-            <Route path="firewalls" element={<FirewallsPage />} />
-            <Route path="policies" element={<PoliciesPage />} />
-            <Route path="port-forwarding" element={<PortForwardingPage />} />
-            <Route path="templates" element={<TemplatesPage />} />
-            <Route path="audit-log" element={<AuditLogPage />} />
-          </Route>
+            <Route path="/admin" element={<AdminRoute><AdminLayout /></AdminRoute>}>
+              <Route index element={<AdminIndexRedirect />} />
+              <Route path="users" element={<UsersPage />} />
+              <Route path="vlans" element={<VLANsPage />} />
+              <Route path="assignments" element={<AssignmentsPage />} />
+              <Route path="hosts" element={<PVEHostsPage />} />
+              <Route path="firewalls" element={<FirewallsPage />} />
+              <Route path="policies" element={<PoliciesPage />} />
+              <Route path="port-forwarding" element={<PortForwardingPage />} />
+              <Route path="templates" element={<TemplatesPage />} />
+              <Route path="audit-log" element={<AuditLogPage />} />
+            </Route>
 
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </ConsoleSessionsProvider>
       </BrowserRouter>
     </AuthProvider>
   );

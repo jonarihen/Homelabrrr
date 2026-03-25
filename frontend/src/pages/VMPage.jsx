@@ -2,11 +2,10 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
-import VNCModal from '../components/VNCModal.jsx';
 import VLANModal from '../components/VLANModal.jsx';
-import SSHModal from '../components/SSHModal.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import useSSHConfig from '../hooks/useSSHConfig.js';
+import { useConsoleSessions } from '../contexts/ConsoleSessionsContext.jsx';
 import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
 
@@ -134,13 +133,12 @@ export default function VMPage() {
   const [rrd, setRrd] = useState(null);
   const [rrdLoading, setRrdLoading] = useState(true);
   const [timeframe, setTimeframe] = useState('hour');
+  const { openSshSession, openVncSession } = useConsoleSessions();
 
   const { sshCfg, setSshCfg, sshSaved, sshSavingError, scanningFingerprint, saveSshConfig, scanSshFingerprint } = useSSHConfig(node, vmid);
 
   const [disks, setDisks] = useState([]);
-  const [vncModal, setVncModal] = useState(false);
   const [vlanModal, setVlanModal] = useState(false);
-  const [sshModal, setSshModal] = useState(false);
 
   useDocumentTitle(vm ? (vm.name || `VM ${vm.vmid}`) : 'VM Details');
 
@@ -289,18 +287,18 @@ export default function VMPage() {
             <Divider />
 
             {/* Connect */}
-            <SectionLabel icon={
+              <SectionLabel icon={
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-2.54a4.5 4.5 0 00-6.364-6.364L4.5 8.257" /></svg>
             } text="Connect" />
             {isRunning ? (
               <>
-                <ActionBtn color="blue" onClick={() => setVncModal(true)} icon={
+                <ActionBtn color="blue" onClick={() => openVncSession(vm)} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" strokeLinecap="round" /></svg>
                 }>VNC</ActionBtn>
                 <ActionBtn color="blue" onClick={() => window.open(`/vnc/${routeNode(vm)}/${vm.vmid}`, '_blank', 'noopener')} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
                 }>VNC Tab</ActionBtn>
-                <ActionBtn color="blue" onClick={() => setSshModal(true)} icon={
+                <ActionBtn color="blue" onClick={() => openSshSession(vm)} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" /></svg>
                 }>SSH</ActionBtn>
               </>
@@ -503,9 +501,7 @@ export default function VMPage() {
         </div>
       </div>
 
-      {vncModal && <VNCModal vm={vm} onClose={() => setVncModal(false)} />}
       {vlanModal && <VLANModal vm={vm} onClose={() => setVlanModal(false)} onSaved={loadVm} />}
-      {sshModal && <SSHModal vm={vm} onClose={() => setSshModal(false)} />}
     </Layout>
   );
 }

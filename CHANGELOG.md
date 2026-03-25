@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-03-25 — Multi-session SSH and VNC console dock
+
+### Shared console manager
+- SSH and VNC consoles now open through a shared app-level session manager instead of one-page-only modals
+- Multiple SSH and VNC sessions can stay open at the same time, each with its own live websocket or RFB connection
+- Console sessions persist while you move around the UI and can be restored without reconnecting after being minimized
+
+### Docked console workflow
+- Console windows can now be minimized into a bottom-left `Console Dock` and restored individually later
+- Each console window gets its own floating header with minimize and close controls, so you can keep several sessions running side by side
+- SSH and VNC modal wrappers now reuse the same panel components as the docked session windows, so console behavior stays consistent everywhere
+
 ## 2026-03-24 — Dedicated port forwarding permission
 
 ### New user permission
