@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-03-25 — VNC proxy nodeRef compatibility fix
+
+### Host-aware VNC proxying
+- Fixed the backend VNC websocket proxy so host-aware `nodeRef` values like `2~pve02` are translated back to the real Proxmox node name before opening the upstream `/vncwebsocket` connection
+- This restores VNC console connectivity for the docked multi-session console flow after the multi-host `nodeRef` rollout
+
 ## 2026-03-25 — Multi-session SSH and VNC console dock
 
 ### Shared console manager

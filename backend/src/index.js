@@ -19,6 +19,7 @@ import sshRoutes, { sshSessions } from './routes/ssh.js';
 import provisionRoutes from './routes/provision.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
+import { decodeNodeRef } from './utils/nodeRef.js';
 
 const app = express();
 const server = createServer(app);
@@ -246,6 +247,8 @@ import { getHostForNode } from './proxmox.js';
 
 vncWss.on('connection', async (clientWs, vncSession) => {
   const { node, vmid, ticket, port, vmtype = 'qemu' } = vncSession;
+  const { nodeName } = decodeNodeRef(node);
+  const proxmoxNode = nodeName || node;
 
   let pveHost;
   try {
@@ -257,7 +260,7 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   }
 
   const TOKEN = `PVEAPIToken=${pveHost.tokenId}=${pveHost.tokenSecret}`;
-  const vncUrl = `wss://${pveHost.host}:${pveHost.port}/api2/json/nodes/${node}/${vmtype}/${vmid}/vncwebsocket`
+  const vncUrl = `wss://${pveHost.host}:${pveHost.port}/api2/json/nodes/${proxmoxNode}/${vmtype}/${vmid}/vncwebsocket`
     + `?port=${port}&vncticket=${encodeURIComponent(ticket)}`;
 
   const agent = new https.Agent({ rejectUnauthorized: pveHost.verifyTls });
@@ -268,7 +271,7 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   });
 
   proxmoxWs.on('open', () => {
-    console.log(`VNC proxy open: ${node}/${vmid}`);
+    console.log(`VNC proxy open: ${proxmoxNode}/${vmid}`);
   });
 
   proxmoxWs.on('message', (data, isBinary) => {
@@ -282,7 +285,7 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   });
 
   proxmoxWs.on('error', (err) => {
-    console.error(`Proxmox WS error (${node}/${vmid}):`, err.message);
+    console.error(`Proxmox WS error (${proxmoxNode}/${vmid}):`, err.message);
     if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
   });
 
