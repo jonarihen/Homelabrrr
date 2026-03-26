@@ -192,6 +192,11 @@ export class FortiGateAPI {
     return res.results || [];
   }
 
+  async getDhcpServer(serverId) {
+    const res = await this.request('GET', `cmdb/system.dhcp/server/${serverId}`);
+    return res.results?.[0] || res || null;
+  }
+
   async createDhcpServer(interfaceName, gateway, netmask, startIp, endIp, dns = ['1.1.1.1', '8.8.8.8']) {
     const config = {
       'default-gateway': gateway,
@@ -208,6 +213,15 @@ export class FortiGateAPI {
 
   async deleteDhcpServer(serverId) {
     return this.request('DELETE', `cmdb/system.dhcp/server/${serverId}`);
+  }
+
+  async updateDhcpServer(serverId, data) {
+    return this.request('PUT', `cmdb/system.dhcp/server/${serverId}`, data);
+  }
+
+  async getDhcpLeases() {
+    const res = await this.request('GET', 'monitor/system/dhcp');
+    return res.results || [];
   }
 
   // ─── Firewall Address Objects ────────────────────────────────────────────────

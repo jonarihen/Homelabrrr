@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
 import VLANModal from '../components/VLANModal.jsx';
+import VMIPManagementPanel from '../components/VMIPManagementPanel.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import useSSHConfig from '../hooks/useSSHConfig.js';
 import { useConsoleSessions } from '../contexts/ConsoleSessionsContext.jsx';
@@ -447,6 +448,14 @@ export default function VMPage() {
 
         {/* ── Backups ── */}
         <BackupsSection node={node} vmid={vmid} />
+
+        {/* ── IP Management ── */}
+        <VMIPManagementPanel
+          node={node}
+          vmid={vmid}
+          currentSshHost={sshCfg.host}
+          onSshHostUpdate={(host) => setSshCfg((current) => ({ ...current, host }))}
+        />
 
         {/* ── SSH Config ── */}
         <div className="space-y-3">

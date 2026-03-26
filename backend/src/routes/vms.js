@@ -8,6 +8,7 @@ import {
   getLXCStatus, lxcAction, getLXCConfig, updateLXCConfig, getLXCRRD, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
 } from '../proxmox.js';
+import { createClient } from '../fortigate.js';
 import { requireAuth } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
@@ -29,6 +30,264 @@ function serializeNodeIdentity(nodeValue) {
   return {
     node: nodeName || String(nodeValue || ''),
     nodeRef: nodeRef || String(nodeValue || ''),
+  };
+}
+
+function badRequest(message) {
+  const err = new Error(message);
+  err.statusCode = 400;
+  return err;
+}
+
+function normalizeMac(mac = '') {
+  return String(mac || '').trim().toLowerCase().replace(/-/g, ':');
+}
+
+function isLikelyMac(value = '') {
+  return /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i.test(normalizeMac(value));
+}
+
+function parseIpv4(value = '') {
+  const parts = String(value || '').trim().split('.');
+  if (parts.length !== 4) return null;
+  const octets = parts.map((part) => Number.parseInt(part, 10));
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null;
+  return octets;
+}
+
+function ipv4ToInt(value = '') {
+  const octets = parseIpv4(value);
+  if (!octets) return null;
+  return (
+    (((octets[0] << 24) >>> 0)
+      + ((octets[1] << 16) >>> 0)
+      + ((octets[2] << 8) >>> 0)
+      + octets[3])
+    >>> 0
+  );
+}
+
+function intToIpv4(value) {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255,
+  ].join('.');
+}
+
+function maskToPrefix(netmask = '') {
+  const value = ipv4ToInt(netmask);
+  if (value === null) return null;
+  let prefix = 0;
+  let seenZero = false;
+
+  for (let bit = 31; bit >= 0; bit -= 1) {
+    const set = (value >>> bit) & 1;
+    if (set) {
+      if (seenZero) return null;
+      prefix += 1;
+    } else {
+      seenZero = true;
+    }
+  }
+
+  return prefix;
+}
+
+function ipInSubnet(ip, gateway, netmask) {
+  const ipInt = ipv4ToInt(ip);
+  const gatewayInt = ipv4ToInt(gateway);
+  const netmaskInt = ipv4ToInt(netmask);
+  if (ipInt === null || gatewayInt === null || netmaskInt === null) return false;
+  return (ipInt & netmaskInt) === (gatewayInt & netmaskInt);
+}
+
+function formatSubnetCidr(gateway = '', netmask = '') {
+  const prefix = maskToPrefix(netmask);
+  const gatewayInt = ipv4ToInt(gateway);
+  const netmaskInt = ipv4ToInt(netmask);
+  if (prefix === null || gatewayInt === null || netmaskInt === null) return '';
+  return `${intToIpv4(gatewayInt & netmaskInt)}/${prefix}`;
+}
+
+function parseVmNetworkInterfaces(config = {}) {
+  return Object.keys(config)
+    .filter((key) => /^net\d+$/.test(key))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    .map((name) => {
+      const raw = String(config[name] || '');
+      const parts = raw.split(',').map((part) => part.trim()).filter(Boolean);
+      const details = {
+        name,
+        raw,
+        model: '',
+        guestName: '',
+        bridge: '',
+        vlanTag: null,
+        mac: '',
+      };
+
+      if (parts[0]?.includes('=')) {
+        const [firstKey, firstValue = ''] = parts[0].split('=');
+        if (firstKey === 'name') {
+          details.guestName = firstValue;
+        } else if (isLikelyMac(firstValue)) {
+          details.model = firstKey;
+          details.mac = normalizeMac(firstValue);
+        }
+      }
+
+      for (const part of parts) {
+        const [key, value = ''] = part.split('=');
+        if (key === 'bridge') details.bridge = value;
+        if (key === 'tag') {
+          const tag = Number.parseInt(value, 10);
+          details.vlanTag = Number.isInteger(tag) ? tag : null;
+        }
+        if (key === 'hwaddr' || key === 'macaddr') details.mac = normalizeMac(value);
+        if (key === 'name') details.guestName = value;
+        if (!details.mac && isLikelyMac(value)) details.mac = normalizeMac(value);
+      }
+
+      return details;
+    });
+}
+
+async function loadVmConfigForIpManagement(node, vmid) {
+  try {
+    return await getVMConfig(node, vmid);
+  } catch {
+    return await getLXCConfig(node, vmid);
+  }
+}
+
+function sanitizeDhcpReservation(entry = {}) {
+  return {
+    id: Number.parseInt(entry.id ?? entry.q_origin_key ?? 0, 10) || 0,
+    type: entry.type || 'mac',
+    ip: entry.ip || '',
+    mac: normalizeMac(entry.mac),
+    action: entry.action || 'reserved',
+    'circuit-id-type': entry['circuit-id-type'] || 'string',
+    'circuit-id': entry['circuit-id'] || '',
+    'remote-id-type': entry['remote-id-type'] || 'string',
+    'remote-id': entry['remote-id'] || '',
+    description: entry.description || '',
+  };
+}
+
+function nextReservationId(reservations = []) {
+  return reservations.reduce((max, reservation) => {
+    const value = Number.parseInt(reservation.id ?? reservation.q_origin_key ?? 0, 10) || 0;
+    return Math.max(max, value);
+  }, 0) + 1;
+}
+
+function findMatchingLease(leases = [], interfaceName, mac) {
+  const normalizedMac = normalizeMac(mac);
+  const candidates = leases.filter((lease) => (
+    normalizeMac(lease.mac) === normalizedMac
+    && lease.interface === interfaceName
+    && (!lease.type || lease.type === 'ipv4')
+  ));
+
+  return candidates.find((lease) => lease.status === 'leased')
+    || candidates.find((lease) => lease.status === 'reserved')
+    || candidates[0]
+    || null;
+}
+
+function syncReservationToSshConfig(node, vmid, ip) {
+  const { nodeName } = decodeNodeRef(node);
+  const candidates = [...new Set([String(node || ''), String(nodeName || '')].filter(Boolean))];
+  if (candidates.length === 0) return false;
+
+  const placeholders = candidates.map(() => '?').join(', ');
+  const rows = db.prepare(
+    `SELECT id, node FROM vm_ssh_configs WHERE vmid = ? AND node IN (${placeholders})`
+  ).all(vmid, ...candidates);
+
+  if (rows.length === 0) return false;
+  const exact = rows.find((row) => row.node === node);
+  const target = exact || (rows.length === 1 ? rows[0] : null);
+  if (!target) return false;
+
+  db.prepare('UPDATE vm_ssh_configs SET host = ? WHERE id = ?').run(ip, target.id);
+  return true;
+}
+
+async function resolveVmDhcpScope(node, vmid, netInterface, firewallId = null) {
+  const config = await loadVmConfigForIpManagement(node, vmid);
+  const iface = parseVmNetworkInterfaces(config).find((entry) => entry.name === netInterface);
+  if (!iface) throw badRequest(`Network interface ${netInterface} not found on this VM`);
+  if (!iface.mac) throw badRequest(`Network interface ${netInterface} has no MAC address`);
+  if (!iface.vlanTag) throw badRequest(`Network interface ${netInterface} is not VLAN-tagged`);
+
+  const vlan = db.prepare('SELECT * FROM vlans WHERE tag = ?').get(iface.vlanTag);
+  if (!vlan) throw badRequest(`VLAN ${iface.vlanTag} is not managed by the portal`);
+  if (vlan.mode === 'tagged_only') throw badRequest(`VLAN ${iface.vlanTag} is tagged-only and has no managed DHCP server`);
+
+  const syncs = db.prepare(`
+    SELECT fvs.*, f.name as firewall_name, f.host, f.port, f.api_key, f.vdom, f.verify_tls
+    FROM firewall_vlan_sync fvs
+    JOIN firewalls f ON f.id = fvs.firewall_id
+    WHERE fvs.vlan_id = ?
+    ORDER BY fvs.id
+  `).all(vlan.id);
+
+  const filtered = firewallId
+    ? syncs.filter((sync) => String(sync.firewall_id) === String(firewallId))
+    : syncs;
+
+  if (filtered.length === 0) {
+    throw badRequest('No synced firewall DHCP scope was found for this VLAN');
+  }
+  if (!firewallId && filtered.length > 1) {
+    throw badRequest('This VM interface is synced to multiple firewalls. Choose a specific firewall.');
+  }
+
+  const sync = filtered[0];
+  const client = createClient(sync);
+  let server = null;
+
+  if (sync.dhcp_server_id) {
+    try {
+      server = await client.getDhcpServer(sync.dhcp_server_id);
+    } catch {
+      server = null;
+    }
+  }
+
+  if (!server) {
+    const servers = await client.getDhcpServers();
+    server = servers.find((entry) => (
+      String(entry.id) === String(sync.dhcp_server_id)
+      || entry.interface === sync.interface_name
+    )) || null;
+  }
+
+  if (!server) {
+    throw badRequest(`No DHCP server was found on ${sync.firewall_name} for ${sync.interface_name}`);
+  }
+
+  const leases = await client.getDhcpLeases();
+  const reservations = Array.isArray(server['reserved-address'])
+    ? server['reserved-address'].map(sanitizeDhcpReservation)
+    : [];
+  const currentReservation = reservations.find((reservation) => reservation.mac === normalizeMac(iface.mac)) || null;
+  const currentLease = findMatchingLease(leases, sync.interface_name, iface.mac);
+
+  return {
+    iface,
+    vlan,
+    sync,
+    client,
+    server,
+    leases,
+    reservations,
+    currentReservation,
+    currentLease,
   };
 }
 
@@ -79,7 +338,7 @@ router.get('/:node/:vmid/status', async (req, res) => {
       res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'lxc' });
     }
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
   }
 });
 
@@ -107,7 +366,7 @@ router.post('/:node/:vmid/action', async (req, res) => {
     logAudit(req, 'vm_action', `${node}/${vmid}`, action);
     res.json({ ok: true, upid });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
   }
 });
 
@@ -129,7 +388,7 @@ router.get('/:node/:vmid/rrddata', async (req, res) => {
     }
     res.json(data);
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
   }
 });
 
@@ -168,6 +427,257 @@ router.post('/:node/:vmid/vnc-ticket', async (req, res) => {
 
     // Return ticket so noVNC can use it as VNC password
     res.json({ token, ticket: vncData.ticket });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.get('/:node/:vmid/ip-management', async (req, res) => {
+  const { node, vmid } = req.params;
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  try {
+    const config = await loadVmConfigForIpManagement(node, vmid);
+    const interfaces = parseVmNetworkInterfaces(config);
+    const vlanTags = [...new Set(interfaces.map((entry) => entry.vlanTag).filter(Boolean))];
+    const vlanMap = new Map(
+      vlanTags.map((tag) => [tag, db.prepare('SELECT * FROM vlans WHERE tag = ?').get(tag)]).filter(([, vlan]) => !!vlan)
+    );
+
+    const syncRows = vlanTags.length > 0
+      ? db.prepare(`
+          SELECT fvs.*, f.name as firewall_name, f.host, f.port, f.api_key, f.vdom, f.verify_tls, v.tag as vlan_tag
+          FROM firewall_vlan_sync fvs
+          JOIN firewalls f ON f.id = fvs.firewall_id
+          JOIN vlans v ON v.id = fvs.vlan_id
+          WHERE v.tag IN (${vlanTags.map(() => '?').join(', ')})
+          ORDER BY fvs.id
+        `).all(...vlanTags)
+      : [];
+
+    const syncMap = new Map();
+    for (const sync of syncRows) {
+      const list = syncMap.get(sync.vlan_tag) || [];
+      list.push(sync);
+      syncMap.set(sync.vlan_tag, list);
+    }
+
+    const firewallCache = new Map();
+
+    const payload = await Promise.all(interfaces.map(async (iface) => {
+      if (!iface.mac) {
+        return { ...iface, status: 'missing_mac', message: 'This interface does not expose a usable MAC address.' };
+      }
+      if (!iface.vlanTag) {
+        return { ...iface, status: 'untagged', message: 'This interface is not VLAN-tagged, so there is no managed DHCP scope to inspect.' };
+      }
+
+      const vlan = vlanMap.get(iface.vlanTag);
+      if (!vlan) {
+        return { ...iface, status: 'unmanaged_vlan', message: `VLAN ${iface.vlanTag} is not managed by the portal.` };
+      }
+      if (vlan.mode === 'tagged_only') {
+        return { ...iface, status: 'tagged_only', vlan: { id: vlan.id, name: vlan.name, tag: vlan.tag }, message: 'Tagged-only VLANs are not pushed to firewall DHCP, so IP management is unavailable.' };
+      }
+
+      const scopes = syncMap.get(iface.vlanTag) || [];
+      if (scopes.length === 0) {
+        return {
+          ...iface,
+          status: 'unsynced',
+          vlan: { id: vlan.id, name: vlan.name, tag: vlan.tag },
+          message: 'This VLAN is not synced to a firewall, so there is no managed DHCP scope yet.',
+        };
+      }
+
+      const dhcpScopes = await Promise.all(scopes.map(async (sync) => {
+        const cacheKey = String(sync.firewall_id);
+        try {
+          let state = firewallCache.get(cacheKey);
+          if (!state) {
+            const client = createClient(sync);
+            const [servers, leases] = await Promise.all([
+              client.getDhcpServers(),
+              client.getDhcpLeases(),
+            ]);
+            state = { servers, leases };
+            firewallCache.set(cacheKey, state);
+          }
+
+          const server = state.servers.find((entry) => (
+            String(entry.id) === String(sync.dhcp_server_id)
+            || entry.interface === sync.interface_name
+          ));
+          if (!server) {
+            return {
+              firewallId: sync.firewall_id,
+              firewallName: sync.firewall_name,
+              interfaceName: sync.interface_name,
+              dhcpServerId: sync.dhcp_server_id || null,
+              error: 'No DHCP server was found for this synced interface.',
+            };
+          }
+
+          const reservations = Array.isArray(server['reserved-address'])
+            ? server['reserved-address'].map(sanitizeDhcpReservation)
+            : [];
+          const reservation = reservations.find((entry) => entry.mac === normalizeMac(iface.mac)) || null;
+          const lease = findMatchingLease(state.leases, sync.interface_name, iface.mac);
+          const range = Array.isArray(server['ip-range']) ? server['ip-range'][0] || null : null;
+
+          return {
+            firewallId: sync.firewall_id,
+            firewallName: sync.firewall_name,
+            interfaceName: sync.interface_name,
+            dhcpServerId: server.id || sync.dhcp_server_id || null,
+            subnet: formatSubnetCidr(server['default-gateway'], server.netmask),
+            gateway: server['default-gateway'] || '',
+            netmask: server.netmask || '',
+            rangeStart: range?.['start-ip'] || '',
+            rangeEnd: range?.['end-ip'] || '',
+            reservation: reservation ? {
+              id: reservation.id,
+              ip: reservation.ip,
+              description: reservation.description || '',
+            } : null,
+            currentLease: lease ? {
+              ip: lease.ip || '',
+              hostname: lease.hostname || '',
+              status: lease.status || '',
+              reserved: !!lease.reserved,
+              expireTime: lease.expire_time || null,
+            } : null,
+            effectiveIp: reservation?.ip || lease?.ip || '',
+          };
+        } catch (err) {
+          return {
+            firewallId: sync.firewall_id,
+            firewallName: sync.firewall_name,
+            interfaceName: sync.interface_name,
+            dhcpServerId: sync.dhcp_server_id || null,
+            error: sanitizeError(err.message),
+          };
+        }
+      }));
+
+      return {
+        ...iface,
+        status: 'managed',
+        vlan: { id: vlan.id, name: vlan.name, tag: vlan.tag },
+        dhcpScopes,
+      };
+    }));
+
+    res.json({ interfaces: payload });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.put('/:node/:vmid/ip-management/:netInterface/reservation', async (req, res) => {
+  const { node, vmid, netInterface } = req.params;
+  const { firewallId = null, ip, description = '' } = req.body;
+
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  if (!ip) {
+    return res.status(400).json({ error: 'Reservation IP is required' });
+  }
+  if (!parseIpv4(ip)) {
+    return res.status(400).json({ error: 'Invalid IPv4 address' });
+  }
+
+  try {
+    const scope = await resolveVmDhcpScope(node, vmid, netInterface, firewallId);
+    if (!ipInSubnet(ip, scope.server['default-gateway'], scope.server.netmask)) {
+      return res.status(400).json({ error: 'Reservation IP must be inside the DHCP subnet' });
+    }
+    if (ip === scope.server['default-gateway']) {
+      return res.status(400).json({ error: 'Reservation IP cannot be the gateway address' });
+    }
+
+    const conflictReservation = scope.reservations.find((reservation) => (
+      reservation.ip === ip && reservation.mac !== normalizeMac(scope.iface.mac)
+    ));
+    if (conflictReservation) {
+      return res.status(400).json({ error: `IP ${ip} is already reserved for another device` });
+    }
+
+    const conflictLease = scope.leases.find((lease) => (
+      lease.ip === ip
+      && normalizeMac(lease.mac) !== normalizeMac(scope.iface.mac)
+      && lease.interface === scope.sync.interface_name
+      && (!lease.type || lease.type === 'ipv4')
+      && lease.status === 'leased'
+    ));
+    if (conflictLease) {
+      return res.status(400).json({ error: `IP ${ip} is currently leased to another device` });
+    }
+
+    const reservations = [...scope.reservations];
+    const descriptionText = String(description || '').trim();
+    const nextReservation = {
+      ...(scope.currentReservation || {}),
+      id: scope.currentReservation?.id || nextReservationId(reservations),
+      type: 'mac',
+      ip,
+      mac: normalizeMac(scope.iface.mac),
+      action: 'reserved',
+      'circuit-id-type': scope.currentReservation?.['circuit-id-type'] || 'string',
+      'circuit-id': scope.currentReservation?.['circuit-id'] || '',
+      'remote-id-type': scope.currentReservation?.['remote-id-type'] || 'string',
+      'remote-id': scope.currentReservation?.['remote-id'] || '',
+      description: descriptionText,
+    };
+
+    const nextReservations = reservations
+      .filter((reservation) => reservation.mac !== normalizeMac(scope.iface.mac))
+      .concat(nextReservation)
+      .sort((a, b) => a.id - b.id);
+
+    await scope.client.updateDhcpServer(scope.server.id || scope.sync.dhcp_server_id, {
+      'reserved-address': nextReservations,
+    });
+
+    const sshConfigUpdated = syncReservationToSshConfig(node, vmid, ip);
+    logAudit(req, 'vm_set_ip_reservation', `${node}/${vmid}/${netInterface}`, `${scope.sync.firewall_name}:${ip}`);
+    res.json({
+      ok: true,
+      reservation: { ip, description: descriptionText },
+      sshConfigHost: sshConfigUpdated ? ip : null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.delete('/:node/:vmid/ip-management/:netInterface/reservation', async (req, res) => {
+  const { node, vmid, netInterface } = req.params;
+  const { firewallId = null } = req.body || {};
+
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  try {
+    const scope = await resolveVmDhcpScope(node, vmid, netInterface, firewallId);
+    if (!scope.currentReservation) {
+      return res.json({ ok: true, removed: false });
+    }
+
+    const nextReservations = scope.reservations
+      .filter((reservation) => reservation.mac !== normalizeMac(scope.iface.mac))
+      .sort((a, b) => a.id - b.id);
+
+    await scope.client.updateDhcpServer(scope.server.id || scope.sync.dhcp_server_id, {
+      'reserved-address': nextReservations,
+    });
+
+    logAudit(req, 'vm_delete_ip_reservation', `${node}/${vmid}/${netInterface}`, scope.sync.firewall_name);
+    res.json({ ok: true, removed: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }

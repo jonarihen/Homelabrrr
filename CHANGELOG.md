@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-03-26 — VM IP management and DHCP reservations
+
+### VM-side IP visibility
+- Added VM IP management to the VM details page so each network interface now shows the detected MAC address, VLAN tag, firewall DHCP scope, current lease, and current reserved IP
+- The backend now matches VM NICs to FortiGate DHCP data by combining the VM's MAC address with the VLAN-backed firewall interface, instead of relying on a separately maintained IP field
+- Tagged-only or unsynced VLANs now explain why managed DHCP/IP control is unavailable for that interface
+
+### DHCP reservation management
+- Added FortiGate-backed DHCP reservation create, update, and delete support for VM interfaces on managed VLANs
+- Reservation edits now work directly against the synced FortiGate DHCP server's `reserved-address` table and also read the live lease table from `monitor/system/dhcp`
+- Saving a reservation automatically updates the VM's SSH host target in the portal when an SSH config already exists, so changing the reserved IP also updates the expected SSH destination
+
 ## 2026-03-25 — VNC proxy nodeRef compatibility fix
 
 ### Host-aware VNC proxying
