@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-03-28 — Provisioned VMs now use CPU type host
+
+### Provisioning CPU model default
+- New VMs created through the admin create-from-scratch flow now explicitly set the Proxmox CPU type to `host`
+- Cloned VMs now also enforce `cpu=host` during the post-clone configuration pass, alongside the existing CPU topology updates
+- This keeps newly provisioned VMs aligned with the physical host CPU model regardless of whether they were cloned from a template or created directly
+
 ## 2026-03-26 — VM IP management and DHCP reservations
 
 ### VM-side IP visibility

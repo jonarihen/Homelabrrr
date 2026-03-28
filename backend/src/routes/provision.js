@@ -222,6 +222,7 @@ router.post('/create', requireAdmin, async (req, res) => {
 
     const config = {
       name,
+      cpu: 'host',
       sockets: cpuLayout.sockets,
       cores: cpuLayout.cores,
       memory: Math.round(parseFloat(memoryGb) * 1024),
@@ -451,6 +452,7 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
     const warnings = [];
     if (opts.cores) {
       const cpuLayout = await computeCpuTopology(node, opts.cores);
+      config.cpu = 'host';
       config.sockets = cpuLayout.sockets;
       config.cores = cpuLayout.cores;
     }
