@@ -2,220 +2,117 @@ import { useEffect, useRef, useState } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
+import SSHConnectForm from './SSHConnectForm.jsx';
+import SFTPBrowser from './SFTPBrowser.jsx';
 
 export default function SSHSessionPanel({ vm, visible = true }) {
-  const vmNode = routeNode(vm);
   const [step, setStep] = useState('config');
-  const [keys, setKeys] = useState([]);
-  const [form, setForm] = useState({
-    keyId: '',
-    host: '',
-    port: 22,
-    username: 'root',
-    hostFingerprint: '',
-    passphrase: '',
-  });
-  const [error, setError] = useState('');
-  const [token, setToken] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [scanningFingerprint, setScanningFingerprint] = useState(false);
+  const [sshToken, setSshToken] = useState(null);
+  const [sftpToken, setSftpToken] = useState(null);
+  const [activeTab, setActiveTab] = useState('terminal');
+  const [sftpConnecting, setSftpConnecting] = useState(false);
+  const [sftpError, setSftpError] = useState('');
 
-  useEffect(() => {
-    let cancelled = false;
-
-    Promise.all([
-      api.get('/ssh/keys'),
-      api.get(`/ssh/config/${vmNode}/${vm.vmid}`),
-    ]).then(([keysRes, configRes]) => {
-      if (cancelled) return;
-
-      setKeys(keysRes.data);
-      const cfg = configRes.data;
-      if (cfg) {
-        setForm((current) => ({
-          ...current,
-          host: cfg.host,
-          port: cfg.port,
-          username: cfg.username,
-          hostFingerprint: cfg.hostFingerprint || '',
-        }));
-      }
-
-      if (keysRes.data.length > 0) {
-        setForm((current) => ({
-          ...current,
-          keyId: current.keyId || keysRes.data[0].id,
-        }));
-      }
-    }).catch((e) => {
-      if (!cancelled) {
-        setError(e.response?.data?.error || 'Failed to load SSH config');
-      }
-    }).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [vmNode, vm.vmid]);
-
-  const connect = async (e) => {
-    e.preventDefault();
-    setError('');
-
-    if (!form.keyId) return setError('Select an SSH key');
-    if (!form.host) return setError('Host/IP is required');
-    if (!form.hostFingerprint) return setError('SSH host fingerprint is required');
-
-    try {
-      await api.put(`/ssh/config/${vmNode}/${vm.vmid}`, {
-        host: form.host,
-        port: form.port,
-        username: form.username,
-        hostFingerprint: form.hostFingerprint,
-      });
-
-      const { data } = await api.post('/ssh/connect', {
-        node: vmNode,
-        vmid: vm.vmid,
-        keyId: form.keyId,
-        passphrase: form.passphrase,
-      });
-
-      setToken(data.token);
-      setStep('terminal');
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to connect');
-    }
+  const handleSshConnect = (token) => {
+    setSshToken(token);
+    setStep('connected');
   };
 
-  const scanFingerprint = async () => {
-    if (!form.host) {
-      setError('Enter the SSH host/IP before scanning');
+  const openFiles = async () => {
+    if (sftpToken) {
+      setActiveTab('files');
       return;
     }
 
-    setScanningFingerprint(true);
-    setError('');
-
+    const vmNode = routeNode(vm);
+    setSftpConnecting(true);
+    setSftpError('');
     try {
-      const { data } = await api.post(`/ssh/config/${vmNode}/${vm.vmid}/scan-fingerprint`, {
-        host: form.host,
-        port: form.port,
+      const keysRes = await api.get('/ssh/keys');
+
+      if (keysRes.data.length === 0) {
+        setSftpError('No SSH keys available');
+        setSftpConnecting(false);
+        return;
+      }
+
+      const { data } = await api.post('/sftp/connect', {
+        node: vmNode,
+        vmid: vm.vmid,
+        keyId: keysRes.data[0].id,
+        passphrase: '',
       });
 
-      setForm((current) => ({ ...current, hostFingerprint: data.hostFingerprint || '' }));
+      setSftpToken(data.token);
+      setActiveTab('files');
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to scan SSH fingerprint');
+      setSftpError(e.response?.data?.error || 'Failed to connect SFTP');
     } finally {
-      setScanningFingerprint(false);
+      setSftpConnecting(false);
     }
   };
 
-  if (step === 'terminal') {
-    return <SSHTerminal token={token} visible={visible} />;
+  if (step === 'config') {
+    return (
+      <div className="h-full overflow-y-auto p-5">
+        <SSHConnectForm vm={vm} onConnect={handleSshConnect} />
+      </div>
+    );
   }
 
   return (
-    <form onSubmit={connect} className="h-full overflow-y-auto p-5 space-y-4">
-      {loading ? (
-        <div className="h-40 flex items-center justify-center text-gray-500 text-sm">Loading...</div>
-      ) : keys.length === 0 ? (
-        <div className="text-center py-8">
-          <p className="text-gray-400 text-sm mb-2">No SSH keys found</p>
-          <p className="text-gray-500 text-xs">Add an SSH key in the SSH Keys page first.</p>
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Tab bar */}
+      <div className="flex items-center gap-1 px-3 py-1.5 border-b border-gray-700 bg-gray-900/80 shrink-0">
+        <TabButton active={activeTab === 'terminal'} onClick={() => setActiveTab('terminal')} icon={
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3" />
+          </svg>
+        }>Terminal</TabButton>
+
+        <TabButton
+          active={activeTab === 'files'}
+          onClick={openFiles}
+          loading={sftpConnecting}
+          icon={
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+            </svg>
+          }
+        >Files</TabButton>
+
+        {sftpError && <span className="text-xs text-red-400 ml-2">{sftpError}</span>}
+      </div>
+
+      {/* Panels */}
+      <div className={`min-h-0 flex-1 ${activeTab === 'terminal' ? '' : 'hidden'}`}>
+        <SSHTerminal token={sshToken} visible={visible && activeTab === 'terminal'} />
+      </div>
+
+      {activeTab === 'files' && sftpToken && (
+        <div className="min-h-0 flex-1 relative">
+          <SFTPBrowser token={sftpToken} />
         </div>
-      ) : (
-        <>
-          <Field label="SSH Key">
-            <select
-              value={form.keyId}
-              onChange={(e) => setForm((current) => ({ ...current, keyId: Number.parseInt(e.target.value, 10) }))}
-              className={inputCls}
-            >
-              {keys.map((key) => (
-                <option key={key.id} value={key.id}>{key.name}</option>
-              ))}
-            </select>
-          </Field>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Field label="Host / IP">
-              <input
-                type="text"
-                required
-                value={form.host}
-                onChange={(e) => setForm((current) => ({ ...current, host: e.target.value }))}
-                className={inputCls}
-                placeholder="192.168.1.100"
-              />
-            </Field>
-
-            <Field label="Port">
-              <input
-                type="number"
-                value={form.port}
-                onChange={(e) => setForm((current) => ({ ...current, port: Number.parseInt(e.target.value, 10) || 22 }))}
-                className={inputCls}
-              />
-            </Field>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Field label="Username">
-              <input
-                type="text"
-                value={form.username}
-                onChange={(e) => setForm((current) => ({ ...current, username: e.target.value }))}
-                className={inputCls}
-              />
-            </Field>
-
-            <Field label="Key Passphrase (if encrypted)">
-              <input
-                type="password"
-                value={form.passphrase}
-                onChange={(e) => setForm((current) => ({ ...current, passphrase: e.target.value }))}
-                className={inputCls}
-                placeholder="Leave empty if none"
-              />
-            </Field>
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="block text-xs text-gray-400">Host Key Fingerprint</label>
-              <button
-                type="button"
-                onClick={scanFingerprint}
-                disabled={scanningFingerprint}
-                className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
-              >
-                {scanningFingerprint ? 'Scanning...' : 'Scan fingerprint'}
-              </button>
-            </div>
-
-            <input
-              type="text"
-              required
-              value={form.hostFingerprint}
-              onChange={(e) => setForm((current) => ({ ...current, hostFingerprint: e.target.value }))}
-              className={inputCls}
-              placeholder="SHA256:..."
-            />
-
-            <p className="mt-1.5 text-xs text-gray-500">
-              Scan reads the server host key and stores a pinned fingerprint for future SSH verification.
-            </p>
-          </div>
-
-          {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
-
-          <button type="submit" className={btnCls}>Connect</button>
-        </>
       )}
-    </form>
+    </div>
+  );
+}
+
+function TabButton({ active, onClick, icon, children, loading = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={loading}
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+        active
+          ? 'bg-gray-700 text-white'
+          : 'text-gray-400 hover:text-white hover:bg-gray-800'
+      } ${loading ? 'opacity-50' : ''}`}
+    >
+      {icon}
+      {loading ? 'Connecting...' : children}
+    </button>
   );
 }
 
@@ -371,18 +268,6 @@ function SSHTerminal({ token, visible }) {
       </div>
 
       <div ref={containerRef} className="flex-1 min-h-0 bg-[#0d1117] p-1" />
-    </div>
-  );
-}
-
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
-const btnCls = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors';
-
-function Field({ label, children }) {
-  return (
-    <div>
-      <label className="block text-xs text-gray-400 mb-1.5">{label}</label>
-      {children}
     </div>
   );
 }

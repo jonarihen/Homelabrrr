@@ -4,6 +4,7 @@ import SSHSessionPanel from '../components/SSHSessionPanel.jsx';
 import VNCSessionPanel from '../components/VNCSessionPanel.jsx';
 import { useAuth } from './AuthContext.jsx';
 import { displayNode, routeNode, vmIdentityKey } from '../utils/nodeRef.js';
+import { computeTileLayout } from '../utils/tileSessions.js';
 
 const ConsoleSessionsContext = createContext(null);
 
@@ -134,6 +135,36 @@ export function ConsoleSessionsProvider({ children }) {
     )));
   }, []);
 
+  const tileSessions = useCallback((mode) => {
+    setSessions((current) => {
+      const visible = current.filter((s) => !s.minimized);
+      if (visible.length < 2) return current;
+
+      const layout = computeTileLayout(visible, mode, getViewport());
+      const updates = new Map(layout.map((l) => [l.id, l]));
+
+      return current.map((session) => {
+        const upd = updates.get(session.id);
+        return upd ? { ...session, x: upd.x, y: upd.y, width: upd.width, height: upd.height } : session;
+      });
+    });
+  }, []);
+
+  const popOutSession = useCallback((id) => {
+    setSessions((current) => {
+      const session = current.find((s) => s.id === id);
+      if (!session) return current;
+
+      const nodeRef = routeNode(session.vm);
+      const path = session.type === 'vnc'
+        ? `/vnc/${nodeRef}/${session.vm.vmid}`
+        : `/ssh/${nodeRef}/${session.vm.vmid}`;
+      window.open(path, '_blank', 'noopener');
+
+      return current.filter((s) => s.id !== id);
+    });
+  }, []);
+
   const value = useMemo(() => ({
     sessions,
     openSshSession,
@@ -155,6 +186,8 @@ export function ConsoleSessionsProvider({ children }) {
           restoreSession={restoreSession}
           closeSession={closeSession}
           moveSession={moveSession}
+          tileSessions={tileSessions}
+          popOutSession={popOutSession}
         />,
         document.body,
       )}
@@ -177,8 +210,11 @@ function ConsoleSessionLayer({
   restoreSession,
   closeSession,
   moveSession,
+  tileSessions,
+  popOutSession,
 }) {
   const minimizedSessions = sessions.filter((session) => session.minimized);
+  const liveCount = sessions.length - minimizedSessions.length;
 
   return (
     <div className="pointer-events-none fixed inset-0 z-40">
@@ -191,22 +227,24 @@ function ConsoleSessionLayer({
           onMinimize={minimizeSession}
           onClose={closeSession}
           onMove={moveSession}
+          onPopOut={popOutSession}
         />
       ))}
 
-      {minimizedSessions.length > 0 && (
+      {(minimizedSessions.length > 0 || liveCount >= 2) && (
         <ConsoleSessionDock
           sessions={minimizedSessions}
           restoreSession={restoreSession}
           closeSession={closeSession}
-          liveCount={sessions.length - minimizedSessions.length}
+          liveCount={liveCount}
+          tileSessions={tileSessions}
         />
       )}
     </div>
   );
 }
 
-function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, onMove }) {
+function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, onMove, onPopOut }) {
   const startDrag = useCallback((event) => {
     if (event.button !== 0) return;
 
@@ -273,6 +311,11 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
             icon={<path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14" />}
           />
           <WindowAction
+            label="Open in new tab"
+            onClick={() => onPopOut(session.id)}
+            icon={<path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />}
+          />
+          <WindowAction
             label="Close"
             onClick={() => onClose(session.id)}
             icon={<path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />}
@@ -291,7 +334,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
   );
 }
 
-function ConsoleSessionDock({ sessions, restoreSession, closeSession, liveCount }) {
+function ConsoleSessionDock({ sessions, restoreSession, closeSession, liveCount, tileSessions }) {
   return (
     <div className="pointer-events-auto fixed bottom-4 left-4 right-4 lg:left-[15.5rem] lg:right-auto lg:max-w-[calc(100vw-17rem)]">
       <div className="inline-flex max-w-full flex-col gap-3 rounded-2xl border border-gray-800 bg-gray-950/92 px-4 py-3 shadow-2xl shadow-black/40 backdrop-blur-xl">
@@ -299,42 +342,75 @@ function ConsoleSessionDock({ sessions, restoreSession, closeSession, liveCount 
           <div>
             <p className="text-[11px] uppercase tracking-[0.25em] text-gray-500">Console Dock</p>
             <p className="text-sm text-gray-300">
-              {sessions.length} minimized
-              {liveCount > 0 ? ` • ${liveCount} live` : ''}
+              {sessions.length > 0 ? `${sessions.length} minimized` : ''}
+              {sessions.length > 0 && liveCount > 0 ? ' \u2022 ' : ''}
+              {liveCount > 0 ? `${liveCount} live` : ''}
             </p>
           </div>
-        </div>
 
-        <div className="flex flex-wrap gap-2">
-          {sessions.map((session) => (
-            <div
-              key={session.id}
-              className="flex items-center gap-2 rounded-xl border border-gray-800 bg-gray-900/90 px-3 py-2"
-            >
-              <button
-                type="button"
-                onClick={() => restoreSession(session.id)}
-                className="flex min-w-0 items-center gap-2 text-left text-sm text-gray-200 hover:text-white transition-colors"
-              >
-                <SessionTypeBadge type={session.type} compact />
-                <span className="truncate max-w-[12rem]">{consoleTitle(session)}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => closeSession(session.id)}
-                className="rounded-md p-1 text-gray-500 hover:bg-red-500/10 hover:text-red-300 transition-colors"
-                aria-label={`Close ${consoleTitle(session)}`}
-              >
-                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
+          {liveCount >= 2 && (
+            <div className="flex items-center gap-1">
+              <TileButton label="Grid" onClick={() => tileSessions('grid')} icon={
+                <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>
+              } />
+              <TileButton label="Side by side" onClick={() => tileSessions('horizontal')} icon={
+                <><rect x="3" y="3" width="8" height="18" rx="1" /><rect x="13" y="3" width="8" height="18" rx="1" /></>
+              } />
+              <TileButton label="Stacked" onClick={() => tileSessions('vertical')} icon={
+                <><rect x="3" y="3" width="18" height="8" rx="1" /><rect x="3" y="13" width="18" height="8" rx="1" /></>
+              } />
             </div>
-          ))}
+          )}
         </div>
+
+        {sessions.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {sessions.map((session) => (
+              <div
+                key={session.id}
+                className="flex items-center gap-2 rounded-xl border border-gray-800 bg-gray-900/90 px-3 py-2"
+              >
+                <button
+                  type="button"
+                  onClick={() => restoreSession(session.id)}
+                  className="flex min-w-0 items-center gap-2 text-left text-sm text-gray-200 hover:text-white transition-colors"
+                >
+                  <SessionTypeBadge type={session.type} compact />
+                  <span className="truncate max-w-[12rem]">{consoleTitle(session)}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => closeSession(session.id)}
+                  className="rounded-md p-1 text-gray-500 hover:bg-red-500/10 hover:text-red-300 transition-colors"
+                  aria-label={`Close ${consoleTitle(session)}`}
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+function TileButton({ label, onClick, icon }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-800 hover:text-white transition-colors"
+      aria-label={label}
+      title={label}
+    >
+      <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+        {icon}
+      </svg>
+    </button>
   );
 }
 

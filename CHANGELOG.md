@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-04-01 — Console tiling, pop-out tabs, and SFTP file browser
+
+### Console window tiling
+- Added tiling layout controls to the console dock that appear when 2+ console windows are open
+- Three tiling modes: Auto Grid (columns/rows based on window count), Side by Side (horizontal), and Stacked (vertical)
+- Tiling is a one-shot rearrangement — windows remain freely draggable after tiling
+- Layout respects sidebar offset, top bar, and dock reserve area
+
+### Pop-out to new tab
+- Added a pop-out button to every floating console window title bar (between minimize and close)
+- VNC sessions pop out to the existing standalone `/vnc/:node/:vmid` page
+- SSH sessions pop out to a new standalone `/ssh/:node/:vmid` page with fullscreen support
+- Added "SSH Tab" button on the VM detail page alongside the existing "VNC Tab" button
+- Pop-out opens a fresh session in the new tab and closes the floating window
+
+### SFTP file browser
+- Added in-browser file upload and download via SFTP, accessible from the "Files" tab in any connected SSH session
+- Backend SFTP routes use the ssh2 library's SFTP subsystem with the same SSH credentials and host key verification as terminal sessions
+- File browser features: breadcrumb navigation, directory listing with sort (folders first), file download, file upload (button or drag-and-drop), new folder creation, and file/folder deletion with confirmation
+- SFTP sessions use REST endpoints (not WebSocket) — each operation opens a fresh authenticated SSH+SFTP connection
+- Upload limit: 100 MB per file; SFTP tokens auto-extend on activity (30-minute idle expiry)
+- Extracted SSH connection form into reusable `SSHConnectForm` component shared between terminal and SFTP flows
+- Added shared `sshConnect.js` backend utility for creating authenticated SSH connections with host key verification
+
 ## 2026-03-28 — Provisioned VMs now use CPU type host
 
 ### Provisioning CPU model default

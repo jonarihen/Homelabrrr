@@ -5,6 +5,7 @@ import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import VMPage from './pages/VMPage.jsx';
 import VNCPage from './pages/VNCPage.jsx';
+import SSHPage from './pages/SSHPage.jsx';
 import AdminLayout from './pages/admin/AdminLayout.jsx';
 import UsersPage from './pages/admin/UsersPage.jsx';
 import VLANsPage from './pages/admin/VLANsPage.jsx';
@@ -79,6 +80,7 @@ export default function App() {
 
             <Route path="/vm/:node/:vmid" element={<PrivateRoute><VMPage /></PrivateRoute>} />
             <Route path="/vnc/:node/:vmid" element={<PrivateRoute><VNCPage /></PrivateRoute>} />
+            <Route path="/ssh/:node/:vmid" element={<PrivateRoute><SSHPage /></PrivateRoute>} />
             <Route path="/provision" element={<PrivateRoute><ProvisionPage /></PrivateRoute>} />
             <Route path="/ssh-keys" element={<PrivateRoute><SSHKeysPage /></PrivateRoute>} />
             <Route path="/account" element={<PrivateRoute allow2faBypass><AccountPage /></PrivateRoute>} />

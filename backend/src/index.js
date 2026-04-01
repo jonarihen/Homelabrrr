@@ -16,6 +16,7 @@ import authRoutes from './routes/auth.js';
 import adminRoutes from './routes/admin.js';
 import vmRoutes, { vncSessions } from './routes/vms.js';
 import sshRoutes, { sshSessions } from './routes/ssh.js';
+import sftpRoutes from './routes/sftp.js';
 import provisionRoutes from './routes/provision.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
@@ -99,6 +100,7 @@ app.use('/api/auth',  authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/vms',   vmRoutes);
 app.use('/api/ssh',   sshRoutes);
+app.use('/api/sftp',  sftpRoutes);
 app.use('/api/provision', provisionRoutes);
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
