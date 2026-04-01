@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-04-02 — VM hardware editing with permission control
+
+### CPU, memory, and disk editing
+- Added "Hardware" button on the VM detail page action bar that opens a two-tab modal for editing CPU cores, memory, and disk size
+- CPU & Memory tab: number inputs for cores (1–128) and memory (128 MB–1 TB), quick memory presets (512M–32G), running-VM warning banner
+- Disk Resize tab: disk selector dropdown with current size/storage info, incremental expand-by-GB input
+- CPU core changes use the same topology computation as VM provisioning — requested cores are validated against physical host core count and mapped to an optimal sockets×cores layout
+
+### Permission gating
+- Added `can_edit_vm_hardware` per-user permission flag (toggleable in admin Users page under "Edit VM Hardware")
+- Hardware button only appears for admins or users with the permission enabled
+- Backend endpoints (`PUT /vms/:node/:vmid/hardware` and `PUT /vms/:node/:vmid/resize-disk`) enforce the permission via `requirePermission` middleware
+- All hardware changes are audit-logged with details of what was changed
+
+### Backend changes
+- Extracted `computeCpuTopology(node, requestedCores)` into shared `backend/src/utils/cpuTopology.js` utility, used by both provisioning and hardware editing
+- Added `resizeVMDisk` Proxmox API wrapper for the `PUT /nodes/:node/qemu/:vmid/resize` endpoint
+
 ## 2026-04-01 — Console tiling, pop-out tabs, and SFTP file browser
 
 ### Console window tiling

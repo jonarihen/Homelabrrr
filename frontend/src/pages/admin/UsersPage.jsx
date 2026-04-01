@@ -255,6 +255,7 @@ const PERM_DEFS = [
   { key: 'can_manage_users',       label: 'Manage Users',       desc: 'Create, edit, delete user accounts and permissions' },
   { key: 'can_manage_assignments', label: 'Manage Assignments', desc: 'Assign VMs and VLANs to users' },
   { key: 'can_view_audit_log',     label: 'View Audit Log',     desc: 'Read the system audit log' },
+  { key: 'can_edit_vm_hardware',   label: 'Edit VM Hardware',   desc: 'Change CPU, memory, and disk size on assigned VMs' },
 ];
 
 function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {

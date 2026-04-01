@@ -2,18 +2,19 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db.js';
 import {
-  getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, getAllVMs, getVMRRD,
+  getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
   restoreVMBackup, listBackupFiles, downloadBackupFile,
   getLXCStatus, lxcAction, getLXCConfig, updateLXCConfig, getLXCRRD, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
 } from '../proxmox.js';
 import { createClient } from '../fortigate.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
+import { computeCpuTopology } from '../utils/cpuTopology.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -742,6 +743,87 @@ router.put('/:node/:vmid/vlan', async (req, res) => {
 
     await updateVMConfig(node, vmid, { [netInterface]: parts.join(',') });
     logAudit(req, 'vlan_change', `${node}/${vmid}`, `${netInterface}=tag:${vlanTag}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// ─── VM Hardware Edit ────────────────────────────────────────────────────────
+
+const pHardware = requirePermission('can_edit_vm_hardware');
+
+router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
+  const { node, vmid } = req.params;
+  const { cores, memory } = req.body;
+
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  if (!cores && !memory) {
+    return res.status(400).json({ error: 'Specify cores and/or memory to update' });
+  }
+
+  try {
+    const updates = {};
+    const details = [];
+
+    if (cores) {
+      const coresNum = parseInt(cores, 10);
+      if (!coresNum || coresNum < 1 || coresNum > 128) {
+        return res.status(400).json({ error: 'Cores must be between 1 and 128' });
+      }
+      const cpuLayout = await computeCpuTopology(node, coresNum);
+      updates.cpu = 'host';
+      updates.sockets = cpuLayout.sockets;
+      updates.cores = cpuLayout.cores;
+      details.push(`cores=${cpuLayout.totalVcpus} (${cpuLayout.sockets}s×${cpuLayout.cores}c)`);
+    }
+
+    if (memory) {
+      const memMb = parseInt(memory, 10);
+      if (!memMb || memMb < 128 || memMb > 1048576) {
+        return res.status(400).json({ error: 'Memory must be between 128 MB and 1 TB' });
+      }
+      updates.memory = memMb;
+      details.push(`memory=${memMb}MB`);
+    }
+
+    await updateVMConfig(node, vmid, updates);
+    logAudit(req, 'vm_hardware_change', `${node}/${vmid}`, details.join(', '));
+    res.json({ ok: true });
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
+  const { node, vmid } = req.params;
+  const { disk, size } = req.body;
+
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  if (!disk || !size) {
+    return res.status(400).json({ error: 'disk and size are required' });
+  }
+
+  // Validate disk name pattern
+  if (!/^(scsi|virtio|sata|ide)\d+$/.test(disk)) {
+    return res.status(400).json({ error: 'Invalid disk name' });
+  }
+
+  // Validate size format (e.g. "+10G", "50G")
+  if (!/^\+?\d+[GMT]$/.test(size)) {
+    return res.status(400).json({ error: 'Size must be like "+10G", "50G", "+512M", etc.' });
+  }
+
+  try {
+    await resizeVMDisk(node, vmid, disk, size);
+    logAudit(req, 'vm_disk_resize', `${node}/${vmid}`, `${disk}=${size}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });

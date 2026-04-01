@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import api from '../api.js';
 
 function formatSize(bytes) {
@@ -30,7 +30,7 @@ function parentDir(path) {
 }
 
 export default function SFTPBrowser({ token }) {
-  const [currentPath, setCurrentPath] = useState('/root');
+  const [currentPath, setCurrentPath] = useState('.');
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -49,7 +49,7 @@ export default function SFTPBrowser({ token }) {
     try {
       const { data } = await api.post('/sftp/ls', { token, path });
       setEntries(data.entries);
-      setCurrentPath(path);
+      setCurrentPath(data.path || path);
       setInitialLoaded(true);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to list directory');
@@ -58,10 +58,10 @@ export default function SFTPBrowser({ token }) {
     }
   }, [token]);
 
-  // Load on first render
-  if (!initialLoaded && !loading) {
+  // Load initial directory on mount
+  useEffect(() => {
     loadDir(currentPath);
-  }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const navigate = (name) => {
     loadDir(joinPath(currentPath, name));
@@ -72,10 +72,29 @@ export default function SFTPBrowser({ token }) {
     if (parent !== currentPath) loadDir(parent);
   };
 
-  const downloadFile = (name) => {
+  const [downloading, setDownloading] = useState(null);
+
+  const downloadFile = async (name) => {
     const filePath = joinPath(currentPath, name);
-    const url = `/api/sftp/download?token=${encodeURIComponent(token)}&path=${encodeURIComponent(filePath)}`;
-    window.open(url, '_blank');
+    setDownloading(name);
+    try {
+      const res = await api.get('/sftp/download', {
+        params: { token, path: filePath },
+        responseType: 'blob',
+      });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Download failed');
+    } finally {
+      setDownloading(null);
+    }
   };
 
   const uploadFiles = async (files) => {
@@ -318,12 +337,17 @@ export default function SFTPBrowser({ token }) {
                         <button
                           type="button"
                           onClick={() => downloadFile(entry.name)}
-                          className="rounded p-1 text-gray-500 hover:bg-gray-700 hover:text-white transition-colors"
+                          disabled={downloading === entry.name}
+                          className="rounded p-1 text-gray-500 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors"
                           title="Download"
                         >
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                          </svg>
+                          {downloading === entry.name ? (
+                            <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                          ) : (
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                            </svg>
+                          )}
                         </button>
                       )}
                       {deleteConfirm === entry.name ? (

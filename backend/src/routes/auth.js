@@ -51,6 +51,7 @@ function serializeUser(user) {
       canManageUsers: !!user.can_manage_users,
       canManageAssignments: !!user.can_manage_assignments,
       canViewAuditLog: !!user.can_view_audit_log,
+      canEditVmHardware: !!user.can_edit_vm_hardware,
     },
   };
 }
@@ -224,7 +225,7 @@ router.get('/me', (req, res) => {
   const user = db.prepare(`
     SELECT id, username, is_admin, totp_enabled, require_2fa, can_provision, can_create_vms,
       can_manage_hosts, can_manage_firewalls, can_manage_port_forwards, can_manage_vlans, can_manage_policies,
-      can_manage_templates, can_manage_users, can_manage_assignments, can_view_audit_log
+      can_manage_templates, can_manage_users, can_manage_assignments, can_view_audit_log, can_edit_vm_hardware
     FROM users
     WHERE id = ?
   `).get(req.session.userId);

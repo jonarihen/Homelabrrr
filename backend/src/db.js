@@ -184,6 +184,7 @@ try { db.exec('ALTER TABLE users ADD COLUMN can_manage_users INTEGER DEFAULT 0')
 try { db.exec('ALTER TABLE users ADD COLUMN can_manage_assignments INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_view_audit_log INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_create_vms INTEGER DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE users ADD COLUMN can_edit_vm_hardware INTEGER DEFAULT 0'); } catch { /* exists */ }
 
 // Audit log
 try { db.exec(`

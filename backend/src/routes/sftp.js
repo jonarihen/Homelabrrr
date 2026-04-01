@@ -139,8 +139,13 @@ router.post('/ls', async (req, res) => {
   try {
     ({ conn, sftp } = await openSftp(sess));
 
+    // Resolve '.' or '~' to the actual absolute path
+    const resolvedPath = await new Promise((resolve, reject) => {
+      sftp.realpath(dirPath, (err, absPath) => (err ? resolve(dirPath) : resolve(absPath)));
+    });
+
     const list = await new Promise((resolve, reject) => {
-      sftp.readdir(dirPath, (err, entries) => (err ? reject(err) : resolve(entries)));
+      sftp.readdir(resolvedPath, (err, entries) => (err ? reject(err) : resolve(entries)));
     });
 
     const entries = list.map((e) => ({
@@ -157,7 +162,7 @@ router.post('/ls', async (req, res) => {
       return a.name.localeCompare(b.name);
     });
 
-    res.json({ entries });
+    res.json({ path: resolvedPath, entries });
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally {

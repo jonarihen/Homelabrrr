@@ -3,10 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
 import VLANModal from '../components/VLANModal.jsx';
+import VMHardwareModal from '../components/VMHardwareModal.jsx';
 import VMIPManagementPanel from '../components/VMIPManagementPanel.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import useSSHConfig from '../hooks/useSSHConfig.js';
 import { useConsoleSessions } from '../contexts/ConsoleSessionsContext.jsx';
+import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
 
@@ -140,6 +142,8 @@ export default function VMPage() {
 
   const [disks, setDisks] = useState([]);
   const [vlanModal, setVlanModal] = useState(false);
+  const [hardwareModal, setHardwareModal] = useState(false);
+  const { user } = useAuth();
 
   useDocumentTitle(vm ? (vm.name || `VM ${vm.vmid}`) : 'VM Details');
 
@@ -166,7 +170,7 @@ export default function VMPage() {
   }, [loadVm]);
 
 
-  useEffect(() => {
+  const loadDisks = useCallback(() => {
     api.get(`/vms/${node}/${vmid}/config`).then(r => {
       const cfg = r.data;
       const diskKeys = Object.keys(cfg).filter(k =>
@@ -180,6 +184,8 @@ export default function VMPage() {
       }));
     }).catch(() => {});
   }, [node, vmid]);
+
+  useEffect(() => { loadDisks(); }, [loadDisks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -316,6 +322,15 @@ export default function VMPage() {
             <ActionBtn color="gray" onClick={() => setVlanModal(true)} icon={
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" /></svg>
             }>VLAN</ActionBtn>
+
+            {(user?.isAdmin || user?.permissions?.canEditVmHardware) && (
+              <>
+                <Divider />
+                <ActionBtn color="gray" onClick={() => setHardwareModal(true)} icon={
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25z" /></svg>
+                }>Hardware</ActionBtn>
+              </>
+            )}
           </div>
           {actionError && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5 mt-3">{actionError}</p>}
         </div>
@@ -514,6 +529,7 @@ export default function VMPage() {
       </div>
 
       {vlanModal && <VLANModal vm={vm} onClose={() => setVlanModal(false)} onSaved={loadVm} />}
+      {hardwareModal && <VMHardwareModal vm={vm} disks={disks} onClose={() => setHardwareModal(false)} onSaved={() => { loadVm(); loadDisks(); }} />}
     </Layout>
   );
 }
