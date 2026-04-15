@@ -4,6 +4,9 @@ import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
 import { displayNode } from '../utils/nodeRef.js';
 
+// Preload noVNC — Proxmox VNC proxies time out quickly
+const rfbModulePromise = import('@novnc/novnc/lib/rfb.js');
+
 function forceFullRefresh(rfb) {
   if (!rfb) return;
   try {
@@ -28,14 +31,14 @@ export default function VNCPage() {
 
     async function connect() {
       try {
+        const { default: RFB } = await rfbModulePromise;
+        if (cancelled || !containerRef.current) return;
+
         const { data } = await api.post(`/vms/${node}/${vmid}/vnc-ticket`);
         if (cancelled) return;
 
         const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
         const wsUrl = `${proto}://${window.location.host}/api/vnc`;
-
-        const { default: RFB } = await import('@novnc/novnc/lib/rfb.js');
-        if (cancelled || !containerRef.current) return;
 
         const rfb = new RFB(containerRef.current, wsUrl, {
           credentials: { password: data.ticket },

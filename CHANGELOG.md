@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-04-15 — VNC reliability and SSH UTF-8 fixes
+
+### VNC console connection reliability
+- Fixed frequent "Connection lost" errors when opening VNC consoles, especially on cold page loads
+- Root cause: `await import('@novnc/novnc/lib/rfb.js')` was issued **after** the VNC ticket was obtained from Proxmox, so the 308 KB noVNC bundle download/parse delay (up to 10+ seconds on first load) often exceeded the Proxmox VNC proxy's short-lived listener window, leaving the server-side proxy to time out before the WebSocket was opened
+- Fix: the noVNC RFB module is now preloaded at module evaluation time and the dynamic `import()` is awaited **before** the VNC ticket is requested, so the Proxmox VNC proxy is only started when we're ready to connect to it immediately
+- Applies to both the docked `VNCSessionPanel` and the standalone `/vnc/:node/:vmid` page
+- Added backend logging around VNC ticket creation and the Proxmox websocket upgrade (`[VNC-ticket]`, `[VNC-ws]`, `[WS-upgrade]`) including Proxmox's HTTP response body on rejection, to aid future troubleshooting
+
+### SSH terminal UTF-8 rendering
+- Fixed garbled output in the SSH terminal for any command that emits multi-byte UTF-8 (Docker Compose progress spinners, checkmarks, box-drawing chars, non-ASCII paths, etc.) — previously showed sequences like `â` and stray control chars
+- Root cause: the frontend decoded base64 shell data with `atob(...)` and passed the resulting binary string straight to xterm's `term.write`, which interprets each character as a Unicode code point instead of a UTF-8 byte, shredding any byte above 0x7F
+- Fix: the frontend now materializes the decoded base64 into a `Uint8Array` before calling `term.write`, so xterm parses the stream as UTF-8 and renders spinners/progress updates correctly
+
 ## 2026-04-02 — VM hardware editing with permission control
 
 ### CPU, memory, and disk editing

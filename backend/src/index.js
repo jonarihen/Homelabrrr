@@ -180,13 +180,16 @@ function loadUpgradeSession(request) {
 
 server.on('upgrade', async (request, socket, head) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
+  console.log(`[WS-upgrade] path=${url.pathname} origin=${request.headers.origin} protocols=${request.headers['sec-websocket-protocol']?.slice(0, 60)}`);
 
   if (url.pathname !== '/api/vnc' && url.pathname !== '/api/ssh') {
+    console.log('[WS-upgrade] rejected: unknown path');
     socket.destroy();
     return;
   }
 
   if (!isAllowedUpgradeOrigin(request)) {
+    console.log(`[WS-upgrade] rejected: origin not allowed (origin=${request.headers.origin}, allowed=${ALLOWED_ORIGIN})`);
     rejectUpgrade(socket, 403, 'Forbidden');
     return;
   }
@@ -194,12 +197,13 @@ server.on('upgrade', async (request, socket, head) => {
   try {
     await loadUpgradeSession(request);
   } catch (err) {
-    console.error('Failed to load websocket session:', err.message);
+    console.error('[WS-upgrade] rejected: session load failed:', err.message);
     rejectUpgrade(socket, 500, 'Internal Server Error');
     return;
   }
 
   if (!request.session?.userId) {
+    console.log('[WS-upgrade] rejected: no userId in session');
     rejectUpgrade(socket, 401, 'Unauthorized');
     return;
   }
@@ -208,10 +212,12 @@ server.on('upgrade', async (request, socket, head) => {
     const token = extractUpgradeToken(request, url);
     const sess = vncSessions.get(token);
     if (!sess || sess.expires < Date.now() || sess._consumed) {
+      console.log(`[WS-upgrade] VNC rejected: token=${token?.slice(0, 8)} found=${!!sess} expired=${sess ? sess.expires < Date.now() : '-'} consumed=${sess?._consumed}`);
       rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
     if (sess.userId !== request.session.userId || sess.sessionId !== request.sessionID) {
+      console.log(`[WS-upgrade] VNC rejected: user/session mismatch (sess.userId=${sess.userId} req.userId=${request.session.userId} sess.sessionId=${sess.sessionId?.slice(0, 8)} req.sessionId=${request.sessionID?.slice(0, 8)})`);
       rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
@@ -248,9 +254,12 @@ server.on('upgrade', async (request, socket, head) => {
 import { getHostForNode } from './proxmox.js';
 
 vncWss.on('connection', async (clientWs, vncSession) => {
-  const { node, vmid, ticket, port, vmtype = 'qemu' } = vncSession;
+  const { node, vmid, ticket, port, vmtype = 'qemu', createdAt } = vncSession;
   const { nodeName } = decodeNodeRef(node);
   const proxmoxNode = nodeName || node;
+  const elapsed = createdAt ? Date.now() - createdAt : -1;
+
+  console.log(`[VNC-ws] connecting ${proxmoxNode}/${vmtype}/${vmid} port=${port} ticketAge=${elapsed}ms ticket=${ticket?.slice(0, 20)}...`);
 
   let pveHost;
   try {
@@ -265,6 +274,8 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   const vncUrl = `wss://${pveHost.host}:${pveHost.port}/api2/json/nodes/${proxmoxNode}/${vmtype}/${vmid}/vncwebsocket`
     + `?port=${port}&vncticket=${encodeURIComponent(ticket)}`;
 
+  console.log(`[VNC-ws] url=${vncUrl.replace(/vncticket=[^&]+/, 'vncticket=REDACTED')} verifyTls=${pveHost.verifyTls}`);
+
   const agent = new https.Agent({ rejectUnauthorized: pveHost.verifyTls });
 
   const proxmoxWs = new WebSocket(vncUrl, ['binary'], {
@@ -273,7 +284,7 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   });
 
   proxmoxWs.on('open', () => {
-    console.log(`VNC proxy open: ${proxmoxNode}/${vmid}`);
+    console.log(`[VNC-ws] proxy OPEN: ${proxmoxNode}/${vmid} (${Date.now() - createdAt}ms since ticket)`);
   });
 
   proxmoxWs.on('message', (data, isBinary) => {
@@ -287,7 +298,17 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   });
 
   proxmoxWs.on('error', (err) => {
-    console.error(`Proxmox WS error (${proxmoxNode}/${vmid}):`, err.message);
+    const age = createdAt ? Date.now() - createdAt : -1;
+    console.error(`[VNC-ws] Proxmox WS error (${proxmoxNode}/${vmtype}/${vmid}): ${err.message} ticketAge=${age}ms`);
+    if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+  });
+
+  proxmoxWs.on('unexpected-response', (req, res) => {
+    let body = '';
+    res.on('data', chunk => body += chunk);
+    res.on('end', () => {
+      console.error(`[VNC-ws] Proxmox rejected (${proxmoxNode}/${vmtype}/${vmid}): HTTP ${res.statusCode} body=${body} ticketAge=${createdAt ? Date.now() - createdAt : -1}ms`);
+    });
     if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
   });
 

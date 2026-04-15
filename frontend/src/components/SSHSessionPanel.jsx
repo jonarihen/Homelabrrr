@@ -133,7 +133,8 @@ function SSHTerminal({ token, visible }) {
         import('@xterm/addon-fit'),
       ]);
 
-      if (disposed || !containerRef.current) return;
+      if (disposed) { console.warn('[SSH] disposed after xterm import'); return; }
+      if (!containerRef.current) { console.warn('[SSH] containerRef null after xterm import'); return; }
 
       const fitAddon = new FitAddon();
       fitAddonRef.current = fitAddon;
@@ -164,7 +165,9 @@ function SSHTerminal({ token, visible }) {
       termRef.current = term;
 
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${proto}://${window.location.host}/api/ssh`, ['vmmgr-shell', `vmmgr-token-${token}`]);
+      const wsUrl = `${proto}://${window.location.host}/api/ssh`;
+      console.log('[SSH] opening WebSocket →', wsUrl, 'token:', token?.slice(0, 8));
+      const ws = new WebSocket(wsUrl, ['vmmgr-shell', `vmmgr-token-${token}`]);
       wsRef.current = ws;
 
       const sendSize = () => {
@@ -183,7 +186,12 @@ function SSHTerminal({ token, visible }) {
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'data') {
-            term.write(atob(msg.data));
+            // Decode base64 to bytes and hand the Uint8Array to xterm so it
+            // parses multi-byte UTF-8 (spinners, checkmarks, box chars) correctly.
+            const bin = atob(msg.data);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+            term.write(bytes);
           } else if (msg.type === 'status') {
             setStatus(msg.status === 'connected' ? 'Connected' : 'Disconnected');
           } else if (msg.type === 'error') {
@@ -195,12 +203,14 @@ function SSHTerminal({ token, visible }) {
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
+        console.warn('[SSH] WebSocket closed, code:', e.code, 'reason:', e.reason);
         term.write('\r\n\x1b[33mConnection closed.\x1b[0m\r\n');
         setStatus('Disconnected');
       };
 
-      ws.onerror = () => {
+      ws.onerror = (e) => {
+        console.error('[SSH] WebSocket error', e);
         setStatus('Error');
       };
 

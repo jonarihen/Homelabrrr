@@ -2,6 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 
+// Preload noVNC RFB module so it's cached before we request a VNC ticket.
+// Proxmox VNC proxies time out quickly (~10s), so the import must not delay
+// the WebSocket connection.
+const rfbModulePromise = import('@novnc/novnc/lib/rfb.js');
+
 function forceFullRefresh(rfb) {
   if (!rfb) return;
 
@@ -29,14 +34,20 @@ export default function VNCSessionPanel({ vm, visible = true }) {
 
     async function connect() {
       try {
+        // Load RFB module first (cached via preload) — no server-side state created.
+        // Only request the VNC ticket after, so the Proxmox proxy doesn't time out
+        // waiting for us to finish the import.
+        const { default: RFB } = await rfbModulePromise;
+        if (cancelled) { console.warn('[VNC] cancelled after RFB import'); return; }
+        if (!containerRef.current) { console.warn('[VNC] containerRef null'); return; }
+
         const { data } = await api.post(`/vms/${vmNode}/${vm.vmid}/vnc-ticket`);
-        if (cancelled) return;
+        if (cancelled) { console.warn('[VNC] cancelled after ticket'); return; }
 
         const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
         const wsUrl = `${proto}://${window.location.host}/api/vnc`;
-        const { default: RFB } = await import('@novnc/novnc/lib/rfb.js');
 
-        if (cancelled || !containerRef.current) return;
+        console.log('[VNC] creating RFB →', wsUrl, 'token:', data.token?.slice(0, 8));
 
         const rfb = new RFB(containerRef.current, wsUrl, {
           credentials: { password: data.ticket },
@@ -47,10 +58,12 @@ export default function VNCSessionPanel({ vm, visible = true }) {
         rfb.resizeSession = false;
 
         rfb.addEventListener('connect', () => {
+          console.log('[VNC] RFB connected');
           setStatus('Connected');
           refreshTimerRef.current = window.setTimeout(() => forceFullRefresh(rfb), 500);
         });
         rfb.addEventListener('disconnect', (e) => {
+          console.warn('[VNC] RFB disconnect, clean:', e.detail.clean);
           setStatus(e.detail.clean ? 'Disconnected' : 'Connection lost');
         });
 

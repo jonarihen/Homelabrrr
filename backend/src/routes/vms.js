@@ -417,13 +417,17 @@ router.post('/:node/:vmid/vnc-ticket', async (req, res) => {
       if (v.expires < Date.now()) vncSessions.delete(k);
     }
 
+    const now = Date.now();
+    console.log(`[VNC-ticket] node=${node} vmid=${vmid} type=${vmtype} port=${vncData.port} ticket=${vncData.ticket?.slice(0, 20)}...`);
+
     vncSessions.set(token, {
       userId: req.session.userId,
       sessionId: req.sessionID,
       node, vmid, vmtype,
       ticket: vncData.ticket,
       port:   vncData.port,
-      expires: Date.now() + 120_000, // 2 min to establish connection
+      createdAt: now,
+      expires: now + 120_000, // 2 min to establish connection
     });
 
     // Return ticket so noVNC can use it as VNC password
