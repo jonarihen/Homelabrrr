@@ -9,8 +9,8 @@
 [![Security](https://img.shields.io/badge/security-TOTP%202FA%20%2B%20role%20controls-bf3989?style=flat-square)](#security-model)
 
 Homelabrrr is a web portal for running a self-service Proxmox environment with FortiGate-backed networking.
-Users get VM access, browser console access, SSH, provisioning, and account management.
-Admins get a single interface for hosts, firewalls, VLANs, policies, assignments, users, and audit history.
+Users get assigned VM/LXC access, browser VNC, browser SSH, SFTP file access, provisioning, and account management.
+Admins get a single interface for Proxmox hosts, FortiGate firewalls, VLANs, policies, port forwards, assignments, users, and audit history.
 
 It is built for homelab deployment behind a reverse proxy such as Nginx Proxy Manager.
 The frontend serves internal HTTP, and TLS is expected to terminate at the proxy layer.
@@ -30,36 +30,39 @@ This project pulls those into one interface so users can work inside guardrails 
 
 | Area | What you get |
 | --- | --- |
-| VM & LXC access | Assigned VM/container listing, browser VNC, detail views with snapshots and backups |
-| SSH | Browser-based SSH terminal using uploaded keys with per-VM authorization |
-| Provisioning | Template-driven cloning and from-scratch VM creation with auto CPU topology, VLAN picker, and GB-based memory |
-| Networking | VLAN management with user-scoped access, FortiGate policy builder, port forwarding / WAN VIP management |
+| VM & LXC access | Assigned VM/container listing, status/actions, browser VNC, snapshots, backups, and file-level backup restore |
+| Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, and pop-out tabs |
+| SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
+| Provisioning | Template-driven cloning plus admin create-from-scratch flow with CPU topology validation, `cpu=host`, VLAN picker, and GB-based memory |
+| Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
+| Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
-| Admin delegation | Granular permission flags — hosts, firewalls, VLANs, policies, templates, users, assignments, audit |
-| Security | Session auth, TOTP 2FA, secrets encrypted at rest, upstream TLS enforcement, audit logging |
+| Admin delegation | Ten granular permission flags for hosts, firewalls, port forwards, VLANs, policies, templates, users, assignments, audit log, and VM hardware edits |
+| Security | Session auth, TOTP 2FA, login throttling, secrets encrypted at rest, upstream TLS enforcement, SSH host-key checks, audit logging |
 
 ## UI Overview
 
 ### User side
 
-- `My VMs` — assigned VM/LXC inventory with search, filter, sort, and bulk actions
-- `New VM` — template-driven cloning (with VLAN picker, GB memory, auto CPU topology) or from-scratch creation for admins
-- `VM Detail` — status, actions (start/stop/reboot), snapshots, backups, file-level restore, browser VNC and SSH
-- `SSH Keys` — uploaded keys used by the browser terminal
+- `My VMs` — assigned VM/LXC inventory with search, filter, sort, selection, and bulk actions
+- `New VM` — template-driven cloning for permitted users, plus create-from-scratch for admins
+- `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore
+- `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs
+- `SSH Keys` — uploaded keys used by browser SSH and SFTP sessions
 - `Account` — password and 2FA management
 
 ### Admin side
 
 - `PVE Hosts` — multi-host Proxmox registration with status monitoring
 - `Templates` — register source VMs with auto-populated defaults from Proxmox config
-- `Firewalls` — FortiGate registration and managed-switch aware VLAN provisioning
-- `VLANs` — network definitions with user-scoped access for delegated managers
-- `Policies` — visual traffic mesh and service-based policy creation
-- `Port Forwarding` — WAN VIP and port forwarding rule management
+- `Firewalls` — FortiGate registration, VDOM/link settings, WAN settings, and managed-switch discovery
+- `VLANs` — managed or tagged-only network definitions, subnet data, and FortiGate sync
+- `Policies` — visual traffic mesh plus address/service object management for admins
+- `Port Forwarding` — WAN VIP and firewall policy management, scoped for delegated users
 - `Assignments` — VM and VLAN-to-user mapping
-- `Users` — accounts, granular permissions, and enforced 2FA
+- `Users` — accounts, granular permissions, VM/VLAN assignments, lockout unlocks, and enforced 2FA
 - `Audit Log` — change tracking with user/IP/timestamp
-- `Changelog` — viewable directly from the admin sidebar
+- `Changelog` — recent platform changes shown from the sidebar for full admins
 
 ## Architecture
 
@@ -76,11 +79,11 @@ flowchart LR
 ## Stack
 
 - Frontend: React 18, Vite 5, Tailwind CSS 3, React Router 6
-- Backend: Node.js 20 (ESM), Express, `ws`, `ssh2`
+- Backend: Node.js 20 (ESM), Express, `ws`, `ssh2`, `multer`
 - Database: SQLite via `better-sqlite3` (encrypted secrets at rest)
-- Auth: session cookies (SQLite-backed) + TOTP 2FA
-- Console access: Proxmox VNC websocket proxy via noVNC
-- SSH terminal: `xterm.js` in the browser, server-side SSH proxy
+- Auth: SQLite-backed session cookies, rate-limited login/2FA, TOTP 2FA
+- Console access: Proxmox VNC websocket proxy via noVNC, plus browser SSH via `xterm.js`
+- File access: SFTP over `ssh2`, sharing the SSH credential and host-key verification flow
 - Integrations: Proxmox VE API (multi-host), FortiGate REST API
 - Deployment: Docker Compose (two containers — backend + frontend/nginx)
 
@@ -89,11 +92,26 @@ flowchart LR
 The current UI is built around a left navigation shell with focused task pages:
 
 - VM dashboard for daily user operations
-- modal-based VNC and SSH access
+- docked/floating VNC and SSH sessions with standalone tab routes
+- SFTP file browsing inside connected SSH sessions
+- VM detail pages with IP reservation, snapshot, backup, restore, and hardware-edit workflows
 - admin pages split into Infrastructure, Networking, and Access sections
 - a visual policy mesh for understanding VLAN relationships
 
 If you want this README to include actual screenshots, add image files under something like `docs/` and link them here.
+
+## Port Forwarding Notes
+
+Managed custom port forwards are named with the target service port and protocol, for example `Minecraft - Custom 25565/tcp`.
+The created FortiGate policies use the same base name through the existing `PF: ...` policy prefix.
+
+Compatibility with existing installs:
+
+- existing managed VIPs and policies are not renamed or migrated
+- old names such as `Minecraft - Custom` continue to be listed, deleted, and cleaned up by their stored `vip_name` and `service_name`
+- new custom forwards can target the same VM when the internal port/protocol is different
+- duplicates are blocked for the same firewall, internal IP, internal port, and protocol
+- the WAN external port/protocol must still be unique on the firewall
 
 ## Quick Start
 
@@ -106,7 +124,7 @@ cp .env.example .env
 Then set at least:
 
 - `SESSION_SECRET` to a long random value
-- `SECRET_ENCRYPTION_KEY` to a 32-byte base64 or hex key (used to encrypt secrets at rest)
+- `SECRET_ENCRYPTION_KEY` to a 32-byte base64, hex, or raw text key (used to encrypt secrets at rest)
 - `ALLOWED_ORIGIN` to your public portal URL
 - `COOKIE_SECURE=true` when the site is served behind HTTPS
 
@@ -123,16 +141,45 @@ Those bootstrap values are only used to create the first admin account on first 
 docker compose up -d --build
 ```
 
+The frontend is published on `http://localhost:8181` by default.
+The backend health check is available through the frontend proxy at `http://localhost:8181/api/health`.
+
 ### 3. Put it behind a reverse proxy
 
 Recommended model:
 
 - TLS terminates at Nginx Proxy Manager or another reverse proxy
 - the proxy forwards traffic to the frontend container
-- the frontend talks to the backend over the internal Docker network
+- the frontend nginx container proxies `/api/*` and websocket upgrades to the backend over the internal Docker network
 
 By default, the frontend is published on port `8181`.
 Use `FRONTEND_BIND_ADDRESS=127.0.0.1` if the proxy runs on the same host and you do not want the UI exposed directly.
+
+## Local Development
+
+Docker Compose is the normal deployment path. For local frontend/backend development:
+
+```powershell
+cd backend
+npm install
+New-Item -ItemType Directory -Force data
+$env:SESSION_SECRET="dev-session-secret"
+$env:SECRET_ENCRYPTION_KEY="0123456789abcdef0123456789abcdef"
+$env:INITIAL_ADMIN_USERNAME="admin"
+$env:INITIAL_ADMIN_PASSWORD="change-this-before-first-start"
+$env:DB_PATH="./data/db.sqlite"
+node src/index.js
+```
+
+In another shell:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Vite proxies `/api` and websocket traffic to `http://localhost:3000`.
 
 ## Environment
 
@@ -141,8 +188,8 @@ Example values live in [`.env.example`](.env.example).
 | Variable | Purpose |
 | --- | --- |
 | `SESSION_SECRET` | Session signing secret |
-| `SECRET_ENCRYPTION_KEY` | Master key for encrypting secrets at rest (API keys, SSH keys, TOTP secrets) |
-| `ALLOWED_ORIGIN` | Allowed browser origin for CORS |
+| `SECRET_ENCRYPTION_KEY` | 32-byte master key for encrypting secrets at rest; accepted as base64, 64-char hex, or exactly 32 bytes of raw text |
+| `ALLOWED_ORIGIN` | Exact public browser origin allowed for CORS and websocket upgrades |
 | `COOKIE_SECURE` | Marks auth cookies as secure |
 | `TRUST_PROXY` | Number or mode used for Express proxy trust |
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
@@ -150,22 +197,32 @@ Example values live in [`.env.example`](.env.example).
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
 | `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing |
 
+Useful implementation defaults:
+
+- backend listens on port `3000` inside Docker
+- frontend nginx listens on port `80` inside Docker and publishes host port `8181`
+- SQLite data is stored in the `db_data` Docker volume at `/app/data/db.sqlite`
+- SFTP uploads are capped at 100 MB per file by the frontend nginx/backend upload path
+
 ## Security Model
 
 Current hardening in the codebase includes:
 
 - no hardcoded default admin user on fresh install
 - optional mandatory 2FA enrollment
+- login and 2FA attempt throttling, with admin unlock support
 - assignment-aware VM access (users only see their own VMs)
-- per-VM SSH authorization and stored destination config
+- per-VM SSH authorization, stored destination config, and SSH host-key verification
+- SFTP access reuses the same authenticated SSH session setup and host-key checks as terminal access
 - secrets encrypted at rest with `SECRET_ENCRYPTION_KEY` (API tokens, SSH keys, TOTP secrets)
 - upstream TLS enforcement for Proxmox and FortiGate connections (with explicit break-glass override)
 - per-host Proxmox TLS verification settings
-- granular admin permissions for delegation (8 independent flags)
-- user-scoped VLAN management (non-admins only see assigned VLANs)
+- granular admin permissions for delegation (10 independent flags)
+- user-scoped VLAN, policy, and port-forward management
+- hardware editing is separately permission-gated and audit-logged
 - audit logging for all significant actions with user/IP/timestamp
 - error message sanitization (strips internal IPs and paths from API responses)
-- CORS locked to `ALLOWED_ORIGIN`, secure cookies, security headers in nginx
+- CORS/websocket origin checks tied to `ALLOWED_ORIGIN` or same-origin access, plus secure cookies and nginx security headers
 
 Operationally important:
 
@@ -186,6 +243,13 @@ This project is intended to run like this:
 4. The frontend proxies API and websocket traffic to the backend
 
 That matches a homelab setup where the app itself stays internal and the public edge is handled elsewhere.
+
+Proxy requirements:
+
+- forward normal HTTP requests and websocket upgrades for `/api/*`
+- preserve `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto`
+- set `ALLOWED_ORIGIN` to the exact external URL, for example `https://portal.example.com`
+- keep `COOKIE_SECURE=true` when users access the portal over HTTPS
 
 ## Repo Layout
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-06-22 — Custom port-forward naming and duplicate protection
+
+### Custom port-forward naming
+- New custom port forwards now include the internal service port and protocol in the generated VIP/policy name, for example `Minecraft - Custom 25565/tcp`
+- Root and lab VDOM firewall policies inherit that generated name through the existing `PF: ...` policy naming pattern
+- This allows multiple custom forwards for the same VM as long as they target different internal ports/protocols
+
+### Duplicate protection
+- The backend now rejects duplicate managed forwards for the same firewall, internal IP, internal port, and protocol
+- The existing external port/protocol conflict check remains in place, so the same WAN port cannot be reused on the firewall
+- Port/protocol values are normalized and validated server-side before FortiGate objects are created
+
+### Compatibility
+- Existing managed VIPs and policies keep their old names; no migration or FortiGate rename is performed
+- Old records such as `VM - Custom` continue to be matched, listed, deleted, and VLAN-cleaned by their stored `vip_name` and `service_name`
+- New duplicate checks include old database rows, so an old `VM - Custom` rule still prevents creating another managed forward to the same internal IP/port/protocol
+
 ## 2026-04-15 — VNC reliability and SSH UTF-8 fixes
 
 ### VNC console connection reliability

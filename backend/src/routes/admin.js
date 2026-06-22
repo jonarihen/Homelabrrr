@@ -1407,6 +1407,26 @@ function managedVipAddressMatches(address, mappedIp) {
   return String(address?.type || 'ipmask') === 'ipmask' && subnet === `${mappedIp} 255.255.255.255`;
 }
 
+function normalizePortForwardProtocol(protocol) {
+  const normalized = String(protocol || 'tcp').toLowerCase();
+  return ['tcp', 'udp'].includes(normalized) ? normalized : null;
+}
+
+function parsePortForwardPort(value) {
+  const raw = String(value || '').trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const port = Number.parseInt(raw, 10);
+  return port >= 1 && port <= 65535 ? port : null;
+}
+
+function buildPortSpecificCustomVipName(vipName, protocol, port) {
+  const trimmedName = String(vipName || '').trim();
+  if (!trimmedName) return '';
+  if (/\b\d{1,5}\/(?:tcp|udp)$/i.test(trimmedName)) return trimmedName;
+  if (/\bcustom$/i.test(trimmedName)) return `${trimmedName} ${port}/${protocol}`;
+  return trimmedName;
+}
+
 // Update WAN config (external IP + WAN zone) from the port forwarding page
 router.put('/firewalls/:id/wan-config', pFirewalls, (req, res) => {
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
@@ -1532,9 +1552,18 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
 
   let { name, protocol = 'tcp', extPort, mappedIp, mappedPort, dstInterface, vlanInterface, srcAddresses = ['all'], node, vmid } = req.body;
   const unrestricted = canManageAllPortForwards(req);
-  if (!name || !extPort || !mappedPort) {
-    return res.status(400).json({ error: 'name, extPort, and mappedPort are required' });
+  protocol = normalizePortForwardProtocol(protocol);
+  extPort = parsePortForwardPort(extPort);
+  mappedPort = parsePortForwardPort(mappedPort);
+  name = String(name || '').trim();
+
+  if (!protocol) {
+    return res.status(400).json({ error: 'protocol must be tcp or udp' });
   }
+  if (!name || !extPort || !mappedPort) {
+    return res.status(400).json({ error: 'name, extPort, and mappedPort are required; ports must be between 1 and 65535' });
+  }
+  name = buildPortSpecificCustomVipName(name, protocol, mappedPort);
 
   const serviceName = buildManagedVipServiceName(name, protocol, mappedPort);
   let createdRootService = false;
@@ -1568,6 +1597,15 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
 
     if (!mappedIp || !dstInterface) {
       return res.status(400).json({ error: 'mappedIp and dstInterface are required' });
+    }
+
+    const duplicateMappedPort = db.prepare(
+      'SELECT vip_name FROM managed_vips WHERE firewall_id = ? AND mapped_ip = ? AND mapped_port = ? AND protocol = ?'
+    ).get(fw.id, mappedIp, mappedPort, protocol);
+    if (duplicateMappedPort) {
+      return res.status(409).json({
+        error: `Internal port ${mappedIp}:${mappedPort}/${protocol.toUpperCase()} is already published by "${duplicateMappedPort.vip_name}"`
+      });
     }
 
     const externalIp = fw.external_ip || '';

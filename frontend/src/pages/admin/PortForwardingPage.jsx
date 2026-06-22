@@ -14,6 +14,22 @@ const SERVICE_PRESETS = [
   { label: 'Custom', port: null, protocol: 'tcp' },
 ];
 
+function portProtocolLabel(port, protocol) {
+  const trimmedPort = String(port || '').trim();
+  if (!trimmedPort) return '';
+  return `${trimmedPort}/${String(protocol || 'tcp').toLowerCase()}`;
+}
+
+function buildRuleName(vmName, service, port, protocol) {
+  const trimmedVmName = String(vmName || '').trim();
+  if (!trimmedVmName) return '';
+  if (service === 'Custom') {
+    const suffix = portProtocolLabel(port, protocol);
+    return `${trimmedVmName} - Custom${suffix ? ` ${suffix}` : ''}`;
+  }
+  return `${trimmedVmName} - ${service}`;
+}
+
 export default function PortForwardingPage() {
   useDocumentTitle('Port Forwarding');
   const { user } = useAuth();
@@ -104,14 +120,13 @@ export default function PortForwardingPage() {
     const vm = vmTargets.find(v => `${routeNode(v)}/${v.vmid}` === vmKey);
     if (!vm) return;
 
-    const svcLabel = form.service === 'Custom' ? 'Custom' : form.service;
     setForm(f => ({
       ...f,
       vmKey,
       mappedIp: vm.ip,
       dstInterface: vm.dstInterface || f.dstInterface,
       vlanInterface: vm.vlanInterface || '',
-      name: `${vm.name} - ${svcLabel}`,
+      name: buildRuleName(vm.name, f.service, f.mappedPort, f.customProtocol),
     }));
   };
 
@@ -127,14 +142,14 @@ export default function PortForwardingPage() {
         protocol: preset.protocol,
         mappedPort: String(preset.port),
         extPort: f.extPort || String(preset.port),
-        name: vmName ? `${vmName} - ${serviceLabel}` : f.name,
+        name: buildRuleName(vmName, serviceLabel, preset.port, preset.protocol) || f.name,
       }));
     } else {
       setForm(f => ({
         ...f,
         service: serviceLabel,
         mappedPort: '',
-        name: vmName ? `${vmName} - Custom` : f.name,
+        name: buildRuleName(vmName, serviceLabel, f.mappedPort, f.customProtocol) || f.name,
       }));
     }
   };
@@ -416,7 +431,16 @@ export default function PortForwardingPage() {
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">Protocol</label>
                   <select value={form.customProtocol}
-                    onChange={e => setForm(f => ({ ...f, customProtocol: e.target.value }))}
+                    onChange={e => {
+                      const customProtocol = e.target.value;
+                      setForm(f => ({
+                        ...f,
+                        customProtocol,
+                        name: f.service === 'Custom'
+                          ? buildRuleName(selectedVm?.name, f.service, f.mappedPort, customProtocol)
+                          : f.name,
+                      }));
+                    }}
                     className={inputCls}>
                     <option value="tcp">TCP</option>
                     <option value="udp">UDP</option>
@@ -426,7 +450,16 @@ export default function PortForwardingPage() {
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Internal Port</label>
                 <input type="number" required min="1" max="65535" value={form.mappedPort}
-                  onChange={e => setForm(f => ({ ...f, mappedPort: e.target.value }))}
+                  onChange={e => {
+                    const mappedPort = e.target.value;
+                    setForm(f => ({
+                      ...f,
+                      mappedPort,
+                      name: f.service === 'Custom'
+                        ? buildRuleName(selectedVm?.name, f.service, mappedPort, f.customProtocol)
+                        : f.name,
+                    }));
+                  }}
                   placeholder={isCustom ? 'e.g. 8080' : ''}
                   className={inputCls}
                   readOnly={!isCustom}
