@@ -22,7 +22,7 @@ export default function Modal({ title, onClose, children, size = 'md' }) {
     >
       <div className={`w-full ${sizes[size]} bg-gray-900 border border-gray-700 rounded-xl shadow-2xl flex flex-col max-h-[90vh]`}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700 shrink-0">
-          <h2 className="text-white font-semibold">{title}</h2>
+          <h2 className="aaris-display text-sm text-gray-100">{title}</h2>
           <button
             onClick={onClose}
             className="text-gray-500 hover:text-white transition-colors p-1 rounded hover:bg-gray-700"

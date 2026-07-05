@@ -159,7 +159,8 @@ export function ConsoleSessionsProvider({ children }) {
       const path = session.type === 'vnc'
         ? `/vnc/${nodeRef}/${session.vm.vmid}`
         : `/ssh/${nodeRef}/${session.vm.vmid}`;
-      window.open(path, '_blank', 'noopener');
+      const name = session.vm.name;
+      window.open(name ? `${path}?name=${encodeURIComponent(name)}` : path, '_blank', 'noopener');
 
       return current.filter((s) => s.id !== id);
     });
@@ -280,7 +281,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
 
   return (
     <div
-      className={`${session.minimized ? 'hidden' : 'flex'} pointer-events-auto fixed flex-col overflow-hidden rounded-2xl border border-gray-700/80 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl`}
+      className={`${session.minimized ? 'hidden' : 'flex'} pointer-events-auto fixed flex-col overflow-hidden border border-gray-700 bg-gray-900`}
       style={{
         left: `${session.x}px`,
         top: `${session.y}px`,
@@ -291,7 +292,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
       onMouseDown={() => onFocus(session.id)}
     >
       <div
-        className="flex items-center justify-between gap-3 border-b border-gray-700/80 bg-gray-950/90 px-4 py-3 cursor-move shrink-0"
+        className="flex items-center justify-between gap-3 border-b border-gray-700 bg-gray-950 px-4 py-3 cursor-move shrink-0"
         onMouseDown={startDrag}
       >
         <div className="min-w-0">
@@ -299,7 +300,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
             <SessionTypeBadge type={session.type} />
             <span className="truncate">{consoleTitle(session)}</span>
           </div>
-          <p className="mt-0.5 truncate text-xs text-gray-500 font-mono">
+          <p className="mt-0.5 truncate font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500">
             {session.vm.node} / {session.vm.vmid}
           </p>
         </div>
@@ -337,10 +338,10 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
 function ConsoleSessionDock({ sessions, restoreSession, closeSession, liveCount, tileSessions }) {
   return (
     <div className="pointer-events-auto fixed bottom-4 left-4 right-4 lg:left-[15.5rem] lg:right-auto lg:max-w-[calc(100vw-17rem)]">
-      <div className="inline-flex max-w-full flex-col gap-3 rounded-2xl border border-gray-800 bg-gray-950/92 px-4 py-3 shadow-2xl shadow-black/40 backdrop-blur-xl">
+      <div className="inline-flex max-w-full flex-col gap-3 border border-gray-800 bg-gray-950 px-4 py-3">
         <div className="flex items-center justify-between gap-6">
           <div>
-            <p className="text-[11px] uppercase tracking-[0.25em] text-gray-500">Console Dock</p>
+            <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-gray-500">Console Dock</p>
             <p className="text-sm text-gray-300">
               {sessions.length > 0 ? `${sessions.length} minimized` : ''}
               {sessions.length > 0 && liveCount > 0 ? ' \u2022 ' : ''}

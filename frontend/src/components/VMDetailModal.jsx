@@ -230,37 +230,37 @@ export default function VMDetailModal({ vm, onClose }) {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <MiniChart
                   data={cpuData}
-                  color="#3b82f6"
+                  color="#ff5a1f"
                   label="CPU Usage"
                   formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'}
                 />
                 <MiniChart
                   data={memData}
-                  color="#a855f7"
+                  color="#ff8a55"
                   label="Memory Usage"
                   formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'}
                 />
                 <MiniChart
                   data={netInData}
-                  color="#22c55e"
+                  color="#3fd97f"
                   label="Network In"
                   formatValue={v => fmtRate(v)}
                 />
                 <MiniChart
                   data={netOutData}
-                  color="#f97316"
+                  color="#ffb224"
                   label="Network Out"
                   formatValue={v => fmtRate(v)}
                 />
                 <MiniChart
                   data={diskReadData}
-                  color="#06b6d4"
+                  color="#8b939e"
                   label="Disk Read"
                   formatValue={v => fmtRate(v)}
                 />
                 <MiniChart
                   data={diskWriteData}
-                  color="#eab308"
+                  color="#e9ecef"
                   label="Disk Write"
                   formatValue={v => fmtRate(v)}
                 />

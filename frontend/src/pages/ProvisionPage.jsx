@@ -36,7 +36,7 @@ export default function ProvisionPage() {
     <Layout>
       <div className="p-6 lg:p-8 max-w-3xl mx-auto space-y-6">
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Create Virtual Machine</h1>
+          <h1 className="aaris-display text-xl text-gray-100">Create Virtual Machine</h1>
           <p className="text-sm text-gray-500 mt-1">
             {showTabs ? 'Provision a new VM from a template or create one from scratch'
               : canCreate ? 'Create a new VM with custom hardware settings'

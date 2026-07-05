@@ -59,7 +59,7 @@ export default function UsersPage() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-bold text-white">Users</h1>
+          <h1 className="aaris-display text-lg text-gray-100">Users</h1>
           <p className="text-sm text-gray-500 mt-0.5">{users.length} accounts</p>
         </div>
         <button

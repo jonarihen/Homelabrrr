@@ -142,20 +142,21 @@ function SSHTerminal({ token, visible }) {
       const term = new Terminal({
         cursorBlink: true,
         fontSize: 14,
-        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
+        fontFamily: "'IBM Plex Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
         theme: {
-          background: '#0d1117',
-          foreground: '#c9d1d9',
-          cursor: '#58a6ff',
-          selectionBackground: '#264f78',
-          black: '#0d1117',
-          red: '#ff7b72',
-          green: '#3fb950',
-          yellow: '#d29922',
-          blue: '#58a6ff',
-          magenta: '#bc8cff',
+          // AARIS operator-console theme — orange cursor, near-black surface
+          background: '#0b0d11',
+          foreground: '#e9ecef',
+          cursor: '#ff5a1f',
+          selectionBackground: '#3a3f47',
+          black: '#0b0d11',
+          red: '#e5484d',
+          green: '#3fd97f',
+          yellow: '#ffb224',
+          blue: '#8b939e',
+          magenta: '#ff8a55',
           cyan: '#39c5cf',
-          white: '#c9d1d9',
+          white: '#e9ecef',
         },
       });
 
@@ -277,7 +278,7 @@ function SSHTerminal({ token, visible }) {
         }`}>{status}</span>
       </div>
 
-      <div ref={containerRef} className="flex-1 min-h-0 bg-[#0d1117] p-1" />
+      <div ref={containerRef} className="flex-1 min-h-0 bg-[#0b0d11] p-1" />
     </div>
   );
 }

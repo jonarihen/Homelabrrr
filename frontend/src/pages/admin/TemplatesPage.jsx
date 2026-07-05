@@ -41,7 +41,7 @@ export default function TemplatesPage() {
     <div className="p-6 lg:p-8">
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">VM Templates</h1>
+          <h1 className="aaris-display text-xl text-gray-100">VM Templates</h1>
           <p className="text-sm text-gray-500 mt-1">Register Proxmox VM templates that users can clone</p>
         </div>
         <button
@@ -77,7 +77,7 @@ export default function TemplatesPage() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {templates.map(t => (
             <div key={t.id} className="bg-gray-900 border border-gray-800 rounded-2xl p-5 relative overflow-hidden">
-              <div className={`absolute inset-x-0 top-0 h-0.5 ${t.enabled ? 'bg-gradient-to-r from-green-500 via-blue-500 to-purple-500' : 'bg-gray-700'}`} />
+              <div className={`absolute inset-x-0 top-0 h-0.5 ${t.enabled ? 'bg-green-500' : 'bg-gray-700'}`} />
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-blue-500/10 rounded-xl flex items-center justify-center">

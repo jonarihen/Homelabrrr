@@ -13,8 +13,8 @@ const configs = {
 export default function StatusBadge({ status }) {
   const c = configs[status] || { dot: 'bg-gray-500', bg: 'bg-gray-500/10 ring-gray-500/20', text: 'text-gray-400', label: status };
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ring-1 ${c.bg} ${c.text}`}>
-      <span className={`inline-block w-1.5 h-1.5 rounded-full ${c.dot}`} />
+    <span className={`inline-flex items-center gap-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.1em] px-2.5 py-1 ring-1 ${c.bg} ${c.text}`}>
+      <span className={`inline-block w-2 h-2 ${c.dot}`} />
       {c.label}
     </span>
   );

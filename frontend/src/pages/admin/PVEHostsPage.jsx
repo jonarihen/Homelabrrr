@@ -87,7 +87,7 @@ export default function PVEHostsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">PVE Hosts</h1>
+          <h1 className="aaris-display text-xl text-gray-100">PVE Hosts</h1>
           <p className="text-sm text-gray-500 mt-1">Manage your Proxmox VE servers</p>
         </div>
         <button
@@ -123,7 +123,7 @@ export default function PVEHostsPage() {
             return (
               <div key={h.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
                 {/* Top accent */}
-                <div className={`h-0.5 ${s.online ? 'bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500' : s.loading ? 'bg-gray-700 animate-pulse' : 'bg-red-500'}`} />
+                <div className={`h-0.5 ${s.online ? 'bg-green-500' : s.loading ? 'bg-gray-700 animate-pulse' : 'bg-red-500'}`} />
 
                 <div className="p-5">
                   {/* Header row */}

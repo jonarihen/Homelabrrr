@@ -16,7 +16,7 @@ export default function AccountPage() {
       <div className="p-6 lg:p-8 max-w-2xl mx-auto space-y-6">
         {/* Header */}
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Account Settings</h1>
+          <h1 className="aaris-display text-xl text-gray-100">Account Settings</h1>
           <p className="text-sm text-gray-500 mt-1">Manage your profile, password, and security</p>
         </div>
 

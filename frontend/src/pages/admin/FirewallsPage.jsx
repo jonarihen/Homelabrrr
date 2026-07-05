@@ -87,7 +87,7 @@ export default function FirewallsPage() {
     <div className="p-6 lg:p-8 max-w-5xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Firewalls</h1>
+          <h1 className="aaris-display text-xl text-gray-100">Firewalls</h1>
           <p className="text-sm text-gray-500 mt-1">Manage FortiGate and other firewall appliances</p>
         </div>
         <button onClick={openAdd} className="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20">
@@ -118,7 +118,7 @@ export default function FirewallsPage() {
             const s = statuses[fw.id] || {};
             return (
               <div key={fw.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-                <div className={`h-0.5 ${s.online ? 'bg-gradient-to-r from-orange-500 via-amber-500 to-yellow-500' : s.loading ? 'bg-gray-700 animate-pulse' : 'bg-red-500'}`} />
+                <div className={`h-0.5 ${s.online ? 'bg-green-500' : s.loading ? 'bg-gray-700 animate-pulse' : 'bg-red-500'}`} />
                 <div className="p-5">
                   <div className="flex items-start justify-between mb-4">
                     <div className="flex items-center gap-3">

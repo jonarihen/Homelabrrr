@@ -1,14 +1,16 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
+import useVmName from '../hooks/useVmName.js';
 import SSHSessionPanel from '../components/SSHSessionPanel.jsx';
 import { displayNode } from '../utils/nodeRef.js';
 
 export default function SSHPage() {
   const { node, vmid } = useParams();
-  useDocumentTitle(`SSH - VM ${vmid}`);
+  const vmName = useVmName(node, vmid);
+  useDocumentTitle(`SSH - ${vmName}`);
   const navigate = useNavigate();
 
-  const vm = { node, vmid: Number(vmid), nodeRef: node, name: `VM ${vmid}` };
+  const vm = { node, vmid: Number(vmid), nodeRef: node, name: vmName };
 
   return (
     <div className="flex flex-col h-screen bg-gray-950">
@@ -24,7 +26,8 @@ export default function SSHPage() {
         </button>
 
         <span className="text-gray-400 text-sm">
-          SSH &mdash; {displayNode(node)}/{vmid}
+          SSH &mdash; {vmName}
+          <span className="text-gray-600 font-mono ml-2">{displayNode(node)}/{vmid}</span>
         </span>
 
         <div className="flex-1" />

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
+import useVmName from '../hooks/useVmName.js';
 import api from '../api.js';
 import { displayNode } from '../utils/nodeRef.js';
 
@@ -19,7 +20,8 @@ function forceFullRefresh(rfb) {
 
 export default function VNCPage() {
   const { node, vmid } = useParams();
-  useDocumentTitle(`VNC - VM ${vmid}`);
+  const vmName = useVmName(node, vmid);
+  useDocumentTitle(`VNC - ${vmName}`);
   const navigate        = useNavigate();
   const containerRef    = useRef(null);
   const rfbRef          = useRef(null);
@@ -83,7 +85,8 @@ export default function VNCPage() {
         </button>
 
         <span className="text-gray-400 text-sm">
-          VNC — {displayNode(node)}/{vmid}
+          VNC — {vmName}
+          <span className="text-gray-600 font-mono ml-2">{displayNode(node)}/{vmid}</span>
         </span>
 
         <span className={`text-xs px-2 py-0.5 rounded ml-1 ${

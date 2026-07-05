@@ -101,7 +101,7 @@ export default function VLANsPage() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-bold text-white">VLANs</h1>
+          <h1 className="aaris-display text-lg text-gray-100">VLANs</h1>
           <p className="text-sm text-gray-500 mt-0.5">
             {vlans.length} defined
             {firewalls.length > 0 && <span className="ml-2 text-orange-400/70">| {firewalls.length} firewall{firewalls.length !== 1 ? 's' : ''} connected</span>}

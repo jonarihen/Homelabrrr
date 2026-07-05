@@ -191,18 +191,21 @@ export default function Dashboard() {
         {/* Header */}
         <div className="flex items-start justify-between mb-6">
           <div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">My Virtual Machines</h1>
-            <div className="flex items-center gap-4 mt-2">
-              <span className="text-sm text-gray-500">{vms.length} total</span>
+            <div className="flex items-baseline gap-3">
+              <span className="font-mono text-xs font-semibold text-orange-600 tracking-[0.12em]">01</span>
+              <h1 className="aaris-display text-xl text-gray-100">My Virtual Machines</h1>
+            </div>
+            <div className="flex items-center gap-4 mt-2 font-mono text-[11px] uppercase tracking-[0.1em]">
+              <span className="text-gray-500">{vms.length} total</span>
               {running > 0 && (
-                <span className="flex items-center gap-1.5 text-sm text-green-400">
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                <span className="flex items-center gap-1.5 text-green-400">
+                  <span className="aaris-led aaris-led--ok aaris-led--pulse" />
                   {running} running
                 </span>
               )}
               {stopped > 0 && (
-                <span className="flex items-center gap-1.5 text-sm text-gray-500">
-                  <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+                <span className="flex items-center gap-1.5 text-gray-500">
+                  <span className="aaris-led aaris-led--off" />
                   {stopped} stopped
                 </span>
               )}
@@ -212,7 +215,7 @@ export default function Dashboard() {
             {(user?.isAdmin || user?.canProvision) && (
               <button
                 onClick={() => navigate('/provision')}
-                className="flex items-center gap-2 text-sm text-white bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl font-medium transition-all shadow-lg shadow-blue-600/20"
+                className="flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-[0.12em] text-gray-950 bg-orange-600 hover:bg-orange-500 border border-orange-600 hover:border-orange-500 px-4 py-2 transition-colors"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
@@ -222,7 +225,7 @@ export default function Dashboard() {
             )}
             <button
               onClick={load}
-              className="flex items-center gap-2 text-sm text-gray-400 hover:text-white bg-gray-800/50 hover:bg-gray-800 border border-gray-700/50 px-4 py-2 rounded-xl transition-all"
+              className="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.12em] text-gray-400 hover:text-gray-100 bg-transparent hover:bg-gray-800 border border-gray-700 px-4 py-2 transition-colors"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />

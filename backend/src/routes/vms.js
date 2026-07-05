@@ -4,7 +4,7 @@ import db from '../db.js';
 import {
   getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
-  restoreVMBackup, listBackupFiles, downloadBackupFile,
+  restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM,
   getLXCStatus, lxcAction, getLXCConfig, updateLXCConfig, getLXCRRD, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
 } from '../proxmox.js';
@@ -12,8 +12,8 @@ import { createClient } from '../fortigate.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
-import { userCanAccessVm } from '../utils/vmAccess.js';
-import { decodeNodeRef } from '../utils/nodeRef.js';
+import { userCanAccessVm, userOwnsVm } from '../utils/vmAccess.js';
+import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 
 const router = Router();
@@ -366,6 +366,56 @@ router.post('/:node/:vmid/action', async (req, res) => {
     }
     logAudit(req, 'vm_action', `${node}/${vmid}`, action);
     res.json({ ok: true, upid });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// ─── VM Deletion ──────────────────────────────────────────────────────────────
+
+router.delete('/:node/:vmid', async (req, res) => {
+  const { node, vmid } = req.params;
+
+  // Admins can delete any VM; regular users only VMs assigned to them.
+  // Deliberately NOT userCanAccessVm — see_all_vms must not grant deletion.
+  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+    return res.status(403).json({ error: 'You can only delete VMs assigned to you' });
+  }
+
+  try {
+    // Collect backups first — after destruction the VMID no longer resolves to a host
+    let backups = [];
+    try {
+      backups = await getVMBackups(node, vmid);
+    } catch (err) {
+      console.warn(`[vm-delete] Could not list backups for ${node}/${vmid}: ${err.message}`);
+    }
+
+    await deleteVM(node, vmid);
+
+    // Purge every backup of this VMID so a future VM reusing the ID never inherits them
+    let deletedBackups = 0;
+    const failedBackups = [];
+    for (const backup of backups) {
+      try {
+        await deleteVMBackup(node, backup.storage, backup.volid);
+        deletedBackups += 1;
+      } catch (err) {
+        console.warn(`[vm-delete] Failed to delete backup ${backup.volid}: ${err.message}`);
+        failedBackups.push(backup.volid);
+      }
+    }
+
+    // Clean up portal records tied to this VM
+    const parsedVmid = parseInt(vmid, 10);
+    const candidates = nodeLookupCandidates(node);
+    const placeholders = candidates.map(() => '?').join(', ');
+    for (const table of ['vm_assignments', 'vm_ssh_configs', 'vm_ssh_user_configs', 'provisioned_vms']) {
+      db.prepare(`DELETE FROM ${table} WHERE vmid = ? AND node IN (${placeholders})`).run(parsedVmid, ...candidates);
+    }
+
+    logAudit(req, 'vm_delete', `${node}/${vmid}`, `backups_deleted=${deletedBackups}${failedBackups.length > 0 ? ` backups_failed=${failedBackups.length}` : ''}`);
+    res.json({ ok: true, deletedBackups, failedBackups });
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
   }

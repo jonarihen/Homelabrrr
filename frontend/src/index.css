@@ -2,17 +2,117 @@
 @tailwind components;
 @tailwind utilities;
 
-* {
-  box-sizing: border-box;
+/* ============================================================================
+   AARIS DESIGN LANGUAGE — global layer
+   Dark, square, thin-bordered, orange-accent operator console.
+   Palette tokens are also remapped onto Tailwind color names in
+   tailwind.config.js so existing utility classes adopt this look.
+   ========================================================================== */
+
+:root {
+  --bg:        #0e1014;
+  --bg-raise:  #12151a;
+  --bg-input:  #0b0d11;
+  --ink:       #e9ecef;
+  --muted:     #8b939e;
+  --dim:       #4d545e;
+  --line:      #232830;
+  --line-soft: #1a1e25;
+  --accent:    #ff5a1f;
+  --accent-hover: #ff7a44;
+  --ok:        #3fd97f;
+  --warning:   #ffb224;
+  --danger:    #e5484d;
+
+  --font-sans: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --grid: 48px;
 }
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
 
 body {
   margin: 0;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #0f172a; }
-::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #475569; }
+/* Subtle technical grid that ties every page together (doc §6). It sits behind
+   the app; opaque panels naturally mask it, and it shows through open space
+   such as the sign-in screen. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+  background-size: var(--grid) var(--grid);
+  opacity: 0.4;
+}
+
+::selection { background: var(--accent); color: var(--bg); }
+
+/* Visible, on-brand keyboard focus (doc §14) */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Custom scrollbar in AARIS neutrals */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line); }
+::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+* { scrollbar-color: var(--line) var(--bg); }
+
+/* ── Reusable AARIS helpers used by hand-authored components ──────────────── */
+
+/* Heavy uppercase technical heading (doc §5) */
+.aaris-display {
+  font-family: var(--font-sans);
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: -0.01em;
+  line-height: 1;
+}
+
+/* Machine-readable monospace label (doc §5) */
+.aaris-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Square status LED (doc §10). Status is conveyed by shape+label, not color
+   alone, per the accessibility rules. */
+.aaris-led {
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.aaris-led--ok      { background: var(--ok); }
+.aaris-led--warning { background: var(--warning); }
+.aaris-led--error   { background: var(--danger); }
+.aaris-led--off     { background: var(--line); }
+.aaris-led--pulse   { animation: aaris-pulse 1.6s var(--ease, ease-in-out) infinite; }
+
+@keyframes aaris-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition-duration: 0.01ms !important; }
+}

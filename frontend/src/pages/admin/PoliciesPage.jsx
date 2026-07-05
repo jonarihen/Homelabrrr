@@ -808,7 +808,7 @@ export default function PoliciesPage() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-3">
               <div>
-                <h1 className="text-2xl font-bold tracking-tight text-white">Policy Mesh</h1>
+                <h1 className="aaris-display text-xl text-gray-100">Policy Mesh</h1>
                 <p className="mt-1 text-sm text-slate-400">
                   {srcVlan
                     ? `Source locked on ${srcVlan.name}. Existing peers pull inward so you can see the neighborhood before choosing a destination.`
@@ -850,7 +850,7 @@ export default function PoliciesPage() {
 
           <div
             ref={canvasRef}
-            className="relative mt-6 overflow-hidden rounded-[28px] border border-slate-800 bg-[radial-gradient(circle_at_center,_rgba(30,41,59,0.75),_rgba(2,6,23,0.98)_68%)] px-4 py-4 min-h-[620px]"
+            className="relative mt-6 overflow-hidden border border-slate-800 bg-[radial-gradient(circle_at_center,_rgba(30,41,59,0.75),_rgba(2,6,23,0.98)_68%)] px-4 py-4 min-h-[620px]"
             style={{ minHeight: `${meshMinHeight}px`, cursor: panRef.current ? 'grabbing' : 'grab' }}
             onMouseLeave={() => setHoveredLine(null)}
             onPointerDown={handleCanvasPointerDown}
@@ -895,7 +895,7 @@ export default function PoliciesPage() {
             )}
 
             {policiesLoading && (
-              <div className="absolute inset-0 z-20 flex items-center justify-center rounded-[28px] bg-slate-950/70 backdrop-blur-sm">
+              <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm">
                 <span className="text-sm text-slate-300">Refreshing policy mesh...</span>
               </div>
             )}

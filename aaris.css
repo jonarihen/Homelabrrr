@@ -1,0 +1,176 @@
+/* ============================================================================
+   AARIS DESIGN LANGUAGE — reusable base
+   Dark, square, thin-bordered, orange-accent, mono-labelled "operator console".
+   Drop this into any project and link it before the app-specific stylesheet.
+   ========================================================================== */
+
+@import url("/static/fonts/fonts.css");
+
+:root {
+  /* ── AARIS canonical tokens (doc §4/§5) ── */
+  --bg:        #0e1014;
+  --bg-raise:  #12151a;
+  --ink:       #e9ecef;
+  --muted:     #8b939e;
+  --dim:       #4d545e;
+  --line:      #232830;
+  --line-soft: #1a1e25;
+  --accent:    #ff5a1f;
+  --ok:        #3fd97f;
+  --warning:   #ffb224;
+  --danger:    #e5484d;
+
+  --font-sans: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --grid: 48px;
+
+  /* ── Back-compat aliases: old TTSRoad token names → AARIS values ──
+     Lets the bulk of the 2,877-line app sheet convert without per-line edits. */
+  --bg-card:    var(--bg-raise);
+  --surface2:   var(--bg-raise);
+  --bg-hover:   #1a1e25;
+  --surface3:   #1a1e25;
+  --bg-input:   #0b0d11;
+
+  --text:       var(--ink);
+  --text-muted: var(--muted);
+
+  --border:        var(--line);
+  --border-focus:  var(--accent);
+  --panel-border:        var(--line);
+  --panel-border-strong: var(--accent);
+
+  --accent-dim:   rgba(255, 90, 31, .15);
+  --accent-hover: #ff7a44;
+
+  --green:   var(--ok);      --green-dim:  rgba(63, 217, 127, .12);
+  --yellow:  var(--warning); --yellow-dim: rgba(255, 178, 36, .12);
+  --red:     var(--danger);  --red-dim:    rgba(229, 72, 77, .12);
+  --purple:  var(--accent);
+
+  /* Machined: no radius, no shadow, flat panels */
+  --radius:    0px;
+  --radius-sm: 0px;
+  --shadow:        none;
+  --shadow-panel:  none;
+  --panel-bg:       var(--bg-raise);
+  --panel-bg-muted: var(--bg-raise);
+
+  --font: var(--font-sans);
+
+  /* Motion (kept from the app so existing transitions still resolve) */
+  --ease-out:    cubic-bezier(.22, .61, .36, 1);
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);
+  --dur-fast: .14s;
+  --dur-med:  .24s;
+  --dur-slow: .5s;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* Subtle technical grid that ties every page together (doc §6). Sits above the
+   page background but below content; opaque panels naturally mask it. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+  background-size: var(--grid) var(--grid);
+  opacity: .5;
+}
+
+::selection { background: var(--accent); color: var(--bg); }
+
+a { color: inherit; }
+
+/* ── Typography helpers (doc §5/§15) ── */
+.display, h1, h2, h3 {
+  font-family: var(--font-sans);
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+.mono { font-family: var(--font-mono); }
+.meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.section-number {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: .12em;
+}
+.section-title {
+  font-family: var(--font-sans);
+  font-weight: 900;
+  text-transform: uppercase;
+  font-size: clamp(22px, 4vw, 34px);
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+.rule { height: 1px; background: var(--line); border: 0; }
+
+/* ── Reusable components (doc §7) ── */
+.panel, .plate {
+  border: 1px solid var(--line);
+  background: var(--bg-raise);
+  border-radius: 0;
+}
+
+.tag {
+  display: inline-block;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-radius: 0;
+  white-space: nowrap;
+}
+
+/* Square status LEDs — status by shape+label, never colour alone (doc §10/§14) */
+.led { width: 8px; height: 8px; display: inline-block; flex: 0 0 auto; }
+.led-ok      { background: var(--ok); }
+.led-warning { background: var(--warning); }
+.led-act     { background: var(--warning); }
+.led-error   { background: var(--danger); }
+.led-off     { background: var(--line); }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

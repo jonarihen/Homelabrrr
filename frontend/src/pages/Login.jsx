@@ -43,83 +43,85 @@ export default function Login() {
     } finally { setLoading(false); }
   };
 
-  const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
+  const labelCls = 'block text-[10px] font-mono uppercase tracking-[0.14em] text-gray-500 mb-2';
+  const inputCls = 'w-full bg-[#0b0d11] border border-gray-700 px-3.5 py-3 text-sm text-gray-100 font-mono placeholder-gray-600 focus:outline-none focus:border-orange-600 transition-colors';
+  const btnCls = 'w-full border border-orange-600 bg-orange-600 text-[#0e1014] font-mono text-xs font-semibold uppercase tracking-[0.14em] py-3.5 hover:bg-orange-500 hover:border-orange-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors';
 
   return (
-    <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
-      {/* Background decoration */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-blue-600/5 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-purple-600/5 rounded-full blur-3xl" />
-      </div>
-
+    <div className="min-h-screen flex items-center justify-center p-4 relative">
       <div className="w-full max-w-sm relative">
-        {/* Logo & heading */}
-        <div className="text-center mb-8">
-          <div className="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-blue-600/20">
-            <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <rect x="2" y="3" width="20" height="14" rx="2" />
-              <path d="M8 21h8M12 17v4" strokeLinecap="round" />
-            </svg>
+        {/* Wordmark / identity plate */}
+        <div className="mb-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-9 h-9 border border-orange-600 flex items-center justify-center text-orange-600">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <rect x="2" y="3" width="20" height="14" rx="0" />
+                <path d="M8 21h8M12 17v4" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div className="leading-none">
+              <div className="aaris-display text-lg text-gray-100">VM Manager</div>
+              <div className="aaris-meta mt-1 text-[10px]">Operator Console</div>
+            </div>
           </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">VM Manager</h1>
-          <p className="text-gray-500 text-sm mt-1.5">
-            {step === 'totp' ? 'Two-factor authentication' : 'Sign in to your account'}
-          </p>
+          <div className="h-px bg-gray-700" />
+        </div>
+
+        {/* Section header */}
+        <div className="flex items-baseline gap-3 mb-4">
+          <span className="font-mono text-xs font-semibold text-orange-600 tracking-[0.12em]">
+            {step === 'totp' ? '02' : '01'}
+          </span>
+          <h1 className="aaris-display text-sm text-gray-300">
+            {step === 'totp' ? 'Two-Factor Verification' : 'Authenticate'}
+          </h1>
         </div>
 
         {step === 'credentials' ? (
-          <form onSubmit={submitCredentials} className="bg-gray-900/80 border border-gray-800/50 rounded-2xl p-6 space-y-4 backdrop-blur-sm shadow-xl shadow-black/20">
+          <form onSubmit={submitCredentials} className="border border-gray-800 bg-gray-900 p-6 space-y-4">
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Username</label>
+              <label className={labelCls}>Username</label>
               <input
                 type="text"
                 autoComplete="username"
                 value={form.username}
                 onChange={e => setForm(f => ({ ...f, username: e.target.value }))}
                 className={inputCls}
-                placeholder="Enter username"
+                placeholder="operator"
                 required
                 autoFocus
               />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Password</label>
+              <label className={labelCls}>Password</label>
               <input
                 type="password"
                 autoComplete="current-password"
                 value={form.password}
                 onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
                 className={inputCls}
-                placeholder="Enter password"
+                placeholder="••••••••"
                 required
               />
             </div>
-            {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20 hover:shadow-blue-600/30"
-            >
-              {loading ? 'Signing in...' : 'Sign in'}
+            {error && (
+              <p className="flex items-start gap-2 text-xs text-red-400 bg-red-900/20 border border-red-800/40 px-3 py-2.5 font-mono">
+                <span className="aaris-led aaris-led--error mt-1" /> {error}
+              </p>
+            )}
+            <button type="submit" disabled={loading} className={btnCls}>
+              {loading ? 'Authenticating…' : 'Sign In →'}
             </button>
           </form>
         ) : (
-          <form onSubmit={submitTotp} className="bg-gray-900/80 border border-gray-800/50 rounded-2xl p-6 space-y-4 backdrop-blur-sm shadow-xl shadow-black/20">
+          <form onSubmit={submitTotp} className="border border-gray-800 bg-gray-900 p-6 space-y-4">
             <input type="hidden" name="username" autoComplete="username" value={form.username} />
             <input type="hidden" name="password" autoComplete="current-password" value={form.password} />
-            <div className="text-center pb-2">
-              <div className="w-14 h-14 bg-blue-500/10 ring-1 ring-blue-500/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                <svg className="w-7 h-7 text-blue-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
-                </svg>
-              </div>
-              <p className="text-xs text-gray-500 leading-relaxed">
-                Enter the 6-digit code from your<br />authenticator app
-              </p>
-            </div>
+            <p className="text-xs text-gray-500 font-mono leading-relaxed">
+              Enter the 6-digit code from your authenticator app.
+            </p>
             <div>
-              <label htmlFor="otp-code" className="block text-xs text-gray-400 mb-1.5 font-medium">Authentication Code</label>
+              <label htmlFor="otp-code" className={labelCls}>Authentication Code</label>
               <input
                 ref={codeRef}
                 id="otp-code"
@@ -130,30 +132,35 @@ export default function Login() {
                 pattern="\d{6}"
                 value={code}
                 onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                className={`${inputCls} text-center tracking-[0.3em] text-lg font-mono`}
+                className={`${inputCls} text-center tracking-[0.5em] text-lg`}
                 placeholder="000000"
                 maxLength={6}
                 required
               />
             </div>
-            {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
-            <button
-              type="submit"
-              disabled={loading || code.length !== 6}
-              className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20 hover:shadow-blue-600/30"
-            >
-              {loading ? 'Verifying...' : 'Verify'}
+            {error && (
+              <p className="flex items-start gap-2 text-xs text-red-400 bg-red-900/20 border border-red-800/40 px-3 py-2.5 font-mono">
+                <span className="aaris-led aaris-led--error mt-1" /> {error}
+              </p>
+            )}
+            <button type="submit" disabled={loading || code.length !== 6} className={btnCls}>
+              {loading ? 'Verifying…' : 'Verify →'}
             </button>
             <button
               type="button"
               onClick={() => { setStep('credentials'); setError(''); setCode(''); }}
-              className="w-full flex items-center justify-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 py-1 transition-colors"
+              className="w-full font-mono text-[10px] uppercase tracking-[0.14em] text-gray-500 hover:text-gray-300 py-1 transition-colors"
             >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" /></svg>
-              Back to login
+              {'←'} Back to login
             </button>
           </form>
         )}
+
+        {/* Status footer */}
+        <div className="mt-4 flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-gray-600">
+          <span className="flex items-center gap-1.5"><span className="aaris-led aaris-led--ok" /> Session · TLS</span>
+          <span>No tracking</span>
+        </div>
       </div>
     </div>
   );

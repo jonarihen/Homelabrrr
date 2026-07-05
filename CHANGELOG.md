@@ -1,6 +1,31 @@
 # Changelog
 
-## 2026-06-22 — Custom port-forward naming and duplicate protection
+## 2026-07-05 — VM deletion, human console tab names, and AARIS design language
+
+### VM deletion with backup purge
+- Added a "Delete" button to the VM detail page action bar with a type-the-VM-name confirmation modal
+- Admins can delete any VM; regular users can only delete VMs assigned to them — the `see_all_vms` flag deliberately does **not** grant deletion rights (new strict `userOwnsVm` ownership check, separate from the view-access check)
+- Deletion force-stops a running guest, waits for it to stop, destroys the VM/LXC with `purge=1` and `destroy-unreferenced-disks=1`, and waits for the Proxmox task to finish before reporting success
+- **All backups of the deleted VMID are purged across every backup-capable storage on the host**, so a future VM that reuses the ID no longer inherits the old VM's backups (fixes the reported issue of new VMs seeing restore points from previously deleted VMs)
+- Portal records tied to the VM (`vm_assignments`, `vm_ssh_configs`, `vm_ssh_user_configs`, `provisioned_vms`) are cleaned up in the same operation
+- Backups that fail to delete are reported back to the UI and logged; deletions are audit-logged as `vm_delete` with the backup count
+- New backend endpoint: `DELETE /vms/:node/:vmid`
+
+### Human-readable console tab names
+- Popped-out VNC/SSH browser tabs are now titled with the VM name (e.g. `SSH - webserver01`) instead of the Proxmox VMID
+- The opener passes the name via a `?name=` query param for an instant title; the page then confirms it from the status API, so direct URL navigation also resolves the real name (new `useVmName` hook)
+- The VNC/SSH page toolbars now lead with the VM name, with node/VMID as secondary mono metadata
+
+### AARIS design language (2026 frontend refresh)
+- The frontend now follows the AARIS operator-console design language documented in `aaris-design-language.md` / `aaris.css`: dark near-black surfaces, square machined corners, thin borders instead of shadows, orange as the single action accent, Archivo headings + IBM Plex Mono labels
+- Tailwind theme remap: all stock color families fold onto the AARIS palette (neutrals → cool near-black ramp, all action hues → orange accent, green/amber/red reserved for status), every border radius flattened to 0 (except `rounded-full` for genuinely round elements), all box shadows disabled
+- Global styles: background technical grid, orange selection/focus-visible states, AARIS scrollbars, square LED helpers (`aaris-led`), heavy uppercase display headings (`aaris-display`), `prefers-reduced-motion` support
+- Login rebuilt as an identity-plate + numbered-section console form; sidebar nav converted to mono uppercase labels with an orange active rail and LED user status
+- Status badges are now square bordered mono tags with square LEDs; VM cards use a solid status strip (no gradients), square meter bars, and mono metadata
+- Floating console windows and the console dock are solid machined panels (no glassmorphism/translucency)
+- Page and section headings across the app (Dashboard, VM detail, admin pages) use the uppercase display style, with the numbered-section pattern on the dashboard
+- Performance charts and the SSH terminal recolored to AARIS tokens (orange/amber/green/neutrals); terminal theme uses the near-black input surface with an orange cursor
+- Removed remaining gradient strips, backdrop-blur glass, decorative shadows, and hard-coded off-palette hex colors (the network topology diagram on the Policies page keeps its categorical service colors, since those are data-bearing)
 
 ### Custom port-forward naming
 - New custom port forwards now include the internal service port and protocol in the generated VIP/policy name, for example `Minecraft - Custom 25565/tcp`

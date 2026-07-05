@@ -392,6 +392,64 @@ export async function getTaskStatus(node, upid) {
   return makeRequest(host, 'GET', `/nodes/${nodeName}/tasks/${encodeURIComponent(upid)}/status`);
 }
 
+// ── VM deletion ──────────────────────────────────────────────────────────────
+
+function sleep(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+async function waitForGuestStopped(host, nodeName, vmtype, vmid, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = await makeRequest(host, 'GET', `/nodes/${nodeName}/${vmtype}/${vmid}/status/current`);
+    if (status.status === 'stopped') return;
+    await sleep(2000);
+  }
+  throw new Error(`Timed out waiting for ${vmtype}/${vmid} to stop`);
+}
+
+async function waitForTaskCompletion(host, nodeName, upid, timeoutMs = 300_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const task = await makeRequest(host, 'GET', `/nodes/${nodeName}/tasks/${encodeURIComponent(upid)}/status`);
+    if (task.status === 'stopped') {
+      if (task.exitstatus !== 'OK') {
+        throw new Error(`Proxmox task failed: ${task.exitstatus}`);
+      }
+      return;
+    }
+    await sleep(2000);
+  }
+  throw new Error('Timed out waiting for Proxmox task to complete');
+}
+
+export async function deleteVM(node, vmid) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+
+  let vmtype = 'qemu';
+  let status;
+  try {
+    status = await makeRequest(host, 'GET', `/nodes/${nodeName}/qemu/${vmid}/status/current`);
+  } catch {
+    status = await makeRequest(host, 'GET', `/nodes/${nodeName}/lxc/${vmid}/status/current`);
+    vmtype = 'lxc';
+  }
+
+  // Proxmox refuses to destroy a running guest — force-stop it first
+  if (status.status === 'running') {
+    await makeRequest(host, 'POST', `/nodes/${nodeName}/${vmtype}/${vmid}/status/stop`, {});
+    await waitForGuestStopped(host, nodeName, vmtype, vmid);
+  }
+
+  // purge removes the guest from backup jobs, HA and replication config
+  const upid = await makeRequest(host, 'DELETE', `/nodes/${nodeName}/${vmtype}/${vmid}?purge=1&destroy-unreferenced-disks=1`);
+  await waitForTaskCompletion(host, nodeName, upid);
+
+  clearCachedVmConfig(node, vmid, vmtype);
+  _vmCache = { data: null, expires: 0 };
+  return { vmtype };
+}
+
 // ── Snapshot helpers ─────────────────────────────────────────────────────────
 
 export async function getSnapshots(node, vmid, vmtype = 'qemu') {

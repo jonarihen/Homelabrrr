@@ -18,18 +18,18 @@ export default function VMCard({ vm, selected, onSelect }) {
   return (
     <div
       onClick={() => navigate(`/vm/${routeNode(vm)}/${vm.vmid}`)}
-      className={`relative bg-gray-900 border rounded-2xl p-5 flex flex-col gap-4 hover:border-gray-600 hover:shadow-lg hover:shadow-black/20 transition-all duration-200 cursor-pointer group overflow-hidden ${selected ? 'border-blue-500/60 bg-blue-950/20' : 'border-gray-800'}`}
+      className={`relative bg-gray-900 border p-5 flex flex-col gap-4 hover:border-gray-600 transition-colors duration-200 cursor-pointer group overflow-hidden ${selected ? 'border-orange-600/60 bg-orange-950/20' : 'border-gray-800'}`}
     >
-      {/* Subtle gradient accent at top */}
-      <div className={`absolute inset-x-0 top-0 h-0.5 ${isRunning ? 'bg-gradient-to-r from-green-500 via-blue-500 to-purple-500' : 'bg-gray-700'}`} />
+      {/* Status strip at top — solid, status color only */}
+      <div className={`absolute inset-x-0 top-0 h-0.5 ${isRunning ? 'bg-green-500' : 'bg-gray-700'}`} />
 
       {/* Selection indicator — visible on hover or when selected */}
       {onSelect && (
         <button
           onClick={(e) => { e.stopPropagation(); onSelect(vm); }}
-          className={`absolute top-2.5 left-2.5 z-10 w-4 h-4 rounded-full border-[1.5px] flex items-center justify-center transition-all duration-150 ${
+          className={`absolute top-2.5 left-2.5 z-10 w-4 h-4 border-[1.5px] flex items-center justify-center transition-all duration-150 ${
             selected
-              ? 'bg-blue-500 border-blue-500 scale-100 opacity-100'
+              ? 'bg-orange-600 border-orange-600 scale-100 opacity-100'
               : 'border-gray-600 bg-gray-800/80 scale-90 opacity-0 group-hover:opacity-100 group-hover:scale-100'
           }`}
         >
@@ -52,7 +52,7 @@ export default function VMCard({ vm, selected, onSelect }) {
               </span>
             )}
           </h3>
-          <p className="text-xs text-gray-500 mt-0.5 font-mono">ID {vm.vmid} / {displayNode(vm.node)}</p>
+          <p className="text-[10px] text-gray-500 mt-1 font-mono uppercase tracking-[0.1em]">ID {vm.vmid} / {displayNode(vm.node)}</p>
         </div>
         <StatusBadge status={vm.status} />
       </div>
@@ -93,9 +93,9 @@ function MiniBar({ label, value, color }) {
 
   return (
     <div className="flex items-center gap-3">
-      <span className="text-xs text-gray-500 w-8 shrink-0">{label}</span>
-      <div className="flex-1 bg-gray-800 rounded-full h-1.5 overflow-hidden">
-        <div className={`${barColor} h-full rounded-full transition-all duration-500`} style={{ width: `${pct}%` }} />
+      <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500 w-8 shrink-0">{label}</span>
+      <div className="flex-1 bg-gray-800 h-1.5 overflow-hidden">
+        <div className={`${barColor} h-full transition-all duration-500`} style={{ width: `${pct}%` }} />
       </div>
       <span className={`text-xs font-mono w-10 text-right ${c.text}`}>{pct.toFixed(0)}%</span>
     </div>
