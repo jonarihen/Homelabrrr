@@ -1,6 +1,6 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
-import AdminChangelogPanel from './AdminChangelogPanel.jsx';
+import ChangelogPanel from './ChangelogPanel.jsx';
 
 const navItem = 'group flex items-center gap-2.5 pl-3 pr-3 py-2 border-l-2 font-mono text-[11px] uppercase tracking-[0.08em] text-gray-400 hover:text-gray-100 hover:bg-gray-800 transition-colors';
 const activeNav = 'border-l-orange-600 bg-gray-800 text-gray-100';
@@ -127,7 +127,7 @@ export default function Layout({ children }) {
         </nav>
 
         <div className="p-3 border-t border-gray-800">
-          {user?.isAdmin && <AdminChangelogPanel />}
+          <ChangelogPanel />
           <button
             onClick={handleLogout}
             className="w-full flex items-center gap-2.5 px-3 py-2 border-l-2 border-transparent font-mono text-[11px] uppercase tracking-[0.08em] text-gray-500 hover:text-red-400 hover:border-l-red-500 hover:bg-red-500/5 transition-colors"

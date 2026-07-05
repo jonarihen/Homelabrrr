@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-05 — Changelog visible to all users
+
+### Changelog access
+- The changelog panel in the sidebar is now visible to every signed-in user, not just admins
+- Renamed the component from `AdminChangelogPanel` to `ChangelogPanel` and dropped the "Admin Changelog" labelling
+- Restyled the panel to the AARIS design language (square panels, mono uppercase labels, orange markers)
+
 ## 2026-07-05 — VM deletion, human console tab names, and AARIS design language
 
 ### VM deletion with backup purge
