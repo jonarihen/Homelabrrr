@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-05 — Discord status uplink in the sidebar
+
+### Discord community link
+- Added a "Discord / Status" uplink row to the sidebar footer for all signed-in users
+- Join the Discord to get status updates and be notified about maintenance windows and breakdowns
+- Styled as an AARIS uplink row (mono uppercase, bordered, orange hover) with the Discord mark; opens in a new tab
+
 ## 2026-07-05 — Changelog visible to all users
 
 ### Changelog access

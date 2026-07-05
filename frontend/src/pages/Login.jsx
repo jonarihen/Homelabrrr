@@ -156,6 +156,22 @@ export default function Login() {
           </form>
         )}
 
+        {/* Discord uplink — status updates, maintenance windows, outages */}
+        <a
+          href="https://discord.gg/KMj63SbyfH"
+          target="_blank"
+          rel="noreferrer"
+          className="group mt-4 flex items-center justify-between gap-3 border border-gray-800 bg-gray-900 px-3.5 py-3 transition-colors hover:border-orange-600 hover:bg-gray-800"
+        >
+          <span className="flex items-center gap-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-gray-400 group-hover:text-gray-100 transition-colors">
+            <DiscordIcon className="h-4 w-4 shrink-0" />
+            Discord / Status
+          </span>
+          <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-gray-600 group-hover:text-orange-500 transition-colors">
+            Maintenance + outage alerts →
+          </span>
+        </a>
+
         {/* Status footer */}
         <div className="mt-4 flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-gray-600">
           <span className="flex items-center gap-1.5"><span className="aaris-led aaris-led--ok" /> Session · TLS</span>
