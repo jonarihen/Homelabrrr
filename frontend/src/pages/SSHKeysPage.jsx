@@ -73,8 +73,20 @@ export default function SSHKeysPage() {
                 {keys.map(k => (
                   <tr key={k.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 transition-colors">
                     <td className="px-4 py-3 text-white font-medium">{k.name}</td>
-                    <td className="px-4 py-3 text-gray-400 text-xs font-mono max-w-xs truncate">
-                      {k.public_key || '—'}
+                    <td className="px-4 py-3 text-xs max-w-xs">
+                      {k.public_key ? (
+                        <span className="text-gray-400 font-mono block truncate">{k.public_key}</span>
+                      ) : (
+                        <span
+                          title="No public key — this key can't set up key-based login when you deploy a VM (cloud-init). Add the matching .pub, or re-add an encrypted key with its passphrase."
+                          className="inline-flex items-center gap-1.5 text-amber-400"
+                        >
+                          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                          </svg>
+                          No public key
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-500 text-xs">
                       {new Date(k.created_at).toLocaleDateString()}
@@ -104,22 +116,46 @@ function AddKeyModal({ onClose, onAdded }) {
   const [form, setForm] = useState({ name: '', privateKey: '', publicKey: '', passphrase: '' });
   const isPPK = form.privateKey.includes('PuTTY-User-Key-File');
   const [error, setError] = useState('');
+  const [warning, setWarning] = useState('');
   const [saving, setSaving] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
     setSaving(true);
     setError('');
+    setWarning('');
     try {
-      await api.post('/ssh/keys', form);
+      const r = await api.post('/ssh/keys', form);
       onAdded();
-      onClose();
+      // If the key has no usable public key, keep the dialog open to tell the
+      // user it won't work for cloud-init provisioning; otherwise we're done.
+      if (r.data?.warning) {
+        setWarning(r.data.warning);
+      } else {
+        onClose();
+      }
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to add key');
     } finally {
       setSaving(false);
     }
   };
+
+  if (warning) {
+    return (
+      <Modal title="Key added — missing public key" onClose={onClose} size="md">
+        <div className="p-5 space-y-4">
+          <div className="flex gap-3 text-sm text-amber-300 bg-amber-900/20 border border-amber-800/40 rounded-lg p-3">
+            <svg className="w-5 h-5 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+            <p>{warning}</p>
+          </div>
+          <button onClick={onClose} className={btnCls}>Done</button>
+        </div>
+      </Modal>
+    );
+  }
 
   const handleFileUpload = (field) => (e) => {
     const file = e.target.files[0];
@@ -174,12 +210,15 @@ function AddKeyModal({ onClose, onAdded }) {
           </Field>
         )}
 
-        <Field label="Public Key (optional)">
+        <Field label="Public Key">
+          <p className="text-xs text-gray-500 -mt-1 mb-1.5">
+            Used to set up key-based login when you deploy a VM (cloud-init). Leave blank and we'll derive it from your private key when possible.
+          </p>
           <textarea
             value={form.publicKey}
             onChange={e => setForm(f => ({ ...f, publicKey: e.target.value }))}
             className={`${inputCls} font-mono text-xs h-16 resize-none`}
-            placeholder="ssh-rsa AAAA... (optional, for display only)"
+            placeholder="ssh-ed25519 AAAA... (auto-derived from your private key if left blank)"
           />
           <label className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 cursor-pointer transition-colors">
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
