@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-07-06 — VNC clipboard paste, grid-lines-over-buttons fix, 2FA safety rails
+
+### Paste into VNC consoles
+- Both VNC surfaces (pop-out console tab and floating console windows) now have a **Paste** button that types your clipboard into the VM as keystrokes
+- Works on any guest with no agent installed — including login prompts, TTYs, and installers — because it replays the text as key events instead of relying on a guest clipboard channel (which QEMU only supports with spice-vdagent)
+- Reads the browser clipboard where permitted (asks once); browsers that block clipboard access fall back to a paste-in prompt
+- Newlines and tabs are sent as Enter/Tab; typing is paced (~100 chars/s) so slow guests don't drop keys; pastes over 2,000 characters ask for confirmation first
+- SSH consoles are unaffected — they already support native browser paste via the terminal
+
+### Background grid fix
+- The AARIS background grid no longer draws on top of buttons and other content — it was rendering at `z-index: 0`, which paints over non-positioned elements, slicing dark 48px grid lines across the orange action buttons
+- The grid now sits behind all content (`z-index: -1`); opaque panels mask it and it shows through open page space as intended
+- Same fix applied to the reusable `aaris.css` base and the code sample in `aaris-design-language.md`
+
+### Two-factor authentication safety rails
+- `POST /auth/2fa/setup` now refuses to run while 2FA is already enabled — previously a single call silently disabled the active second factor even if the new enrollment was never completed
+- The admin "Disable 2FA for this user" button now asks for confirmation before firing (it was the only destructive action without one)
+- Self-service 2FA changes are now audit-logged (`2fa_setup_started`, `2fa_enabled`, `2fa_disabled`) so silent state flips are traceable in the audit log
+
 ## 2026-07-05 — Discord status uplink in the sidebar
 
 ### Discord community link

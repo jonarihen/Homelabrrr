@@ -44,12 +44,14 @@ body {
 
 /* Subtle technical grid that ties every page together (doc §6). It sits behind
    the app; opaque panels naturally mask it, and it shows through open space
-   such as the sign-in screen. */
+   such as the sign-in screen. z-index must stay negative: at 0 the fixed
+   pseudo-element paints on top of all non-positioned content and the grid
+   lines cut across buttons and text. */
 body::before {
   content: "";
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: -1;
   pointer-events: none;
   background-image:
     linear-gradient(var(--line-soft) 1px, transparent 1px),

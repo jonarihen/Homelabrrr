@@ -346,6 +346,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
   };
 
   const resetTwoFactor = async () => {
+    if (!confirm(`Disable 2FA for "${user.username}"? They will be able to sign in with only their password until they re-enroll.`)) return;
     try {
       await api.post(`/admin/users/${user.id}/reset-2fa`);
       setTwoFaMsg('2FA has been disabled for this user.');

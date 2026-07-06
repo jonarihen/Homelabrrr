@@ -83,12 +83,14 @@ body {
 }
 
 /* Subtle technical grid that ties every page together (doc §6). Sits above the
-   page background but below content; opaque panels naturally mask it. */
+   page background but below content; opaque panels naturally mask it.
+   z-index must stay negative: at 0 the fixed pseudo-element paints on top of
+   all non-positioned content and the grid lines cut across buttons and text. */
 body::before {
   content: "";
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: -1;
   pointer-events: none;
   background-image:
     linear-gradient(var(--line-soft) 1px, transparent 1px),

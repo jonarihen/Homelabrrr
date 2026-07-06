@@ -4,6 +4,7 @@ import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import useVmName from '../hooks/useVmName.js';
 import api from '../api.js';
 import { displayNode } from '../utils/nodeRef.js';
+import { readClipboardText, typeIntoVnc } from '../utils/vncPaste.js';
 
 // Preload noVNC — Proxmox VNC proxies time out quickly
 const rfbModulePromise = import('@novnc/novnc/lib/rfb.js');
@@ -27,9 +28,26 @@ export default function VNCPage() {
   const rfbRef          = useRef(null);
   const [status, setStatus] = useState('Connecting...');
   const [error, setError]   = useState('');
+  const [pasting, setPasting] = useState(false);
+  const pasteStopRef = useRef(false);
+
+  const pasteClipboard = async () => {
+    const rfb = rfbRef.current;
+    if (!rfb || pasting) return;
+    const text = await readClipboardText();
+    if (!text) return;
+    if (text.length > 2000 && !confirm(`Type all ${text.length} clipboard characters into the VM?`)) return;
+    setPasting(true);
+    try {
+      await typeIntoVnc(rfb, text, { shouldStop: () => pasteStopRef.current || rfbRef.current !== rfb });
+    } finally {
+      setPasting(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
+    pasteStopRef.current = false;
 
     async function connect() {
       try {
@@ -67,6 +85,7 @@ export default function VNCPage() {
     connect();
     return () => {
       cancelled = true;
+      pasteStopRef.current = true;
       rfbRef.current?.disconnect();
     };
   }, [node, vmid]);
@@ -94,6 +113,15 @@ export default function VNCPage() {
         }`}>{status}</span>
 
         <div className="flex-1" />
+
+        <button
+          onClick={pasteClipboard}
+          disabled={pasting || status !== 'Connected'}
+          className="text-xs px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          title="Type clipboard text into the VM as keystrokes"
+        >
+          {pasting ? 'Typing…' : 'Paste'}
+        </button>
 
         <button
           onClick={() => rfbRef.current?.sendCtrlAltDel()}

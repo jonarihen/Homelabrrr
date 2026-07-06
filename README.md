@@ -31,7 +31,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Area | What you get |
 | --- | --- |
 | VM & LXC access | Assigned VM/container listing, status/actions, browser VNC, snapshots, backups, and file-level backup restore |
-| Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, and pop-out tabs |
+| Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, pop-out tabs, and clipboard paste into VNC (typed into the guest as keystrokes, no agent needed) |
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
 | Provisioning | Template-driven cloning plus admin create-from-scratch flow with CPU topology validation, `cpu=host`, VLAN picker, and GB-based memory |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
@@ -47,7 +47,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `My VMs` — assigned VM/LXC inventory with search, filter, sort, selection, and bulk actions
 - `New VM` — template-driven cloning for permitted users, plus create-from-scratch for admins
 - `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore
-- `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs
+- `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs; VNC consoles have a Paste button that types the clipboard into the guest (SSH terminals take native browser paste)
 - `SSH Keys` — uploaded keys used by browser SSH and SFTP sessions
 - `Account` — password and 2FA management
 
@@ -62,7 +62,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `Assignments` — VM and VLAN-to-user mapping
 - `Users` — accounts, granular permissions, VM/VLAN assignments, lockout unlocks, and enforced 2FA
 - `Audit Log` — change tracking with user/IP/timestamp
-- `Changelog` — recent platform changes shown from the sidebar for full admins
+- `Changelog` — recent platform changes shown from the sidebar for every signed-in user
 
 ## Architecture
 
@@ -210,6 +210,7 @@ Current hardening in the codebase includes:
 
 - no hardcoded default admin user on fresh install
 - optional mandatory 2FA enrollment
+- 2FA lifecycle protection: starting a new enrollment cannot silently disable an active second factor, admin 2FA resets require confirmation, and setup/enable/disable/reset are audit-logged
 - login and 2FA attempt throttling, with admin unlock support
 - assignment-aware VM access (users only see their own VMs)
 - per-VM SSH authorization, stored destination config, and SSH host-key verification

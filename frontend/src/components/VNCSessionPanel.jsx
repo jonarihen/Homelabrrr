@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
+import { readClipboardText, typeIntoVnc } from '../utils/vncPaste.js';
 
 // Preload noVNC RFB module so it's cached before we request a VNC ticket.
 // Proxmox VNC proxies time out quickly (~10s), so the import must not delay
@@ -28,9 +29,12 @@ export default function VNCSessionPanel({ vm, visible = true }) {
   const refreshTimerRef = useRef(null);
   const [status, setStatus] = useState('Connecting...');
   const [error, setError] = useState('');
+  const [pasting, setPasting] = useState(false);
+  const pasteStopRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
+    pasteStopRef.current = false;
 
     async function connect() {
       try {
@@ -86,6 +90,7 @@ export default function VNCSessionPanel({ vm, visible = true }) {
 
     return () => {
       cancelled = true;
+      pasteStopRef.current = true;
       window.clearTimeout(refreshTimerRef.current);
       resizeObserverRef.current?.disconnect();
       rfbRef.current?.disconnect();
@@ -102,12 +107,36 @@ export default function VNCSessionPanel({ vm, visible = true }) {
   const sendCtrlAltDel = () => rfbRef.current?.sendCtrlAltDel();
   const refresh = () => forceFullRefresh(rfbRef.current);
 
+  const pasteClipboard = async () => {
+    const rfb = rfbRef.current;
+    if (!rfb || pasting) return;
+    const text = await readClipboardText();
+    if (!text) return;
+    if (text.length > 2000 && !confirm(`Type all ${text.length} clipboard characters into the VM?`)) return;
+    setPasting(true);
+    try {
+      await typeIntoVnc(rfb, text, { shouldStop: () => pasteStopRef.current || rfbRef.current !== rfb });
+    } finally {
+      setPasting(false);
+    }
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-700 bg-gray-900 shrink-0">
         <span className={`text-xs px-2 py-0.5 rounded ${
           status === 'Connected' ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'
         }`}>{status}</span>
+
+        <button
+          type="button"
+          onClick={pasteClipboard}
+          disabled={pasting || status !== 'Connected'}
+          className="text-xs px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          title="Type clipboard text into the VM as keystrokes"
+        >
+          {pasting ? 'Typing…' : 'Paste'}
+        </button>
 
         <button
           type="button"

@@ -272,12 +272,18 @@ router.put('/change-password', requireAuth, (req, res) => {
 
 // Generate a new secret and return a QR code (does NOT enable 2FA yet)
 router.post('/2fa/setup', requireAuth, async (req, res) => {
-  const user = db.prepare('SELECT username FROM users WHERE id = ?').get(req.session.userId);
+  const user = db.prepare('SELECT username, totp_enabled FROM users WHERE id = ?').get(req.session.userId);
+  // Never let setup clobber an active second factor — otherwise a single call
+  // silently disables 2FA (totp_enabled=0) even if enrollment is never finished.
+  if (user.totp_enabled) {
+    return res.status(400).json({ error: '2FA is already enabled — disable it first to re-enroll' });
+  }
   const secret = authenticator.generateSecret();
   const otpauth = authenticator.keyuri(user.username, 'VM Manager', secret);
 
   // Store secret temporarily — not active until /2fa/enable confirms it
   db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').run(encryptSecret(secret), req.session.userId);
+  logAudit(req, '2fa_setup_started', user.username, '');
 
   try {
     const qrDataUrl = await QRCode.toDataURL(otpauth);
@@ -301,6 +307,7 @@ router.post('/2fa/enable', requireAuth, (req, res) => {
 
   db.prepare('UPDATE users SET totp_enabled = 1 WHERE id = ?').run(req.session.userId);
   req.session.twoFactorEnrollmentOnly = false;
+  logAudit(req, '2fa_enabled', req.session.username, '');
   res.json({ ok: true });
 });
 
@@ -317,6 +324,7 @@ router.post('/2fa/disable', requireAuth, (req, res) => {
   if (!isValid) return res.status(400).json({ error: 'Invalid code' });
 
   db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.session.userId);
+  logAudit(req, '2fa_disabled', req.session.username, '');
   res.json({ ok: true });
 });
 

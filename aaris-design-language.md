@@ -228,6 +228,7 @@ body::before {
   content: "";
   position: fixed;
   inset: 0;
+  z-index: -1; /* behind content — a fixed element at z-index auto/0 paints over non-positioned elements */
   pointer-events: none;
   background-image:
     linear-gradient(var(--line-soft) 1px, transparent 1px),

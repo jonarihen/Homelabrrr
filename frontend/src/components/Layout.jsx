@@ -16,7 +16,9 @@ export default function Layout({ children }) {
   };
 
   return (
-    <div className="flex h-screen bg-gray-950 overflow-hidden">
+    // No bg on the shell — body paints the page color and the AARIS grid sits
+    // behind it; an opaque wrapper here would blank the grid on every page.
+    <div className="flex h-screen overflow-hidden">
       {/* Sidebar */}
       <aside className="w-56 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col">
         <div className="px-4 py-4 border-b border-gray-800">
