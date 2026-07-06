@@ -282,6 +282,17 @@ export async function getNodeCpuInfo(node) {
   };
 }
 
+export async function getNodeStatus(node) {
+  const { host, nodeName } = await resolveNode(node);
+  const status = await makeRequest(host, 'GET', `/nodes/${nodeName}/status`);
+  return { ...status, nodeName };
+}
+
+export async function getStorageStatus(node, storage) {
+  const { host, nodeName } = await resolveNode(node);
+  return makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${encodeURIComponent(storage)}/status`);
+}
+
 // ── Host status check ────────────────────────────────────────────────────────
 
 export async function getHostStatus(host) {
@@ -367,6 +378,30 @@ export async function getISOImages(node, storage) {
   const { host, nodeName } = await resolveNode(node);
   const content = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${storage}/content?content=iso`);
   return content || [];
+}
+
+// Ask PVE to download a file from a URL into a storage (content type iso —
+// cloud images are stored there as .img regardless of source format; qemu-img
+// probes the real format on import). Returns the download task UPID.
+export async function downloadUrlToStorage(node, storage, url, filename, checksum, checksumAlgorithm) {
+  const { host, nodeName } = await resolveNode(node);
+  const body = { content: 'iso', url, filename };
+  if (checksum) {
+    body.checksum = checksum;
+    body['checksum-algorithm'] = checksumAlgorithm || 'sha256';
+  }
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/storage/${encodeURIComponent(storage)}/download-url`, body);
+}
+
+export async function deleteVolume(node, volid) {
+  const { host, nodeName } = await resolveNode(node);
+  const storage = String(volid).split(':')[0];
+  return makeRequest(host, 'DELETE', `/nodes/${nodeName}/storage/${encodeURIComponent(storage)}/content/${encodeURIComponent(volid)}`);
+}
+
+export async function convertToTemplate(node, vmid) {
+  const { host, nodeName } = await resolveNode(node);
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${vmid}/template`, {});
 }
 
 export async function getNetworks(node) {

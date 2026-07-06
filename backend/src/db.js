@@ -151,6 +151,23 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// Cloud images (downloaded qcow2/raw cloud images used to build cloud-init templates)
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS cloud_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    node TEXT NOT NULL,
+    storage TEXT NOT NULL,
+    volid TEXT DEFAULT '',
+    size INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'downloading',
+    status_detail TEXT DEFAULT '',
+    upid TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`); } catch { /* exists */ }
+
 // Track provisioned VMs
 try { db.exec(`
   CREATE TABLE IF NOT EXISTS provisioned_vms (

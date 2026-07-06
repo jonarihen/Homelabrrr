@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-07-06 — Cloud image provisioning with cloud-init
+
+### Cloud image catalog (admins)
+- New **Cloud Images** section on the Templates page: download official cloud images (Ubuntu, Debian, Rocky, or any custom qcow2/raw URL) straight onto a PVE storage via the Proxmox API — presets included, optional SHA256 verification
+- **Create Template** turns a downloaded image into a ready-to-clone cloud-init template in one click: imports the image as the boot disk (`import-from`, requires PVE 7.3+), attaches a cloud-init drive and serial console, grows the disk to a chosen base size, converts the VM to a Proxmox template, and registers it in the portal's template list
+- Download and template builds run in the background with live status in the table; actions are audit-logged (`cloud_image_download`, `cloud_image_template`, `cloud_image_delete`)
+
+### Cloud-init provisioning (users)
+- Cloning a cloud-init template now offers a **Cloud-Init Setup** section: guest username, optional password, your stored SSH public keys (checkbox per key), and network mode — DHCP or static IP/gateway
+- Settings are applied on the VM's first boot via cloud-init; no ISO installer, no manual account setup
+- Server-side validation of username/password/IP formats; SSH keys are read from your own stored keys only
+
+## 2026-07-06 — Proxmox owner/VLAN tags on VMs, provisioning capacity rails
+
+### Owner + VLAN tags in the Proxmox UI
+- VMs are now tagged in Proxmox with the assigned owner's username and the VLAN of each tagged network interface (`vlan-<name>`, or `vlan-<number>` for VLANs the portal doesn't know), so ownership and network placement are visible as tag pills directly in the PVE UI
+- Tags update automatically when a VM is assigned or unassigned, when a user is renamed or deleted (the old username tag is stripped), and when provisioning completes
+- New "Sync PVE Tags" button on the Assignments page re-stamps every VM at once — use it once after deploying to tag the existing fleet, or after changing NIC VLANs outside the portal (audit-logged as `vm_tags_sync`)
+- The portal only manages its own tag namespaces (portal usernames and `vlan-*`); any other manually set PVE tags are left untouched
+
+### Provisioning capacity rails
+- Cloning and creating a VM now checks the target node's **free memory** and the target storage's **available disk space** before any Proxmox task starts; requests that don't fit are rejected with a clear message (e.g. "requested 16.0 GB, only 12.3 GB free")
+- The checks fail open if the Proxmox API can't be queried, so a monitoring hiccup never blocks provisioning — real API failures still surface from the clone/create call itself
+
 ## 2026-07-06 — VNC clipboard paste, grid-lines-over-buttons fix, 2FA safety rails
 
 ### Paste into VNC consoles

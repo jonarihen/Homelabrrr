@@ -9,6 +9,7 @@ export default function AssignmentsPage() {
   const [vms, setVms]       = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]   = useState('');
+  const [tagSync, setTagSync] = useState({ running: false, msg: '' });
 
   const load = async () => {
     try {
@@ -33,6 +34,16 @@ export default function AssignmentsPage() {
     }
   };
 
+  const syncTags = async () => {
+    setTagSync({ running: true, msg: '' });
+    try {
+      const { data } = await api.post('/admin/sync-vm-tags');
+      setTagSync({ running: false, msg: `${data.checked} VMs checked, ${data.updated} retagged${data.failed ? `, ${data.failed} failed` : ''}` });
+    } catch (e) {
+      setTagSync({ running: false, msg: 'Failed: ' + (e.response?.data?.error || e.message) });
+    }
+  };
+
   const assigned   = vms.filter(v => v.assignment);
   const unassigned = vms.filter(v => !v.assignment);
 
@@ -45,12 +56,27 @@ export default function AssignmentsPage() {
             {assigned.length} assigned · {unassigned.length} unassigned
           </p>
         </div>
-        <button
-          onClick={load}
-          className="text-sm text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {tagSync.msg && (
+            <span className={`text-xs font-mono ${tagSync.msg.startsWith('Failed') ? 'text-red-400' : 'text-gray-500'}`}>
+              {tagSync.msg}
+            </span>
+          )}
+          <button
+            onClick={syncTags}
+            disabled={tagSync.running}
+            title="Rewrite the owner + VLAN tags shown on VMs in the Proxmox UI"
+            className="text-sm text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 disabled:opacity-40 px-3 py-2 rounded-lg transition-colors"
+          >
+            {tagSync.running ? 'Syncing tags…' : 'Sync PVE Tags'}
+          </button>
+          <button
+            onClick={load}
+            className="text-sm text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && <p className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}

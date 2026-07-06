@@ -84,7 +84,9 @@ function CloneForm() {
   const [storages, setStorages] = useState([]);
   const [users, setUsers] = useState([]);
   const [vlans, setVlans] = useState([]);
+  const [sshKeys, setSshKeys] = useState([]);
   const [form, setForm] = useState({ name: '', cores: '', memory: '', diskGb: '', storage: '', description: '', assignTo: '', vlanTag: '' });
+  const [ci, setCi] = useState({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -95,6 +97,7 @@ function CloneForm() {
       .catch(() => {})
       .finally(() => setLoading(false));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
+    api.get('/ssh/keys').then(r => setSshKeys((r.data || []).filter(k => k.public_key))).catch(() => {});
     if (user?.isAdmin) {
       api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
     }
@@ -118,6 +121,7 @@ function CloneForm() {
       storage: t.default_storage,
       description: '',
     });
+    setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   };
 
   const submit = async (e) => {
@@ -134,11 +138,23 @@ function CloneForm() {
         description: form.description,
         assignTo: form.assignTo || undefined,
         vlanTag: form.vlanTag || undefined,
+        ...(selected.cloud_init ? {
+          ciUser: ci.user || undefined,
+          ciPassword: ci.password || undefined,
+          sshKeyIds: ci.keyIds.length > 0 ? ci.keyIds : undefined,
+          ipMode: ci.ipMode,
+          ipAddress: ci.ipMode === 'static' ? ci.ipAddress : undefined,
+          ipGateway: ci.ipMode === 'static' ? (ci.ipGateway || undefined) : undefined,
+        } : {}),
       });
       navigate(`/vm/${routeNode(r.data)}/${r.data.vmid}`);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to create VM');
     } finally { setSaving(false); }
+  };
+
+  const toggleKey = (id) => {
+    setCi(c => ({ ...c, keyIds: c.keyIds.includes(id) ? c.keyIds.filter(k => k !== id) : [...c.keyIds, id] }));
   };
 
   if (loading) {
@@ -281,6 +297,64 @@ function CloneForm() {
                 <option value="">No VLAN (untagged)</option>
                 {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
               </select>
+            </div>
+          )}
+
+          {!!selected.cloud_init && (
+            <div className="border border-gray-800 rounded-2xl p-4 space-y-4">
+              <div>
+                <p className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Cloud-Init Setup</p>
+                <p className="text-xs text-gray-600 mt-0.5">Guest account and network are applied on first boot.</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Username</label>
+                  <input type="text" value={ci.user} onChange={e => setCi(c => ({ ...c, user: e.target.value }))} className={inputCls} placeholder="operator" autoComplete="off" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Password (optional)</label>
+                  <input type="password" value={ci.password} onChange={e => setCi(c => ({ ...c, password: e.target.value }))} className={inputCls} placeholder="min. 8 characters" autoComplete="new-password" />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-1.5 font-medium">SSH Keys</label>
+                {sshKeys.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {sshKeys.map(k => (
+                      <label key={k.id} className="flex items-center gap-2.5 text-sm text-gray-300 cursor-pointer">
+                        <input type="checkbox" checked={ci.keyIds.includes(k.id)} onChange={() => toggleKey(k.id)} className="accent-orange-600" />
+                        <span className="font-mono text-xs">{k.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-600">No keys with a public key found — add one under SSH Keys to get key-based login.</p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Network</label>
+                  <select value={ci.ipMode} onChange={e => setCi(c => ({ ...c, ipMode: e.target.value }))} className={inputCls}>
+                    <option value="dhcp">DHCP</option>
+                    <option value="static">Static IP</option>
+                  </select>
+                </div>
+                {ci.ipMode === 'static' && (
+                  <>
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1.5 font-medium">IP / CIDR</label>
+                      <input type="text" value={ci.ipAddress} onChange={e => setCi(c => ({ ...c, ipAddress: e.target.value }))} className={inputCls} placeholder="10.0.20.50/24" required />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1.5 font-medium">Gateway</label>
+                      <input type="text" value={ci.ipGateway} onChange={e => setCi(c => ({ ...c, ipGateway: e.target.value }))} className={inputCls} placeholder="10.0.20.1" />
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           )}
 

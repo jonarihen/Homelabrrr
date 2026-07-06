@@ -7,6 +7,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { logAudit } from '../utils/audit.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
+import { syncVmTagsSafe } from '../utils/vmTags.js';
 
 const router = Router();
 
@@ -243,9 +244,16 @@ router.get('/me', (req, res) => {
 router.put('/change-username', requireAuth, (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'Username required' });
+  const previous = req.session.username;
   try {
     db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, req.session.userId);
     req.session.username = username;
+    // Re-stamp the PVE owner tag on this user's VMs; the old username is
+    // gone from the users table, so pass it as retired.
+    const vms = db.prepare('SELECT node, vmid FROM vm_assignments WHERE user_id = ?').all(req.session.userId);
+    for (const vm of vms) {
+      syncVmTagsSafe(vm.node, vm.vmid, { retired: [previous].filter(Boolean) });
+    }
     res.json({ ok: true });
   } catch (err) {
     if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Username already taken' });

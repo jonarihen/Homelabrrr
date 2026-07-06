@@ -33,7 +33,8 @@ This project pulls those into one interface so users can work inside guardrails 
 | VM & LXC access | Assigned VM/container listing, status/actions, browser VNC, snapshots, backups, and file-level backup restore |
 | Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, pop-out tabs, and clipboard paste into VNC (typed into the guest as keystrokes, no agent needed) |
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
-| Provisioning | Template-driven cloning plus admin create-from-scratch flow with CPU topology validation, `cpu=host`, VLAN picker, and GB-based memory |
+| Provisioning | Template-driven cloning plus admin create-from-scratch flow with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, and pre-flight capacity checks (node free memory + storage space) |
+| Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) with one-click conversion to cloud-init templates; clones configure guest user, SSH keys, and DHCP/static network on first boot (requires PVE 7.3+ for `import-from`) |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
@@ -54,12 +55,12 @@ This project pulls those into one interface so users can work inside guardrails 
 ### Admin side
 
 - `PVE Hosts` — multi-host Proxmox registration with status monitoring
-- `Templates` — register source VMs with auto-populated defaults from Proxmox config
+- `Templates` — register source VMs with auto-populated defaults from Proxmox config; cloud image catalog with downloads and one-click cloud-init template builds
 - `Firewalls` — FortiGate registration, VDOM/link settings, WAN settings, and managed-switch discovery
 - `VLANs` — managed or tagged-only network definitions, subnet data, and FortiGate sync
 - `Policies` — visual traffic mesh plus address/service object management for admins
 - `Port Forwarding` — WAN VIP and firewall policy management, scoped for delegated users
-- `Assignments` — VM and VLAN-to-user mapping
+- `Assignments` — VM and VLAN-to-user mapping; owner + VLAN are stamped as Proxmox tags on each VM (with a bulk "Sync PVE Tags" action) so ownership is visible in the PVE UI too
 - `Users` — accounts, granular permissions, VM/VLAN assignments, lockout unlocks, and enforced 2FA
 - `Audit Log` — change tracking with user/IP/timestamp
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user

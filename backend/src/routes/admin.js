@@ -9,6 +9,7 @@ import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
+import { syncVmTagsSafe } from '../utils/vmTags.js';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -213,8 +214,10 @@ router.put('/users/:id/username', pUsers, (req, res) => {
   if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'Username required' });
+  const previous = db.prepare('SELECT username FROM users WHERE id = ?').get(req.params.id);
   try {
     db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, req.params.id);
+    retagUserVms(req.params.id, previous?.username);
     res.json({ ok: true });
   } catch (err) {
     if (err.message.includes('UNIQUE')) {
@@ -223,6 +226,15 @@ router.put('/users/:id/username', pUsers, (req, res) => {
     throw err;
   }
 });
+
+// Re-stamp the PVE owner tag on a user's VMs after a rename; the old
+// username no longer exists in the users table, so pass it as retired.
+function retagUserVms(userId, previousUsername) {
+  const vms = db.prepare('SELECT node, vmid FROM vm_assignments WHERE user_id = ?').all(userId);
+  for (const vm of vms) {
+    syncVmTagsSafe(vm.node, vm.vmid, { retired: [previousUsername].filter(Boolean) });
+  }
+}
 
 router.put('/users/:id/password', pUsers, (req, res) => {
   if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
@@ -272,13 +284,20 @@ router.put('/users/:id/permission', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete('/users/:id', pUsers, (req, res) => {
+router.delete('/users/:id', pUsers, async (req, res) => {
   if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
   if (parseInt(req.params.id) === req.session.userId) {
     return res.status(400).json({ error: 'Cannot delete yourself' });
   }
+  // Assignments cascade away with the user — capture them (and the username,
+  // which won't exist anymore) so the owner tags get cleared from PVE.
+  const target = db.prepare('SELECT username FROM users WHERE id = ?').get(req.params.id);
+  const orphanedVms = db.prepare('SELECT node, vmid FROM vm_assignments WHERE user_id = ?').all(req.params.id);
   db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
   logAudit(req, 'admin_delete_user', req.params.id, '');
+  for (const vm of orphanedVms) {
+    syncVmTagsSafe(vm.node, vm.vmid, { retired: [target?.username].filter(Boolean) });
+  }
   res.json({ ok: true });
 });
 
@@ -328,7 +347,7 @@ router.get('/assignments', pAssignments, (req, res) => {
   res.json(rows.map(row => ({ ...row, ...serializeNodeIdentity(row.node) })));
 });
 
-router.post('/assignments', pAssignments, (req, res) => {
+router.post('/assignments', pAssignments, async (req, res) => {
   const { userId, node, vmid } = req.body;
   if (!userId || !node || !vmid) {
     return res.status(400).json({ error: 'userId, node and vmid required' });
@@ -337,6 +356,7 @@ router.post('/assignments', pAssignments, (req, res) => {
     const r = db.prepare(
       'INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)'
     ).run(userId, node, parseInt(vmid));
+    await syncVmTagsSafe(node, vmid);
     res.json({ id: r.lastInsertRowid });
   } catch (err) {
     if (err.message.includes('UNIQUE')) {
@@ -346,9 +366,30 @@ router.post('/assignments', pAssignments, (req, res) => {
   }
 });
 
-router.delete('/assignments/:id', pAssignments, (req, res) => {
+router.delete('/assignments/:id', pAssignments, async (req, res) => {
+  const assignment = db.prepare('SELECT node, vmid FROM vm_assignments WHERE id = ?').get(req.params.id);
   db.prepare('DELETE FROM vm_assignments WHERE id = ?').run(req.params.id);
+  if (assignment) await syncVmTagsSafe(assignment.node, assignment.vmid);
   res.json({ ok: true });
+});
+
+// Re-stamp owner/VLAN tags on every VM the portal can see — for the first
+// rollout, or after NIC/VLAN changes made outside the portal
+router.post('/sync-vm-tags', pAssignments, async (req, res) => {
+  try {
+    const vms = await getAllVMs();
+    let updated = 0;
+    let failed = 0;
+    for (const vm of vms) {
+      const result = await syncVmTagsSafe(vm.nodeRef, vm.vmid);
+      if (result.error) failed += 1;
+      else if (result.changed) updated += 1;
+    }
+    logAudit(req, 'vm_tags_sync', 'all', `${vms.length} checked, ${updated} updated, ${failed} failed`);
+    res.json({ checked: vms.length, updated, failed });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
 });
 
 // ─── VLANs ───────────────────────────────────────────────────────────────────

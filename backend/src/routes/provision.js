@@ -10,6 +10,8 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
+import { assertNodeCapacity } from '../utils/capacity.js';
+import { syncVmTagsSafe } from '../utils/vmTags.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -88,13 +90,51 @@ router.post('/clone', async (req, res) => {
     return res.status(403).json({ error: 'You do not have permission to provision VMs' });
   }
 
-  const { templateId, name, cores, memoryGb, diskGb, storage, description, assignTo, vlanTag } = req.body;
+  const {
+    templateId, name, cores, memoryGb, diskGb, storage, description, assignTo, vlanTag,
+    ciUser, ciPassword, sshKeyIds, ipMode, ipAddress, ipGateway,
+  } = req.body;
   if (!templateId || !name) {
     return res.status(400).json({ error: 'Template and name are required' });
   }
 
   const template = db.prepare('SELECT * FROM vm_templates WHERE id = ? AND enabled = 1').get(templateId);
   if (!template) return res.status(404).json({ error: 'Template not found' });
+
+  // Cloud-init guest settings (only honored for cloud-init templates)
+  const cloudInitOpts = {};
+  if (template.cloud_init) {
+    if (ciUser) {
+      if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(ciUser)) {
+        return res.status(400).json({ error: 'Invalid cloud-init username (lowercase letters, digits, - and _)' });
+      }
+      cloudInitOpts.ciUser = ciUser;
+    }
+    if (ciPassword) {
+      if (String(ciPassword).length < 8) {
+        return res.status(400).json({ error: 'Cloud-init password must be at least 8 characters' });
+      }
+      cloudInitOpts.ciPassword = String(ciPassword);
+    }
+    if (Array.isArray(sshKeyIds) && sshKeyIds.length > 0) {
+      const placeholders = sshKeyIds.map(() => '?').join(',');
+      const keys = db.prepare(
+        `SELECT public_key FROM ssh_keys WHERE user_id = ? AND id IN (${placeholders}) AND public_key != ''`
+      ).all(req.session.userId, ...sshKeyIds.map(Number));
+      if (keys.length > 0) cloudInitOpts.sshKeys = keys.map((k) => k.public_key.trim()).join('\n');
+    }
+    if (ipMode === 'static') {
+      if (!/^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(ipAddress || '')) {
+        return res.status(400).json({ error: 'Static IP must be in CIDR form, e.g. 10.0.20.50/24' });
+      }
+      if (ipGateway && !/^(\d{1,3}\.){3}\d{1,3}$/.test(ipGateway)) {
+        return res.status(400).json({ error: 'Gateway must be an IPv4 address' });
+      }
+      cloudInitOpts.ipConfig = ipGateway ? `ip=${ipAddress},gw=${ipGateway}` : `ip=${ipAddress}`;
+    } else if (ipMode === 'dhcp') {
+      cloudInitOpts.ipConfig = 'ip=dhcp';
+    }
+  }
 
   // Validate VLAN access for non-admins
   if (vlanTag && !user.is_admin) {
@@ -111,6 +151,20 @@ router.post('/clone', async (req, res) => {
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     // Non-validation errors are fine — we'll fall back in pollAndConfigure
+  }
+
+  // Refuse requests the node can't fit (free RAM / storage space)
+  const finalMem = memoryGb ? Math.round(parseFloat(memoryGb) * 1024) : template.default_memory;
+  const finalDisk = diskGb || template.default_disk_gb;
+  try {
+    await assertNodeCapacity(template.node, {
+      memoryMb: finalMem,
+      diskGb: finalDisk,
+      storage: storage || template.default_storage,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    throw err;
   }
 
   try {
@@ -139,17 +193,13 @@ router.post('/clone', async (req, res) => {
       } catch { /* may already be assigned */ }
     }
 
-    // Queue post-clone config update (cores, memory, cloud-init)
-    const finalCores = cores || template.default_cores;
-    const finalMem = memoryGb ? Math.round(parseFloat(memoryGb) * 1024) : template.default_memory;
-    const finalDisk = diskGb || template.default_disk_gb;
-
     // Do config changes after clone finishes — poll in background
     pollAndConfigure(row.lastInsertRowid, template.node, newVmid, upid, {
       cores: finalCores,
       memory: finalMem,
       diskGb: finalDisk,
       cloudInit: template.cloud_init,
+      ...cloudInitOpts,
       description,
       vlanTag: vlanTag ? parseInt(vlanTag) : null,
     });
@@ -188,6 +238,13 @@ router.post('/create', requireAdmin, async (req, res) => {
     const vmid = await getNextVmid();
     const cpuLayout = await computeCpuTopology(node, cores);
 
+    // Refuse requests the node can't fit (free RAM / storage space)
+    await assertNodeCapacity(node, {
+      memoryMb: Math.round(parseFloat(memoryGb) * 1024),
+      diskGb: String(diskSize).replace(/[^0-9]/g, ''),
+      storage,
+    });
+
     const config = {
       name,
       cpu: 'host',
@@ -219,11 +276,14 @@ router.post('/create', requireAdmin, async (req, res) => {
       } catch { /* already assigned */ }
     }
 
-    // Poll for completion
+    // Poll for completion, then stamp PVE owner/VLAN tags on the new VM
     if (upid) {
-      pollTaskCompletion(row.lastInsertRowid, node, upid);
+      pollTaskCompletion(row.lastInsertRowid, node, upid)
+        .then((ok) => { if (ok) return syncVmTagsSafe(node, vmid); })
+        .catch((err) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
     } else {
       db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?').run('ready', '', row.lastInsertRowid);
+      syncVmTagsSafe(node, vmid);
     }
 
     logAudit(req, 'vm_create', `${node}/${vmid}`, name);
@@ -477,6 +537,9 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
       db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
         .run('ready', '', provisionId);
     }
+
+    // Stamp PVE owner/VLAN tags now that assignment + net config are final
+    await syncVmTagsSafe(node, vmid);
   } catch (err) {
     console.error(`Post-clone config failed for VM ${vmid}:`, err.message);
     db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
