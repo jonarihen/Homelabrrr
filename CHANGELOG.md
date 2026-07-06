@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-07-06 — Deploy VMs directly from cloud images, with live progress
+
+### Cloud image as the provisioning source
+- New **Cloud Image** tab on the New VM page: pick a downloaded cloud image (Ubuntu, Debian, Rocky, or any custom qcow2/raw) and deploy a brand-new VM straight from it — no static Proxmox template needed
+- The backend builds the VM directly with `import-from`: creates the VM shell, imports the image as the boot disk, grows the disk, attaches a cloud-init drive and serial console, applies the cloud-init user/password/SSH keys/network, stamps owner + VLAN tags, and can start the VM when it's done
+- The cloud image catalog is now the source of truth for provisioning — updating a base image means re-downloading it, not rebuilding a template
+- Cloud-init settings (guest user, password, your stored SSH keys, DHCP/static network) work in the direct flow just like the template clone flow; capacity (node memory + storage space) and CPU-topology checks run before anything is created
+- Available to any user with provisioning permission; admins additionally pick the target network bridge and can assign the VM to another user
+- Template cloning and create-from-scratch are unchanged and still available — templates become an optional fast-clone path rather than the only way to use a cloud image
+
+### Live deployment progress
+- Every deploy (cloud image, template clone, or from scratch) now shows a **step-by-step progress stepper** with a progress bar instead of a blank "creating…" wait: reserving VMID, checking capacity, creating/importing, resizing, applying cloud-init, tagging, and starting
+- Failed Proxmox tasks surface the error inline, and partial issues (e.g. a disk resize that couldn't run) show as a warning with detail
+- The Recent Provisions table now shows the source image or template per job
+- New audit action `vm_from_image` for direct cloud-image deployments
+
 ## 2026-07-06 — Cloud image provisioning with cloud-init
 
 ### Cloud image catalog (admins)

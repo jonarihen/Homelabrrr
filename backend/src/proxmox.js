@@ -368,6 +368,11 @@ export async function resizeVMDisk(node, vmid, disk, size) {
   return makeRequest(host, 'PUT', `/nodes/${nodeName}/qemu/${vmid}/resize`, { disk, size });
 }
 
+export async function startVM(node, vmid) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${vmid}/status/start`, {});
+}
+
 export async function getStorages(node) {
   const { host, nodeName } = await resolveNode(node);
   const storages = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage`);
