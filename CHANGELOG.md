@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-06 — SSH keys auto-derive their public key (and warn when they can't)
+
+- Adding an SSH key now **derives the public key from the private key** automatically when you don't paste one — so the key is immediately usable for cloud-init provisioning (which injects the public key into the guest). Works for OpenSSH, PEM, and PuTTY PPK keys, including encrypted keys when you supply the passphrase.
+- If a public key still can't be produced (e.g. an encrypted key added without its passphrase), the **Add Key** dialog now clearly warns that the key won't work for deploying VMs, instead of failing silently later.
+- The SSH Keys list flags any key with **No public key** so incomplete keys are obvious at a glance.
+- Existing keys missing a public key are **backfilled** automatically (for unencrypted keys) the next time the list loads — no need to re-add them.
+
 ## 2026-07-06 — Deploy VMs directly from cloud images, with live progress
 
 ### Cloud image as the provisioning source
