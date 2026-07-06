@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import {
-  getNextVmid, cloneVM, createVM, updateVMConfig, resizeVMDisk,
+  getNextVmid, cloneVM, createVM, updateVMConfig, resizeVMDisk, startVM,
   getStorages, getISOImages, getNetworks, getNodes, getTaskStatus,
   getAllVMs, getVMConfig,
 } from '../proxmox.js';
@@ -25,13 +25,81 @@ function serializeNodeIdentity(nodeValue) {
 }
 
 function serializeProvisionRow(row) {
+  let steps = [];
+  try { steps = row.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
   return {
     ...row,
+    steps,
     ...serializeNodeIdentity(row.node),
   };
 }
 
-// computeCpuTopology moved to ../utils/cpuTopology.js
+// ─── Deployment progress (step tracking) ─────────────────────────────────────
+// Each provisioning job carries a JSON array of steps on its provisioned_vms
+// row so the UI can render a live stepper. A step is { key, label, status },
+// status ∈ 'pending' | 'active' | 'done' | 'error' | 'skipped'. Steps that
+// finish synchronously before the row exists are seeded 'done' at insert time;
+// the background pollers advance the rest.
+
+function stepList(steps) {
+  return JSON.stringify(steps.map((s) => ({ key: s.key, label: s.label, status: s.status || 'pending', note: s.note || '' })));
+}
+
+function setStep(provisionId, key, status, note) {
+  const row = db.prepare('SELECT steps FROM provisioned_vms WHERE id = ?').get(provisionId);
+  let steps = [];
+  try { steps = row?.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
+  const step = steps.find((s) => s.key === key);
+  if (!step) return;
+  step.status = status;
+  if (note !== undefined) step.note = note;
+  db.prepare('UPDATE provisioned_vms SET steps = ? WHERE id = ?').run(JSON.stringify(steps), provisionId);
+}
+
+// ─── Cloud-init option parsing (shared by clone + from-image) ────────────────
+// Returns { opts } to hand to the config step, or { error: { status, message } }
+// on a validation failure. SSH keys are always read from the requesting user's
+// own stored keys.
+
+function parseCloudInitOptions({ ciUser, ciPassword, sshKeyIds, ipMode, ipAddress, ipGateway }, userId) {
+  const opts = {};
+  if (ciUser) {
+    if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(ciUser)) {
+      return { error: { status: 400, message: 'Invalid cloud-init username (lowercase letters, digits, - and _)' } };
+    }
+    opts.ciUser = ciUser;
+  }
+  if (ciPassword) {
+    if (String(ciPassword).length < 8) {
+      return { error: { status: 400, message: 'Cloud-init password must be at least 8 characters' } };
+    }
+    opts.ciPassword = String(ciPassword);
+  }
+  if (Array.isArray(sshKeyIds) && sshKeyIds.length > 0) {
+    const placeholders = sshKeyIds.map(() => '?').join(',');
+    const keys = db.prepare(
+      `SELECT public_key FROM ssh_keys WHERE user_id = ? AND id IN (${placeholders}) AND public_key != ''`
+    ).all(userId, ...sshKeyIds.map(Number));
+    if (keys.length > 0) opts.sshKeys = keys.map((k) => k.public_key.trim()).join('\n');
+  }
+  if (ipMode === 'static') {
+    if (!/^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(ipAddress || '')) {
+      return { error: { status: 400, message: 'Static IP must be in CIDR form, e.g. 10.0.20.50/24' } };
+    }
+    if (ipGateway && !/^(\d{1,3}\.){3}\d{1,3}$/.test(ipGateway)) {
+      return { error: { status: 400, message: 'Gateway must be an IPv4 address' } };
+    }
+    opts.ipConfig = ipGateway ? `ip=${ipAddress},gw=${ipGateway}` : `ip=${ipAddress}`;
+  } else if (ipMode === 'dhcp') {
+    opts.ipConfig = 'ip=dhcp';
+  }
+  return { opts };
+}
+
+// A non-admin needs can_provision to reach clone / from-image / images.
+function loadProvisioner(req) {
+  return db.prepare('SELECT id, can_provision, is_admin FROM users WHERE id = ?').get(req.session.userId);
+}
 
 // ─── Templates (public, read-only for users) ────────────────────────────────
 
@@ -44,6 +112,24 @@ router.get('/templates', (req, res) => {
     nodeRef: t.node,
     node: decodeNodeRef(t.node).nodeName || t.node,
   })));
+});
+
+// ─── Cloud images available to provision directly (read-only, provisioners) ──
+
+router.get('/images', (req, res) => {
+  const user = loadProvisioner(req);
+  if (!user?.is_admin && !user?.can_provision) {
+    return res.status(403).json({ error: 'You do not have permission to provision VMs' });
+  }
+  // Only ready images stored as import content can be used as an import-from
+  // disk source; iso-content rows (downloaded before the import switch) can't.
+  const rows = db.prepare(
+    "SELECT id, name, node, storage, volid, size FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' ORDER BY name"
+  ).all();
+  res.json(rows.map((r) => {
+    const { nodeName, nodeRef } = decodeNodeRef(r.node);
+    return { id: r.id, name: r.name, storage: r.storage, size: r.size, node: nodeName || r.node, nodeRef: nodeRef || r.node };
+  }));
 });
 
 // ─── Proxmox resources (for form dropdowns) ─────────────────────────────────
@@ -85,14 +171,13 @@ router.get('/nodes/:node/networks', requireAdmin, async (req, res) => {
 
 router.post('/clone', async (req, res) => {
   // Check permission
-  const user = db.prepare('SELECT can_provision, is_admin FROM users WHERE id = ?').get(req.session.userId);
+  const user = loadProvisioner(req);
   if (!user?.is_admin && !user?.can_provision) {
     return res.status(403).json({ error: 'You do not have permission to provision VMs' });
   }
 
   const {
     templateId, name, cores, memoryGb, diskGb, storage, description, assignTo, vlanTag,
-    ciUser, ciPassword, sshKeyIds, ipMode, ipAddress, ipGateway,
   } = req.body;
   if (!templateId || !name) {
     return res.status(400).json({ error: 'Template and name are required' });
@@ -102,38 +187,11 @@ router.post('/clone', async (req, res) => {
   if (!template) return res.status(404).json({ error: 'Template not found' });
 
   // Cloud-init guest settings (only honored for cloud-init templates)
-  const cloudInitOpts = {};
+  let cloudInitOpts = {};
   if (template.cloud_init) {
-    if (ciUser) {
-      if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(ciUser)) {
-        return res.status(400).json({ error: 'Invalid cloud-init username (lowercase letters, digits, - and _)' });
-      }
-      cloudInitOpts.ciUser = ciUser;
-    }
-    if (ciPassword) {
-      if (String(ciPassword).length < 8) {
-        return res.status(400).json({ error: 'Cloud-init password must be at least 8 characters' });
-      }
-      cloudInitOpts.ciPassword = String(ciPassword);
-    }
-    if (Array.isArray(sshKeyIds) && sshKeyIds.length > 0) {
-      const placeholders = sshKeyIds.map(() => '?').join(',');
-      const keys = db.prepare(
-        `SELECT public_key FROM ssh_keys WHERE user_id = ? AND id IN (${placeholders}) AND public_key != ''`
-      ).all(req.session.userId, ...sshKeyIds.map(Number));
-      if (keys.length > 0) cloudInitOpts.sshKeys = keys.map((k) => k.public_key.trim()).join('\n');
-    }
-    if (ipMode === 'static') {
-      if (!/^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(ipAddress || '')) {
-        return res.status(400).json({ error: 'Static IP must be in CIDR form, e.g. 10.0.20.50/24' });
-      }
-      if (ipGateway && !/^(\d{1,3}\.){3}\d{1,3}$/.test(ipGateway)) {
-        return res.status(400).json({ error: 'Gateway must be an IPv4 address' });
-      }
-      cloudInitOpts.ipConfig = ipGateway ? `ip=${ipAddress},gw=${ipGateway}` : `ip=${ipAddress}`;
-    } else if (ipMode === 'dhcp') {
-      cloudInitOpts.ipConfig = 'ip=dhcp';
-    }
+    const parsed = parseCloudInitOptions(req.body, req.session.userId);
+    if (parsed.error) return res.status(parsed.error.status).json({ error: parsed.error.message });
+    cloudInitOpts = parsed.opts;
   }
 
   // Validate VLAN access for non-admins
@@ -179,10 +237,19 @@ router.post('/clone', async (req, res) => {
       { storage: storage || template.default_storage, description: description || '' }
     );
 
-    // Track the provisioned VM
+    // Track the provisioned VM — the clone/capacity work above is already done,
+    // so those steps are seeded complete and the clone task is left active.
+    const steps = stepList([
+      { key: 'reserve', label: 'Reserving VMID', status: 'done' },
+      { key: 'capacity', label: 'Checking node capacity', status: 'done' },
+      { key: 'clone', label: 'Cloning template', status: 'active' },
+      { key: 'configure', label: 'Applying CPU / memory / cloud-init', status: 'pending' },
+      { key: 'resize', label: 'Resizing disk', status: 'pending' },
+      { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
+    ]);
     const row = db.prepare(
-      'INSERT INTO provisioned_vms (user_id, node, vmid, name, template_id, status, upid) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(req.session.userId, template.node, newVmid, name, template.id, 'cloning', upid || '');
+      "INSERT INTO provisioned_vms (user_id, node, vmid, name, template_id, source_type, steps, status, upid) VALUES (?, ?, ?, ?, ?, 'template', ?, 'cloning', ?)"
+    ).run(req.session.userId, template.node, newVmid, name, template.id, steps, upid || '');
 
     // Assign VM — admins only get an assignment if they explicitly pick a target user
     const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
@@ -202,7 +269,7 @@ router.post('/clone', async (req, res) => {
       ...cloudInitOpts,
       description,
       vlanTag: vlanTag ? parseInt(vlanTag) : null,
-    });
+    }).catch((err) => console.error(`Post-clone config failed for VM ${newVmid}:`, err.message));
 
     logAudit(req, 'vm_clone', `${template.node}/${newVmid}`, `template:${template.name}`);
     res.json({
@@ -210,6 +277,157 @@ router.post('/clone', async (req, res) => {
       vmid: newVmid,
       ...serializeNodeIdentity(template.node),
       status: 'cloning',
+      upid,
+    });
+  } catch (err) {
+    const status = err.message?.includes('globally unique VMID') ? 503 : 500;
+    res.status(status).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// ─── Create a VM directly from a cloud image (no static template) ────────────
+//
+// Builds a new VM whose boot disk is imported straight from a downloaded cloud
+// image (import-from, PVE 7.3+), attaches a cloud-init drive + serial console,
+// grows the disk, applies the requested cloud-init user/network, stamps
+// owner/VLAN tags, and optionally starts it. The cloud image — not a Proxmox
+// template — is the source artifact.
+
+router.post('/from-image', async (req, res) => {
+  const user = loadProvisioner(req);
+  if (!user?.is_admin && !user?.can_provision) {
+    return res.status(403).json({ error: 'You do not have permission to provision VMs' });
+  }
+
+  const {
+    imageId, name, cores = 2, memoryGb = 2, diskGb = 20,
+    storage, bridge = 'vmbr0', description = '', assignTo, vlanTag, start = false,
+  } = req.body;
+
+  if (!imageId || !name || !storage) {
+    return res.status(400).json({ error: 'Image, name and storage are required' });
+  }
+
+  // `bridge` and `storage` are concatenated into Proxmox property strings, so
+  // they must be strict identifiers. Non-admins can't pick a bridge (the
+  // networks list is admin-only) — pinning them to vmbr0 also blocks a
+  // `bridge=vmbr0,tag=N` injection that would put the NIC on a VLAN the user has
+  // no access to, bypassing the VLAN check below.
+  const safeBridge = user.is_admin ? String(bridge || 'vmbr0') : 'vmbr0';
+  if (!/^[a-zA-Z0-9._-]+$/.test(safeBridge)) {
+    return res.status(400).json({ error: 'Invalid network bridge' });
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(String(storage))) {
+    return res.status(400).json({ error: 'Invalid storage' });
+  }
+
+  const image = db.prepare("SELECT * FROM cloud_images WHERE id = ?").get(imageId);
+  if (!image) return res.status(404).json({ error: 'Cloud image not found' });
+  if (image.status !== 'ready') {
+    return res.status(400).json({ error: `Image is not ready (status: ${image.status})` });
+  }
+  if (!image.volid || image.volid.includes(':iso/')) {
+    return res.status(400).json({ error: 'This image cannot be used as a disk source — remove it and add it again to re-download it as import content' });
+  }
+
+  // PVE VM names must be DNS-like — sanitize so the deploy doesn't fail late.
+  const vmName = String(name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+  if (!vmName) {
+    return res.status(400).json({ error: 'Name must contain letters or digits' });
+  }
+
+  const baseDiskGb = parseInt(diskGb, 10);
+  if (!Number.isInteger(baseDiskGb) || baseDiskGb < 5) {
+    return res.status(400).json({ error: 'Disk size must be at least 5 GB' });
+  }
+  const memoryMb = Math.round(parseFloat(memoryGb) * 1024);
+
+  // Cloud images are always cloud-init capable, so guest settings are honored.
+  const parsed = parseCloudInitOptions(req.body, req.session.userId);
+  if (parsed.error) return res.status(parsed.error.status).json({ error: parsed.error.message });
+  const cloudInitOpts = parsed.opts;
+
+  // Validate VLAN access for non-admins
+  if (vlanTag && !user.is_admin) {
+    const allowed = db.prepare(
+      'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
+    ).get(req.session.userId, parseInt(vlanTag));
+    if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
+  }
+
+  // CPU topology + node capacity checks run on the image's node (import-from
+  // requires the disk source and target to share a host).
+  let cpuLayout;
+  try {
+    cpuLayout = await computeCpuTopology(image.node, cores);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    // Non-validation error — fall back to a plain socket/core split
+    cpuLayout = { sockets: 1, cores: parseInt(cores, 10) || 2 };
+  }
+
+  try {
+    await assertNodeCapacity(image.node, { memoryMb, diskGb: baseDiskGb, storage });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+
+  try {
+    const vmid = await getNextVmid();
+    const tag = vlanTag ? parseInt(vlanTag) : null;
+
+    const upid = await createVM(image.node, vmid, {
+      name: vmName,
+      cpu: 'host',
+      sockets: cpuLayout.sockets,
+      cores: cpuLayout.cores,
+      memory: memoryMb,
+      ostype: 'l26',
+      scsihw: 'virtio-scsi-single',
+      scsi0: `${storage}:0,import-from=${image.volid}`,
+      ide2: `${storage}:cloudinit`,
+      boot: 'order=scsi0',
+      serial0: 'socket',
+      vga: 'serial0',
+      net0: tag ? `virtio,bridge=${safeBridge},tag=${tag}` : `virtio,bridge=${safeBridge}`,
+      ...(description && { description }),
+    });
+
+    const startNow = !!start;
+    const steps = stepList([
+      { key: 'reserve', label: 'Reserving VMID', status: 'done' },
+      { key: 'capacity', label: 'Checking node capacity', status: 'done' },
+      { key: 'create', label: 'Creating VM & importing cloud image', status: 'active' },
+      { key: 'resize', label: 'Resizing disk', status: 'pending' },
+      { key: 'cloudinit', label: 'Applying cloud-init config', status: 'pending' },
+      { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
+      { key: 'start', label: startNow ? 'Starting VM' : 'Finalizing', status: 'pending' },
+    ]);
+    const row = db.prepare(
+      "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, cloud_image_id, steps, status, upid) VALUES (?, ?, ?, ?, 'cloudimage', ?, ?, 'creating', ?)"
+    ).run(req.session.userId, image.node, vmid, vmName, image.id, steps, upid || '');
+
+    const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
+    if (targetUser) {
+      try {
+        db.prepare('INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)')
+          .run(targetUser, image.node, vmid);
+      } catch { /* may already be assigned */ }
+    }
+
+    finishImageProvision(row.lastInsertRowid, image.node, vmid, upid, {
+      diskGb: baseDiskGb,
+      ...cloudInitOpts,
+      start: startNow,
+    }).catch((err) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message));
+
+    logAudit(req, 'vm_from_image', `${image.node}/${vmid}`, `image:${image.name}`);
+    res.json({
+      id: row.lastInsertRowid,
+      vmid,
+      ...serializeNodeIdentity(image.node),
+      status: 'creating',
       upid,
     });
   } catch (err) {
@@ -263,9 +481,15 @@ router.post('/create', requireAdmin, async (req, res) => {
     const upid = await createVM(node, vmid, config);
 
     // Track
+    const steps = stepList([
+      { key: 'reserve', label: 'Reserving VMID', status: 'done' },
+      { key: 'capacity', label: 'Checking node capacity', status: 'done' },
+      { key: 'create', label: 'Creating VM', status: upid ? 'active' : 'done' },
+      { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
+    ]);
     const row = db.prepare(
-      'INSERT INTO provisioned_vms (user_id, node, vmid, name, status, upid) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(req.session.userId, node, vmid, name, 'creating', upid || '');
+      "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, steps, status, upid) VALUES (?, ?, ?, ?, 'create', ?, 'creating', ?)"
+    ).run(req.session.userId, node, vmid, name, steps, upid || '');
 
     // Assign VM — admins only get an assignment if they explicitly pick a target user
     const targetUser = req.session.isAdmin ? (assignTo || null) : req.session.userId;
@@ -279,11 +503,19 @@ router.post('/create', requireAdmin, async (req, res) => {
     // Poll for completion, then stamp PVE owner/VLAN tags on the new VM
     if (upid) {
       pollTaskCompletion(row.lastInsertRowid, node, upid)
-        .then((ok) => { if (ok) return syncVmTagsSafe(node, vmid); })
+        .then(async (ok) => {
+          setStep(row.lastInsertRowid, 'create', ok ? 'done' : 'error');
+          if (!ok) return;
+          setStep(row.lastInsertRowid, 'tags', 'active');
+          await syncVmTagsSafe(node, vmid);
+          setStep(row.lastInsertRowid, 'tags', 'done');
+          db.prepare("UPDATE provisioned_vms SET status = 'ready', status_detail = '' WHERE id = ?").run(row.lastInsertRowid);
+        })
         .catch((err) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
     } else {
-      db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?').run('ready', '', row.lastInsertRowid);
-      syncVmTagsSafe(node, vmid);
+      setStep(row.lastInsertRowid, 'tags', 'active');
+      db.prepare("UPDATE provisioned_vms SET status = 'ready', status_detail = '' WHERE id = ?").run(row.lastInsertRowid);
+      syncVmTagsSafe(node, vmid).finally(() => setStep(row.lastInsertRowid, 'tags', 'done'));
     }
 
     logAudit(req, 'vm_create', `${node}/${vmid}`, name);
@@ -300,10 +532,11 @@ router.get('/status', (req, res) => {
   const where = req.session.isAdmin ? '' : 'WHERE pv.user_id = ?';
   const params = req.session.isAdmin ? [] : [req.session.userId];
   const rows = db.prepare(`
-    SELECT pv.*, u.username, t.name as template_name
+    SELECT pv.*, u.username, t.name as template_name, ci.name as image_name
     FROM provisioned_vms pv
     LEFT JOIN users u ON u.id = pv.user_id
     LEFT JOIN vm_templates t ON t.id = pv.template_id
+    LEFT JOIN cloud_images ci ON ci.id = pv.cloud_image_id
     ${where}
     ORDER BY pv.created_at DESC
     LIMIT 50
@@ -312,22 +545,30 @@ router.get('/status', (req, res) => {
 });
 
 router.get('/status/:id', async (req, res) => {
-  const row = db.prepare('SELECT * FROM provisioned_vms WHERE id = ?').get(req.params.id);
+  const row = db.prepare(`
+    SELECT pv.*, t.name as template_name, ci.name as image_name
+    FROM provisioned_vms pv
+    LEFT JOIN vm_templates t ON t.id = pv.template_id
+    LEFT JOIN cloud_images ci ON ci.id = pv.cloud_image_id
+    WHERE pv.id = ?
+  `).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   if (!req.session.isAdmin && row.user_id !== req.session.userId) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
-  // If still in progress, check task status
+  // Resilience: surface a failed PVE task even if the in-process poller missed
+  // it (e.g. the backend restarted mid-job). Success is finalized by the
+  // background pollers, so we never flip to 'ready' here — that would race the
+  // still-running configure/import steps.
   if (row.upid && (row.status === 'cloning' || row.status === 'creating' || row.status === 'configuring')) {
     try {
       const task = await getTaskStatus(row.node, row.upid);
-      if (task.status === 'stopped') {
-        const newStatus = task.exitstatus === 'OK' ? 'ready' : 'error';
+      if (task.status === 'stopped' && task.exitstatus !== 'OK') {
         db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
-          .run(newStatus, task.exitstatus === 'OK' ? '' : (task.exitstatus || 'Task failed'), row.id);
-        row.status = newStatus;
-        row.status_detail = task.exitstatus === 'OK' ? '' : (task.exitstatus || 'Task failed');
+          .run('error', task.exitstatus || 'Task failed', row.id);
+        row.status = 'error';
+        row.status_detail = task.exitstatus || 'Task failed';
       }
     } catch { /* ignore */ }
   }
@@ -446,16 +687,20 @@ router.delete('/admin/templates/:id', requirePermission('can_manage_templates'),
 
 // ─── Background task polling ─────────────────────────────────────────────────
 
-async function pollTaskCompletion(provisionId, node, upid, maxAttempts = 120) {
+// Polls a PVE task to completion. Returns true on success. On failure/timeout
+// it writes a terminal status + detail so the error is visible; on success it
+// leaves the status untouched so the caller can finalize after its own
+// post-task work (configure, resize, tags, start).
+async function pollTaskCompletion(provisionId, node, upid, { maxAttempts = 120 } = {}) {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, 5000));
     try {
       const task = await getTaskStatus(node, upid);
       if (task.status === 'stopped') {
-        const newStatus = task.exitstatus === 'OK' ? 'ready' : 'error';
+        if (task.exitstatus === 'OK') return true;
         db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
-          .run(newStatus, task.exitstatus === 'OK' ? '' : (task.exitstatus || 'Task failed'), provisionId);
-        return task.exitstatus === 'OK';
+          .run('error', task.exitstatus || 'Task failed', provisionId);
+        return false;
       }
     } catch { /* keep polling */ }
   }
@@ -468,12 +713,16 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
   // Wait for clone task to finish
   if (upid) {
     const ok = await pollTaskCompletion(provisionId, node, upid);
+    setStep(provisionId, 'clone', ok ? 'done' : 'error');
     if (!ok) return;
+  } else {
+    setStep(provisionId, 'clone', 'done');
   }
 
   // Apply post-clone configuration
   db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
     .run('configuring', '', provisionId);
+  setStep(provisionId, 'configure', 'active');
 
   try {
     const config = {};
@@ -498,19 +747,26 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
     if (Object.keys(config).length > 0) {
       await updateVMConfig(node, vmid, config);
     }
+    setStep(provisionId, 'configure', 'done');
 
     // Resize disk if needed
+    setStep(provisionId, 'resize', 'active');
     if (opts.diskGb) {
       try {
         await resizeVMDisk(node, vmid, 'scsi0', `${opts.diskGb}G`);
+        setStep(provisionId, 'resize', 'done');
       } catch {
         // Try virtio0 if scsi0 doesn't exist
         try {
           await resizeVMDisk(node, vmid, 'virtio0', `${opts.diskGb}G`);
+          setStep(provisionId, 'resize', 'done');
         } catch {
           warnings.push(`Disk resize to ${opts.diskGb}G failed`);
+          setStep(provisionId, 'resize', 'skipped', `resize to ${opts.diskGb}G failed`);
         }
       }
+    } else {
+      setStep(provisionId, 'resize', 'skipped');
     }
 
     // Apply VLAN tag to net0 if requested
@@ -530,6 +786,11 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
       }
     }
 
+    // Stamp PVE owner/VLAN tags now that assignment + net config are final
+    setStep(provisionId, 'tags', 'active');
+    await syncVmTagsSafe(node, vmid);
+    setStep(provisionId, 'tags', 'done');
+
     if (warnings.length > 0) {
       db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
         .run('warning', warnings.join('; '), provisionId);
@@ -537,14 +798,75 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
       db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
         .run('ready', '', provisionId);
     }
-
-    // Stamp PVE owner/VLAN tags now that assignment + net config are final
-    await syncVmTagsSafe(node, vmid);
   } catch (err) {
     console.error(`Post-clone config failed for VM ${vmid}:`, err.message);
+    setStep(provisionId, 'configure', 'error', err.message);
     db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
       .run('warning', err.message || 'Post-clone configuration failed', provisionId);
   }
+}
+
+// Background driver for the direct cloud-image flow: wait for the create+import
+// task, grow the boot disk, apply cloud-init, stamp tags, optionally start.
+async function finishImageProvision(provisionId, node, vmid, upid, opts) {
+  const ok = await pollTaskCompletion(provisionId, node, upid, { maxAttempts: 240 });
+  setStep(provisionId, 'create', ok ? 'done' : 'error');
+  if (!ok) return; // status already error/timeout
+
+  db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+    .run('configuring', '', provisionId);
+  const warnings = [];
+
+  // Grow the imported boot disk
+  setStep(provisionId, 'resize', 'active');
+  if (opts.diskGb) {
+    try {
+      await resizeVMDisk(node, vmid, 'scsi0', `${opts.diskGb}G`);
+      setStep(provisionId, 'resize', 'done');
+    } catch (err) {
+      warnings.push(`Disk resize to ${opts.diskGb}G failed`);
+      setStep(provisionId, 'resize', 'skipped', `resize to ${opts.diskGb}G failed`);
+    }
+  } else {
+    setStep(provisionId, 'resize', 'skipped');
+  }
+
+  // Apply cloud-init user / password / SSH keys / network
+  setStep(provisionId, 'cloudinit', 'active');
+  try {
+    const config = {};
+    if (opts.ciUser) config.ciuser = opts.ciUser;
+    if (opts.ciPassword) config.cipassword = opts.ciPassword;
+    if (opts.sshKeys) config.sshkeys = encodeURIComponent(opts.sshKeys);
+    config.ipconfig0 = opts.ipConfig || 'ip=dhcp';
+    await updateVMConfig(node, vmid, config);
+    setStep(provisionId, 'cloudinit', 'done');
+  } catch (err) {
+    warnings.push('Cloud-init configuration failed');
+    setStep(provisionId, 'cloudinit', 'error', err.message);
+  }
+
+  // Owner / VLAN tags (net0 was set with the VLAN tag at create time)
+  setStep(provisionId, 'tags', 'active');
+  await syncVmTagsSafe(node, vmid);
+  setStep(provisionId, 'tags', 'done');
+
+  // Optionally start the VM
+  if (opts.start) {
+    setStep(provisionId, 'start', 'active');
+    try {
+      await startVM(node, vmid);
+      setStep(provisionId, 'start', 'done');
+    } catch (err) {
+      warnings.push('VM created but failed to start');
+      setStep(provisionId, 'start', 'error', err.message);
+    }
+  } else {
+    setStep(provisionId, 'start', 'done');
+  }
+
+  db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
+    .run(warnings.length ? 'warning' : 'ready', warnings.join('; '), provisionId);
 }
 
 export default router;

@@ -33,8 +33,8 @@ This project pulls those into one interface so users can work inside guardrails 
 | VM & LXC access | Assigned VM/container listing, status/actions, browser VNC, snapshots, backups, and file-level backup restore |
 | Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, pop-out tabs, and clipboard paste into VNC (typed into the guest as keystrokes, no agent needed) |
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
-| Provisioning | Template-driven cloning plus admin create-from-scratch flow with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, and pre-flight capacity checks (node free memory + storage space) |
-| Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) with one-click conversion to cloud-init templates; clones configure guest user, SSH keys, and DHCP/static network on first boot (requires a storage with the Import content type; PVE 9) |
+| Provisioning | Deploy straight from a cloud image, clone a template, or admin create-from-scratch — all with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, pre-flight capacity checks (node free memory + storage space), and a live step-by-step deployment progress stepper |
+| Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) as the provisioning source: deploy a new VM directly from an image with `import-from` (no static template needed), configuring guest user, SSH keys, and DHCP/static network via cloud-init on first boot; optional one-click conversion to a reusable template remains (requires a storage with the Import content type; PVE 9) |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
@@ -46,7 +46,7 @@ This project pulls those into one interface so users can work inside guardrails 
 ### User side
 
 - `My VMs` — assigned VM/LXC inventory with search, filter, sort, selection, and bulk actions
-- `New VM` — template-driven cloning for permitted users, plus create-from-scratch for admins
+- `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and create-from-scratch for admins, each with a live deployment progress stepper
 - `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore
 - `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs; VNC consoles have a Paste button that types the clipboard into the guest (SSH terminals take native browser paste)
 - `SSH Keys` — uploaded keys used by browser SSH and SFTP sessions
@@ -55,7 +55,7 @@ This project pulls those into one interface so users can work inside guardrails 
 ### Admin side
 
 - `PVE Hosts` — multi-host Proxmox registration with status monitoring
-- `Templates` — register source VMs with auto-populated defaults from Proxmox config; cloud image catalog with downloads and one-click cloud-init template builds
+- `Templates` — register source VMs with auto-populated defaults from Proxmox config; cloud image catalog with downloads used as the direct provisioning source (deploy VMs straight from an image) plus optional one-click cloud-init template builds
 - `Firewalls` — FortiGate registration, VDOM/link settings, WAN settings, and managed-switch discovery
 - `VLANs` — managed or tagged-only network definitions, subnet data, and FortiGate sync
 - `Policies` — visual traffic mesh plus address/service object management for admins

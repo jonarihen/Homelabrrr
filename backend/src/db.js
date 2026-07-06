@@ -177,6 +177,9 @@ try { db.exec(`
     vmid INTEGER NOT NULL,
     name TEXT NOT NULL,
     template_id INTEGER,
+    source_type TEXT DEFAULT 'template',
+    cloud_image_id INTEGER,
+    steps TEXT DEFAULT '',
     status TEXT DEFAULT 'creating',
     status_detail TEXT DEFAULT '',
     upid TEXT DEFAULT '',
@@ -186,6 +189,19 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 try { db.exec("ALTER TABLE provisioned_vms ADD COLUMN status_detail TEXT DEFAULT ''"); } catch { /* exists */ }
+// Direct cloud-image provisioning + step-based deployment progress
+try { db.exec("ALTER TABLE provisioned_vms ADD COLUMN source_type TEXT DEFAULT 'template'"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE provisioned_vms ADD COLUMN cloud_image_id INTEGER'); } catch { /* exists */ }
+try { db.exec("ALTER TABLE provisioned_vms ADD COLUMN steps TEXT DEFAULT ''"); } catch { /* exists */ }
+// Provisioning is finalized by in-process background pollers. A row left
+// mid-flight ('cloning'/'creating'/'configuring') at startup was orphaned by a
+// crash/restart and can never reach a terminal state — mark it interrupted so
+// the UI stops spinning instead of waiting forever.
+try {
+  db.prepare(
+    "UPDATE provisioned_vms SET status = 'error', status_detail = 'Provisioning was interrupted by a server restart — check the VM in Proxmox' WHERE status IN ('cloning', 'creating', 'configuring')"
+  ).run();
+} catch { /* table may not exist yet on a brand-new DB */ }
 
 // Allow users to provision VMs (per-user permission)
 try { db.exec('ALTER TABLE users ADD COLUMN can_provision INTEGER DEFAULT 0'); } catch { /* exists */ }
