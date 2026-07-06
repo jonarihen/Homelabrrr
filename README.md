@@ -34,7 +34,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, pop-out tabs, and clipboard paste into VNC (typed into the guest as keystrokes, no agent needed) |
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
 | Provisioning | Template-driven cloning plus admin create-from-scratch flow with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, and pre-flight capacity checks (node free memory + storage space) |
-| Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) with one-click conversion to cloud-init templates; clones configure guest user, SSH keys, and DHCP/static network on first boot (requires PVE 7.3+ for `import-from`) |
+| Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) with one-click conversion to cloud-init templates; clones configure guest user, SSH keys, and DHCP/static network on first boot (requires a storage with the Import content type; PVE 9) |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import {
   downloadUrlToStorage, deleteVolume, convertToTemplate,
-  getTaskStatus, getISOImages, getNextVmid, createVM, resizeVMDisk,
+  getTaskStatus, getStorageContent, getNextVmid, createVM, resizeVMDisk,
 } from '../proxmox.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
@@ -58,9 +58,13 @@ router.post('/', async (req, res) => {
     'INSERT INTO cloud_images (name, url, node, storage, status) VALUES (?, ?, ?, ?, ?)'
   ).run(name, url, node, storage, 'downloading');
   const id = row.lastInsertRowid;
-  // Stored as ISO content; unique suffix avoids clobbering an existing file
-  const filename = `${slug}-ci${id}.img`;
-  const volid = `${storage}:iso/${filename}`;
+  // Stored as `import` content; the unique suffix avoids clobbering an
+  // existing file. PVE derives the disk format from the extension, and
+  // distro ".img" cloud images are qcow2 inside, so they are stored as
+  // .qcow2 (raw images are published as .raw).
+  const srcExt = (url.split('?')[0].match(/\.(qcow2|raw|vmdk|img)$/i)?.[1] || 'qcow2').toLowerCase();
+  const filename = `${slug}-ci${id}.${srcExt === 'img' ? 'qcow2' : srcExt}`;
+  const volid = `${storage}:import/${filename}`;
 
   try {
     const upid = await downloadUrlToStorage(node, storage, url, filename, checksum?.trim() || undefined);
@@ -77,7 +81,7 @@ router.post('/', async (req, res) => {
         return;
       }
       try {
-        const content = await getISOImages(node, storage);
+        const content = await getStorageContent(node, storage, 'import');
         const vol = content.find((c) => c.volid === volid);
         if (!vol) {
           setImageStatus(id, 'error', 'Download finished but the image was not found on the storage');
@@ -131,6 +135,11 @@ router.post('/:id/template', async (req, res) => {
   if (!image) return res.status(404).json({ error: 'Image not found' });
   if (image.status !== 'ready') {
     return res.status(400).json({ error: `Image is not ready (status: ${image.status})` });
+  }
+  // Rows downloaded before the switch to import content can't be used as an
+  // import-from source — PVE rejects iso-content volumes as disk sources.
+  if (image.volid.includes(':iso/')) {
+    return res.status(400).json({ error: 'This image was stored as ISO content — remove it and add it again to re-download it as import content' });
   }
 
   const {

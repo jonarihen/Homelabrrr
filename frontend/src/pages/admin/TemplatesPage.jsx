@@ -314,10 +314,10 @@ function CloudImageFormModal({ onClose, onSaved }) {
     if (!form.node) return;
     api.get(`/provision/nodes/${form.node}/storages`)
       .then(r => {
-        const isoCapable = r.data.filter(s => s.content?.includes('iso'));
-        setStorages(isoCapable);
-        if (!isoCapable.find(s => s.storage === form.storage)) {
-          setForm(f => ({ ...f, storage: isoCapable[0]?.storage || '' }));
+        const importCapable = r.data.filter(s => s.content?.includes('import'));
+        setStorages(importCapable);
+        if (!importCapable.find(s => s.storage === form.storage)) {
+          setForm(f => ({ ...f, storage: importCapable[0]?.storage || '' }));
         }
       })
       .catch(() => setStorages([]));
@@ -386,6 +386,13 @@ function CloudImageFormModal({ onClose, onSaved }) {
             </select>
           </div>
         </div>
+
+        {form.node && storages.length === 0 && (
+          <p className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/30 rounded-lg p-2.5">
+            No import-capable storage on this node. In the PVE UI, enable the "Import" content type on a
+            directory storage (Datacenter → Storage → e.g. local → Content) first.
+          </p>
+        )}
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">SHA256 checksum (optional)</label>

@@ -4,7 +4,8 @@
 
 ### Cloud image catalog (admins)
 - New **Cloud Images** section on the Templates page: download official cloud images (Ubuntu, Debian, Rocky, or any custom qcow2/raw URL) straight onto a PVE storage via the Proxmox API — presets included, optional SHA256 verification
-- **Create Template** turns a downloaded image into a ready-to-clone cloud-init template in one click: imports the image as the boot disk (`import-from`, requires PVE 7.3+), attaches a cloud-init drive and serial console, grows the disk to a chosen base size, converts the VM to a Proxmox template, and registers it in the portal's template list
+- Images are stored as **import content**, so the download-target storage needs the "Import" content type enabled (Datacenter → Storage → local → Content); PVE 9 rejects the old ISO-storage import trick
+- **Create Template** turns a downloaded image into a ready-to-clone cloud-init template in one click: imports the image as the boot disk (`import-from`), attaches a cloud-init drive and serial console, grows the disk to a chosen base size, converts the VM to a Proxmox template, and registers it in the portal's template list
 - Download and template builds run in the background with live status in the table; actions are audit-logged (`cloud_image_download`, `cloud_image_template`, `cloud_image_delete`)
 
 ### Cloud-init provisioning (users)
