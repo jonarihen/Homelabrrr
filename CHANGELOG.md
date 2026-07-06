@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-07-07 — Accessibility & interface polish pass
+
+A broad sweep to make the console fully keyboard- and screen-reader-operable and to sand down rough edges — without changing how anything works.
+
+### Keyboard & screen reader
+- Every dialog is now a proper modal: focus moves into it on open, stays trapped while it's open, returns to where you were on close, and **Escape** closes it. Screen readers announce the dialog and its title.
+- VM cards are operable from the keyboard — Tab to a card and press **Enter/Space** to open it; the multi-select checkbox is reachable and reports its checked state (and no longer hides on touch screens).
+- Icon-only buttons (dialog close, page back, table edit/delete, clear-search, the mobile menu toggle) now have accessible names.
+- Form fields across sign-in, account, provisioning, SSH keys, and every admin form are properly labelled — clicking a label focuses its field, and screen readers read the field's name.
+- Errors and results (login failures, bulk start/stop outcomes, save/delete results, live deployment progress) are now announced as they appear instead of being silently inserted.
+- Custom switches like the bidirectional-policy toggle are real, focusable controls with proper state.
+
+### In-app notifications instead of browser pop-ups
+- Delete/remove confirmations now use an **in-app confirmation dialog** that matches the operator-console look, replacing the native browser "OK/Cancel" box.
+- Failures that used to fire a blocking browser alert now surface as **dismissible status toasts** in the corner.
+
+### Layout & consistency
+- The sidebar collapses into a **drawer on small screens** with a hamburger toggle, so the app is usable on a phone; wide admin tables scroll horizontally instead of clipping their last columns.
+- Squared off stray rounded/pill elements, gave the CPU and RAM meters distinct colours again, raised a few low-contrast labels to meet AA, and aligned the Account page with the rest of the console.
+- The policy-mesh animation now honours the system **"reduce motion"** setting.
+
 ## 2026-07-06 — SSH keys auto-derive their public key (and warn when they can't)
 
 - Adding an SSH key now **derives the public key from the private key** automatically when you don't paste one — so the key is immediately usable for cloud-init provisioning (which injects the public key into the guest). Works for OpenSSH, PEM, and PuTTY PPK keys, including encrypted keys when you supply the passphrase.

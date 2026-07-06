@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
@@ -155,13 +155,13 @@ function DeploymentProgress({ job, onDeployAnother }) {
         {isReady || isError ? 'Deploy another' : 'Back'}
       </button>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6" aria-live="polite">
         <div className="flex items-start justify-between mb-5">
           <div>
-            <h3 className="text-white font-semibold flex items-center gap-2">
+            <h2 className="text-white font-semibold flex items-center gap-2">
               {job.name || `VM ${job.vmid}`}
               <span className="text-xs text-gray-500 font-mono">VMID {job.vmid}</span>
-            </h3>
+            </h2>
             <p className="text-xs text-gray-500 mt-0.5">
               {isReady ? 'Deployment complete' : isError ? 'Deployment failed' : 'Deploying…'}
             </p>
@@ -205,7 +205,7 @@ function DeploymentProgress({ job, onDeployAnother }) {
           </p>
         )}
         {isError && (
-          <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3 mt-5">
+          <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3 mt-5">
             {row?.status_detail || 'The Proxmox task failed. Check the Proxmox task log for details.'}
           </p>
         )}
@@ -292,6 +292,7 @@ function StepIcon({ status }) {
 // ── Cloud-init sub-form (shared visual block) ───────────────────────────────
 
 function CloudInitFields({ ci, setCi, sshKeys }) {
+  const uid = useId();
   const toggleKey = (id) => {
     setCi(c => ({ ...c, keyIds: c.keyIds.includes(id) ? c.keyIds.filter(k => k !== id) : [...c.keyIds, id] }));
   };
@@ -299,22 +300,22 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
     <div className="border border-gray-800 rounded-2xl p-4 space-y-4">
       <div>
         <p className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Cloud-Init Setup</p>
-        <p className="text-xs text-gray-600 mt-0.5">Guest account and network are applied on first boot.</p>
+        <p className="text-xs text-gray-500 mt-0.5">Guest account and network are applied on first boot.</p>
       </div>
 
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Username</label>
-          <input type="text" value={ci.user} onChange={e => setCi(c => ({ ...c, user: e.target.value }))} className={inputCls} placeholder="operator" autoComplete="off" />
+          <label htmlFor={`${uid}-user`} className="block text-xs text-gray-400 mb-1.5 font-medium">Username</label>
+          <input id={`${uid}-user`} type="text" value={ci.user} onChange={e => setCi(c => ({ ...c, user: e.target.value }))} className={inputCls} placeholder="operator" autoComplete="off" />
         </div>
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Password (optional)</label>
-          <input type="password" value={ci.password} onChange={e => setCi(c => ({ ...c, password: e.target.value }))} className={inputCls} placeholder="min. 8 characters" autoComplete="new-password" />
+          <label htmlFor={`${uid}-pass`} className="block text-xs text-gray-400 mb-1.5 font-medium">Password (optional)</label>
+          <input id={`${uid}-pass`} type="password" value={ci.password} onChange={e => setCi(c => ({ ...c, password: e.target.value }))} className={inputCls} placeholder="min. 8 characters" autoComplete="new-password" />
         </div>
       </div>
 
       <div>
-        <label className="block text-xs text-gray-400 mb-1.5 font-medium">SSH Keys</label>
+        <span className="block text-xs text-gray-400 mb-1.5 font-medium">SSH Keys</span>
         {sshKeys.length > 0 ? (
           <div className="space-y-1.5">
             {sshKeys.map(k => (
@@ -325,14 +326,14 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
             ))}
           </div>
         ) : (
-          <p className="text-xs text-gray-600">No keys with a public key found — add one under SSH Keys to get key-based login.</p>
+          <p className="text-xs text-gray-500">No keys with a public key found — add one under SSH Keys to get key-based login.</p>
         )}
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className={`grid ${ci.ipMode === 'static' ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-1'} gap-4`}>
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Network</label>
-          <select value={ci.ipMode} onChange={e => setCi(c => ({ ...c, ipMode: e.target.value }))} className={inputCls}>
+          <label htmlFor={`${uid}-net`} className="block text-xs text-gray-400 mb-1.5 font-medium">Network</label>
+          <select id={`${uid}-net`} value={ci.ipMode} onChange={e => setCi(c => ({ ...c, ipMode: e.target.value }))} className={inputCls}>
             <option value="dhcp">DHCP</option>
             <option value="static">Static IP</option>
           </select>
@@ -340,12 +341,12 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
         {ci.ipMode === 'static' && (
           <>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">IP / CIDR</label>
-              <input type="text" value={ci.ipAddress} onChange={e => setCi(c => ({ ...c, ipAddress: e.target.value }))} className={inputCls} placeholder="10.0.20.50/24" required />
+              <label htmlFor={`${uid}-ip`} className="block text-xs text-gray-400 mb-1.5 font-medium">IP / CIDR</label>
+              <input id={`${uid}-ip`} type="text" value={ci.ipAddress} onChange={e => setCi(c => ({ ...c, ipAddress: e.target.value }))} className={inputCls} placeholder="10.0.20.50/24" required />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Gateway</label>
-              <input type="text" value={ci.ipGateway} onChange={e => setCi(c => ({ ...c, ipGateway: e.target.value }))} className={inputCls} placeholder="10.0.20.1" />
+              <label htmlFor={`${uid}-gw`} className="block text-xs text-gray-400 mb-1.5 font-medium">Gateway</label>
+              <input id={`${uid}-gw`} type="text" value={ci.ipGateway} onChange={e => setCi(c => ({ ...c, ipGateway: e.target.value }))} className={inputCls} placeholder="10.0.20.1" />
             </div>
           </>
         )}
@@ -376,6 +377,7 @@ function CloudImageForm({ onStarted }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const fid = useId();
 
   useEffect(() => {
     api.get('/provision/images')
@@ -460,7 +462,7 @@ function CloudImageForm({ onStarted }) {
           </svg>
         </div>
         <p className="text-gray-400 font-medium">No cloud images available</p>
-        <p className="text-sm text-gray-600 mt-1">An admin needs to download a cloud image under Templates → Cloud Images first.</p>
+        <p className="text-sm text-gray-500 mt-1">An admin needs to download a cloud image under Templates → Cloud Images first.</p>
       </div>
     );
   }
@@ -521,15 +523,16 @@ function CloudImageForm({ onStarted }) {
             </svg>
           </div>
           <div>
-            <h3 className="text-white font-semibold">Deploy from: {selected.name}</h3>
+            <h2 className="text-white font-semibold">Deploy from: {selected.name}</h2>
             <p className="text-xs text-gray-500 font-mono">{displayNode(selected.node)} / {selected.storage}</p>
           </div>
         </div>
 
         <form onSubmit={submit} className="space-y-4">
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">VM Name</label>
+            <label htmlFor={`${fid}-name`} className="block text-xs text-gray-400 mb-1.5 font-medium">VM Name</label>
             <input
+              id={`${fid}-name`}
               type="text"
               required
               value={form.name}
@@ -538,40 +541,40 @@ function CloudImageForm({ onStarted }) {
               placeholder="my-new-vm"
               autoFocus
             />
-            <p className="text-xs text-gray-600 mt-1">Lowercased and hyphenated for Proxmox (e.g. "My Web" → my-web).</p>
+            <p className="text-xs text-gray-500 mt-1">Lowercased and hyphenated for Proxmox (e.g. "My Web" → my-web).</p>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
-              <input type="number" min="1" max="64" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
+              <label htmlFor={`${fid}-cores`} className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
+              <input id={`${fid}-cores`} type="number" min="1" max="64" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
-              <input type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
+              <label htmlFor={`${fid}-mem`} className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
+              <input id={`${fid}-mem`} type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk (GB)</label>
-              <input type="number" min="5" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className={inputCls} />
+              <label htmlFor={`${fid}-disk`} className="block text-xs text-gray-400 mb-1.5 font-medium">Disk (GB)</label>
+              <input id={`${fid}-disk`} type="number" min="5" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className={inputCls} />
             </div>
           </div>
 
           <div className={`grid ${user?.isAdmin ? 'grid-cols-2' : 'grid-cols-1'} gap-4`}>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Storage</label>
+              <label htmlFor={`${fid}-storage`} className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Storage</label>
               {storages.length > 0 ? (
-                <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
+                <select id={`${fid}-storage`} value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
                   <option value="">Select...</option>
                   {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
                 </select>
               ) : (
-                <input type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" required />
+                <input id={`${fid}-storage`} type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" required />
               )}
             </div>
             {user?.isAdmin && (
               <div>
-                <label className="block text-xs text-gray-400 mb-1.5 font-medium">Network Bridge</label>
-                <select value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className={inputCls}>
+                <label htmlFor={`${fid}-bridge`} className="block text-xs text-gray-400 mb-1.5 font-medium">Network Bridge</label>
+                <select id={`${fid}-bridge`} value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className={inputCls}>
                   {bridges.map(b => <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` — ${b.comments}` : ''}</option>)}
                   {bridges.length === 0 && <option value="vmbr0">vmbr0</option>}
                 </select>
@@ -581,8 +584,8 @@ function CloudImageForm({ onStarted }) {
 
           {vlans.length > 0 && (
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
-              <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
+              <label htmlFor={`${fid}-vlan`} className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
+              <select id={`${fid}-vlan`} value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
                 <option value="">No VLAN (untagged)</option>
                 {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
               </select>
@@ -593,18 +596,19 @@ function CloudImageForm({ onStarted }) {
 
           {user?.isAdmin && (
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
-              <select value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
+              <label htmlFor={`${fid}-assign`} className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
+              <select id={`${fid}-assign`} value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
                 <option value="">No assignment</option>
                 {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
               </select>
-              <p className="text-xs text-gray-600 mt-1">Admins can see all VMs without an assignment.</p>
+              <p className="text-xs text-gray-500 mt-1">Admins can see all VMs without an assignment.</p>
             </div>
           )}
 
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Description (optional)</label>
+            <label htmlFor={`${fid}-desc`} className="block text-xs text-gray-400 mb-1.5 font-medium">Description (optional)</label>
             <textarea
+              id={`${fid}-desc`}
               value={form.description}
               onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
               className={`${inputCls} h-16 resize-none`}
@@ -617,7 +621,7 @@ function CloudImageForm({ onStarted }) {
             Start the VM after deployment
           </label>
 
-          {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+          {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
 
           <button
             type="submit"
@@ -647,6 +651,7 @@ function CloneForm({ onStarted }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const fid = useId();
 
   useEffect(() => {
     api.get('/provision/templates')
@@ -723,7 +728,7 @@ function CloneForm({ onStarted }) {
           </svg>
         </div>
         <p className="text-gray-400 font-medium">No templates available</p>
-        <p className="text-sm text-gray-600 mt-1">An admin needs to register VM templates first.</p>
+        <p className="text-sm text-gray-500 mt-1">An admin needs to register VM templates first.</p>
       </div>
     );
   }
@@ -789,15 +794,16 @@ function CloneForm({ onStarted }) {
             </svg>
           </div>
           <div>
-            <h3 className="text-white font-semibold">Cloning: {selected.name}</h3>
+            <h2 className="text-white font-semibold">Cloning: {selected.name}</h2>
             <p className="text-xs text-gray-500 font-mono">{displayNode(selected.node)} / VMID {selected.vmid}</p>
           </div>
         </div>
 
         <form onSubmit={submit} className="space-y-4">
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">VM Name</label>
+            <label htmlFor={`${fid}-name`} className="block text-xs text-gray-400 mb-1.5 font-medium">VM Name</label>
             <input
+              id={`${fid}-name`}
               type="text"
               required
               value={form.name}
@@ -808,25 +814,26 @@ function CloneForm({ onStarted }) {
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
-              <input type="number" min="1" max="64" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
+              <label htmlFor={`${fid}-cores`} className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
+              <input id={`${fid}-cores`} type="number" min="1" max="64" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
-              <input type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
+              <label htmlFor={`${fid}-mem`} className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
+              <input id={`${fid}-mem`} type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk (GB)</label>
-              <input type="number" min="1" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className={inputCls} />
+              <label htmlFor={`${fid}-disk`} className="block text-xs text-gray-400 mb-1.5 font-medium">Disk (GB)</label>
+              <input id={`${fid}-disk`} type="number" min="1" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className={inputCls} />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Storage</label>
+            <label htmlFor={`${fid}-storage`} className="block text-xs text-gray-400 mb-1.5 font-medium">Storage</label>
             {storages.length > 0 ? (
               <select
+                id={`${fid}-storage`}
                 value={form.storage}
                 onChange={e => setForm(f => ({ ...f, storage: e.target.value }))}
                 className={inputCls}
@@ -839,14 +846,14 @@ function CloneForm({ onStarted }) {
                 ))}
               </select>
             ) : (
-              <input type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" />
+              <input id={`${fid}-storage`} type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" />
             )}
           </div>
 
           {vlans.length > 0 && (
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
-              <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
+              <label htmlFor={`${fid}-vlan`} className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
+              <select id={`${fid}-vlan`} value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
                 <option value="">No VLAN (untagged)</option>
                 {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
               </select>
@@ -857,18 +864,19 @@ function CloneForm({ onStarted }) {
 
           {user?.isAdmin && (
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
-              <select value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
+              <label htmlFor={`${fid}-assign`} className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
+              <select id={`${fid}-assign`} value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
                 <option value="">No assignment</option>
                 {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
               </select>
-              <p className="text-xs text-gray-600 mt-1">Admins can see all VMs without an assignment.</p>
+              <p className="text-xs text-gray-500 mt-1">Admins can see all VMs without an assignment.</p>
             </div>
           )}
 
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Description (optional)</label>
+            <label htmlFor={`${fid}-desc`} className="block text-xs text-gray-400 mb-1.5 font-medium">Description (optional)</label>
             <textarea
+              id={`${fid}-desc`}
               value={form.description}
               onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
               className={`${inputCls} h-16 resize-none`}
@@ -876,7 +884,7 @@ function CloneForm({ onStarted }) {
             />
           </div>
 
-          {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+          {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
 
           <button
             type="submit"
@@ -909,6 +917,7 @@ function CreateForm({ onStarted }) {
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const fid = useId();
 
   useEffect(() => {
     api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
@@ -972,7 +981,7 @@ function CreateForm({ onStarted }) {
           </svg>
         </div>
         <div>
-          <h3 className="text-white font-semibold">Create from Scratch</h3>
+          <h2 className="text-white font-semibold">Create from Scratch</h2>
           <p className="text-xs text-gray-500">Full VM configuration with custom hardware settings</p>
         </div>
       </div>
@@ -980,8 +989,8 @@ function CreateForm({ onStarted }) {
       <form onSubmit={submit} className="space-y-4">
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Node</label>
-            <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
+            <label htmlFor={`${fid}-node`} className="block text-xs text-gray-400 mb-1.5 font-medium">Node</label>
+            <select id={`${fid}-node`} value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
               <option value="">Select node...</option>
               {uniqueNodes.map(n => (
                 <option key={routeNode(n)} value={routeNode(n)}>
@@ -991,30 +1000,30 @@ function CreateForm({ onStarted }) {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">VM Name</label>
-            <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} placeholder="my-vm" />
+            <label htmlFor={`${fid}-name`} className="block text-xs text-gray-400 mb-1.5 font-medium">VM Name</label>
+            <input id={`${fid}-name`} type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} placeholder="my-vm" />
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
-            <input type="number" min="1" max="128" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
+            <label htmlFor={`${fid}-cores`} className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
+            <input id={`${fid}-cores`} type="number" min="1" max="128" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
-            <input type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
+            <label htmlFor={`${fid}-mem`} className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
+            <input id={`${fid}-mem`} type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Size (GB)</label>
-            <input type="number" min="1" value={form.diskSize} onChange={e => setForm(f => ({ ...f, diskSize: e.target.value }))} className={inputCls} />
+            <label htmlFor={`${fid}-disk`} className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Size (GB)</label>
+            <input id={`${fid}-disk`} type="number" min="1" value={form.diskSize} onChange={e => setForm(f => ({ ...f, diskSize: e.target.value }))} className={inputCls} />
           </div>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Storage</label>
-            <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls}>
+            <label htmlFor={`${fid}-storage`} className="block text-xs text-gray-400 mb-1.5 font-medium">Storage</label>
+            <select id={`${fid}-storage`} value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls}>
               <option value="">Select...</option>
               {storages.filter(s => s.content?.includes('images')).map(s => (
                 <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
@@ -1022,8 +1031,8 @@ function CreateForm({ onStarted }) {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Network Bridge</label>
-            <select value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className={inputCls}>
+            <label htmlFor={`${fid}-bridge`} className="block text-xs text-gray-400 mb-1.5 font-medium">Network Bridge</label>
+            <select id={`${fid}-bridge`} value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className={inputCls}>
               {bridges.map(b => <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` — ${b.comments}` : ''}</option>)}
               {bridges.length === 0 && <option value="vmbr0">vmbr0</option>}
             </select>
@@ -1032,8 +1041,8 @@ function CreateForm({ onStarted }) {
 
         {vlans.length > 0 && (
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
-            <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
+            <label htmlFor={`${fid}-vlan`} className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
+            <select id={`${fid}-vlan`} value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
               <option value="">No VLAN (untagged)</option>
               {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
             </select>
@@ -1042,15 +1051,15 @@ function CreateForm({ onStarted }) {
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">ISO Image (optional)</label>
-            <select value={form.iso} onChange={e => setForm(f => ({ ...f, iso: e.target.value }))} className={inputCls}>
+            <label htmlFor={`${fid}-iso`} className="block text-xs text-gray-400 mb-1.5 font-medium">ISO Image (optional)</label>
+            <select id={`${fid}-iso`} value={form.iso} onChange={e => setForm(f => ({ ...f, iso: e.target.value }))} className={inputCls}>
               <option value="">None</option>
               {isos.map(i => <option key={i.volid} value={i.volid}>{i.volid.split('/').pop()}</option>)}
             </select>
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">OS Type</label>
-            <select value={form.ostype} onChange={e => setForm(f => ({ ...f, ostype: e.target.value }))} className={inputCls}>
+            <label htmlFor={`${fid}-ostype`} className="block text-xs text-gray-400 mb-1.5 font-medium">OS Type</label>
+            <select id={`${fid}-ostype`} value={form.ostype} onChange={e => setForm(f => ({ ...f, ostype: e.target.value }))} className={inputCls}>
               <option value="l26">Linux 2.6+</option>
               <option value="l24">Linux 2.4</option>
               <option value="win11">Windows 11/2022</option>
@@ -1066,15 +1075,15 @@ function CreateForm({ onStarted }) {
           <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-300 transition-colors">Advanced options</summary>
           <div className="grid grid-cols-2 gap-4 mt-3 pt-3 border-t border-gray-800">
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">BIOS</label>
-              <select value={form.bios} onChange={e => setForm(f => ({ ...f, bios: e.target.value }))} className={inputCls}>
+              <label htmlFor={`${fid}-bios`} className="block text-xs text-gray-400 mb-1.5 font-medium">BIOS</label>
+              <select id={`${fid}-bios`} value={form.bios} onChange={e => setForm(f => ({ ...f, bios: e.target.value }))} className={inputCls}>
                 <option value="seabios">SeaBIOS (Legacy)</option>
                 <option value="ovmf">OVMF (UEFI)</option>
               </select>
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">SCSI Controller</label>
-              <select value={form.scsihw} onChange={e => setForm(f => ({ ...f, scsihw: e.target.value }))} className={inputCls}>
+              <label htmlFor={`${fid}-scsihw`} className="block text-xs text-gray-400 mb-1.5 font-medium">SCSI Controller</label>
+              <select id={`${fid}-scsihw`} value={form.scsihw} onChange={e => setForm(f => ({ ...f, scsihw: e.target.value }))} className={inputCls}>
                 <option value="virtio-scsi-single">VirtIO SCSI Single</option>
                 <option value="virtio-scsi-pci">VirtIO SCSI</option>
                 <option value="lsi">LSI 53C895A</option>
@@ -1086,21 +1095,21 @@ function CreateForm({ onStarted }) {
 
         {user?.isAdmin && (
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
-            <select value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
+            <label htmlFor={`${fid}-assign`} className="block text-xs text-gray-400 mb-1.5 font-medium">Assign to User</label>
+            <select id={`${fid}-assign`} value={form.assignTo} onChange={e => setForm(f => ({ ...f, assignTo: e.target.value }))} className={inputCls}>
               <option value="">No assignment</option>
               {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
             </select>
-            <p className="text-xs text-gray-600 mt-1">Admins can see all VMs without an assignment.</p>
+            <p className="text-xs text-gray-500 mt-1">Admins can see all VMs without an assignment.</p>
           </div>
         )}
 
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Description (optional)</label>
-          <textarea value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} className={`${inputCls} h-16 resize-none`} placeholder="What's this VM for?" />
+          <label htmlFor={`${fid}-desc`} className="block text-xs text-gray-400 mb-1.5 font-medium">Description (optional)</label>
+          <textarea id={`${fid}-desc`} value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} className={`${inputCls} h-16 resize-none`} placeholder="What's this VM for?" />
         </div>
 
-        {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+        {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
 
         <button type="submit" disabled={saving || !form.node || !form.name} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20">
           {saving ? 'Creating VM...' : 'Create VM'}
@@ -1139,8 +1148,8 @@ function RecentProvisions() {
   return (
     <div className="space-y-3">
       <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Recent Provisions</h2>
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
+        <table className="w-full min-w-[560px] text-sm">
           <thead>
             <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
               <th className="text-left px-4 py-3">Name</th>
@@ -1151,11 +1160,20 @@ function RecentProvisions() {
             </tr>
           </thead>
           <tbody>
-            {jobs.map(j => (
+            {jobs.map(j => {
+              const actionable = ['ready', 'warning'].includes(j.status);
+              const open = () => actionable && navigate(`/vm/${routeNode(j)}/${j.vmid}`);
+              return (
               <tr
                 key={j.id}
-                className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 cursor-pointer transition-colors"
-                onClick={() => ['ready', 'warning'].includes(j.status) && navigate(`/vm/${routeNode(j)}/${j.vmid}`)}
+                className={`border-b border-gray-800 last:border-0 transition-colors ${actionable ? 'hover:bg-gray-800/50 cursor-pointer' : ''}`}
+                onClick={open}
+                {...(actionable ? {
+                  role: 'button',
+                  tabIndex: 0,
+                  'aria-label': `Open ${j.name || `VM ${j.vmid}`}`,
+                  onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } },
+                } : {})}
               >
                 <td className="px-4 py-3">
                   <p className="text-white font-medium">{j.name}</p>
@@ -1179,7 +1197,8 @@ function RecentProvisions() {
                 </td>
                 <td className="px-4 py-3 text-gray-500 text-xs">{new Date(j.created_at).toLocaleString()}</td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

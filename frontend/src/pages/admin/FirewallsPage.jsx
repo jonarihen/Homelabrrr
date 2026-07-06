@@ -1,9 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import useDialogA11y from '../../hooks/useDialogA11y.js';
+import { useNotify } from '../../contexts/NotificationsContext.jsx';
+import { useConfirm } from '../../contexts/ConfirmContext.jsx';
 
 export default function FirewallsPage() {
   useDocumentTitle('Firewalls');
+  const notify = useNotify();
+  const confirm = useConfirm();
+  const dialogRef = useRef(null);
   const [firewalls, setFirewalls] = useState([]);
   const [statuses, setStatuses] = useState({});
   const [loading, setLoading] = useState(true);
@@ -14,6 +20,8 @@ export default function FirewallsPage() {
   const [saving, setSaving] = useState(false);
   const [switches, setSwitches] = useState([]);
   const [switchesLoading, setSwitchesLoading] = useState(false);
+
+  useDialogA11y(dialogRef, () => setShowForm(false), showForm);
 
   function defaultForm() {
     return { name: '', host: '', port: 443, apiKey: '', vdom: 'lab', parentInterface: 'fortilink', wanInterface: 'wan1', vlanRangeStart: 1001, vlanRangeEnd: 1999, labVdomLink: 'lab-root0', rootVdom: 'root', rootVdomLink: 'lab-root1', routeGateway: '10.255.254.2', trunkSwitchSerial: '', trunkSwitchPort: '', verifyTls: true };
@@ -73,13 +81,13 @@ export default function FirewallsPage() {
     } finally { setSaving(false); }
   };
 
-  const remove = async (id) => {
-    if (!confirm('Delete this firewall? Any synced VLANs will lose their tracking.')) return;
+  const remove = async (fw) => {
+    if (!(await confirm({ title: 'Delete firewall', message: `Delete "${fw.name}"? Any synced VLANs will lose their tracking.`, confirmLabel: 'Delete', danger: true }))) return;
     try {
-      await api.delete(`/admin/firewalls/${id}`);
+      await api.delete(`/admin/firewalls/${fw.id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      notify.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -135,23 +143,23 @@ export default function FirewallsPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       {s.loading ? (
-                        <span className="text-xs text-gray-500 bg-gray-800 px-2.5 py-1 rounded-full">Checking...</span>
+                        <span className="text-xs text-gray-500 bg-gray-800 px-2.5 py-1 rounded">Checking...</span>
                       ) : s.online ? (
-                        <span className="text-xs text-green-400 bg-green-500/10 ring-1 ring-green-500/20 px-2.5 py-1 rounded-full flex items-center gap-1.5">
+                        <span className="text-xs text-green-400 bg-green-500/10 ring-1 ring-green-500/20 px-2.5 py-1 rounded flex items-center gap-1.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
                           Online
                         </span>
                       ) : (
-                        <span className="text-xs text-red-400 bg-red-500/10 ring-1 ring-red-500/20 px-2.5 py-1 rounded-full flex items-center gap-1.5">
+                        <span className="text-xs text-red-400 bg-red-500/10 ring-1 ring-red-500/20 px-2.5 py-1 rounded flex items-center gap-1.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
                           Offline
                         </span>
                       )}
-                      <button onClick={() => openEdit(fw)} className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-800 transition-colors">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
+                      <button onClick={() => openEdit(fw)} aria-label={`Edit ${fw.name}`} className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-800 transition-colors">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
                       </button>
-                      <button onClick={() => remove(fw.id)} className="text-gray-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/10 transition-colors">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+                      <button onClick={() => remove(fw)} aria-label={`Delete ${fw.name}`} className="text-gray-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/10 transition-colors">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
                       </button>
                     </div>
                   </div>
@@ -183,33 +191,33 @@ export default function FirewallsPage() {
       {/* Add/Edit form modal */}
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}>
-          <form onSubmit={save} className="w-full max-w-lg bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
+          <form ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="fw-modal-title" onSubmit={save} className="w-full max-w-lg bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-              <h2 className="text-white font-semibold">{editId ? 'Edit Firewall' : 'Add Firewall'}</h2>
-              <button type="button" onClick={() => setShowForm(false)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              <h2 id="fw-modal-title" className="text-white font-semibold">{editId ? 'Edit Firewall' : 'Add Firewall'}</h2>
+              <button type="button" onClick={() => setShowForm(false)} aria-label="Close" className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-xs text-gray-400 mb-1.5 font-medium">Name</label>
-                <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} placeholder="FortiGate 71G" />
+                <label htmlFor="fw-name" className="block text-xs text-gray-400 mb-1.5 font-medium">Name</label>
+                <input id="fw-name" type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} placeholder="FortiGate 71G" />
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Host / IP</label>
-                  <input type="text" required value={form.host} onChange={e => setForm(f => ({ ...f, host: e.target.value }))} className={inputCls} placeholder="192.168.1.1" />
+                  <label htmlFor="fw-host" className="block text-xs text-gray-400 mb-1.5 font-medium">Host / IP</label>
+                  <input id="fw-host" type="text" required value={form.host} onChange={e => setForm(f => ({ ...f, host: e.target.value }))} className={inputCls} placeholder="192.168.1.1" />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Port</label>
-                  <input type="number" value={form.port} onChange={e => setForm(f => ({ ...f, port: parseInt(e.target.value) || 443 }))} className={inputCls} />
+                  <label htmlFor="fw-port" className="block text-xs text-gray-400 mb-1.5 font-medium">Port</label>
+                  <input id="fw-port" type="number" value={form.port} onChange={e => setForm(f => ({ ...f, port: parseInt(e.target.value) || 443 }))} className={inputCls} />
                 </div>
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1.5 font-medium">
+                <label htmlFor="fw-apikey" className="block text-xs text-gray-400 mb-1.5 font-medium">
                   API Key {editId && <span className="text-gray-600">(leave empty to keep current)</span>}
                 </label>
-                <input type="password" required={!editId} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} className={inputCls} placeholder="REST API administrator token" />
+                <input id="fw-apikey" type="password" required={!editId} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} className={inputCls} placeholder="REST API administrator token" />
                 <p className="text-xs text-gray-600 mt-1">Create in FortiGate: System &gt; Administrators &gt; REST API</p>
               </div>
               <label className="flex items-start gap-3 cursor-pointer rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3">
@@ -226,26 +234,26 @@ export default function FirewallsPage() {
               </label>
               <div className="grid grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">VDOM</label>
-                  <input type="text" required value={form.vdom} onChange={e => setForm(f => ({ ...f, vdom: e.target.value }))} className={inputCls} placeholder="lab" />
+                  <label htmlFor="fw-vdom" className="block text-xs text-gray-400 mb-1.5 font-medium">VDOM</label>
+                  <input id="fw-vdom" type="text" required value={form.vdom} onChange={e => setForm(f => ({ ...f, vdom: e.target.value }))} className={inputCls} placeholder="lab" />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Parent Interface</label>
-                  <input type="text" required value={form.parentInterface} onChange={e => setForm(f => ({ ...f, parentInterface: e.target.value }))} className={inputCls} placeholder="fortilink" />
+                  <label htmlFor="fw-parent-intf" className="block text-xs text-gray-400 mb-1.5 font-medium">Parent Interface</label>
+                  <input id="fw-parent-intf" type="text" required value={form.parentInterface} onChange={e => setForm(f => ({ ...f, parentInterface: e.target.value }))} className={inputCls} placeholder="fortilink" />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">WAN Interface</label>
-                  <input type="text" required value={form.wanInterface} onChange={e => setForm(f => ({ ...f, wanInterface: e.target.value }))} className={inputCls} placeholder="wan1" />
+                  <label htmlFor="fw-wan-intf" className="block text-xs text-gray-400 mb-1.5 font-medium">WAN Interface</label>
+                  <input id="fw-wan-intf" type="text" required value={form.wanInterface} onChange={e => setForm(f => ({ ...f, wanInterface: e.target.value }))} className={inputCls} placeholder="wan1" />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN Range Start</label>
-                  <input type="number" min="1" max="4094" required value={form.vlanRangeStart} onChange={e => setForm(f => ({ ...f, vlanRangeStart: parseInt(e.target.value) || 1001 }))} className={inputCls} />
+                  <label htmlFor="fw-vlan-start" className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN Range Start</label>
+                  <input id="fw-vlan-start" type="number" min="1" max="4094" required value={form.vlanRangeStart} onChange={e => setForm(f => ({ ...f, vlanRangeStart: parseInt(e.target.value) || 1001 }))} className={inputCls} />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN Range End</label>
-                  <input type="number" min="1" max="4094" required value={form.vlanRangeEnd} onChange={e => setForm(f => ({ ...f, vlanRangeEnd: parseInt(e.target.value) || 1999 }))} className={inputCls} />
+                  <label htmlFor="fw-vlan-end" className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN Range End</label>
+                  <input id="fw-vlan-end" type="number" min="1" max="4094" required value={form.vlanRangeEnd} onChange={e => setForm(f => ({ ...f, vlanRangeEnd: parseInt(e.target.value) || 1999 }))} className={inputCls} />
                 </div>
               </div>
               <p className="text-xs text-gray-600">Only VLANs with tags in this range can be pushed to this firewall.</p>
@@ -254,20 +262,20 @@ export default function FirewallsPage() {
                 <p className="text-xs text-gray-500 mb-2 font-medium uppercase tracking-wider">Routing (VDOM link)</p>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">Lab VDOM link (dstintf)</label>
-                    <input type="text" required value={form.labVdomLink} onChange={e => setForm(f => ({ ...f, labVdomLink: e.target.value }))} className={inputCls} placeholder="lab-root0" />
+                    <label htmlFor="fw-lab-vdom-link" className="block text-xs text-gray-400 mb-1.5 font-medium">Lab VDOM link (dstintf)</label>
+                    <input id="fw-lab-vdom-link" type="text" required value={form.labVdomLink} onChange={e => setForm(f => ({ ...f, labVdomLink: e.target.value }))} className={inputCls} placeholder="lab-root0" />
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">Root VDOM link (device)</label>
-                    <input type="text" required value={form.rootVdomLink} onChange={e => setForm(f => ({ ...f, rootVdomLink: e.target.value }))} className={inputCls} placeholder="lab-root1" />
+                    <label htmlFor="fw-root-vdom-link" className="block text-xs text-gray-400 mb-1.5 font-medium">Root VDOM link (device)</label>
+                    <input id="fw-root-vdom-link" type="text" required value={form.rootVdomLink} onChange={e => setForm(f => ({ ...f, rootVdomLink: e.target.value }))} className={inputCls} placeholder="lab-root1" />
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">Root VDOM name</label>
-                    <input type="text" required value={form.rootVdom} onChange={e => setForm(f => ({ ...f, rootVdom: e.target.value }))} className={inputCls} placeholder="root" />
+                    <label htmlFor="fw-root-vdom" className="block text-xs text-gray-400 mb-1.5 font-medium">Root VDOM name</label>
+                    <input id="fw-root-vdom" type="text" required value={form.rootVdom} onChange={e => setForm(f => ({ ...f, rootVdom: e.target.value }))} className={inputCls} placeholder="root" />
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">Route gateway</label>
-                    <input type="text" required value={form.routeGateway} onChange={e => setForm(f => ({ ...f, routeGateway: e.target.value }))} className={inputCls} placeholder="10.255.254.2" />
+                    <label htmlFor="fw-route-gw" className="block text-xs text-gray-400 mb-1.5 font-medium">Route gateway</label>
+                    <input id="fw-route-gw" type="text" required value={form.routeGateway} onChange={e => setForm(f => ({ ...f, routeGateway: e.target.value }))} className={inputCls} placeholder="10.255.254.2" />
                   </div>
                 </div>
                 <p className="text-xs text-gray-600 mt-1.5">Lab→internet: {form.labVdomLink} | Static route in {form.rootVdom}: via {form.routeGateway} on {form.rootVdomLink}</p>
@@ -287,26 +295,26 @@ export default function FirewallsPage() {
                 )}
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">Managed Switch</label>
+                    <label htmlFor="fw-switch" className="block text-xs text-gray-400 mb-1.5 font-medium">Managed Switch</label>
                     {switches.length > 0 ? (
-                      <select value={form.trunkSwitchSerial} onChange={e => setForm(f => ({ ...f, trunkSwitchSerial: e.target.value, trunkSwitchPort: '' }))} className={selectCls}>
+                      <select id="fw-switch" value={form.trunkSwitchSerial} onChange={e => setForm(f => ({ ...f, trunkSwitchSerial: e.target.value, trunkSwitchPort: '' }))} className={selectCls}>
                         <option value="">None</option>
                         {switches.map(sw => (
                           <option key={sw.name} value={sw.name}>{sw.name}{sw.serial && sw.serial !== sw.name ? ` (${sw.serial})` : ''}</option>
                         ))}
                       </select>
                     ) : (
-                      <input type="text" value={form.trunkSwitchSerial} onChange={e => setForm(f => ({ ...f, trunkSwitchSerial: e.target.value }))} className={inputCls} placeholder={switchesLoading ? 'Loading...' : 'JAHE-SW01'} />
+                      <input id="fw-switch" type="text" value={form.trunkSwitchSerial} onChange={e => setForm(f => ({ ...f, trunkSwitchSerial: e.target.value }))} className={inputCls} placeholder={switchesLoading ? 'Loading...' : 'JAHE-SW01'} />
                     )}
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">Port</label>
+                    <label htmlFor="fw-switch-port" className="block text-xs text-gray-400 mb-1.5 font-medium">Port</label>
                     {(() => {
                       const selectedSw = switches.find(sw => sw.name === form.trunkSwitchSerial);
                       const ports = selectedSw?.ports || [];
                       if (ports.length > 0) {
                         return (
-                          <select value={form.trunkSwitchPort} onChange={e => setForm(f => ({ ...f, trunkSwitchPort: e.target.value }))} className={selectCls}>
+                          <select id="fw-switch-port" value={form.trunkSwitchPort} onChange={e => setForm(f => ({ ...f, trunkSwitchPort: e.target.value }))} className={selectCls}>
                             <option value="">None</option>
                             {ports.map(p => (
                               <option key={p.name} value={p.name}>
@@ -316,14 +324,14 @@ export default function FirewallsPage() {
                           </select>
                         );
                       }
-                      return <input type="text" value={form.trunkSwitchPort} onChange={e => setForm(f => ({ ...f, trunkSwitchPort: e.target.value }))} className={inputCls} placeholder="port49" />;
+                      return <input id="fw-switch-port" type="text" value={form.trunkSwitchPort} onChange={e => setForm(f => ({ ...f, trunkSwitchPort: e.target.value }))} className={inputCls} placeholder="port49" />;
                     })()}
                   </div>
                 </div>
                 <p className="text-xs text-gray-600 mt-1.5">Port connected to the hypervisor. New VLANs will be added to its allowed-vlans list.</p>
               </div>
 
-              {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+              {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
               <div className="flex gap-3 pt-1">
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">Cancel</button>
                 <button type="submit" disabled={saving} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors shadow-lg shadow-blue-600/20">

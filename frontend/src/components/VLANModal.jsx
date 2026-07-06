@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useId, useState, useEffect } from 'react';
 import Modal from './Modal.jsx';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 
 export default function VLANModal({ vm, onClose, onSaved }) {
   const vmNode = routeNode(vm);
+  const netIfaceId = useId();
+  const vlanGroupId = useId();
   const [vlans, setVlans]           = useState([]);
   const [config, setConfig]         = useState(null);
   const [selectedTag, setSelectedTag] = useState('');
@@ -69,8 +71,9 @@ export default function VLANModal({ vm, onClose, onSaved }) {
           <>
             {/* Net interface selector */}
             <div>
-              <label className="block text-xs text-gray-400 mb-1">Network Interface</label>
+              <label htmlFor={netIfaceId} className="block text-xs text-gray-400 mb-1">Network Interface</label>
               <select
+                id={netIfaceId}
                 value={netIface}
                 onChange={e => setNetIface(e.target.value)}
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
@@ -82,13 +85,13 @@ export default function VLANModal({ vm, onClose, onSaved }) {
 
             {/* VLAN selector */}
             <div>
-              <label className="block text-xs text-gray-400 mb-1">VLAN Tag</label>
+              <label id={vlanGroupId} className="block text-xs text-gray-400 mb-1">VLAN Tag</label>
               {vlans.length === 0 ? (
                 <p className="text-xs text-yellow-400 bg-yellow-900/20 rounded p-3">
                   No VLANs assigned to your account. Ask an admin to assign VLANs.
                 </p>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-2" role="radiogroup" aria-labelledby={vlanGroupId}>
                   <label className="flex items-center gap-3 p-2.5 rounded-lg bg-gray-800 border border-gray-700 cursor-pointer hover:border-blue-500 transition-colors">
                     <input
                       type="radio"
@@ -124,7 +127,7 @@ export default function VLANModal({ vm, onClose, onSaved }) {
               )}
             </div>
 
-            {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+            {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
 
             <button
               onClick={() => setStep('confirm')}
@@ -162,7 +165,7 @@ export default function VLANModal({ vm, onClose, onSaved }) {
               </span>
             </label>
 
-            {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+            {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
 
             <div className="flex gap-3">
               <button

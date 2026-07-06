@@ -4,6 +4,7 @@ import Layout from '../components/Layout.jsx';
 import VMCard from '../components/VMCard.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { useConfirm } from '../contexts/ConfirmContext.jsx';
 import api from '../api.js';
 import { routeNode, vmIdentityKey } from '../utils/nodeRef.js';
 
@@ -20,9 +21,11 @@ const SORT_OPTIONS = [
 export default function Dashboard() {
   useDocumentTitle('My VMs');
   const { user } = useAuth();
+  const confirm = useConfirm();
   const navigate = useNavigate();
   const [vms, setVms] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
 
   // Filter/sort state
@@ -52,6 +55,15 @@ export default function Dashboard() {
     load();
     const interval = setInterval(load, 15000);
     return () => clearInterval(interval);
+  }, [load]);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
   }, [load]);
 
   // Filtered and sorted VMs
@@ -148,8 +160,13 @@ export default function Dashboard() {
   const executeBulkAction = useCallback(async (action) => {
     if (selectedVms.length === 0) return;
     const label = action === 'start' ? 'Starting' : action === 'stop' ? 'Stopping' : 'Shutting down';
-    const confirmMsg = `${label} ${selectedVms.length} VM${selectedVms.length > 1 ? 's' : ''}. Continue?`;
-    if (!window.confirm(confirmMsg)) return;
+    const count = `${selectedVms.length} VM${selectedVms.length > 1 ? 's' : ''}`;
+    if (!(await confirm({
+      title: `${label} ${count}`,
+      message: `${label} ${count}. Continue?`,
+      confirmLabel: action === 'start' ? 'Start' : action === 'stop' ? 'Force Stop' : 'Shutdown',
+      danger: action !== 'start',
+    }))) return;
 
     setBulkLoading(true);
     setBulkError('');
@@ -175,7 +192,7 @@ export default function Dashboard() {
     } finally {
       setBulkLoading(false);
     }
-  }, [selectedVms, load]);
+  }, [selectedVms, load, confirm]);
 
   function fmtBytes(bytes) {
     if (!bytes) return '0';
@@ -224,10 +241,11 @@ export default function Dashboard() {
               </button>
             )}
             <button
-              onClick={load}
-              className="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.12em] text-gray-400 hover:text-gray-100 bg-transparent hover:bg-gray-800 border border-gray-700 px-4 py-2 transition-colors"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.12em] text-gray-400 hover:text-gray-100 bg-transparent hover:bg-gray-800 border border-gray-700 px-4 py-2 transition-colors disabled:opacity-50"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
               Refresh
@@ -237,7 +255,7 @@ export default function Dashboard() {
 
         {/* Summary stats bar */}
         {running > 0 && !loading && (
-          <div className="flex items-center gap-6 bg-gray-900/60 border border-gray-800/50 rounded-xl px-5 py-3 mb-5">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 bg-gray-900/60 border border-gray-800/50 rounded-xl px-5 py-3 mb-5">
             <div className="flex items-center gap-2">
               <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -263,7 +281,7 @@ export default function Dashboard() {
         )}
 
         {error && (
-          <div className="bg-red-900/20 border border-red-800/50 rounded-xl p-4 text-red-400 text-sm mb-5">
+          <div role="alert" className="bg-red-900/20 border border-red-800/50 rounded-xl p-4 text-red-400 text-sm mb-5">
             {error}
           </div>
         )}
@@ -281,14 +299,16 @@ export default function Dashboard() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search by name or VMID..."
+                aria-label="Search VMs by name or VMID"
                 className="w-full bg-gray-900 border border-gray-700/50 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-colors"
               />
               {search && (
                 <button
                   onClick={() => setSearch('')}
+                  aria-label="Clear search"
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 p-0.5"
                 >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
@@ -412,7 +432,7 @@ export default function Dashboard() {
         )}
 
         {bulkError && (
-          <div className="bg-red-900/20 border border-red-800/50 rounded-xl p-4 text-red-400 text-sm mb-5">
+          <div role="alert" className="bg-red-900/20 border border-red-800/50 rounded-xl p-4 text-red-400 text-sm mb-5">
             {bulkError}
           </div>
         )}

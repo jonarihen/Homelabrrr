@@ -1,6 +1,8 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
 import { ConsoleSessionsProvider } from './contexts/ConsoleSessionsContext.jsx';
+import { NotificationsProvider } from './contexts/NotificationsContext.jsx';
+import { ConfirmProvider } from './contexts/ConfirmContext.jsx';
 import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import VMPage from './pages/VMPage.jsx';
@@ -20,9 +22,17 @@ import SSHKeysPage from './pages/SSHKeysPage.jsx';
 import AccountPage from './pages/AccountPage.jsx';
 import ProvisionPage from './pages/ProvisionPage.jsx';
 
+function LoadingScreen() {
+  return (
+    <div className="flex items-center justify-center h-screen font-mono text-xs uppercase tracking-[0.14em] text-gray-500" role="status" aria-live="polite">
+      <span className="aaris-led aaris-led--warning aaris-led--pulse mr-2.5" /> Loading…
+    </div>
+  );
+}
+
 function PrivateRoute({ children, allow2faBypass }) {
   const { user, loading } = useAuth();
-  if (loading) return <div className="flex items-center justify-center h-screen text-gray-400">Loading...</div>;
+  if (loading) return <LoadingScreen />;
   if (!user) return <Navigate to="/login" replace />;
   // If 2FA is required but not enabled, force user to account page to set it up
   if (user.require2fa && !user.twoFactorEnabled && !allow2faBypass) {
@@ -33,7 +43,7 @@ function PrivateRoute({ children, allow2faBypass }) {
 
 function AdminRoute({ children }) {
   const { user, loading } = useAuth();
-  if (loading) return null;
+  if (loading) return <LoadingScreen />;
   if (!user) return <Navigate to="/login" replace />;
   // Allow access if admin OR has any management permission
   const p = user.permissions || {};
@@ -61,17 +71,19 @@ function AdminIndexRedirect() {
 
 function RootRedirect() {
   const { user, loading } = useAuth();
-  if (loading) return null;
+  if (loading) return <LoadingScreen />;
   if (!user) return <Navigate to="/login" replace />;
   return <Navigate to="/dashboard" replace />;
 }
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <ConsoleSessionsProvider>
-          <Routes>
+    <NotificationsProvider>
+      <ConfirmProvider>
+        <AuthProvider>
+          <BrowserRouter>
+            <ConsoleSessionsProvider>
+              <Routes>
             <Route path="/login" element={<Login />} />
 
             <Route path="/" element={<PrivateRoute><RootRedirect /></PrivateRoute>} />
@@ -99,9 +111,11 @@ export default function App() {
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </ConsoleSessionsProvider>
-      </BrowserRouter>
-    </AuthProvider>
+              </Routes>
+            </ConsoleSessionsProvider>
+          </BrowserRouter>
+        </AuthProvider>
+      </ConfirmProvider>
+    </NotificationsProvider>
   );
 }

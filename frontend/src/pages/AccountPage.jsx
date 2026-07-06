@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
+const inputCls = 'w-full bg-[#0b0d11] border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 
 export default function AccountPage() {
   useDocumentTitle('Account');
@@ -74,25 +74,26 @@ function UsernameSection({ user, setUser }) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
       <div className="flex items-center gap-3 mb-4">
-        <div className="w-9 h-9 bg-blue-500/10 rounded-xl flex items-center justify-center">
-          <svg className="w-4.5 h-4.5 text-blue-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+        <div className="w-9 h-9 border border-gray-700 bg-gray-800 flex items-center justify-center">
+          <svg aria-hidden="true" focusable="false" className="w-4.5 h-4.5 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
           </svg>
         </div>
         <div>
-          <h2 className="text-sm font-semibold text-white">Username</h2>
+          <h2 className="aaris-display text-sm text-white">Username</h2>
           <p className="text-xs text-gray-500">Change your display name</p>
         </div>
       </div>
       <form onSubmit={submit} className="flex items-end gap-3">
         <div className="flex-1">
-          <input type="text" required value={username} onChange={e => { setUsername(e.target.value); setMsg(''); }} className={inputCls} />
+          <label htmlFor="acct-username" className="block text-xs text-gray-500 mb-1.5 font-medium">Username</label>
+          <input id="acct-username" type="text" required value={username} onChange={e => { setUsername(e.target.value); setMsg(''); }} className={inputCls} />
         </div>
         <button type="submit" disabled={saving || username === user?.username} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium rounded-xl transition-colors shrink-0">
           {saving ? 'Saving...' : 'Update'}
         </button>
       </form>
-      {msg && <p className={`text-xs mt-2 ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
+      {msg && <p role={isError ? 'alert' : 'status'} aria-live={isError ? undefined : 'polite'} className={`text-xs mt-2 ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
     </div>
   );
 }
@@ -122,32 +123,32 @@ function PasswordSection() {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
       <div className="flex items-center gap-3 mb-4">
-        <div className="w-9 h-9 bg-purple-500/10 rounded-xl flex items-center justify-center">
-          <svg className="w-4.5 h-4.5 text-purple-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+        <div className="w-9 h-9 border border-gray-700 bg-gray-800 flex items-center justify-center">
+          <svg aria-hidden="true" focusable="false" className="w-4.5 h-4.5 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
           </svg>
         </div>
         <div>
-          <h2 className="text-sm font-semibold text-white">Password</h2>
+          <h2 className="aaris-display text-sm text-white">Password</h2>
           <p className="text-xs text-gray-500">Change your account password</p>
         </div>
       </div>
       <form onSubmit={submit} className="space-y-3">
         <div>
-          <label className="block text-xs text-gray-500 mb-1.5 font-medium">Current Password</label>
-          <input type="password" required value={form.currentPassword} onChange={e => setForm(f => ({ ...f, currentPassword: e.target.value }))} className={inputCls} autoComplete="current-password" />
+          <label htmlFor="pw-current" className="block text-xs text-gray-500 mb-1.5 font-medium">Current Password</label>
+          <input id="pw-current" type="password" required value={form.currentPassword} onChange={e => setForm(f => ({ ...f, currentPassword: e.target.value }))} className={inputCls} autoComplete="current-password" />
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs text-gray-500 mb-1.5 font-medium">New Password</label>
-            <input type="password" required value={form.newPassword} onChange={e => setForm(f => ({ ...f, newPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
+            <label htmlFor="pw-new" className="block text-xs text-gray-500 mb-1.5 font-medium">New Password</label>
+            <input id="pw-new" type="password" required value={form.newPassword} onChange={e => setForm(f => ({ ...f, newPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1.5 font-medium">Confirm Password</label>
-            <input type="password" required value={form.confirmPassword} onChange={e => setForm(f => ({ ...f, confirmPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
+            <label htmlFor="pw-confirm" className="block text-xs text-gray-500 mb-1.5 font-medium">Confirm Password</label>
+            <input id="pw-confirm" type="password" required value={form.confirmPassword} onChange={e => setForm(f => ({ ...f, confirmPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
           </div>
         </div>
-        {msg && <p className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
+        {msg && <p role={isError ? 'alert' : 'status'} aria-live={isError ? undefined : 'polite'} className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
         <button type="submit" disabled={saving} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium rounded-xl transition-colors">
           {saving ? 'Updating...' : 'Change Password'}
         </button>
@@ -212,12 +213,12 @@ function TwoFactorSection({ user, setUser }) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${user?.twoFactorEnabled ? 'bg-green-500/10' : 'bg-gray-800'}`}>
-            <svg className={`w-4.5 h-4.5 ${user?.twoFactorEnabled ? 'text-green-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg aria-hidden="true" focusable="false" className={`w-4.5 h-4.5 ${user?.twoFactorEnabled ? 'text-green-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
             </svg>
           </div>
           <div>
-            <h2 className="text-sm font-semibold text-white">Two-Factor Authentication</h2>
+            <h2 className="aaris-display text-sm text-white">Two-Factor Authentication</h2>
             <p className="text-xs text-gray-500">
               {user?.twoFactorEnabled ? 'Your account is protected with an authenticator app' : 'Add an extra layer of security'}
             </p>
@@ -229,8 +230,8 @@ function TwoFactorSection({ user, setUser }) {
       </div>
 
       {success && (
-        <p className="text-xs text-green-400 bg-green-900/20 border border-green-800/30 rounded-xl p-3 flex items-center gap-2">
-          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+        <p role="status" aria-live="polite" className="text-xs text-green-400 bg-green-900/20 border border-green-800/30 rounded-xl p-3 flex items-center gap-2">
+          <svg aria-hidden="true" focusable="false" className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
           {success}
         </p>
       )}
@@ -251,7 +252,7 @@ function TwoFactorSection({ user, setUser }) {
           <button
             onClick={startSetup}
             disabled={saving}
-            className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20"
+            className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-medium transition-colors"
           >
             {saving ? 'Setting up...' : 'Enable 2FA'}
           </button>
@@ -273,15 +274,17 @@ function TwoFactorSection({ user, setUser }) {
             </details>
           </div>
           <div>
-            <p className="text-xs text-gray-400 mb-2">2. Enter the 6-digit code from your app to confirm</p>
+            <label htmlFor="twofa-setup-code" className="block text-xs text-gray-400 mb-2">2. Enter the 6-digit code from your app to confirm</label>
             <input
+              id="twofa-setup-code"
               type="text" inputMode="numeric" autoComplete="one-time-code"
+              aria-label="6-digit authentication code"
               value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
               className={`${inputCls} text-center tracking-[0.3em] font-mono text-lg`}
               placeholder="000000" maxLength={6} autoFocus
             />
           </div>
-          {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+          {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
           <div className="flex gap-3">
             <button type="submit" disabled={saving || code.length !== 6} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
               {saving ? 'Activating...' : 'Activate 2FA'}
@@ -295,14 +298,16 @@ function TwoFactorSection({ user, setUser }) {
 
       {step === 'disable' && (
         <form onSubmit={disable} className="space-y-3 border-t border-gray-700/50 pt-4">
-          <p className="text-xs text-gray-400">Enter your current authenticator code to disable 2FA</p>
+          <label htmlFor="twofa-disable-code" className="block text-xs text-gray-400">Enter your current authenticator code to disable 2FA</label>
           <input
+            id="twofa-disable-code"
             type="text" inputMode="numeric" autoComplete="one-time-code"
+            aria-label="6-digit authentication code"
             value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
             className={`${inputCls} text-center tracking-[0.3em] font-mono text-lg`}
             placeholder="000000" maxLength={6} autoFocus
           />
-          {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+          {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
           <div className="flex gap-3">
             <button type="submit" disabled={saving || code.length !== 6} className="flex-1 bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
               {saving ? 'Disabling...' : 'Confirm Disable'}

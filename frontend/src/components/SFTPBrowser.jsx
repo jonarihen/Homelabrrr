@@ -160,7 +160,7 @@ export default function SFTPBrowser({ token }) {
   return (
     <div
       ref={dropRef}
-      className={`flex h-full min-h-0 flex-col ${dragOver ? 'ring-2 ring-blue-500/50 ring-inset' : ''}`}
+      className={`relative flex h-full min-h-0 flex-col ${dragOver ? 'ring-2 ring-blue-500/50 ring-inset' : ''}`}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
@@ -196,8 +196,9 @@ export default function SFTPBrowser({ token }) {
           onClick={goUp}
           className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white transition-colors"
           title="Go up"
+          aria-label="Go up"
         >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
           </svg>
         </button>
@@ -207,8 +208,9 @@ export default function SFTPBrowser({ token }) {
           onClick={() => loadDir(currentPath)}
           className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white transition-colors"
           title="Refresh"
+          aria-label="Refresh"
         >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         </button>
@@ -218,8 +220,9 @@ export default function SFTPBrowser({ token }) {
           onClick={() => setShowMkdir(!showMkdir)}
           className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white transition-colors"
           title="New folder"
+          aria-label="New folder"
         >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 10.5v6m3-3H9m4.06-7.19l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
           </svg>
         </button>
@@ -251,6 +254,7 @@ export default function SFTPBrowser({ token }) {
             onChange={(e) => setMkdirName(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && createDir()}
             placeholder="New folder name"
+            aria-label="New folder name"
             className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-blue-500"
             autoFocus
           />
@@ -268,7 +272,7 @@ export default function SFTPBrowser({ token }) {
       )}
 
       {error && (
-        <div className="px-4 py-2 text-xs text-red-400 bg-red-900/20 border-b border-gray-700">
+        <div role="alert" className="px-4 py-2 text-xs text-red-400 bg-red-900/20 border-b border-gray-700">
           {error}
         </div>
       )}

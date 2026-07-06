@@ -1,11 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import Layout from '../components/Layout.jsx';
 import Modal from '../components/Modal.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
+import { useNotify } from '../contexts/NotificationsContext.jsx';
+import { useConfirm } from '../contexts/ConfirmContext.jsx';
 import api from '../api.js';
 
 export default function SSHKeysPage() {
   useDocumentTitle('SSH Keys');
+  const notify = useNotify();
+  const confirm = useConfirm();
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
@@ -21,12 +25,12 @@ export default function SSHKeysPage() {
   useEffect(() => { load(); }, []);
 
   const deleteKey = async (id, name) => {
-    if (!confirm(`Delete SSH key "${name}"?`)) return;
+    if (!(await confirm({ title: 'Delete SSH key', message: `Delete SSH key "${name}"? This cannot be undone.`, confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api.delete(`/ssh/keys/${id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      notify.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -59,8 +63,8 @@ export default function SSHKeysPage() {
             <p className="text-sm mt-1">Add a private key to connect to your VMs via SSH.</p>
           </div>
         ) : (
-          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
+            <table className="w-full min-w-[640px] text-sm">
               <thead>
                 <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
                   <th className="text-left px-4 py-3">Name</th>
@@ -113,6 +117,11 @@ export default function SSHKeysPage() {
 }
 
 function AddKeyModal({ onClose, onAdded }) {
+  const uid = useId();
+  const nameId = `${uid}-name`;
+  const privId = `${uid}-priv`;
+  const passId = `${uid}-pass`;
+  const pubId = `${uid}-pub`;
   const [form, setForm] = useState({ name: '', privateKey: '', publicKey: '', passphrase: '' });
   const isPPK = form.privateKey.includes('PuTTY-User-Key-File');
   const [error, setError] = useState('');
@@ -168,8 +177,9 @@ function AddKeyModal({ onClose, onAdded }) {
   return (
     <Modal title="Add SSH Key" onClose={onClose} size="md">
       <form onSubmit={submit} className="p-5 space-y-4">
-        <Field label="Key Name">
+        <Field label="Key Name" htmlFor={nameId}>
           <input
+            id={nameId}
             type="text"
             required
             value={form.name}
@@ -180,8 +190,9 @@ function AddKeyModal({ onClose, onAdded }) {
           />
         </Field>
 
-        <Field label="Private Key (OpenSSH, PEM, or PuTTY PPK)">
+        <Field label="Private Key (OpenSSH, PEM, or PuTTY PPK)" htmlFor={privId}>
           <textarea
+            id={privId}
             required
             value={form.privateKey}
             onChange={e => setForm(f => ({ ...f, privateKey: e.target.value }))}
@@ -189,17 +200,18 @@ function AddKeyModal({ onClose, onAdded }) {
             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;&#10;PuTTY PPK files are also supported."
           />
           <label className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 cursor-pointer transition-colors">
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
             </svg>
             Upload file
-            <input type="file" className="hidden" accept=".pem,.key,.ppk,*" onChange={handleFileUpload('privateKey')} />
+            <input type="file" className="sr-only" accept=".pem,.key,.ppk,*" onChange={handleFileUpload('privateKey')} />
           </label>
         </Field>
 
         {isPPK && (
-          <Field label="PPK Passphrase (if encrypted)">
+          <Field label="PPK Passphrase (if encrypted)" htmlFor={passId}>
             <input
+              id={passId}
               type="password"
               value={form.passphrase}
               onChange={e => setForm(f => ({ ...f, passphrase: e.target.value }))}
@@ -210,26 +222,27 @@ function AddKeyModal({ onClose, onAdded }) {
           </Field>
         )}
 
-        <Field label="Public Key">
+        <Field label="Public Key" htmlFor={pubId}>
           <p className="text-xs text-gray-500 -mt-1 mb-1.5">
             Used to set up key-based login when you deploy a VM (cloud-init). Leave blank and we'll derive it from your private key when possible.
           </p>
           <textarea
+            id={pubId}
             value={form.publicKey}
             onChange={e => setForm(f => ({ ...f, publicKey: e.target.value }))}
             className={`${inputCls} font-mono text-xs h-16 resize-none`}
             placeholder="ssh-ed25519 AAAA... (auto-derived from your private key if left blank)"
           />
           <label className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 cursor-pointer transition-colors">
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
             </svg>
             Upload file
-            <input type="file" className="hidden" onChange={handleFileUpload('publicKey')} />
+            <input type="file" className="sr-only" onChange={handleFileUpload('publicKey')} />
           </label>
         </Field>
 
-        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <button type="submit" disabled={saving} className={btnCls}>
           {saving ? 'Adding...' : 'Add Key'}
         </button>
@@ -241,10 +254,10 @@ function AddKeyModal({ onClose, onAdded }) {
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 const btnCls = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors';
 
-function Field({ label, children }) {
+function Field({ label, htmlFor, children }) {
   return (
     <div>
-      <label className="block text-xs text-gray-400 mb-1.5">{label}</label>
+      <label htmlFor={htmlFor} className="block text-xs text-gray-400 mb-1.5">{label}</label>
       {children}
     </div>
   );

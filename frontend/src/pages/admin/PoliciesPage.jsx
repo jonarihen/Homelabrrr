@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import useDialogA11y from '../../hooks/useDialogA11y.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useNotify } from '../../contexts/NotificationsContext.jsx';
+import { useConfirm } from '../../contexts/ConfirmContext.jsx';
 
 const SERVICES = [
   { name: 'ALL', label: 'All Traffic' },
@@ -420,6 +423,11 @@ function GraphLegend() {
 export default function PoliciesPage() {
   useDocumentTitle('Policies');
   const { user } = useAuth();
+  const notify = useNotify();
+  const confirm = useConfirm();
+  const reduceMotion = typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const canManageObjects = !!user?.isAdmin;
   const [firewalls, setFirewalls] = useState([]);
   const [selectedFw, setSelectedFw] = useState(null);
@@ -665,6 +673,9 @@ export default function PoliciesPage() {
     setDragOverrides({});
   };
 
+  const modalRef = useRef(null);
+  useDialogA11y(modalRef, cancelSelection, showModal && !!srcVlan && !!dstVlan);
+
   const recenterView = () => {
     setPanOffset({ x: 0, y: 0 });
     setDragOverrides({});
@@ -704,12 +715,12 @@ export default function PoliciesPage() {
   };
 
   const deletePolicy = async (policyId) => {
-    if (!confirm('Delete this policy?')) return;
+    if (!(await confirm({ title: 'Delete policy', message: 'Delete this policy?', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api.delete(`/admin/policies/${policyId}?firewallId=${selectedFw}`);
       loadData();
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to delete policy');
+      notify.error(err.response?.data?.error || 'Failed to delete policy');
     }
   };
 
@@ -737,6 +748,13 @@ export default function PoliciesPage() {
     if (tags.length === 0) {
       animatedPositionsRef.current = {};
       setAnimatedNodePositions({});
+      return undefined;
+    }
+
+    if (reduceMotion) {
+      // Honor prefers-reduced-motion: snap straight to targets, no tween.
+      animatedPositionsRef.current = targetNodePositions;
+      setAnimatedNodePositions(targetNodePositions);
       return undefined;
     }
 
@@ -791,7 +809,7 @@ export default function PoliciesPage() {
         animationFrameRef.current = null;
       }
     };
-  }, [targetNodePositions]);
+  }, [targetNodePositions, reduceMotion]);
 
   if (loading) {
     return (
@@ -987,7 +1005,7 @@ export default function PoliciesPage() {
                           fill="none"
                           opacity={0.92 * opacity}
                         />
-                        {line.action === 'accept' && (
+                        {line.action === 'accept' && !reduceMotion && (
                           <>
                             <path
                               d={line.pathD}
@@ -1147,7 +1165,7 @@ export default function PoliciesPage() {
                         key={vlan.tag}
                         onClick={() => handleCardClick(vlan)}
                         onPointerDown={(e) => handleNodePointerDown(e, vlan)}
-                        className={`absolute z-[5] h-36 w-36 cursor-grab rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${
+                        className={`absolute z-[5] h-36 w-36 cursor-grab rounded-none border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${
                           isSource
                             ? 'border-cyan-300/80 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.22),0_0_0_12px_rgba(8,145,178,0.08),0_26px_60px_rgba(8,145,178,0.24)]'
                             : isDestination
@@ -1163,12 +1181,12 @@ export default function PoliciesPage() {
                           transform: `translate(-50%, -50%) scale(${scale})`,
                         }}
                       >
-                        <div className="relative flex h-full flex-col items-center justify-center overflow-hidden rounded-[30px] px-4 py-4">
+                        <div className="relative flex h-full flex-col items-center justify-center overflow-hidden rounded-none px-4 py-4">
                           <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.1),_transparent_48%)]" />
-                          <div className="absolute inset-[8%] rounded-[24px] bg-slate-950/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]" />
-                          <div className="absolute inset-[10%] rounded-[22px] border border-white/6" />
+                          <div className="absolute inset-[8%] rounded-none bg-slate-950/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]" />
+                          <div className="absolute inset-[10%] rounded-none border border-white/6" />
                           <div
-                            className="absolute inset-[18%] rounded-[20px] opacity-80 blur-sm"
+                            className="absolute inset-[18%] rounded-none opacity-80 blur-sm"
                             style={{
                               background: isSource
                                 ? 'radial-gradient(circle, rgba(34,211,238,0.35), transparent 72%)'
@@ -1356,12 +1374,12 @@ export default function PoliciesPage() {
                     <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{object.type}</span>
                     <button
                       onClick={async () => {
-                        if (!confirm(`Delete address object "${object.name}"?`)) return;
+                        if (!(await confirm({ title: 'Delete address object', message: `Delete address object "${object.name}"?`, confirmLabel: 'Delete', danger: true }))) return;
                         try {
                           await api.delete(`/admin/objects/addresses/${encodeURIComponent(object.name)}?firewallId=${selectedFw}`);
                           loadObjects();
                         } catch (err) {
-                          alert(err.response?.data?.error || 'Failed to delete');
+                          notify.error(err.response?.data?.error || 'Failed to delete');
                         }
                       }}
                       className="shrink-0 rounded p-1 text-gray-600 transition-colors hover:bg-red-500/10 hover:text-red-400"
@@ -1449,12 +1467,12 @@ export default function PoliciesPage() {
                     <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{object.protocol}</span>
                     <button
                       onClick={async () => {
-                        if (!confirm(`Delete service object "${object.name}"?`)) return;
+                        if (!(await confirm({ title: 'Delete service object', message: `Delete service object "${object.name}"?`, confirmLabel: 'Delete', danger: true }))) return;
                         try {
                           await api.delete(`/admin/objects/services/${encodeURIComponent(object.name)}?firewallId=${selectedFw}`);
                           loadObjects();
                         } catch (err) {
-                          alert(err.response?.data?.error || 'Failed to delete');
+                          notify.error(err.response?.data?.error || 'Failed to delete');
                         }
                       }}
                       className="shrink-0 rounded p-1 text-gray-600 transition-colors hover:bg-red-500/10 hover:text-red-400"
@@ -1528,9 +1546,16 @@ export default function PoliciesPage() {
 
       {showModal && srcVlan && dstVlan && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) cancelSelection(); }}>
-          <div className="w-full max-w-md rounded-3xl border border-gray-700 bg-gray-900 shadow-2xl">
+          <div
+            ref={modalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-policy-title"
+            tabIndex={-1}
+            className="w-full max-w-md rounded-3xl border border-gray-700 bg-gray-900 shadow-2xl"
+          >
             <div className="border-b border-gray-700 px-5 py-4">
-              <h2 className="font-semibold text-white">Create Policy</h2>
+              <h2 id="create-policy-title" className="font-semibold text-white">Create Policy</h2>
             </div>
 
             <div className="space-y-5 p-5">
@@ -1586,15 +1611,22 @@ export default function PoliciesPage() {
                 </div>
               </div>
 
-              <label className="group flex cursor-pointer items-center gap-3">
-                <div className={`relative h-5 w-9 rounded-full transition-colors ${bidirectional ? 'bg-cyan-600' : 'bg-slate-700'}`} onClick={() => setBidirectional(!bidirectional)}>
-                  <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${bidirectional ? 'translate-x-4' : 'translate-x-0.5'}`} />
-                </div>
-                <div>
-                  <span className="text-sm text-slate-300 transition-colors group-hover:text-white">Bidirectional</span>
-                  <p className="text-[10px] text-slate-600">Also allow {dstVlan.name} to reach {srcVlan.name}</p>
-                </div>
-              </label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={bidirectional}
+                aria-label="Bidirectional policy"
+                onClick={() => setBidirectional(!bidirectional)}
+                className="group flex w-full cursor-pointer items-center gap-3 text-left"
+              >
+                <span className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${bidirectional ? 'bg-cyan-600' : 'bg-slate-700'}`} aria-hidden="true">
+                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${bidirectional ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                </span>
+                <span className="block">
+                  <span className="block text-sm text-slate-300 transition-colors group-hover:text-white">Bidirectional</span>
+                  <span className="block text-[10px] text-slate-600">Also allow {dstVlan.name} to reach {srcVlan.name}</span>
+                </span>
+              </button>
 
               {error && <p className="rounded-xl border border-red-800/30 bg-red-900/20 p-3 text-xs text-red-400">{error}</p>}
 

@@ -3,11 +3,15 @@ import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
+import { useNotify } from '../../contexts/NotificationsContext.jsx';
+import { useConfirm } from '../../contexts/ConfirmContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
 export default function TemplatesPage() {
   useDocumentTitle('Templates');
+  const notify = useNotify();
+  const confirm = useConfirm();
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -28,12 +32,12 @@ export default function TemplatesPage() {
   useEffect(() => { load(); }, []);
 
   const deleteTemplate = async (id, name) => {
-    if (!confirm(`Delete template "${name}"? This does not delete the actual VM.`)) return;
+    if (!(await confirm({ title: 'Remove template', message: `Delete template "${name}"? This does not delete the actual VM.`, confirmLabel: 'Remove', danger: true }))) return;
     try {
       await api.delete(`/provision/admin/templates/${id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      notify.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -173,6 +177,8 @@ function fmtSize(bytes) {
 }
 
 function CloudImagesSection({ onTemplatesChanged }) {
+  const notify = useNotify();
+  const confirm = useConfirm();
   const [images, setImages] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
   const [templateImage, setTemplateImage] = useState(null);
@@ -200,12 +206,12 @@ function CloudImagesSection({ onTemplatesChanged }) {
   }, [images]);
 
   const remove = async (img) => {
-    if (!confirm(`Delete cloud image "${img.name}"? The downloaded file is removed from ${img.storage}.`)) return;
+    if (!(await confirm({ title: 'Delete cloud image', message: `Delete cloud image "${img.name}"? The downloaded file is removed from ${img.storage}.`, confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api.delete(`/cloud-images/${img.id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      notify.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -232,8 +238,8 @@ function CloudImagesSection({ onTemplatesChanged }) {
           <p className="text-sm text-gray-500">No cloud images yet. Add Ubuntu, Debian or another distro's cloud image to build templates from.</p>
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
                 <th className="text-left px-4 py-3">Image</th>

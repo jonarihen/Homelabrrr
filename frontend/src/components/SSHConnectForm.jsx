@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { cloneElement, useEffect, useId, useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 
@@ -195,7 +195,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
 
       <div>
         <div className="flex items-center justify-between mb-1.5">
-          <label className="block text-xs text-gray-400">Host Key Fingerprint</label>
+          <label htmlFor="ssh-host-fingerprint" className="block text-xs text-gray-400">Host Key Fingerprint</label>
           <button
             type="button"
             onClick={scanFingerprint}
@@ -207,6 +207,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         </div>
 
         <input
+          id="ssh-host-fingerprint"
           type="text"
           required
           value={form.hostFingerprint}
@@ -220,7 +221,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         </p>
       </div>
 
-      {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+      {error && <p role="alert" aria-live="assertive" className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
 
       <button type="submit" disabled={connecting} className={btnCls}>
         {connecting ? 'Connecting...' : submitLabel}
@@ -230,10 +231,11 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
 }
 
 function Field({ label, children }) {
+  const id = useId();
   return (
     <div>
-      <label className="block text-xs text-gray-400 mb-1.5">{label}</label>
-      {children}
+      <label htmlFor={id} className="block text-xs text-gray-400 mb-1.5">{label}</label>
+      {cloneElement(children, { id })}
     </div>
   );
 }
