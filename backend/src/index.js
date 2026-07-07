@@ -60,7 +60,7 @@ const sessionMiddleware = session({
   cookie: {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.COOKIE_SECURE === 'true',
+    secure: process.env.COOKIE_SECURE !== 'false',
     maxAge: 24 * 60 * 60 * 1000,
   },
 });

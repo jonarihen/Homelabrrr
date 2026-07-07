@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-07 — Security: session cookies are now Secure by default
+
+- The session cookie's `Secure` attribute is now **on by default** — previously it was only applied when the operator explicitly set `COOKIE_SECURE=true`, so a deployment that forgot the variable shipped session cookies that browsers would also send over plain HTTP, exposing them to interception on any TLS-stripping hop. `COOKIE_SECURE` is now opt-**out**: set it to `false` only for plain-HTTP local development.
+
 ## 2026-07-07 — Security: reject malformed node names before they reach Proxmox
 
 - Fixed a **path-injection / SSRF** weakness: a node identifier is interpolated into the Proxmox API path, and several endpoints did so without validation or URL-encoding. A crafted node name containing `/`, `..`, or `?` (e.g. `1~..%2F..%2F..%2Fversion%3F`) could steer a request made with the **privileged PVE API token** outside the intended `/nodes/<node>/…` path. Node names are now validated against a strict DNS-label pattern and rejected before any upstream request, and **every** node/storage segment is URL-encoded at the point of interpolation.

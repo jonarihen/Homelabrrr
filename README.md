@@ -127,7 +127,7 @@ Then set at least:
 - `SESSION_SECRET` to a long random value
 - `SECRET_ENCRYPTION_KEY` to a 32-byte base64, hex, or raw text key (used to encrypt secrets at rest)
 - `ALLOWED_ORIGIN` to your public portal URL
-- `COOKIE_SECURE=true` when the site is served behind HTTPS
+- `COOKIE_SECURE` only if you need to opt out: session cookies are marked `Secure` by default, set `COOKIE_SECURE=false` only for plain-HTTP dev setups
 
 If the database is brand new and empty, also set:
 
@@ -191,7 +191,7 @@ Example values live in [`.env.example`](.env.example).
 | `SESSION_SECRET` | Session signing secret |
 | `SECRET_ENCRYPTION_KEY` | 32-byte master key for encrypting secrets at rest; accepted as base64, 64-char hex, or exactly 32 bytes of raw text |
 | `ALLOWED_ORIGIN` | Exact public browser origin allowed for CORS and websocket upgrades |
-| `COOKIE_SECURE` | Marks auth cookies as secure |
+| `COOKIE_SECURE` | Marks auth cookies as `Secure` (default `true`; set to `false` only for plain-HTTP local dev) |
 | `TRUST_PROXY` | Number or mode used for Express proxy trust |
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
@@ -254,7 +254,7 @@ Proxy requirements:
 - forward normal HTTP requests and websocket upgrades for `/api/*`
 - preserve `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto`
 - set `ALLOWED_ORIGIN` to the exact external URL, for example `https://portal.example.com`
-- keep `COOKIE_SECURE=true` when users access the portal over HTTPS
+- keep `COOKIE_SECURE` at its secure default (`true`) — the `Secure` cookie flag must stay on behind the TLS-terminating proxy
 
 ## Repo Layout
 
