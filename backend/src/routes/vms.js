@@ -26,6 +26,25 @@ function checkAccess(userId, node, vmid, isAdmin) {
   return userCanAccessVm(userId, node, vmid, isAdmin);
 }
 
+// Backup volume IDs embed the VMID they belong to. The route-level access
+// check only covers :vmid, so every handler that forwards a caller-supplied
+// volid to Proxmox must also verify the volid targets that same VM —
+// otherwise any user could read, restore, or delete another tenant's
+// backups by naming a foreign volid (IDOR). Unparseable volids are rejected.
+function volidBelongsToVm(volid, vmid) {
+  const s = String(volid || '');
+  const target = Number.parseInt(vmid, 10);
+  const found = [];
+  // Classic vzdump archives: <storage>:backup/vzdump-qemu-100-2024_05_01-….vma.zst
+  const vzdump = s.match(/vzdump-(?:qemu|lxc|openvz)-(\d+)-/);
+  if (vzdump) found.push(Number.parseInt(vzdump[1], 10));
+  // PBS snapshots: <storage>:backup/vm/100/2026-07-06T22:37:18Z
+  const pbs = s.match(/(?:^|[:/])backup\/(?:vm|ct)\/(\d+)(?:\/|$)/);
+  if (pbs) found.push(Number.parseInt(pbs[1], 10));
+  // A volid that matches both forms must agree with the route VMID in both
+  return found.length > 0 && found.every(id => id === target);
+}
+
 function serializeNodeIdentity(nodeValue) {
   const { nodeName, nodeRef } = decodeNodeRef(nodeValue);
   return {
@@ -931,6 +950,9 @@ router.delete('/:node/:vmid/backups/:storage/*', async (req, res) => {
   if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
     return res.status(403).json({ error: 'Access denied' });
   }
+  if (!volidBelongsToVm(volid, vmid)) {
+    return res.status(403).json({ error: 'Backup does not belong to this VM' });
+  }
   try {
     await deleteVMBackup(node, storage, volid);
     logAudit(req, 'backup_delete', `${node}/${vmid}`, volid);
@@ -949,6 +971,9 @@ router.post('/:node/:vmid/restore', async (req, res) => {
   }
   const { archive, storage } = req.body;
   if (!archive) return res.status(400).json({ error: 'archive (volid) is required' });
+  if (!volidBelongsToVm(archive, vmid)) {
+    return res.status(403).json({ error: 'Backup does not belong to this VM' });
+  }
   try {
     const vmtype = archive.includes('vzdump-lxc-') ? 'lxc' : 'qemu';
     const upid = await restoreVMBackup(node, vmid, archive, storage, vmtype);
@@ -968,6 +993,9 @@ router.get('/:node/:vmid/backup-files/:storage/*', async (req, res) => {
   if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
     return res.status(403).json({ error: 'Access denied' });
   }
+  if (!volidBelongsToVm(volid, vmid)) {
+    return res.status(403).json({ error: 'Backup does not belong to this VM' });
+  }
   try {
     const files = await listBackupFiles(node, storage, volid, filepath);
     res.json(files);
@@ -982,6 +1010,9 @@ router.get('/:node/:vmid/backup-download/:storage/*', async (req, res) => {
   const { filepath } = req.query;
   if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
     return res.status(403).json({ error: 'Access denied' });
+  }
+  if (!volidBelongsToVm(volid, vmid)) {
+    return res.status(403).json({ error: 'Backup does not belong to this VM' });
   }
   if (!filepath) return res.status(400).json({ error: 'filepath is required' });
   try {

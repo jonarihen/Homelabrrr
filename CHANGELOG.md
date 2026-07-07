@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-07 — Security: backup operations now verify the backup belongs to the VM
+
+- Fixed a **high-severity access-control gap**: the backup browse, download, restore, and delete endpoints checked that you had access to the VM in the URL, but not that the backup volume you named actually belonged to that VM — so access to any one VM was enough to read, restore, or delete **any** VM's backups. The backend now requires the VMID embedded in the backup volume ID (both vzdump archives and PBS snapshots) to match the VM in the URL, and rejects anything it can't parse.
+
 ## 2026-07-07 — Backups grouped by storage, with encryption and verification status
 
 - The VM **Backups** panel now groups backups **by the storage they live on** instead of one flat list — each storage gets its own collapsible section with the storage type (PBS, NFS, directory, …), backup count, combined size, and how full that storage is
