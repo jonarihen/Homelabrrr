@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-07 — Security: reject malformed node names before they reach Proxmox
+
+- Fixed a **path-injection / SSRF** weakness: a node identifier is interpolated into the Proxmox API path, and several endpoints did so without validation or URL-encoding. A crafted node name containing `/`, `..`, or `?` (e.g. `1~..%2F..%2F..%2Fversion%3F`) could steer a request made with the **privileged PVE API token** outside the intended `/nodes/<node>/…` path. Node names are now validated against a strict DNS-label pattern and rejected before any upstream request, and **every** node/storage segment is URL-encoded at the point of interpolation.
+- The `GET /provision/nodes/:node/storages` endpoint was reachable by any logged-in user; it now requires provisioning or template-management permission, matching its sibling routes.
+
 ## 2026-07-07 — Security: restoring a backup now requires owning the VM
 
 - Restoring a backup into a VM now requires the VM to be **assigned to you** (or being an admin), the same rule as VM deletion and backup deletion. Restore overwrites the VM's disks, so the "see all VMs" permission is no longer enough to trigger it on VMs you don't own.

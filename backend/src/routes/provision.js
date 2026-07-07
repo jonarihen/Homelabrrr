@@ -142,7 +142,7 @@ router.get('/nodes', requirePermission('can_manage_templates'), async (req, res)
   }
 });
 
-router.get('/nodes/:node/storages', async (req, res) => {
+router.get('/nodes/:node/storages', requirePermission('can_provision', 'can_manage_templates'), async (req, res) => {
   try {
     const storages = await getStorages(req.params.node);
     res.json(storages);

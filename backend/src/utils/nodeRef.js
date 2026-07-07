@@ -1,5 +1,16 @@
 const NODE_REF_SEPARATOR = '~';
 
+// Proxmox node names are DNS-label shaped. Anything outside this set ('/',
+// '?', '#', whitespace, …) could steer the upstream API request path when the
+// name is interpolated into a URL, so it must be rejected before any request.
+// Dot-only names ('.', '..') match the pattern but normalize as traversal.
+const NODE_NAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
+
+export function isValidNodeName(nodeName) {
+  const name = String(nodeName || '');
+  return NODE_NAME_PATTERN.test(name) && !/^\.+$/.test(name);
+}
+
 export function encodeNodeRef(hostId, nodeName) {
   const node = String(nodeName || '').trim();
   if (!node) return '';

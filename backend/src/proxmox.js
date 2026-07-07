@@ -1,7 +1,7 @@
 import https from 'https';
 import db from './db.js';
 import { decryptSecret } from './utils/secrets.js';
-import { decodeNodeRef, encodeNodeRef } from './utils/nodeRef.js';
+import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.js';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
@@ -95,6 +95,7 @@ async function hostForNode(nodeRef, opts = {}) {
   const { vmid = null } = opts;
   const { hostId, nodeName } = decodeNodeRef(nodeRef);
   if (!nodeName) throw new Error('Node is required');
+  if (!isValidNodeName(nodeName)) throw new Error('Invalid node name');
 
   if (hostId) return getHostById(hostId);
 
@@ -200,24 +201,24 @@ export async function getAllVMs() {
 
 export async function getVMStatus(node, vmid) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'GET', `/nodes/${nodeName}/qemu/${vmid}/status/current`);
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/current`);
 }
 
 export async function vmAction(node, vmid, action) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${vmid}/status/${action}`, {});
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/${action}`, {});
 }
 
 export async function getVNCTicket(node, vmid) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${vmid}/vncproxy`, { websocket: 1 });
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/vncproxy`, { websocket: 1 });
 }
 
 export async function getVMConfig(node, vmid) {
   const cached = getCachedVmConfig(node, vmid, 'qemu');
   if (cached) return cached;
   const { host, nodeName } = await resolveNode(node, { vmid });
-  const config = await makeRequest(host, 'GET', `/nodes/${nodeName}/qemu/${vmid}/config`);
+  const config = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config`);
   setCachedVmConfig(node, vmid, config, 'qemu');
   return config;
 }
@@ -225,24 +226,24 @@ export async function getVMConfig(node, vmid) {
 export async function updateVMConfig(node, vmid, config) {
   const { host, nodeName } = await resolveNode(node, { vmid });
   clearCachedVmConfig(node, vmid, 'qemu');
-  return makeRequest(host, 'PUT', `/nodes/${nodeName}/qemu/${vmid}/config`, config);
+  return makeRequest(host, 'PUT', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config`, config);
 }
 
 export async function getLXCStatus(node, vmid) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'GET', `/nodes/${nodeName}/lxc/${vmid}/status/current`);
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/current`);
 }
 
 export async function lxcAction(node, vmid, action) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/lxc/${vmid}/status/${action}`, {});
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/${action}`, {});
 }
 
 export async function getLXCConfig(node, vmid) {
   const cached = getCachedVmConfig(node, vmid, 'lxc');
   if (cached) return cached;
   const { host, nodeName } = await resolveNode(node, { vmid });
-  const config = await makeRequest(host, 'GET', `/nodes/${nodeName}/lxc/${vmid}/config`);
+  const config = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/config`);
   setCachedVmConfig(node, vmid, config, 'lxc');
   return config;
 }
@@ -250,29 +251,29 @@ export async function getLXCConfig(node, vmid) {
 export async function updateLXCConfig(node, vmid, config) {
   const { host, nodeName } = await resolveNode(node, { vmid });
   clearCachedVmConfig(node, vmid, 'lxc');
-  return makeRequest(host, 'PUT', `/nodes/${nodeName}/lxc/${vmid}/config`, config);
+  return makeRequest(host, 'PUT', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/config`, config);
 }
 
 export async function getLXCRRD(node, vmid, timeframe = 'hour') {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'GET', `/nodes/${nodeName}/lxc/${vmid}/rrddata?timeframe=${timeframe}`);
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/rrddata?timeframe=${encodeURIComponent(timeframe)}`);
 }
 
 export async function getLXCVNCTicket(node, vmid) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/lxc/${vmid}/vncproxy`, { websocket: 1 });
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/vncproxy`, { websocket: 1 });
 }
 
 export async function getVMRRD(node, vmid, type = 'qemu', timeframe = 'hour') {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'GET', `/nodes/${nodeName}/${type}/${vmid}/rrddata?timeframe=${timeframe}`);
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/${type}/${vmid}/rrddata?timeframe=${encodeURIComponent(timeframe)}`);
 }
 
 // ── Node CPU topology ────────────────────────────────────────────────────────
 
 export async function getNodeCpuInfo(node) {
   const { host, nodeName } = await resolveNode(node);
-  const status = await makeRequest(host, 'GET', `/nodes/${nodeName}/status`);
+  const status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/status`);
   const info = status.cpuinfo || {};
   return {
     sockets: info.sockets || 1,
@@ -284,13 +285,13 @@ export async function getNodeCpuInfo(node) {
 
 export async function getNodeStatus(node) {
   const { host, nodeName } = await resolveNode(node);
-  const status = await makeRequest(host, 'GET', `/nodes/${nodeName}/status`);
+  const status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/status`);
   return { ...status, nodeName };
 }
 
 export async function getStorageStatus(node, storage) {
   const { host, nodeName } = await resolveNode(node);
-  return makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${encodeURIComponent(storage)}/status`);
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/status`);
 }
 
 // ── Host status check ────────────────────────────────────────────────────────
@@ -355,33 +356,33 @@ export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {
     ...(opts.storage && { storage: opts.storage }),
     ...(opts.description && { description: opts.description }),
   };
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${templateVmid}/clone`, body);
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${templateVmid}/clone`, body);
 }
 
 export async function createVM(node, vmid, config) {
   const { host, nodeName } = await resolveNode(node);
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu`, { vmid, ...config });
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu`, { vmid, ...config });
 }
 
 export async function resizeVMDisk(node, vmid, disk, size) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'PUT', `/nodes/${nodeName}/qemu/${vmid}/resize`, { disk, size });
+  return makeRequest(host, 'PUT', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/resize`, { disk, size });
 }
 
 export async function startVM(node, vmid) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${vmid}/status/start`, {});
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/start`, {});
 }
 
 export async function getStorages(node) {
   const { host, nodeName } = await resolveNode(node);
-  const storages = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage`);
+  const storages = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage`);
   return storages.filter(s => s.active && s.enabled);
 }
 
 export async function getISOImages(node, storage) {
   const { host, nodeName } = await resolveNode(node);
-  const content = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${storage}/content?content=iso`);
+  const content = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/content?content=iso`);
   return content || [];
 }
 
@@ -396,29 +397,29 @@ export async function downloadUrlToStorage(node, storage, url, filename, checksu
     body.checksum = checksum;
     body['checksum-algorithm'] = checksumAlgorithm || 'sha256';
   }
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/storage/${encodeURIComponent(storage)}/download-url`, body);
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/download-url`, body);
 }
 
 export async function getStorageContent(node, storage, content) {
   const { host, nodeName } = await resolveNode(node);
-  const list = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${encodeURIComponent(storage)}/content?content=${encodeURIComponent(content)}`);
+  const list = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/content?content=${encodeURIComponent(content)}`);
   return list || [];
 }
 
 export async function deleteVolume(node, volid) {
   const { host, nodeName } = await resolveNode(node);
   const storage = String(volid).split(':')[0];
-  return makeRequest(host, 'DELETE', `/nodes/${nodeName}/storage/${encodeURIComponent(storage)}/content/${encodeURIComponent(volid)}`);
+  return makeRequest(host, 'DELETE', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/content/${encodeURIComponent(volid)}`);
 }
 
 export async function convertToTemplate(node, vmid) {
   const { host, nodeName } = await resolveNode(node);
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/qemu/${vmid}/template`, {});
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/template`, {});
 }
 
 export async function getNetworks(node) {
   const { host, nodeName } = await resolveNode(node);
-  const nets = await makeRequest(host, 'GET', `/nodes/${nodeName}/network`);
+  const nets = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/network`);
   return (nets || []).filter(n => n.type === 'bridge');
 }
 
@@ -436,7 +437,7 @@ export async function getNodes() {
 
 export async function getTaskStatus(node, upid) {
   const { host, nodeName } = await resolveNode(node);
-  return makeRequest(host, 'GET', `/nodes/${nodeName}/tasks/${encodeURIComponent(upid)}/status`);
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/tasks/${encodeURIComponent(upid)}/status`);
 }
 
 // ── VM deletion ──────────────────────────────────────────────────────────────
@@ -448,7 +449,7 @@ function sleep(ms) {
 async function waitForGuestStopped(host, nodeName, vmtype, vmid, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const status = await makeRequest(host, 'GET', `/nodes/${nodeName}/${vmtype}/${vmid}/status/current`);
+    const status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/status/current`);
     if (status.status === 'stopped') return;
     await sleep(2000);
   }
@@ -458,7 +459,7 @@ async function waitForGuestStopped(host, nodeName, vmtype, vmid, timeoutMs = 120
 async function waitForTaskCompletion(host, nodeName, upid, timeoutMs = 300_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const task = await makeRequest(host, 'GET', `/nodes/${nodeName}/tasks/${encodeURIComponent(upid)}/status`);
+    const task = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/tasks/${encodeURIComponent(upid)}/status`);
     if (task.status === 'stopped') {
       if (task.exitstatus !== 'OK') {
         throw new Error(`Proxmox task failed: ${task.exitstatus}`);
@@ -476,20 +477,20 @@ export async function deleteVM(node, vmid) {
   let vmtype = 'qemu';
   let status;
   try {
-    status = await makeRequest(host, 'GET', `/nodes/${nodeName}/qemu/${vmid}/status/current`);
+    status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/current`);
   } catch {
-    status = await makeRequest(host, 'GET', `/nodes/${nodeName}/lxc/${vmid}/status/current`);
+    status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/current`);
     vmtype = 'lxc';
   }
 
   // Proxmox refuses to destroy a running guest — force-stop it first
   if (status.status === 'running') {
-    await makeRequest(host, 'POST', `/nodes/${nodeName}/${vmtype}/${vmid}/status/stop`, {});
+    await makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/status/stop`, {});
     await waitForGuestStopped(host, nodeName, vmtype, vmid);
   }
 
   // purge removes the guest from backup jobs, HA and replication config
-  const upid = await makeRequest(host, 'DELETE', `/nodes/${nodeName}/${vmtype}/${vmid}?purge=1&destroy-unreferenced-disks=1`);
+  const upid = await makeRequest(host, 'DELETE', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}?purge=1&destroy-unreferenced-disks=1`);
   await waitForTaskCompletion(host, nodeName, upid);
 
   clearCachedVmConfig(node, vmid, vmtype);
@@ -501,23 +502,23 @@ export async function deleteVM(node, vmid) {
 
 export async function getSnapshots(node, vmid, vmtype = 'qemu') {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'GET', `/nodes/${nodeName}/${vmtype}/${vmid}/snapshot`);
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/snapshot`);
 }
 
 export async function createSnapshot(node, vmid, vmtype = 'qemu', name, description = '', vmstate = false) {
   const { host, nodeName } = await resolveNode(node, { vmid });
   const body = { snapname: name, ...(description && { description }), ...(vmtype === 'qemu' && { vmstate: vmstate ? 1 : 0 }) };
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/${vmtype}/${vmid}/snapshot`, body);
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/snapshot`, body);
 }
 
 export async function deleteSnapshot(node, vmid, vmtype = 'qemu', snapname) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'DELETE', `/nodes/${nodeName}/${vmtype}/${vmid}/snapshot/${encodeURIComponent(snapname)}`);
+  return makeRequest(host, 'DELETE', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/snapshot/${encodeURIComponent(snapname)}`);
 }
 
 export async function rollbackSnapshot(node, vmid, vmtype = 'qemu', snapname) {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/${vmtype}/${vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`, {});
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`, {});
 }
 
 // ── Backup helpers ──────────────────────────────────────────────────────────
@@ -525,12 +526,12 @@ export async function rollbackSnapshot(node, vmid, vmtype = 'qemu', snapname) {
 export async function getVMBackups(node, vmid) {
   const { host, nodeName } = await resolveNode(node, { vmid });
   // List all storages, then check each backup-capable one for this VM's backups
-  const storages = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage`);
+  const storages = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage`);
   const backupStorages = storages.filter(s => s.active && s.enabled && s.content?.includes('backup'));
   const allBackups = [];
   for (const s of backupStorages) {
     try {
-      const content = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${s.storage}/content?content=backup&vmid=${vmid}`);
+      const content = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(s.storage)}/content?content=backup&vmid=${encodeURIComponent(vmid)}`);
       if (content) allBackups.push(...content.map(b => ({ ...b, storage: s.storage })));
     } catch { /* skip */ }
   }
@@ -548,7 +549,7 @@ export async function createVMBackup(node, vmid, opts = {}) {
     ...(opts.storage && { storage: opts.storage }),
     ...(opts.notes && { 'notes-template': opts.notes }),
   };
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/vzdump`, body);
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/vzdump`, body);
 }
 
 export async function restoreVMBackup(node, vmid, archive, storage, vmtype = 'qemu') {
@@ -559,17 +560,17 @@ export async function restoreVMBackup(node, vmid, archive, storage, vmtype = 'qe
     force: 1,
     ...(storage && { storage }),
   };
-  return makeRequest(host, 'POST', `/nodes/${nodeName}/${vmtype}`, body);
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}`, body);
 }
 
 export async function deleteVMBackup(node, storage, volid) {
   const { host, nodeName } = await resolveNode(node);
-  return makeRequest(host, 'DELETE', `/nodes/${nodeName}/storage/${storage}/content/${encodeURIComponent(volid)}`);
+  return makeRequest(host, 'DELETE', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/content/${encodeURIComponent(volid)}`);
 }
 
 export async function getBackupStorages(node) {
   const { host, nodeName } = await resolveNode(node);
-  const storages = await makeRequest(host, 'GET', `/nodes/${nodeName}/storage`);
+  const storages = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage`);
   return storages.filter(s => s.active && s.enabled && s.content?.includes('backup'));
 }
 
@@ -578,7 +579,7 @@ export async function getBackupStorages(node) {
 export async function listBackupFiles(node, storage, volid, filepath = '/') {
   const { host, nodeName } = await resolveNode(node);
   const params = new URLSearchParams({ volume: volid, filepath });
-  return makeRequest(host, 'GET', `/nodes/${nodeName}/storage/${storage}/file-restore/list?${params}`);
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/file-restore/list?${params}`);
 }
 
 export async function downloadBackupFile(node, storage, volid, filepath) {
@@ -586,7 +587,7 @@ export async function downloadBackupFile(node, storage, volid, filepath) {
   const params = new URLSearchParams({ volume: volid, filepath });
   const baseUrl = `https://${host.host}:${host.port}/api2/json`;
   const authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
-  const url = `${baseUrl}/nodes/${nodeName}/storage/${storage}/file-restore/download?${params}`;
+  const url = `${baseUrl}/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/file-restore/download?${params}`;
 
   // Use Node https module for proper TLS handling (fetch doesn't support agent)
   return new Promise((resolve, reject) => {
