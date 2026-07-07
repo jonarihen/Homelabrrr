@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-07 — Claim VMs and a grouped view on the Assignments page
+
+- The admin **VM Assignments** page now lets you **claim** unassigned VMs — a per-VM **Claim** button assigns it to your own account, and a **Claim all unassigned** button grabs everything at once (handy for VMs that predate the portal)
+- The assignments table is now **grouped for readability**: unassigned VMs at the top (amber header), then one section per user, each sorted by VMID with a per-group count
+
 ## 2026-07-07 — Security: deleting a backup now requires owning the VM
 
 - Deleting a VM backup now requires the VM to be **assigned to you** (or being an admin), matching the rule that already applied to VM deletion. Previously the "see all VMs" permission was enough — users with read-everything visibility could delete backups of VMs they didn't own.
