@@ -19,6 +19,7 @@ import sshRoutes, { sshSessions } from './routes/ssh.js';
 import sftpRoutes from './routes/sftp.js';
 import provisionRoutes from './routes/provision.js';
 import cloudImageRoutes from './routes/cloudimages.js';
+import portalRoutes from './routes/portal.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
@@ -104,6 +105,7 @@ app.use('/api/ssh',   sshRoutes);
 app.use('/api/sftp',  sftpRoutes);
 app.use('/api/provision', provisionRoutes);
 app.use('/api/cloud-images', cloudImageRoutes);
+app.use('/api/portal', portalRoutes);
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 // Global error handler — sanitize leaked details

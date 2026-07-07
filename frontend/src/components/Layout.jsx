@@ -39,8 +39,11 @@ export default function Layout({ children }) {
         </div>
 
         <nav className="flex-1 py-3 space-y-0.5 overflow-y-auto">
+          <NavLink to="/welcome" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
+            <Icon d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /> Overview
+          </NavLink>
           <NavLink to="/dashboard" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-            <Icon d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /> My VMs
+            <Icon d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2z" /> My VMs
           </NavLink>
           {(user?.isAdmin || user?.canProvision) && (
             <NavLink to="/provision" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>

@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
 import { ConsoleSessionsProvider } from './contexts/ConsoleSessionsContext.jsx';
 import Login from './pages/Login.jsx';
+import WelcomePage from './pages/WelcomePage.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import VMPage from './pages/VMPage.jsx';
 import VNCPage from './pages/VNCPage.jsx';
@@ -63,7 +64,7 @@ function RootRedirect() {
   const { user, loading } = useAuth();
   if (loading) return null;
   if (!user) return <Navigate to="/login" replace />;
-  return <Navigate to="/dashboard" replace />;
+  return <Navigate to="/welcome" replace />;
 }
 
 export default function App() {
@@ -76,6 +77,7 @@ export default function App() {
 
             <Route path="/" element={<PrivateRoute><RootRedirect /></PrivateRoute>} />
 
+            <Route path="/welcome" element={<PrivateRoute><WelcomePage /></PrivateRoute>} />
             <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
 
             <Route path="/vm/:node/:vmid" element={<PrivateRoute><VMPage /></PrivateRoute>} />

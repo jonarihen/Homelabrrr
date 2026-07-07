@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-07 — New welcome page after login
+
+- Logging in now lands you on a new **Overview** page instead of the VM list — a quick glance at how the lab is doing before you dive in
+- **System status** shows whether the platform is healthy (`All systems operational` / `Degraded` / `Major outage`) based on hypervisor reachability. Admins additionally see a per-host breakdown with PVE version, running VM counts, and fleet totals — regular users only see the overall state
+- **Your VMs** summarizes your own machines (total / running / stopped) with quick links to each one and to the full VM list
+- **Notices** let admins publish maintenance windows, warnings, and info messages that every user sees on login — create, edit, deactivate, and delete right on the page
+- **Uplinks** is an admin-curated list of useful links (wiki, monitoring, Discord, …) shown to everyone
+- The Overview page is also available from the top of the sidebar at any time
+
 ## 2026-07-07 — Security: session cookies are now Secure by default
 
 - The session cookie's `Secure` attribute is now **on by default** — previously it was only applied when the operator explicitly set `COOKIE_SECURE=true`, so a deployment that forgot the variable shipped session cookies that browsers would also send over plain HTTP, exposing them to interception on any TLS-stripping hop. `COOKIE_SECURE` is now opt-**out**: set it to `false` only for plain-HTTP local development.

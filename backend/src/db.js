@@ -302,6 +302,30 @@ try { db.exec("ALTER TABLE managed_vips ADD COLUMN vlan_interface TEXT DEFAULT '
 try { db.exec("ALTER TABLE firewalls ADD COLUMN external_ip TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE firewalls ADD COLUMN root_wan_zone TEXT DEFAULT 'underlay'"); } catch { /* exists */ }
 
+// Landing page: admin-managed notices (maintenance windows etc.) and useful links
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS portal_notices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    body TEXT DEFAULT '',
+    level TEXT DEFAULT 'info',
+    active INTEGER DEFAULT 1,
+    created_by TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`); } catch { /* exists */ }
+
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS portal_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    url TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`); } catch { /* exists */ }
+
 assertSecretEncryptionKey();
 
 function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {

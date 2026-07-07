@@ -25,7 +25,7 @@ export default function Login() {
       const result = await login(form.username, form.password);
       if (result.requiresTwoFactor) setStep('totp');
       else if (result.twoFactorSetupRequired) navigate('/account', { replace: true });
-      else navigate('/dashboard', { replace: true });
+      else navigate('/welcome', { replace: true });
     } catch (e) {
       setError(e.response?.data?.error || 'Login failed');
     } finally { setLoading(false); }
@@ -36,7 +36,7 @@ export default function Login() {
     setError(''); setLoading(true);
     try {
       await verifyTwoFactor(code);
-      navigate('/dashboard', { replace: true });
+      navigate('/welcome', { replace: true });
     } catch (e) {
       setError(e.response?.data?.error || 'Invalid code');
       setCode('');
