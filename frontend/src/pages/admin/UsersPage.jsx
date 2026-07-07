@@ -1,12 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId, cloneElement } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useNotify } from '../../contexts/NotificationsContext.jsx';
+import { useConfirm } from '../../contexts/ConfirmContext.jsx';
 import { displayNode, routeNode, vmIdentityKey } from '../../utils/nodeRef.js';
 
 export default function UsersPage() {
   useDocumentTitle('Users');
+  const notify = useNotify();
+  const confirm = useConfirm();
   const { user: currentUser } = useAuth();
   const canGrantPrivileges = !!currentUser?.isAdmin;
   const [users, setUsers]           = useState([]);
@@ -37,12 +41,12 @@ export default function UsersPage() {
   useEffect(() => { load(); }, []);
 
   const deleteUser = async (id) => {
-    if (!confirm('Delete this user? This will also remove their VM and VLAN assignments.')) return;
+    if (!(await confirm({ title: 'Delete user', message: 'This also removes their VM and VLAN assignments.', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await api.delete(`/admin/users/${id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      notify.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -51,7 +55,7 @@ export default function UsersPage() {
       await api.post(`/admin/users/${id}/unlock`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to unlock');
+      notify.error(e.response?.data?.error || 'Failed to unlock');
     }
   };
 
@@ -70,15 +74,15 @@ export default function UsersPage() {
         </button>
       </div>
 
-      {error && <p className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
+      {error && <p role="alert" className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
 
       {loading ? (
         <div className="space-y-3">
           {[1,2,3].map(i => <div key={i} className="h-16 bg-gray-900 rounded-xl animate-pulse" />)}
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
                 <th className="text-left px-4 py-3">Username</th>
@@ -234,7 +238,7 @@ function CreateUserModal({ canCreateAdmin, onClose, onCreated }) {
             <span className="text-sm text-gray-300">Admin account</span>
           </label>
         )}
-        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <button type="submit" disabled={saving} className={btnCls}>
           {saving ? 'Creating...' : 'Create User'}
         </button>
@@ -259,6 +263,7 @@ const PERM_DEFS = [
 ];
 
 function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
+  const confirm = useConfirm();
   const canGrantPrivileges = !!currentUser?.isAdmin;
   const [tab, setTab]           = useState(() => canGrantPrivileges ? 'permissions' : 'vms');
   const [userVMs, setUserVMs]   = useState([]);
@@ -346,7 +351,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
   };
 
   const resetTwoFactor = async () => {
-    if (!confirm(`Disable 2FA for "${user.username}"? They will be able to sign in with only their password until they re-enroll.`)) return;
+    if (!(await confirm({ title: 'Disable 2FA', message: `Disable 2FA for "${user.username}"? They will be able to sign in with only their password until they re-enroll.`, confirmLabel: 'Disable 2FA', danger: true }))) return;
     try {
       await api.post(`/admin/users/${user.id}/reset-2fa`);
       setTwoFaMsg('2FA has been disabled for this user.');
@@ -378,7 +383,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
 
   return (
     <Modal title={`Manage — ${user.username}`} onClose={onClose} size="lg">
-      <div className="flex border-b border-gray-700 overflow-x-auto">
+      <div role="tablist" aria-label="Manage user sections" className="flex border-b border-gray-700 overflow-x-auto">
         {[
           ...(canGrantPrivileges ? [{ id: 'permissions', label: 'Permissions' }] : []),
           { id: 'vms', label: 'VM Assignments' },
@@ -387,6 +392,10 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
         ].map(t => (
           <button
             key={t.id}
+            role="tab"
+            id={`manage-tab-${t.id}`}
+            aria-selected={tab === t.id}
+            aria-controls="manage-tabpanel"
             onClick={() => { setTab(t.id); setError(''); }}
             className={`px-5 py-3 text-sm whitespace-nowrap transition-colors ${
               tab === t.id
@@ -399,8 +408,8 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
         ))}
       </div>
 
-      <div className="p-5">
-        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2 mb-4">{error}</p>}
+      <div id="manage-tabpanel" role="tabpanel" aria-labelledby={`manage-tab-${tab}`} className="p-5">
+        {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded p-2 mb-4">{error}</p>}
 
         {canGrantPrivileges && tab === 'permissions' && (
           <div className="space-y-4">
@@ -546,7 +555,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
                   autoFocus
                 />
               </Field>
-              {usernameMsg && <p className={`text-xs ${usernameMsg.startsWith('Failed') ? 'text-red-400' : 'text-green-400'}`}>{usernameMsg}</p>}
+              {usernameMsg && <p role={usernameMsg.startsWith('Failed') ? 'alert' : 'status'} aria-live="polite" className={`text-xs ${usernameMsg.startsWith('Failed') ? 'text-red-400' : 'text-green-400'}`}>{usernameMsg}</p>}
               <button type="submit" className={btnCls}>Change Username</button>
             </form>
 
@@ -555,7 +564,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
               {canGrantPrivileges && user.twoFactorEnabled ? (
                 <div className="space-y-2">
                   <p className="text-xs text-gray-400">This user has 2FA enabled. You can disable it on their behalf if they have lost access to their authenticator.</p>
-                  {twoFaMsg && <p className={`text-xs ${twoFaMsg.startsWith('Failed') ? 'text-red-400' : 'text-green-400'}`}>{twoFaMsg}</p>}
+                  {twoFaMsg && <p role={twoFaMsg.startsWith('Failed') ? 'alert' : 'status'} aria-live="polite" className={`text-xs ${twoFaMsg.startsWith('Failed') ? 'text-red-400' : 'text-green-400'}`}>{twoFaMsg}</p>}
                   <button
                     type="button"
                     onClick={resetTwoFactor}
@@ -583,7 +592,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
                     className={inputCls}
                   />
                 </Field>
-                {pwMsg && <p className={`text-xs ${pwMsg.startsWith('Failed') ? 'text-red-400' : 'text-green-400'}`}>{pwMsg}</p>}
+                {pwMsg && <p role={pwMsg.startsWith('Failed') ? 'alert' : 'status'} aria-live="polite" className={`text-xs ${pwMsg.startsWith('Failed') ? 'text-red-400' : 'text-green-400'}`}>{pwMsg}</p>}
                 <button type="submit" className={btnCls}>Change Password</button>
               </form>
             </div>
@@ -600,10 +609,11 @@ const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2
 const btnCls   = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors';
 
 function Field({ label, children }) {
+  const id = useId();
   return (
     <div>
-      <label className="block text-xs text-gray-400 mb-1.5">{label}</label>
-      {children}
+      <label htmlFor={id} className="block text-xs text-gray-400 mb-1.5">{label}</label>
+      {cloneElement(children, { id })}
     </div>
   );
 }
@@ -657,8 +667,18 @@ function DangerBtn({ children, onClick }) {
 }
 
 function PermToggle({ label, desc, checked, onChange }) {
+  const [pending, setPending] = useState(false);
+  const handleChange = async (e) => {
+    const next = e.target.checked;
+    setPending(true);
+    try {
+      await onChange(next);
+    } finally {
+      setPending(false);
+    }
+  };
   return (
-    <label className="flex items-center justify-between bg-gray-800 rounded-lg px-4 py-2.5 cursor-pointer hover:bg-gray-800/80 transition-colors">
+    <label className={`flex items-center justify-between bg-gray-800 rounded-lg px-4 py-2.5 hover:bg-gray-800/80 transition-colors ${pending ? 'opacity-60 cursor-wait' : 'cursor-pointer'}`}>
       <div>
         <p className="text-sm text-white">{label}</p>
         {desc && <p className="text-xs text-gray-500">{desc}</p>}
@@ -666,7 +686,8 @@ function PermToggle({ label, desc, checked, onChange }) {
       <input
         type="checkbox"
         checked={checked}
-        onChange={e => onChange(e.target.checked)}
+        disabled={pending}
+        onChange={handleChange}
         className="accent-blue-500 w-4 h-4 shrink-0 ml-3"
       />
     </label>

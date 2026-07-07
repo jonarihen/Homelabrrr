@@ -63,34 +63,52 @@ export default function SSHSessionPanel({ vm, visible = true }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Tab bar */}
-      <div className="flex items-center gap-1 px-3 py-1.5 border-b border-gray-700 bg-gray-900/80 shrink-0">
-        <TabButton active={activeTab === 'terminal'} onClick={() => setActiveTab('terminal')} icon={
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3" />
-          </svg>
-        }>Terminal</TabButton>
+      <div role="tablist" aria-label="SSH session" className="flex items-center gap-1 px-3 py-1.5 border-b border-gray-700 bg-gray-900/80 shrink-0">
+        <TabButton
+          id="ssh-tab-terminal"
+          controls="ssh-panel-terminal"
+          active={activeTab === 'terminal'}
+          onClick={() => setActiveTab('terminal')}
+          icon={
+            <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3" />
+            </svg>
+          }
+        >Terminal</TabButton>
 
         <TabButton
+          id="ssh-tab-files"
+          controls="ssh-panel-files"
           active={activeTab === 'files'}
           onClick={openFiles}
           loading={sftpConnecting}
           icon={
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
             </svg>
           }
         >Files</TabButton>
 
-        {sftpError && <span className="text-xs text-red-400 ml-2">{sftpError}</span>}
+        {sftpError && <span role="alert" className="text-xs text-red-400 ml-2">{sftpError}</span>}
       </div>
 
       {/* Panels */}
-      <div className={`min-h-0 flex-1 ${activeTab === 'terminal' ? '' : 'hidden'}`}>
+      <div
+        role="tabpanel"
+        id="ssh-panel-terminal"
+        aria-labelledby="ssh-tab-terminal"
+        className={`min-h-0 flex-1 ${activeTab === 'terminal' ? '' : 'hidden'}`}
+      >
         <SSHTerminal token={sshToken} visible={visible && activeTab === 'terminal'} />
       </div>
 
       {activeTab === 'files' && sftpToken && (
-        <div className="min-h-0 flex-1 relative">
+        <div
+          role="tabpanel"
+          id="ssh-panel-files"
+          aria-labelledby="ssh-tab-files"
+          className="min-h-0 flex-1 relative"
+        >
           <SFTPBrowser token={sftpToken} />
         </div>
       )}
@@ -98,10 +116,14 @@ export default function SSHSessionPanel({ vm, visible = true }) {
   );
 }
 
-function TabButton({ active, onClick, icon, children, loading = false }) {
+function TabButton({ active, onClick, icon, children, loading = false, id, controls }) {
   return (
     <button
       type="button"
+      role="tab"
+      id={id}
+      aria-selected={active}
+      aria-controls={controls}
       onClick={onClick}
       disabled={loading}
       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${

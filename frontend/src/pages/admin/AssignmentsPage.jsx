@@ -3,9 +3,13 @@ import api from '../../api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, vmIdentityKey } from '../../utils/nodeRef.js';
+import { useNotify } from '../../contexts/NotificationsContext.jsx';
+import { useConfirm } from '../../contexts/ConfirmContext.jsx';
 
 export default function AssignmentsPage() {
   useDocumentTitle('Assignments');
+  const notify = useNotify();
+  const confirm = useConfirm();
   const [vms, setVms]       = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]   = useState('');
@@ -25,12 +29,12 @@ export default function AssignmentsPage() {
   useEffect(() => { load(); }, []);
 
   const unassign = async (assignment) => {
-    if (!confirm('Remove this VM assignment?')) return;
+    if (!(await confirm({ title: 'Remove assignment', message: 'Remove this VM assignment?', confirmLabel: 'Remove', danger: true }))) return;
     try {
       await api.delete(`/admin/assignments/${assignment.id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed');
+      notify.error(e.response?.data?.error || 'Failed to remove assignment');
     }
   };
 
@@ -57,11 +61,9 @@ export default function AssignmentsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {tagSync.msg && (
-            <span className={`text-xs font-mono ${tagSync.msg.startsWith('Failed') ? 'text-red-400' : 'text-gray-500'}`}>
-              {tagSync.msg}
-            </span>
-          )}
+          <span role="status" aria-live="polite" className={`text-xs font-mono ${tagSync.msg.startsWith('Failed') ? 'text-red-400' : 'text-gray-500'}`}>
+            {tagSync.msg}
+          </span>
           <button
             onClick={syncTags}
             disabled={tagSync.running}
@@ -79,15 +81,20 @@ export default function AssignmentsPage() {
         </div>
       </div>
 
-      {error && <p className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
+      {error && <p role="alert" className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
 
       {loading ? (
         <div className="space-y-3">
           {[1,2,3,4].map(i => <div key={i} className="h-14 bg-gray-900 rounded-xl animate-pulse" />)}
         </div>
+      ) : vms.length === 0 ? (
+        <div className="text-center py-20 text-gray-500">
+          <p>No VMs found.</p>
+          <p className="text-sm mt-1">Register a Proxmox host to see VMs here.</p>
+        </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
                 <th className="text-left px-4 py-3">VM</th>

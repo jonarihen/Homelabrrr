@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useId } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
+import { useNotify } from '../contexts/NotificationsContext.jsx';
+import { useConfirm } from '../contexts/ConfirmContext.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
 import Modal from '../components/Modal.jsx';
 import VLANModal from '../components/VLANModal.jsx';
@@ -256,8 +258,8 @@ export default function VMPage() {
         {/* ── Header ── */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <button onClick={() => navigate('/dashboard')} className="text-gray-500 hover:text-white transition-colors p-2 rounded-xl hover:bg-gray-800">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" /></svg>
+            <button onClick={() => navigate('/dashboard')} aria-label="Back to VMs" className="text-gray-500 hover:text-white transition-colors p-2 rounded-xl hover:bg-gray-800">
+              <svg className="w-5 h-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" /></svg>
             </button>
             <div>
               <h1 className="aaris-display text-xl text-gray-100">{vm.name || `VM ${vm.vmid}`}</h1>
@@ -340,7 +342,7 @@ export default function VMPage() {
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
             }>Delete</ActionBtn>
           </div>
-          {actionError && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5 mt-3">{actionError}</p>}
+          {actionError && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5 mt-3">{actionError}</p>}
         </div>
 
         {/* ── Stats Grid ── */}
@@ -494,7 +496,7 @@ export default function VMPage() {
             </div>
             <div className="mt-4">
               <div className="flex items-center justify-between mb-1.5">
-                <label className="block text-xs text-gray-500">Host Key Fingerprint</label>
+                <label htmlFor="ssh-host-fingerprint" className="block text-xs text-gray-500">Host Key Fingerprint</label>
                 <button
                   onClick={scanSshFingerprint}
                   disabled={scanningFingerprint}
@@ -504,6 +506,7 @@ export default function VMPage() {
                 </button>
               </div>
               <input
+                id="ssh-host-fingerprint"
                 type="text"
                 value={sshCfg.hostFingerprint}
                 onChange={e => setSshCfg(c => ({ ...c, hostFingerprint: e.target.value }))}
@@ -530,7 +533,7 @@ export default function VMPage() {
               )}
             </div>
             {sshSavingError && (
-              <p className="mt-3 text-xs text-red-400 bg-red-900/20 rounded-lg p-3">{sshSavingError}</p>
+              <p role="alert" className="mt-3 text-xs text-red-400 bg-red-900/20 rounded-lg p-3">{sshSavingError}</p>
             )}
           </div>
         </div>
@@ -547,6 +550,7 @@ export default function VMPage() {
 
 function DeleteVMModal({ vm, node, onClose }) {
   const navigate = useNavigate();
+  const notify = useNotify();
   const [confirmText, setConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
@@ -559,7 +563,7 @@ function DeleteVMModal({ vm, node, onClose }) {
       const r = await api.delete(`/vms/${node}/${vm.vmid}`);
       const failed = r.data?.failedBackups?.length || 0;
       if (failed > 0) {
-        alert(`VM deleted, but ${failed} backup(s) could not be removed. Check the Proxmox storage manually.`);
+        notify.warning(`VM deleted, but ${failed} backup(s) could not be removed. Check the Proxmox storage manually.`);
       }
       navigate('/dashboard');
     } catch (e) {
@@ -686,6 +690,9 @@ function ActionBtn({ children, color, onClick, disabled, icon }) {
 // ── Backups Section ─────────────────────────────────────────────────────────
 
 function SnapshotsSection({ node, vmid }) {
+  const confirm = useConfirm();
+  const nameId = useId();
+  const descId = useId();
   const [snapshots, setSnapshots] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -733,6 +740,7 @@ function SnapshotsSection({ node, vmid }) {
   };
 
   const remove = async (snapname) => {
+    if (!(await confirm({ title: 'Delete snapshot', message: `Delete snapshot "${snapname}"? This cannot be undone.`, confirmLabel: 'Delete', danger: true }))) return;
     setDeleting(snapname); setError(''); setSuccess('');
     try {
       await api.delete(`/vms/${node}/${vmid}/snapshots/${encodeURIComponent(snapname)}`);
@@ -752,22 +760,24 @@ function SnapshotsSection({ node, vmid }) {
         </button>
       </div>
 
-      {error && <div className="bg-red-900/20 border border-red-800/50 rounded-xl p-3 text-red-400 text-xs">{error}</div>}
-      {success && <div className="bg-green-900/20 border border-green-800/50 rounded-xl p-3 text-green-400 text-xs">{success}</div>}
+      {error && <div role="alert" className="bg-red-900/20 border border-red-800/50 rounded-xl p-3 text-red-400 text-xs">{error}</div>}
+      {success && <div role="status" aria-live="polite" className="bg-green-900/20 border border-green-800/50 rounded-xl p-3 text-green-400 text-xs">{success}</div>}
 
       {showForm && (
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs text-gray-500 mb-1.5 font-medium">Name</label>
+              <label htmlFor={nameId} className="block text-xs text-gray-500 mb-1.5 font-medium">Name</label>
               <input
+                id={nameId}
                 value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                 placeholder="pre-update" className="w-full bg-gray-800 border border-gray-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
               />
             </div>
             <div>
-              <label className="block text-xs text-gray-500 mb-1.5 font-medium">Description (optional)</label>
+              <label htmlFor={descId} className="block text-xs text-gray-500 mb-1.5 font-medium">Description (optional)</label>
               <input
+                id={descId}
                 value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
                 placeholder="Before applying updates" className="w-full bg-gray-800 border border-gray-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
               />
@@ -787,13 +797,13 @@ function SnapshotsSection({ node, vmid }) {
         </div>
       )}
 
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
         {loading ? (
           <div className="p-6 text-center text-gray-500 text-sm">Loading snapshots...</div>
         ) : snapshots.length === 0 ? (
           <div className="p-6 text-center text-gray-500 text-sm">No snapshots</div>
         ) : (
-          <table className="w-full">
+          <table className="w-full min-w-[560px]">
             <thead>
               <tr className="bg-gray-800/50 text-xs text-gray-400">
                 <th className="text-left px-4 py-3 font-medium">Name</th>
@@ -838,6 +848,7 @@ function SnapshotsSection({ node, vmid }) {
 }
 
 function BackupsSection({ node, vmid }) {
+  const confirm = useConfirm();
   const [backups, setBackups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [storages, setStorages] = useState([]);
@@ -903,7 +914,7 @@ function BackupsSection({ node, vmid }) {
   };
 
   const deleteBackup = async (storage, volid) => {
-    if (!confirm('Delete this backup? This cannot be undone.')) return;
+    if (!(await confirm({ title: 'Delete backup', message: 'Delete this backup? This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
     setDeleting(volid); setError('');
     try {
       await api.delete(`/vms/${node}/${vmid}/backups/${storage}/${volid}`);
@@ -996,8 +1007,8 @@ function BackupsSection({ node, vmid }) {
         </button>
       </div>
 
-      {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
-      {success && <p className="text-xs text-green-400 bg-green-900/20 rounded-lg p-2.5">{success}</p>}
+      {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
+      {success && <p role="status" aria-live="polite" className="text-xs text-green-400 bg-green-900/20 rounded-lg p-2.5">{success}</p>}
 
       {/* Create form */}
       {showForm && (
@@ -1115,7 +1126,7 @@ function BackupsSection({ node, vmid }) {
             ))}
           </div>
 
-          {browseError && <p className="text-xs text-red-400 bg-red-900/20 p-3 mx-5 my-3 rounded-lg">{browseError}</p>}
+          {browseError && <p role="alert" className="text-xs text-red-400 bg-red-900/20 p-3 mx-5 my-3 rounded-lg">{browseError}</p>}
 
           {browseLoading ? (
             <div className="p-6 space-y-2">
@@ -1248,10 +1259,12 @@ function BackupsSection({ node, vmid }) {
 }
 
 function InputField({ label, value, onChange, placeholder, type = 'text' }) {
+  const id = useId();
   return (
     <div>
-      <label className="block text-xs text-gray-500 mb-1.5 font-medium">{label}</label>
+      <label htmlFor={id} className="block text-xs text-gray-500 mb-1.5 font-medium">{label}</label>
       <input
+        id={id}
         type={type}
         value={value}
         onChange={e => onChange(e.target.value)}

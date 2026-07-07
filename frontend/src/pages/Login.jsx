@@ -80,8 +80,9 @@ export default function Login() {
         {step === 'credentials' ? (
           <form onSubmit={submitCredentials} className="border border-gray-800 bg-gray-900 p-6 space-y-4">
             <div>
-              <label className={labelCls}>Username</label>
+              <label htmlFor="login-username" className={labelCls}>Username</label>
               <input
+                id="login-username"
                 type="text"
                 autoComplete="username"
                 value={form.username}
@@ -93,8 +94,9 @@ export default function Login() {
               />
             </div>
             <div>
-              <label className={labelCls}>Password</label>
+              <label htmlFor="login-password" className={labelCls}>Password</label>
               <input
+                id="login-password"
                 type="password"
                 autoComplete="current-password"
                 value={form.password}
@@ -105,7 +107,7 @@ export default function Login() {
               />
             </div>
             {error && (
-              <p className="flex items-start gap-2 text-xs text-red-400 bg-red-900/20 border border-red-800/40 px-3 py-2.5 font-mono">
+              <p role="alert" className="flex items-start gap-2 text-xs text-red-400 bg-red-900/20 border border-red-800/40 px-3 py-2.5 font-mono">
                 <span className="aaris-led aaris-led--error mt-1" /> {error}
               </p>
             )}
@@ -139,7 +141,7 @@ export default function Login() {
               />
             </div>
             {error && (
-              <p className="flex items-start gap-2 text-xs text-red-400 bg-red-900/20 border border-red-800/40 px-3 py-2.5 font-mono">
+              <p role="alert" className="flex items-start gap-2 text-xs text-red-400 bg-red-900/20 border border-red-800/40 px-3 py-2.5 font-mono">
                 <span className="aaris-led aaris-led--error mt-1" /> {error}
               </p>
             )}

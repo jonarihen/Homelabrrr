@@ -1,11 +1,16 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
+import useDialogA11y from '../hooks/useDialogA11y.js';
+import { useConfirm } from '../contexts/ConfirmContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
 export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
   const vmNode = routeNode(vm);
+  const confirm = useConfirm();
+  const dialogRef = useRef(null);
+  useDialogA11y(dialogRef, onClose);
   const [tab, setTab] = useState('cpu-mem');
   const [cores, setCores] = useState(vm.maxcpu || vm.cpus || 2);
   const [memory, setMemory] = useState(vm.maxmem ? Math.round(vm.maxmem / 1024 / 1024) : 2048);
@@ -53,6 +58,12 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
       setError('Select a disk and enter a valid size');
       return;
     }
+    if (!(await confirm({
+      title: 'Expand disk',
+      message: `Expand ${selectedDisk} by +${diskAddGb}G? Disk growth cannot be undone.`,
+      confirmLabel: 'Expand',
+      danger: true,
+    }))) return;
     setDiskSaving(true);
     setError('');
     setSuccess('');
@@ -73,14 +84,19 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="hw-modal-title"
+        tabIndex={-1}
         className="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-lg mx-4"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800">
-          <h2 className="text-white font-semibold text-sm">Edit Hardware — {vm.name || `VM ${vm.vmid}`}</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <h2 id="hw-modal-title" className="text-white font-semibold text-sm">Edit Hardware — {vm.name || `VM ${vm.vmid}`}</h2>
+          <button onClick={onClose} aria-label="Close" className="text-gray-500 hover:text-white transition-colors">
+            <svg className="w-5 h-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
@@ -217,8 +233,8 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
             </>
           )}
 
-          {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
-          {success && <p className="text-xs text-green-400 bg-green-900/20 rounded-lg p-2.5">{success}</p>}
+          {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
+          {success && <p role="status" aria-live="polite" className="text-xs text-green-400 bg-green-900/20 rounded-lg p-2.5">{success}</p>}
         </div>
       </div>
     </div>

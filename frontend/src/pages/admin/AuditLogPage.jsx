@@ -66,6 +66,7 @@ export default function AuditLogPage() {
           <select
             value={actionFilter}
             onChange={handleFilterChange}
+            aria-label="Filter by action"
             className="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
           >
             <option value="">All actions</option>
@@ -82,8 +83,8 @@ export default function AuditLogPage() {
         </div>
       )}
 
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-        <table className="w-full">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
+        <table className="w-full min-w-[720px]">
           <thead>
             <tr className="bg-gray-800/50">
               <th className="text-left text-xs font-medium text-gray-400 uppercase tracking-wider px-4 py-3">Time</th>
@@ -114,7 +115,7 @@ export default function AuditLogPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-300">{row.target}</td>
-                  <td className="px-4 py-3 text-sm text-gray-300 max-w-xs truncate">{row.detail}</td>
+                  <td className="px-4 py-3 text-sm text-gray-300 max-w-xs truncate" title={row.detail}>{row.detail}</td>
                   <td className="px-4 py-3 text-xs text-gray-500 font-mono">{row.ip}</td>
                 </tr>
               ))

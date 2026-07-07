@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import api from '../api.js';
+import { useConfirm } from '../contexts/ConfirmContext.jsx';
 
 export default function VMIPManagementPanel({ node, vmid, currentSshHost = '', onSshHostUpdate }) {
   const [interfaces, setInterfaces] = useState([]);
@@ -43,7 +44,7 @@ export default function VMIPManagementPanel({ node, vmid, currentSshHost = '', o
           ))}
         </div>
       ) : error ? (
-        <div className="bg-red-900/20 border border-red-800/40 rounded-2xl p-4 text-sm text-red-300">{error}</div>
+        <div role="alert" className="bg-red-900/20 border border-red-800/40 rounded-2xl p-4 text-sm text-red-300">{error}</div>
       ) : interfaces.length === 0 ? (
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 text-sm text-gray-500">
           No network interfaces were detected on this VM.
@@ -68,6 +69,10 @@ export default function VMIPManagementPanel({ node, vmid, currentSshHost = '', o
 }
 
 function IPInterfaceCard({ network, node, vmid, currentSshHost, onReload, onSshHostUpdate }) {
+  const confirm = useConfirm();
+  const scopeSelectId = useId();
+  const reservedIpId = useId();
+  const descriptionId = useId();
   const scopes = network.dhcpScopes || [];
   const defaultScopeId = useMemo(() => {
     const preferred = scopes.find((scope) => !scope.error);
@@ -128,6 +133,13 @@ function IPInterfaceCard({ network, node, vmid, currentSshHost, onReload, onSshH
   const removeReservation = async () => {
     if (!selectedScope || selectedScope.error || !selectedScope.reservation) return;
 
+    if (!(await confirm({
+      title: 'Remove reservation',
+      message: `Remove the DHCP reservation on ${selectedScope.firewallName} for ${network.name}? This updates the firewall immediately.`,
+      confirmLabel: 'Remove',
+      danger: true,
+    }))) return;
+
     setSaving(true);
     setError('');
     setSuccess('');
@@ -179,8 +191,9 @@ function IPInterfaceCard({ network, node, vmid, currentSshHost, onReload, onSshH
         <>
           {scopes.length > 1 && (
             <div>
-              <label className="block text-xs text-gray-500 mb-1.5">Firewall DHCP Scope</label>
+              <label htmlFor={scopeSelectId} className="block text-xs text-gray-500 mb-1.5">Firewall DHCP Scope</label>
               <select
+                id={scopeSelectId}
                 value={selectedFirewallId}
                 onChange={(e) => setSelectedFirewallId(e.target.value)}
                 className={inputCls}
@@ -231,8 +244,9 @@ function IPInterfaceCard({ network, node, vmid, currentSshHost, onReload, onSshH
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1.5">Reserved IP</label>
+                  <label htmlFor={reservedIpId} className="block text-xs text-gray-500 mb-1.5">Reserved IP</label>
                   <input
+                    id={reservedIpId}
                     type="text"
                     value={reservationIp}
                     onChange={(e) => setReservationIp(e.target.value)}
@@ -242,8 +256,9 @@ function IPInterfaceCard({ network, node, vmid, currentSshHost, onReload, onSshH
                 </div>
 
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1.5">Description</label>
+                  <label htmlFor={descriptionId} className="block text-xs text-gray-500 mb-1.5">Description</label>
                   <input
+                    id={descriptionId}
                     type="text"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
@@ -253,8 +268,8 @@ function IPInterfaceCard({ network, node, vmid, currentSshHost, onReload, onSshH
                 </div>
               </div>
 
-              {error && <p className="text-xs text-red-300 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">{error}</p>}
-              {success && <p className="text-xs text-green-300 bg-green-900/20 border border-green-800/30 rounded-lg px-3 py-2">{success}</p>}
+              {error && <p role="alert" className="text-xs text-red-300 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">{error}</p>}
+              {success && <p role="status" aria-live="polite" className="text-xs text-green-300 bg-green-900/20 border border-green-800/30 rounded-lg px-3 py-2">{success}</p>}
 
               <div className="flex flex-wrap gap-2">
                 <button

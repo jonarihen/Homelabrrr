@@ -5,6 +5,7 @@ import useVmName from '../hooks/useVmName.js';
 import api from '../api.js';
 import { displayNode } from '../utils/nodeRef.js';
 import { readClipboardText, typeIntoVnc } from '../utils/vncPaste.js';
+import { useConfirm } from '../contexts/ConfirmContext.jsx';
 
 // Preload noVNC — Proxmox VNC proxies time out quickly
 const rfbModulePromise = import('@novnc/novnc/lib/rfb.js');
@@ -24,6 +25,7 @@ export default function VNCPage() {
   const vmName = useVmName(node, vmid);
   useDocumentTitle(`VNC - ${vmName}`);
   const navigate        = useNavigate();
+  const confirm         = useConfirm();
   const containerRef    = useRef(null);
   const rfbRef          = useRef(null);
   const [status, setStatus] = useState('Connecting...');
@@ -36,7 +38,12 @@ export default function VNCPage() {
     if (!rfb || pasting) return;
     const text = await readClipboardText();
     if (!text) return;
-    if (text.length > 2000 && !confirm(`Type all ${text.length} clipboard characters into the VM?`)) return;
+    if (text.length > 2000 && !(await confirm({
+      title: 'Paste clipboard',
+      message: `Type all ${text.length} clipboard characters into the VM?`,
+      confirmLabel: 'Paste',
+      danger: false,
+    }))) return;
     setPasting(true);
     try {
       await typeIntoVnc(rfb, text, { shouldStop: () => pasteStopRef.current || rfbRef.current !== rfb });
@@ -93,17 +100,18 @@ export default function VNCPage() {
   return (
     <div className="flex flex-col h-screen bg-black">
       {/* Toolbar */}
-      <div className="flex items-center gap-3 px-4 py-2 bg-gray-900 border-b border-gray-800 shrink-0">
+      <div className="flex flex-wrap items-center gap-3 px-4 py-2 bg-gray-900 border-b border-gray-800 shrink-0">
         <button
           onClick={() => navigate(-1)}
+          aria-label="Go back"
           className="text-gray-400 hover:text-white transition-colors"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
         </button>
 
-        <span className="text-gray-400 text-sm">
+        <span className="text-gray-400 text-sm min-w-0 truncate">
           VNC — {vmName}
           <span className="text-gray-600 font-mono ml-2">{displayNode(node)}/{vmid}</span>
         </span>
@@ -153,7 +161,7 @@ export default function VNCPage() {
       {/* VNC canvas */}
       <div className="flex-1 relative">
         {error ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-red-400 gap-3">
+          <div role="alert" className="absolute inset-0 flex flex-col items-center justify-center text-red-400 gap-3">
             <p>{error}</p>
             <button
               onClick={() => window.location.reload()}

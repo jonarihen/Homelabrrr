@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useId, useState, useEffect } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useNotify } from '../../contexts/NotificationsContext.jsx';
+import { useConfirm } from '../../contexts/ConfirmContext.jsx';
 
 function buildManagedSubnet(tag) {
   const parsedTag = parseInt(tag, 10);
@@ -47,6 +49,8 @@ function findNextAvailableVlanTag(vlans, firewalls) {
 export default function VLANsPage() {
   useDocumentTitle('VLANs');
   const { user } = useAuth();
+  const notify = useNotify();
+  const confirm = useConfirm();
   const [vlans, setVlans]       = useState([]);
   const [firewalls, setFirewalls] = useState([]);
   const [loading, setLoading]   = useState(true);
@@ -82,18 +86,18 @@ export default function VLANsPage() {
     const vlan = vlans.find(v => v.id === id);
     const hasSyncs = vlan?.firewallSync?.length > 0;
     const msg = hasSyncs
-      ? `Delete VLAN ${vlan.tag} (${vlan.name})?\n\nThis will remove it from:\n• ${vlan.firewallSync.map(s => s.firewallName).join('\n• ')}\n\nAll user assignments will also be removed.`
+      ? `This will remove VLAN ${vlan.tag} (${vlan.name}) from: ${vlan.firewallSync.map(s => s.firewallName).join(', ')}. All user assignments will also be removed.`
       : `Delete VLAN ${vlan.tag} (${vlan.name})? All user assignments will be removed.`;
-    if (!confirm(msg)) return;
+    if (!(await confirm({ title: 'Delete VLAN', message: msg, confirmLabel: 'Delete', danger: true }))) return;
     try {
       const r = await api.delete(`/admin/vlans/${id}`);
       const failed = r.data?.firewallCleanup?.filter(f => f.status === 'error' || f.status === 'partial');
       if (failed?.length > 0) {
-        alert(`VLAN deleted from database, but FortiGate cleanup had issues:\n\n${failed.map(f => `${f.firewall}: ${f.error || f.errors?.join(', ')}`).join('\n')}\n\nYou may need to manually remove the interface/policies from the firewall.`);
+        notify.warning(`VLAN deleted from database, but FortiGate cleanup had issues: ${failed.map(f => `${f.firewall}: ${f.error || f.errors?.join(', ')}`).join('; ')}. You may need to manually remove the interface/policies from the firewall.`);
       }
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      notify.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -115,7 +119,7 @@ export default function VLANsPage() {
         </button>
       </div>
 
-      {error && <p className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
+      {error && <p role="alert" className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
 
       {loading ? (
         <div className="space-y-3">
@@ -145,7 +149,7 @@ export default function VLANsPage() {
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-blue-400 bg-blue-900/20 px-2 py-0.5 rounded text-xs">{v.tag}</span>
                       {v.mode === 'tagged_only' && (
-                        <span className="text-[10px] uppercase tracking-wider text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/20 px-2 py-0.5 rounded-full">
+                        <span className="text-[10px] uppercase tracking-wider text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/20 px-2 py-0.5 rounded">
                           Tagged only
                         </span>
                       )}
@@ -244,6 +248,11 @@ export default function VLANsPage() {
 
 function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
   const isAdmin = !!user?.isAdmin;
+  const typeLabelId = useId();
+  const tagId = useId();
+  const subnetCidrId = useId();
+  const nameId = useId();
+  const descriptionId = useId();
   const suggestedTag = !vlan ? findNextAvailableVlanTag(vlans, firewalls) : null;
   const [form, setForm] = useState({
     name: vlan?.name || '',
@@ -331,11 +340,12 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
     <Modal title={vlan ? `Edit VLAN ${vlan.tag}` : 'New VLAN'} onClose={onClose} size="sm">
       <form onSubmit={submit} className="p-5 space-y-4">
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5">VLAN Type</label>
+          <label id={typeLabelId} className="block text-xs text-gray-400 mb-1.5">VLAN Type</label>
           {isAdmin ? (
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-2" role="group" aria-labelledby={typeLabelId}>
               <button
                 type="button"
+                aria-pressed={!isTaggedOnly}
                 onClick={() => setForm(f => ({ ...f, mode: 'managed', subnetCidr: '' }))}
                 className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${!isTaggedOnly ? 'border-blue-500 bg-blue-500/10 text-blue-300' : 'border-gray-700 bg-gray-800 text-gray-300 hover:border-gray-600'}`}
               >
@@ -344,6 +354,7 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
               </button>
               <button
                 type="button"
+                aria-pressed={isTaggedOnly}
                 onClick={() => setForm(f => ({ ...f, mode: 'tagged_only' }))}
                 className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${isTaggedOnly ? 'border-fuchsia-500 bg-fuchsia-500/10 text-fuchsia-300' : 'border-gray-700 bg-gray-800 text-gray-300 hover:border-gray-600'}`}
               >
@@ -358,11 +369,12 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
           )}
         </div>
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5">
+          <label htmlFor={tagId} className="block text-xs text-gray-400 mb-1.5">
             VLAN Tag {isTaggedOnly ? '(1–4094)' : '(1000–4094 recommended)'}
           </label>
           {isAdmin ? (
             <input
+              id={tagId}
               type="number"
               min="1" max="4094"
               required
@@ -402,8 +414,9 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
         </div>
         {isTaggedOnly && (
           <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Subnet CIDR</label>
+            <label htmlFor={subnetCidrId} className="block text-xs text-gray-400 mb-1.5">Subnet CIDR</label>
             <input
+              id={subnetCidrId}
               type="text"
               required
               value={form.subnetCidr}
@@ -417,8 +430,9 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
           </div>
         )}
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5">Name</label>
+          <label htmlFor={nameId} className="block text-xs text-gray-400 mb-1.5">Name</label>
           <input
+            id={nameId}
             type="text"
             required
             value={form.name}
@@ -428,8 +442,9 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
           />
         </div>
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5">Description (optional)</label>
+          <label htmlFor={descriptionId} className="block text-xs text-gray-400 mb-1.5">Description (optional)</label>
           <input
+            id={descriptionId}
             type="text"
             value={form.description}
             onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
@@ -474,7 +489,7 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
           );
         })()}
 
-        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <button type="submit" disabled={saving} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors">
           {saving ? 'Saving...' : vlan ? 'Save Changes' : !isTaggedOnly && syncToFw ? 'Create VLAN & Push to Firewall' : 'Create VLAN'}
         </button>
@@ -484,6 +499,7 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
 }
 
 function SyncModal({ vlan, firewalls, onClose, onSaved }) {
+  const notify = useNotify();
   const [syncs, setSyncs]     = useState(vlan.firewallSync || []);
   const [syncing, setSyncing] = useState(false);
   const [removing, setRemoving] = useState(null);
@@ -517,7 +533,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
       setSyncs(prev => prev.filter(s => s.firewallId !== firewallId));
       onSaved();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to remove');
+      notify.error(e.response?.data?.error || 'Failed to remove');
     } finally { setRemoving(null); }
   };
 
@@ -599,7 +615,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
           </div>
         )}
 
-        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
       </div>
     </Modal>
   );

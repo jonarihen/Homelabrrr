@@ -3,6 +3,7 @@ import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useConfirm } from '../../contexts/ConfirmContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
 
@@ -32,6 +33,7 @@ function buildRuleName(vmName, service, port, protocol) {
 
 export default function PortForwardingPage() {
   useDocumentTitle('Port Forwarding');
+  const confirm = useConfirm();
   const { user } = useAuth();
   const canManageAllPortForwards = !!(user?.isAdmin || user?.permissions?.canManageFirewalls);
 
@@ -224,7 +226,7 @@ export default function PortForwardingPage() {
   };
 
   const handleDelete = async (vipName) => {
-    if (!confirm(`Delete port forward "${vipName}"?\nThis will remove the VIP and its firewall policy from the root VDOM.`)) return;
+    if (!(await confirm({ title: 'Delete port forward', message: `Delete port forward "${vipName}"? This will remove the VIP and its firewall policy from the root VDOM.`, confirmLabel: 'Delete', danger: true }))) return;
     setDeleting(vipName);
     try {
       await api.delete(`/admin/firewalls/${selectedFw}/vips/${encodeURIComponent(vipName)}`);
@@ -367,9 +369,9 @@ export default function PortForwardingPage() {
 
       {/* Error banner */}
       {error && (
-        <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3 text-sm text-red-400 flex items-center justify-between">
+        <div role="alert" aria-live="assertive" className="bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3 text-sm text-red-400 flex items-center justify-between">
           <span>{error}</span>
-          <button onClick={() => setError('')} className="text-red-500 hover:text-red-400 ml-4 text-lg leading-none">&times;</button>
+          <button onClick={() => setError('')} aria-label="Dismiss error" className="text-red-500 hover:text-red-400 ml-4 text-lg leading-none">&times;</button>
         </div>
       )}
 
@@ -419,7 +421,7 @@ export default function PortForwardingPage() {
                 <input type="number" required min="1" max="65535" value={form.extPort}
                   onChange={e => setForm(f => ({ ...f, extPort: e.target.value }))}
                   placeholder="e.g. 2222"
-                  className={`${inputCls} ${portConflict ? '!border-red-500 !focus:ring-red-500' : ''}`}
+                  className={`${inputCls} ${portConflict ? '!border-red-500 focus:!ring-red-500' : ''}`}
                 />
                 {portConflict && (
                   <p className="text-xs text-red-400 mt-1">
@@ -499,23 +501,23 @@ export default function PortForwardingPage() {
                   )}
                 </div>
                 <div>
-                  <label className="block text-[11px] text-gray-500 mb-0.5">Rule Name</label>
-                  <input type="text" value={form.name}
+                  <label htmlFor="pf-rule-name" className="block text-[11px] text-gray-500 mb-0.5">Rule Name</label>
+                  <input id="pf-rule-name" type="text" value={form.name}
                     onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                    className="bg-transparent border-none text-sm text-white p-0 focus:outline-none focus:ring-0 w-full"
+                    className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded px-2 py-1 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
                     required />
                 </div>
               </div>
             )}
 
             {createError && (
-              <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-sm text-red-400">
+              <div role="alert" aria-live="assertive" className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-sm text-red-400">
                 {createError}
               </div>
             )}
 
             {attempted && !canSubmit && (
-              <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2 text-sm text-yellow-400">
+              <div role="alert" aria-live="assertive" className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2 text-sm text-yellow-400">
                 Missing: {missingFields.join(', ')}
               </div>
             )}
@@ -536,9 +538,21 @@ export default function PortForwardingPage() {
 
       {/* VIP Table */}
       {loading ? (
-        <div className="text-center py-16">
-          <div className="inline-block w-6 h-6 border-2 border-gray-600 border-t-blue-500 rounded-full animate-spin" />
-          <p className="text-gray-500 text-sm mt-3">Loading VIPs from FortiGate...</p>
+        <div className="bg-gray-900/50 border border-gray-800/50 rounded-xl overflow-hidden" aria-busy="true">
+          <div className="border-b border-gray-800/50 px-4 py-3 text-[10px] text-gray-500 uppercase tracking-wider font-semibold">
+            Loading VIPs from FortiGate...
+          </div>
+          <div className="divide-y divide-gray-800/30">
+            {[0, 1, 2, 3].map(i => (
+              <div key={i} className="flex items-center gap-4 px-4 py-3 animate-pulse">
+                <div className="h-5 w-16 bg-gray-800 rounded-full" />
+                <div className="h-4 w-40 bg-gray-800 rounded flex-1" />
+                <div className="h-4 w-12 bg-gray-800 rounded" />
+                <div className="h-4 w-16 bg-gray-800 rounded" />
+                <div className="h-4 w-24 bg-gray-800 rounded" />
+              </div>
+            ))}
+          </div>
         </div>
       ) : !needsWanConfig && (
         <div className="bg-gray-900/50 border border-gray-800/50 rounded-xl overflow-hidden">
@@ -604,7 +618,8 @@ export default function PortForwardingPage() {
                         <button
                           onClick={() => handleDelete(v.name)}
                           disabled={deleting === v.name}
-                          className="text-xs text-red-500/60 hover:text-red-400 disabled:opacity-50 transition-colors opacity-0 group-hover:opacity-100"
+                          aria-label={`Delete port forward ${v.name}`}
+                          className="text-xs text-red-500/60 hover:text-red-400 disabled:opacity-50 transition-colors opacity-60 group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100"
                         >
                           {deleting === v.name ? (
                             <span className="opacity-100">Deleting...</span>

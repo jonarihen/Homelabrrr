@@ -127,8 +127,8 @@ function ProgressBar({ label, value, max, color = 'blue' }) {
         <span className="text-xs text-gray-400">{label}</span>
         <span className="text-xs text-gray-300">{fmt(value)} / {fmt(max)}</span>
       </div>
-      <div className="w-full bg-gray-700 rounded-full h-2">
-        <div className={`${barColor} h-2 rounded-full transition-all`} style={{ width: `${Math.min(pct, 100)}%` }} />
+      <div className="w-full bg-gray-700 h-2">
+        <div className={`${barColor} h-2 transition-all`} style={{ width: `${Math.min(pct, 100)}%` }} />
       </div>
       <p className="text-xs text-gray-500 mt-1 text-right">{pct}%</p>
     </div>
@@ -273,7 +273,7 @@ export default function VMDetailModal({ vm, onClose }) {
         <div>
           <h3 className="text-sm text-gray-300 font-medium mb-3">SSH Configuration</h3>
           <div className="bg-gray-800 rounded-lg p-4">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Host / IP</label>
                 <input

@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import changelogMarkdown from '../../../CHANGELOG.md?raw';
 import { parseChangelog } from '../utils/changelog.js';
+import useDialogA11y from '../hooks/useDialogA11y.js';
 
 function formatDateLabel(date) {
   return new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', {
@@ -14,6 +15,8 @@ function formatDateLabel(date) {
 
 export default function ChangelogPanel() {
   const [open, setOpen] = useState(false);
+  const dialogRef = useRef(null);
+  useDialogA11y(dialogRef, () => setOpen(false), open);
   const entries = useMemo(() => parseChangelog(changelogMarkdown), []);
   const latestEntry = entries[0];
   const latestDateLabel = useMemo(
@@ -30,11 +33,18 @@ export default function ChangelogPanel() {
         if (e.target === e.currentTarget) setOpen(false);
       }}
     >
-      <div className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden border border-gray-800 bg-gray-950">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="changelog-title"
+        tabIndex={-1}
+        className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden border border-gray-800 bg-gray-950"
+      >
         <div className="flex items-center justify-between border-b border-gray-800 px-5 py-4">
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-gray-500">Changelog</p>
-            <h2 className="aaris-display mt-1 text-sm text-gray-100">Recent platform changes</h2>
+            <h2 id="changelog-title" className="aaris-display mt-1 text-sm text-gray-100">Recent platform changes</h2>
           </div>
           <button
             type="button"
@@ -90,16 +100,18 @@ export default function ChangelogPanel() {
         <button
           type="button"
           onClick={() => setOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={open}
           className="w-full border border-gray-800 bg-gray-900/85 px-3 py-2 text-left text-sm text-gray-300 transition-colors hover:bg-gray-800 hover:text-white"
         >
           <div className="flex items-center justify-between gap-3">
             <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em]">
-              <svg className="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <svg className="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-8.625a2.625 2.625 0 00-2.625-2.625H7.125A2.625 2.625 0 004.5 5.625v12.75A2.625 2.625 0 007.125 21h9.75a2.625 2.625 0 002.625-2.625V18M8.25 7.5h7.5M8.25 11.25h7.5M8.25 15h4.5" />
               </svg>
               <span>Changelog</span>
             </span>
-            <svg className="h-4 w-4 text-gray-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg className="h-4 w-4 text-gray-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
             </svg>
           </div>
