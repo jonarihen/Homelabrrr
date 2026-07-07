@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-07 — Cluster CPU and memory meters on the Overview page
+
+- The **System status** panel on the Overview page now shows **cluster-wide CPU and memory usage** — visible to every user, not just admins. CPU is core-weighted across all reachable nodes; memory shows used / total. The bars shift green → amber → red at 70% and 90% load, with the exact percentage always printed next to them
+
 ## 2026-07-07 — New welcome page after login
 
 - Logging in now lands you on a new **Overview** page instead of the VM list — a quick glance at how the lab is doing before you dive in

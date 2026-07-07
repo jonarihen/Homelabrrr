@@ -307,7 +307,7 @@ export async function getHostStatus(host) {
       online: true,
       version: version.version,
       release: version.release,
-      nodes: nodes.map(n => ({ node: n.node, status: n.status, cpu: n.cpu, mem: n.mem, maxmem: n.maxmem, uptime: n.uptime })),
+      nodes: nodes.map(n => ({ node: n.node, status: n.status, cpu: n.cpu, maxcpu: n.maxcpu, mem: n.mem, maxmem: n.maxmem, uptime: n.uptime })),
       vmCount: vms.filter(v => v.type === 'qemu').length,
       runningVms: vms.filter(v => v.type === 'qemu' && v.status === 'running').length,
     };

@@ -221,6 +221,22 @@ export default function WelcomePage() {
                       </span>
                     </div>
 
+                    {/* Cluster-wide resource usage — visible to every user */}
+                    {status?.usage && (
+                      <div className="border-t border-gray-800 px-4 py-3 space-y-2.5">
+                        <Meter
+                          label="CPU"
+                          pct={status.usage.cpuPct}
+                          detail={`${status.usage.totalCores} cores`}
+                        />
+                        <Meter
+                          label="Memory"
+                          pct={status.usage.memPct}
+                          detail={`${fmtBytes(status.usage.memUsed)} / ${fmtBytes(status.usage.memTotal)}`}
+                        />
+                      </div>
+                    )}
+
                     {/* Admin-only: per-host breakdown + fleet totals */}
                     {isAdmin && status?.hosts?.length > 0 && (
                       <div className="border-t border-gray-800">
@@ -491,6 +507,36 @@ function PanelButton({ primary, disabled, onClick, children }) {
     >
       {children}
     </button>
+  );
+}
+
+function fmtBytes(bytes) {
+  if (!bytes) return '0';
+  const gb = bytes / 1024 / 1024 / 1024;
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+}
+
+// Utilization meter: status color by load, but the value is always printed —
+// state is never conveyed by color alone.
+function Meter({ label, pct, detail }) {
+  const clamped = Math.max(0, Math.min(100, pct || 0));
+  const fill = clamped >= 90 ? 'bg-red-400' : clamped >= 70 ? 'bg-amber-400' : 'bg-green-400';
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-14 shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500">{label}</span>
+      <div
+        className="flex-1 h-1.5 bg-gray-800"
+        role="meter"
+        aria-valuenow={Math.round(clamped)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`${label} usage`}
+      >
+        <div className={`h-full ${fill}`} style={{ width: `${clamped}%` }} />
+      </div>
+      <span className="w-12 shrink-0 text-right font-mono text-xs text-gray-200">{clamped.toFixed(0)}%</span>
+      <span className="w-28 shrink-0 text-right font-mono text-[10px] uppercase tracking-[0.08em] text-gray-600">{detail}</span>
+    </div>
   );
 }
 

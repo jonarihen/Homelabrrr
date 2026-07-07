@@ -25,6 +25,25 @@ router.get('/status', async (req, res) => {
 
     const payload = { overall, hostsTotal: hosts.length, hostsOnline: online };
 
+    // Cluster-wide CPU/memory usage across all reachable nodes — aggregate
+    // only, so it is safe to show every user. CPU is core-weighted: each
+    // node's load fraction × its core count.
+    const onlineNodes = statuses
+      .filter(s => s.online)
+      .flatMap(s => s.nodes || [])
+      .filter(n => n.status === 'online');
+    const totalCores = onlineNodes.reduce((sum, n) => sum + (n.maxcpu || 0), 0);
+    const usedCores = onlineNodes.reduce((sum, n) => sum + (n.cpu || 0) * (n.maxcpu || 0), 0);
+    const memTotal = onlineNodes.reduce((sum, n) => sum + (n.maxmem || 0), 0);
+    const memUsed = onlineNodes.reduce((sum, n) => sum + (n.mem || 0), 0);
+    payload.usage = totalCores > 0 ? {
+      cpuPct: (usedCores / totalCores) * 100,
+      totalCores,
+      memUsed,
+      memTotal,
+      memPct: memTotal > 0 ? (memUsed / memTotal) * 100 : 0,
+    } : null;
+
     if (req.session.isAdmin) {
       payload.hosts = hosts.map((h, i) => {
         const s = statuses[i];
