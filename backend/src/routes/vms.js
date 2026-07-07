@@ -947,8 +947,9 @@ router.post('/:node/:vmid/backup', async (req, res) => {
 router.delete('/:node/:vmid/backups/:storage/*', async (req, res) => {
   const { node, vmid, storage } = req.params;
   const volid = req.params[0];
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
-    return res.status(403).json({ error: 'Access denied' });
+  // Deliberately NOT userCanAccessVm — see_all_vms must not grant backup deletion.
+  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+    return res.status(403).json({ error: 'You can only delete backups of VMs assigned to you' });
   }
   if (!volidBelongsToVm(volid, vmid)) {
     return res.status(403).json({ error: 'Backup does not belong to this VM' });

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-07 — Security: deleting a backup now requires owning the VM
+
+- Deleting a VM backup now requires the VM to be **assigned to you** (or being an admin), matching the rule that already applied to VM deletion. Previously the "see all VMs" permission was enough — users with read-everything visibility could delete backups of VMs they didn't own.
+
 ## 2026-07-07 — Security: backup operations now verify the backup belongs to the VM
 
 - Fixed a **high-severity access-control gap**: the backup browse, download, restore, and delete endpoints checked that you had access to the VM in the URL, but not that the backup volume you named actually belonged to that VM — so access to any one VM was enough to read, restore, or delete **any** VM's backups. The backend now requires the VMID embedded in the backup volume ID (both vzdump archives and PBS snapshots) to match the VM in the URL, and rejects anything it can't parse.
