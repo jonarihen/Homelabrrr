@@ -60,7 +60,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `VLANs` — managed or tagged-only network definitions, subnet data, and FortiGate sync
 - `Policies` — visual traffic mesh plus address/service object management for admins
 - `Port Forwarding` — WAN VIP and firewall policy management, scoped for delegated users
-- `Assignments` — VM and VLAN-to-user mapping; owner + VLAN are stamped as Proxmox tags on each VM (with a bulk "Sync PVE Tags" action) so ownership is visible in the PVE UI too
+- `Assignments` — VM and VLAN-to-user mapping, grouped per user with unassigned VMs listed first; unassigned VMs can be claimed for your own account (per VM, or all at once — handy for fleets that predate the portal); owner + VLAN are stamped as Proxmox tags on each VM (with a bulk "Sync PVE Tags" action) so ownership is visible in the PVE UI too
 - `Users` — accounts, granular permissions, VM/VLAN assignments, lockout unlocks, and enforced 2FA
 - `Audit Log` — change tracking with user/IP/timestamp
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user
@@ -214,6 +214,8 @@ Current hardening in the codebase includes:
 - 2FA lifecycle protection: starting a new enrollment cannot silently disable an active second factor, admin 2FA resets require confirmation, and setup/enable/disable/reset are audit-logged
 - login and 2FA attempt throttling, with admin unlock support
 - assignment-aware VM access (users only see their own VMs)
+- backup browse, download, restore, and delete verify that the named backup volume actually belongs to the VM being operated on (the VMID embedded in the volid must match; unparseable volids are rejected)
+- destructive operations (VM deletion, backup deletion) require strict VM ownership — the see-all-VMs visibility flag does not grant them
 - per-VM SSH authorization, stored destination config, and SSH host-key verification
 - SFTP access reuses the same authenticated SSH session setup and host-key checks as terminal access
 - secrets encrypted at rest with `SECRET_ENCRYPTION_KEY` (API tokens, SSH keys, TOTP secrets)
