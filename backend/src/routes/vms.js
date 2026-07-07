@@ -967,8 +967,10 @@ router.delete('/:node/:vmid/backups/:storage/*', async (req, res) => {
 
 router.post('/:node/:vmid/restore', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
-    return res.status(403).json({ error: 'Access denied' });
+  // Deliberately NOT userCanAccessVm — restore overwrites the VM's disks
+  // (force: 1), so see_all_vms must not grant it.
+  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+    return res.status(403).json({ error: 'You can only restore backups to VMs assigned to you' });
   }
   const { archive, storage } = req.body;
   if (!archive) return res.status(400).json({ error: 'archive (volid) is required' });

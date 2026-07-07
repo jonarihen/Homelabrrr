@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-07 — Security: restoring a backup now requires owning the VM
+
+- Restoring a backup into a VM now requires the VM to be **assigned to you** (or being an admin), the same rule as VM deletion and backup deletion. Restore overwrites the VM's disks, so the "see all VMs" permission is no longer enough to trigger it on VMs you don't own.
+
 ## 2026-07-07 — Claim VMs and a grouped view on the Assignments page
 
 - The admin **VM Assignments** page now lets you **claim** unassigned VMs — a per-VM **Claim** button assigns it to your own account, and a **Claim all unassigned** button grabs everything at once (handy for VMs that predate the portal)

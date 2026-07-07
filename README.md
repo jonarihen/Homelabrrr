@@ -215,7 +215,7 @@ Current hardening in the codebase includes:
 - login and 2FA attempt throttling, with admin unlock support
 - assignment-aware VM access (users only see their own VMs)
 - backup browse, download, restore, and delete verify that the named backup volume actually belongs to the VM being operated on (the VMID embedded in the volid must match; unparseable volids are rejected)
-- destructive operations (VM deletion, backup deletion) require strict VM ownership — the see-all-VMs visibility flag does not grant them
+- destructive operations (VM deletion, backup deletion, backup restore) require strict VM ownership — the see-all-VMs visibility flag does not grant them
 - per-VM SSH authorization, stored destination config, and SSH host-key verification
 - SFTP access reuses the same authenticated SSH session setup and host-key checks as terminal access
 - secrets encrypted at rest with `SECRET_ENCRYPTION_KEY` (API tokens, SSH keys, TOTP secrets)
