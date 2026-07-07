@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
@@ -837,6 +837,28 @@ function SnapshotsSection({ node, vmid }) {
   );
 }
 
+const STORAGE_TYPE_LABELS = {
+  pbs: 'PBS',
+  dir: 'Directory',
+  nfs: 'NFS',
+  cifs: 'CIFS',
+  btrfs: 'Btrfs',
+  cephfs: 'CephFS',
+  glusterfs: 'GlusterFS',
+};
+
+// Small bordered status tag with a square LED (AARIS §7.6/§10)
+function BackupTag({ led, children, title }) {
+  const ledColor = { ok: 'bg-green-400', warning: 'bg-yellow-400', error: 'bg-red-400', off: 'bg-gray-600' }[led] || 'bg-gray-600';
+  return (
+    <span title={title}
+      className="inline-flex items-center gap-1.5 px-1.5 py-0.5 border border-gray-700/60 font-mono text-[10px] uppercase tracking-wider text-gray-400 whitespace-nowrap shrink-0">
+      <span className={`w-1.5 h-1.5 shrink-0 ${ledColor}`} />
+      {children}
+    </span>
+  );
+}
+
 function BackupsSection({ node, vmid }) {
   const [backups, setBackups] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -855,6 +877,7 @@ function BackupsSection({ node, vmid }) {
   const [browsePathStack, setBrowsePathStack] = useState([]); // [{filepath, label}]
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState({});
 
   const loadBackups = useCallback(async () => {
     try {
@@ -874,6 +897,29 @@ function BackupsSection({ node, vmid }) {
       })
       .catch(() => {});
   }, [node, vmid]);
+
+  // Group backups by the storage they live on, enriched with storage metadata
+  const groups = useMemo(() => {
+    const map = new Map();
+    for (const b of backups) {
+      const key = b.storage || 'unknown';
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(b);
+    }
+    return [...map.entries()]
+      .map(([storage, items]) => {
+        const meta = storages.find(s => s.storage === storage);
+        return {
+          storage,
+          items,
+          type: meta?.type || (items.some(i => /^pbs-/.test(i.format || '')) ? 'pbs' : undefined),
+          total: meta?.total,
+          used: meta?.used,
+          size: items.reduce((sum, i) => sum + (i.size || 0), 0),
+        };
+      })
+      .sort((a, b) => a.storage.localeCompare(b.storage));
+  }, [backups, storages]);
 
   const createBackup = async () => {
     setCreating(true); setError(''); setSuccess('');
@@ -1173,76 +1219,133 @@ function BackupsSection({ node, vmid }) {
         </div>
       )}
 
-      {/* Backups list */}
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-        {loading ? (
-          <div className="p-6 space-y-3">
-            {[1,2].map(i => <div key={i} className="h-10 bg-gray-800 rounded-lg animate-pulse" />)}
-          </div>
-        ) : backups.length === 0 ? (
-          <div className="p-8 text-center">
-            <svg className="w-8 h-8 text-gray-700 mx-auto mb-2" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
-            <p className="text-sm text-gray-500">No backups found</p>
-          </div>
-        ) : (
-          <div className="divide-y divide-gray-800">
-            {backups.map(b => (
-              <div key={b.volid} className="px-5 py-3.5 hover:bg-gray-800/30 transition-colors">
-                <div className="flex items-center justify-between">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2.5">
-                      <svg className="w-4 h-4 text-blue-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
-                      <span className="text-sm text-white font-mono truncate" title={b.volid}>{b.volid?.split('/').pop() || b.volid}</span>
-                    </div>
-                    <div className="flex items-center gap-4 mt-1 ml-6.5">
-                      <span className="text-xs text-gray-500">{fmtDate(b.ctime)}</span>
-                      <span className="text-xs text-gray-500">{fmtSize(b.size)}</span>
-                      <span className="text-xs text-gray-600 font-mono">{b.storage}</span>
-                      {b.format && <span className="text-xs text-gray-600">{b.format}</span>}
-                    </div>
+      {/* Backups grouped by storage location */}
+      {loading ? (
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-3">
+          {[1,2].map(i => <div key={i} className="h-10 bg-gray-800 rounded-lg animate-pulse" />)}
+        </div>
+      ) : backups.length === 0 ? (
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
+          <svg className="w-8 h-8 text-gray-700 mx-auto mb-2" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
+          <p className="text-sm text-gray-500">No backups found</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {groups.map(g => {
+            const isCollapsed = !!collapsedGroups[g.storage];
+            const usedPct = g.total > 0 && g.used != null ? Math.round((g.used / g.total) * 100) : null;
+            const isPbs = g.type === 'pbs';
+            return (
+              <div key={g.storage} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+                {/* Storage group header */}
+                <button
+                  onClick={() => setCollapsedGroups(c => ({ ...c, [g.storage]: !c[g.storage] }))}
+                  className="w-full flex items-center justify-between gap-3 px-5 py-3 hover:bg-gray-800/30 transition-colors text-left"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <svg className="w-4 h-4 text-blue-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" /></svg>
+                    <span className="text-sm text-white font-mono truncate">{g.storage}</span>
+                    <span
+                      className="px-1.5 py-0.5 border border-gray-700/60 font-mono text-[10px] uppercase tracking-wider text-gray-500 shrink-0"
+                      title={isPbs ? 'Proxmox Backup Server' : `Storage type: ${g.type || 'unknown'}`}
+                    >
+                      {STORAGE_TYPE_LABELS[g.type] || g.type || 'storage'}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0 ml-3">
-                    {/* Browse files */}
-                    <button
-                      onClick={() => openFileBrowser(b)}
-                      className="text-gray-600 hover:text-cyan-400 transition-colors p-2 rounded-lg hover:bg-cyan-900/20"
-                      title="Browse files (file-level restore)"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg>
-                    </button>
-                    {/* Restore */}
-                    <button
-                      onClick={() => setRestoreConfirm(b)}
-                      disabled={restoring === b.volid}
-                      className="text-gray-600 hover:text-yellow-400 transition-colors p-2 rounded-lg hover:bg-yellow-900/20 disabled:opacity-40"
-                      title="Full VM restore"
-                    >
-                      {restoring === b.volid ? (
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
-                      ) : (
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
-                      )}
-                    </button>
-                    {/* Delete */}
-                    <button
-                      onClick={() => deleteBackup(b.storage, b.volid)}
-                      disabled={deleting === b.volid}
-                      className="text-gray-600 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-900/20 disabled:opacity-40"
-                      title="Delete backup"
-                    >
-                      {deleting === b.volid ? (
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
-                      ) : (
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
-                      )}
-                    </button>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-xs text-gray-500 font-mono">
+                      {g.items.length} {g.items.length === 1 ? 'backup' : 'backups'} · {fmtSize(g.size)}
+                    </span>
+                    {usedPct != null && (
+                      <span className={`hidden sm:inline text-xs font-mono ${usedPct >= 85 ? 'text-yellow-400' : 'text-gray-600'}`} title={`${fmtSize(g.used)} of ${fmtSize(g.total)} used on this storage`}>
+                        {usedPct}% full
+                      </span>
+                    )}
+                    <svg className={`w-3.5 h-3.5 text-gray-500 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
                   </div>
-                </div>
+                </button>
+
+                {!isCollapsed && (
+                  <div className="divide-y divide-gray-800 border-t border-gray-800">
+                    {g.items.map(b => {
+                      // PVE reports `encrypted` as 1, a key fingerprint, or a crypt-mode string
+                      const isEncrypted = b.encrypted === 1 || b.encrypted === true ||
+                        (typeof b.encrypted === 'string' && b.encrypted !== '' && b.encrypted !== '0' && b.encrypted !== 'none' && b.encrypted !== 'sign-only');
+                      const isProtected = b.protected === 1 || b.protected === '1' || b.protected === true;
+                      const verifyState = b.verification?.state;
+                      return (
+                      <div key={b.volid} className="px-5 py-3.5 hover:bg-gray-800/30 transition-colors">
+                        <div className="flex items-center justify-between">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <svg className="w-4 h-4 text-blue-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
+                              <span className="text-sm text-white font-mono truncate" title={b.volid}>{b.volid?.split('/').pop() || b.volid}</span>
+                              {isPbs && (isEncrypted
+                                ? <BackupTag led="ok" title="This backup is encrypted on the backup server">Encrypted</BackupTag>
+                                : <BackupTag led="off" title="This backup is stored unencrypted">Not encrypted</BackupTag>
+                              )}
+                              {isPbs && (verifyState === 'ok'
+                                ? <BackupTag led="ok" title="Last PBS verification passed">Verified</BackupTag>
+                                : verifyState === 'failed'
+                                  ? <BackupTag led="error" title="Last PBS verification FAILED — this backup may be corrupt">Verify failed</BackupTag>
+                                  : <BackupTag led="off" title="This backup has not been verified yet">Not verified</BackupTag>
+                              )}
+                              {isProtected && <BackupTag led="warning" title="Protected — cannot be pruned or deleted until protection is removed">Protected</BackupTag>}
+                            </div>
+                            <div className="flex items-center gap-4 mt-1 ml-[24px]">
+                              <span className="text-xs text-gray-500">{fmtDate(b.ctime)}</span>
+                              <span className="text-xs text-gray-500">{fmtSize(b.size)}</span>
+                              {b.format && <span className="text-xs text-gray-600 font-mono">{b.format}</span>}
+                              {b.notes && <span className="text-xs text-gray-500 italic truncate" title={b.notes}>{b.notes}</span>}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0 ml-3">
+                            {/* Browse files */}
+                            <button
+                              onClick={() => openFileBrowser(b)}
+                              className="text-gray-600 hover:text-cyan-400 transition-colors p-2 rounded-lg hover:bg-cyan-900/20"
+                              title="Browse files (file-level restore)"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg>
+                            </button>
+                            {/* Restore */}
+                            <button
+                              onClick={() => setRestoreConfirm(b)}
+                              disabled={restoring === b.volid}
+                              className="text-gray-600 hover:text-yellow-400 transition-colors p-2 rounded-lg hover:bg-yellow-900/20 disabled:opacity-40"
+                              title="Full VM restore"
+                            >
+                              {restoring === b.volid ? (
+                                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                              ) : (
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
+                              )}
+                            </button>
+                            {/* Delete */}
+                            <button
+                              onClick={() => deleteBackup(b.storage, b.volid)}
+                              disabled={deleting === b.volid}
+                              className="text-gray-600 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-900/20 disabled:opacity-40"
+                              title="Delete backup"
+                            >
+                              {deleting === b.volid ? (
+                                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                              ) : (
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-07 — Backups grouped by storage, with encryption and verification status
+
+- The VM **Backups** panel now groups backups **by the storage they live on** instead of one flat list — each storage gets its own collapsible section with the storage type (PBS, NFS, directory, …), backup count, combined size, and how full that storage is
+- PBS backups now show their **encryption status** (`Encrypted` / `Not encrypted`) and **verification state** (`Verified` / `Verify failed` / `Not verified`) as status tags on each backup
+- **Protected** backups are flagged, and backup **notes** are shown inline
+
 ## 2026-07-06 — SSH keys auto-derive their public key (and warn when they can't)
 
 - Adding an SSH key now **derives the public key from the private key** automatically when you don't paste one — so the key is immediately usable for cloud-init provisioning (which injects the public key into the guest). Works for OpenSSH, PEM, and PuTTY PPK keys, including encrypted keys when you supply the passphrase.
