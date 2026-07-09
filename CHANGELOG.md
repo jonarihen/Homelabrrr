@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-09 — Security: login lockout can no longer be weaponized to lock other users out
+
+- Fixed a **targeted account-lockout denial of service**: the login lockout (10 failed attempts / 10 minutes) was keyed on the username alone, so anyone who knew a username — including `admin` — could lock that account from anywhere with ten bad passwords, and keep renewing the lock forever. Lockout is now keyed on **username + source IP**: an attacker only ever locks the account from their own address, while the real user logs in unaffected
+- Depends on `TRUST_PROXY` matching your topology (see the earlier fix) so the recorded source IP is the real client and not the reverse proxy
+- The admin Users page still shows a user as locked when any single address has hit the limit, and **Unlock** still clears all attempts for the account
+
 ## 2026-07-09 — Policy Mesh: zoom, route inspection, search, and keyboard control
 
 - **Scroll to zoom** the mesh (40%–250%), anchored on the cursor — plus a **zoom control** with +/− buttons and the current percentage in the bottom-right corner. Recenter now also resets zoom

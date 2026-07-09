@@ -117,30 +117,38 @@ router.post('/login', loginLimiter, async (req, res, next) => {
 
   const now = Date.now();
   const windowStart = now - LOCKOUT_WINDOW_MS;
+  // Lockout is scoped to (username, ip) — a username-only lockout lets any
+  // unauthenticated party lock an arbitrary account (targeted DoS) with a
+  // handful of bad passwords. Requires TRUST_PROXY to match the real proxy
+  // hop count so req.ip is the actual client.
+  const clientIp = String(req.ip || '');
 
   db.prepare('DELETE FROM login_attempts WHERE attempted_at < ?').run(windowStart);
 
   const { count } = db.prepare(
-    'SELECT COUNT(*) as count FROM login_attempts WHERE username = ? AND attempted_at > ?'
-  ).get(username, windowStart);
+    'SELECT COUNT(*) as count FROM login_attempts WHERE username = ? AND ip = ? AND attempted_at > ?'
+  ).get(username, clientIp, windowStart);
 
   if (count >= LOCKOUT_MAX) {
-    return res.status(423).json({ error: 'Account locked — too many failed attempts. Try again in 10 minutes or contact an admin.' });
+    return res.status(423).json({ error: 'Too many failed attempts for this account from your address. Try again in 10 minutes or contact an admin.' });
   }
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   const passwordOk = bcrypt.compareSync(password, user ? user.password : DUMMY_PASSWORD_HASH);
   if (!user || !passwordOk) {
-    db.prepare('INSERT INTO login_attempts (username, attempted_at) VALUES (?, ?)').run(username, now);
+    db.prepare('INSERT INTO login_attempts (username, ip, attempted_at) VALUES (?, ?, ?)').run(username, clientIp, now);
     logAudit({ session: { username: username }, headers: req.headers, ip: req.ip }, 'login_failed', username, '');
     const remaining = LOCKOUT_MAX - (count + 1);
     if (remaining <= 0) {
-      return res.status(423).json({ error: 'Account locked — too many failed attempts. Try again in 10 minutes or contact an admin.' });
+      return res.status(423).json({ error: 'Too many failed attempts for this account from your address. Try again in 10 minutes or contact an admin.' });
     }
     return res.status(401).json({ error: `Invalid credentials (${remaining} attempt${remaining !== 1 ? 's' : ''} remaining before lockout)` });
   }
 
-  db.prepare('DELETE FROM login_attempts WHERE username = ?').run(username);
+  // Clear only this (username, ip) pair — clearing all rows would reset an
+  // attacker's counter on another address every time the real user logs in.
+  // Admin "Unlock" still clears every address for the account.
+  db.prepare('DELETE FROM login_attempts WHERE username = ? AND ip = ?').run(username, clientIp);
 
   try {
     await regenerateSession(req);

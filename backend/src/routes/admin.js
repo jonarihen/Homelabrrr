@@ -163,11 +163,17 @@ router.get('/users', pUsers, (req, res) => {
       u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log, u.can_edit_vm_hardware,
       u.created_at,
       (SELECT COUNT(*) FROM vm_assignments WHERE user_id = u.id) as vm_count,
-      (SELECT COUNT(*) FROM login_attempts WHERE username = u.username AND attempted_at > ?) as recent_failures
+      (SELECT COUNT(*) FROM login_attempts WHERE username = u.username AND attempted_at > ?) as recent_failures,
+      (SELECT COALESCE(MAX(ip_count), 0) FROM (
+        SELECT COUNT(*) AS ip_count FROM login_attempts
+        WHERE username = u.username AND attempted_at > ? GROUP BY ip
+      )) as max_ip_failures
     FROM users u
     ORDER BY u.username
-  `).all(windowStart);
-  res.json(users.map(u => ({ ...u, locked: u.recent_failures >= LOCKOUT_MAX, twoFactorEnabled: !!u.totp_enabled, require2fa: !!u.require_2fa, canProvision: !!u.can_provision, canCreateVms: !!u.can_create_vms })));
+  `).all(windowStart, windowStart);
+  // Lockout is per (username, ip) — a user counts as locked when any single
+  // address has hit the limit
+  res.json(users.map(u => ({ ...u, locked: u.max_ip_failures >= LOCKOUT_MAX, twoFactorEnabled: !!u.totp_enabled, require2fa: !!u.require_2fa, canProvision: !!u.can_provision, canCreateVms: !!u.can_create_vms })));
 });
 
 router.post('/users', pUsers, (req, res) => {

@@ -76,10 +76,15 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS login_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL,
+    ip TEXT NOT NULL DEFAULT '',
     attempted_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(username, attempted_at);
 `);
+// Lockout is keyed on (username, ip) so an anonymous attacker can't lock a
+// user out of their own address by spamming bad passwords (targeted DoS).
+try { db.exec("ALTER TABLE login_attempts ADD COLUMN ip TEXT NOT NULL DEFAULT ''"); } catch { /* exists */ }
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(username, ip, attempted_at)'); } catch { /* exists */ }
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS two_factor_attempts (
