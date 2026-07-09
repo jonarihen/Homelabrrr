@@ -397,22 +397,35 @@ function buildLineModels(policies, positions, srcTag) {
     .filter(Boolean);
 }
 
-function GraphLegend() {
+function GraphLegend({ usedServices, hasDeny }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {SERVICES.map(service => (
-        <span
-          key={service.name}
-          className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em]"
-          style={badgeStyle(service.name)}
-        >
+      {SERVICES.map(service => {
+        const used = !usedServices || usedServices.has(service.name);
+        return (
           <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ backgroundColor: SERVICE_COLORS[service.name] }}
-          />
-          {service.label}
+            key={service.name}
+            title={used ? undefined : 'No policy currently uses this service'}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] transition-opacity ${used ? '' : 'opacity-40'}`}
+            style={badgeStyle(service.name)}
+          >
+            <span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ backgroundColor: SERVICE_COLORS[service.name] }}
+            />
+            {service.label}
+          </span>
+        );
+      })}
+      {hasDeny && (
+        <span
+          className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em]"
+          style={badgeStyle('DENY', 'deny')}
+        >
+          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: DENY_COLOR }} />
+          Deny
         </span>
-      ))}
+      )}
     </div>
   );
 }
@@ -462,6 +475,17 @@ export default function PoliciesPage() {
   // ── Pan viewport ────────────────────────────────────────────────────────────
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const panRef = useRef(null); // { startX, startY, origPanX, origPanY }
+
+  // ── Zoom viewport ───────────────────────────────────────────────────────────
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  zoomRef.current = zoom;
+  const panOffsetRef = useRef(panOffset);
+  panOffsetRef.current = panOffset;
+
+  // ── Policy popover (click a route line) + VLAN search ──────────────────────
+  const [linePopover, setLinePopover] = useState(null); // { id, x, y }
+  const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
     api.get('/admin/firewalls').then(r => {
@@ -538,7 +562,55 @@ export default function PoliciesPage() {
       observer.disconnect();
       window.removeEventListener('resize', updateSize);
     };
-  }, []);
+    // `loading` dep: the canvas div only mounts after the skeleton goes away
+  }, [loading]);
+
+  // Wheel zoom toward the cursor. Attached manually (non-passive) so
+  // preventDefault can stop the page from scrolling.
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return undefined;
+
+    const onWheel = (e) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const current = zoomRef.current;
+      const next = clamp(current * (e.deltaY < 0 ? 1.12 : 1 / 1.12), 0.4, 2.5);
+      if (next === current) return;
+      const pan = panOffsetRef.current;
+      // Keep the point under the cursor stationary while scaling
+      setPanOffset({
+        x: mx - (((mx - pan.x) / current) * next),
+        y: my - (((my - pan.y) / current) * next),
+      });
+      setZoom(next);
+      setLinePopover(null); // anchored in screen coords — would detach from its line
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [loading]);
+
+  // Esc walks back one step: modal → line popover → source selection
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key !== 'Escape') return;
+      if (showModal) { cancelSelection(); return; }
+      if (linePopover) { setLinePopover(null); return; }
+      if (srcVlan) cancelSelection();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
+
+  const usedServices = useMemo(() => {
+    const set = new Set();
+    policies.forEach(p => (p.service || []).forEach(s => set.add(s)));
+    return set;
+  }, [policies]);
+  const hasDeny = useMemo(() => policies.some(p => p.action !== 'accept'), [policies]);
 
   const graph = useMemo(() => buildPolicyGraph(policies), [policies]);
   const degreeMap = graph.degree;
@@ -606,6 +678,8 @@ export default function PoliciesPage() {
     if (e.button !== 0) return;
     if (dragRef.current) return;
     if (e.target.closest('button')) return;
+    if (e.target.closest('[data-mesh-overlay]')) return;
+    if (linePopover) setLinePopover(null);
     panRef.current = {
       startX: e.clientX,
       startY: e.clientY,
@@ -627,8 +701,9 @@ export default function PoliciesPage() {
         setDragOverrides(prev => ({
           ...prev,
           [dragRef.current.tag]: {
-            x: dragRef.current.origX + dx,
-            y: dragRef.current.origY + dy,
+            // Node coordinates are pre-zoom, so screen deltas scale down
+            x: dragRef.current.origX + (dx / zoomRef.current),
+            y: dragRef.current.origY + (dy / zoomRef.current),
           },
         }));
         return;
@@ -668,6 +743,22 @@ export default function PoliciesPage() {
   const recenterView = () => {
     setPanOffset({ x: 0, y: 0 });
     setDragOverrides({});
+    setZoom(1);
+  };
+
+  // Zoom anchored on the canvas center (for the +/− buttons)
+  const zoomBy = (factor) => {
+    const current = zoomRef.current;
+    const next = clamp(current * factor, 0.4, 2.5);
+    if (next === current) return;
+    const cx = canvasSize.width / 2;
+    const cy = canvasSize.height / 2;
+    const pan = panOffsetRef.current;
+    setPanOffset({
+      x: cx - (((cx - pan.x) / current) * next),
+      y: cy - (((cy - pan.y) / current) * next),
+    });
+    setZoom(next);
   };
 
   const toggleService = (svc) => {
@@ -707,6 +798,7 @@ export default function PoliciesPage() {
     if (!confirm('Delete this policy?')) return;
     try {
       await api.delete(`/admin/policies/${policyId}?firewallId=${selectedFw}`);
+      setLinePopover(null);
       loadData();
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to delete policy');
@@ -815,7 +907,7 @@ export default function PoliciesPage() {
                     : 'Choose a source VLAN to pull its existing peers into focus, then click a destination to define the rule.'}
                 </p>
               </div>
-              <GraphLegend />
+              <GraphLegend usedServices={usedServices} hasDeny={hasDeny} />
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row">
@@ -856,7 +948,7 @@ export default function PoliciesPage() {
             onPointerDown={handleCanvasPointerDown}
           >
             {/* Recenter button */}
-            {(panOffset.x !== 0 || panOffset.y !== 0 || Object.keys(dragOverrides).length > 0) && (
+            {(panOffset.x !== 0 || panOffset.y !== 0 || zoom !== 1 || Object.keys(dragOverrides).length > 0) && (
               <button
                 onClick={(e) => { e.stopPropagation(); recenterView(); }}
                 className="absolute top-3 right-3 z-20 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-300 backdrop-blur-sm transition-colors hover:bg-slate-800 hover:text-white"
@@ -867,10 +959,10 @@ export default function PoliciesPage() {
                 Recenter
               </button>
             )}
-            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.05)_1px,transparent_1px)] bg-[size:72px_72px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }} />
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(56,189,248,0.12),_transparent_46%)]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }} />
+            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.05)_1px,transparent_1px)] bg-[size:72px_72px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }} />
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(56,189,248,0.12),_transparent_46%)]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }} />
             {selectedTag && (
-              <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }}>
+              <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }}>
                 <div
                   className="absolute rounded-full border border-cyan-400/15"
                   style={{
@@ -907,8 +999,53 @@ export default function PoliciesPage() {
               </div>
             ) : (
               <>
+                {/* VLAN search */}
+                <div data-mesh-overlay className="absolute left-3 top-3 z-20">
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900/90 px-3 py-1.5 backdrop-blur-sm">
+                    <svg className="h-3.5 w-3.5 shrink-0 text-slate-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                    </svg>
+                    <input
+                      type="text"
+                      value={searchTerm}
+                      onChange={e => setSearchTerm(e.target.value)}
+                      placeholder="Find VLAN..."
+                      className="w-32 bg-transparent text-xs text-slate-200 placeholder-slate-600 focus:outline-none"
+                    />
+                    {searchTerm && (
+                      <button
+                        onClick={() => setSearchTerm('')}
+                        className="rounded p-0.5 text-slate-500 transition-colors hover:text-white"
+                      >
+                        <svg className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Zoom controls */}
+                <div data-mesh-overlay className="absolute bottom-3 right-3 z-20 flex items-center gap-0.5 rounded-xl border border-slate-700 bg-slate-900/90 px-1.5 py-1 backdrop-blur-sm">
+                  <button
+                    onClick={() => zoomBy(1 / 1.25)}
+                    className="rounded-lg px-2 py-0.5 text-sm text-slate-300 transition-colors hover:bg-slate-800 hover:text-white"
+                    title="Zoom out"
+                  >
+                    −
+                  </button>
+                  <span className="w-11 text-center text-[11px] font-mono text-slate-400">{Math.round(zoom * 100)}%</span>
+                  <button
+                    onClick={() => zoomBy(1.25)}
+                    className="rounded-lg px-2 py-0.5 text-sm text-slate-300 transition-colors hover:bg-slate-800 hover:text-white"
+                    title="Zoom in"
+                  >
+                    +
+                  </button>
+                </div>
+
                 <svg className="absolute inset-0 z-[3] h-full w-full" style={{ overflow: 'visible' }}>
-                  <g transform={`translate(${panOffset.x}, ${panOffset.y})`}>
+                  <g transform={`translate(${panOffset.x}, ${panOffset.y}) scale(${zoom})`}>
                   <defs>
                     {lines.map(line => (
                       <g key={`defs-${line.id}`}>
@@ -944,6 +1081,16 @@ export default function PoliciesPage() {
                           strokeWidth={24}
                           fill="none"
                           style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const canvasRect = canvasRef.current.getBoundingClientRect();
+                            setLinePopover({
+                              id: line.id,
+                              x: clamp(e.clientX - canvasRect.left, 140, Math.max(140, canvasSize.width - 140)),
+                              y: e.clientY - canvasRect.top,
+                            });
+                            setHoveredLine(null);
+                          }}
                           onMouseEnter={(e) => {
                             setHoveredLine(line.id);
                             const canvasRect = canvasRef.current.getBoundingClientRect();
@@ -1074,17 +1221,19 @@ export default function PoliciesPage() {
                   </g>
                 </svg>
 
-                {hoveredLine && (() => {
+                {hoveredLine && !linePopover && (() => {
                   const line = lines.find(item => item.id === hoveredLine);
                   if (!line) return null;
                   const edgeColor = line.colors[0];
+                  // Clamp inside the canvas; flip below the cursor near the top edge
+                  const flipBelow = tooltipPos.y < 150;
                   return (
                     <div
                       className="pointer-events-none absolute z-10"
                       style={{
-                        left: tooltipPos.x,
+                        left: clamp(tooltipPos.x, 130, Math.max(130, canvasSize.width - 130)),
                         top: tooltipPos.y,
-                        transform: 'translate(-50%, -100%)',
+                        transform: flipBelow ? 'translate(-50%, 26px)' : 'translate(-50%, -100%)',
                       }}
                     >
                       <div
@@ -1113,15 +1262,81 @@ export default function PoliciesPage() {
                           {line.action === 'accept' ? 'Allowed traffic path' : 'Denied traffic path'}
                         </p>
                       </div>
-                      <div
-                        className="mx-auto -mt-1 h-2 w-2 rotate-45 bg-slate-950"
-                        style={{ borderBottom: `1px solid ${edgeColor}40`, borderRight: `1px solid ${edgeColor}40` }}
-                      />
+                      {!flipBelow && (
+                        <div
+                          className="mx-auto -mt-1 h-2 w-2 rotate-45 bg-slate-950"
+                          style={{ borderBottom: `1px solid ${edgeColor}40`, borderRight: `1px solid ${edgeColor}40` }}
+                        />
+                      )}
                     </div>
                   );
                 })()}
 
-                <div className="relative z-[4] min-h-[588px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }}>
+                {linePopover && (() => {
+                  const line = lines.find(item => item.id === linePopover.id);
+                  if (!line) return null;
+                  const edgeColor = line.colors[0];
+                  const flipBelow = linePopover.y < 210;
+                  return (
+                    <div
+                      data-mesh-overlay
+                      className="absolute z-30"
+                      style={{
+                        left: linePopover.x,
+                        top: linePopover.y,
+                        transform: flipBelow ? 'translate(-50%, 14px)' : 'translate(-50%, -100%)',
+                      }}
+                    >
+                      <div
+                        className="min-w-[250px] rounded-2xl border bg-slate-950/95 px-4 py-3 shadow-2xl backdrop-blur-sm"
+                        style={{ borderColor: `${edgeColor}40` }}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="font-medium text-cyan-300">{line.srcName}</span>
+                            <svg className="h-3.5 w-3.5 text-slate-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                            </svg>
+                            <span className="font-medium text-white">{line.dstName}</span>
+                          </div>
+                          <button
+                            onClick={() => setLinePopover(null)}
+                            className="-mr-1 -mt-1 rounded p-1 text-slate-500 transition-colors hover:bg-slate-800 hover:text-white"
+                          >
+                            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {line.services.map(service => (
+                            <span
+                              key={`popover-${line.id}-${service}`}
+                              className="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em]"
+                              style={badgeStyle(service, line.action)}
+                            >
+                              {service}
+                            </span>
+                          ))}
+                        </div>
+                        <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                          {line.action === 'accept' ? 'Allowed traffic path' : 'Denied traffic path'}
+                        </p>
+                        <button
+                          onClick={() => deletePolicy(line.id)}
+                          className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl border border-red-800/40 bg-red-900/20 px-3 py-2 text-xs font-medium text-red-300 transition-colors hover:bg-red-900/40 hover:text-red-200"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                          </svg>
+                          Delete this policy
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="relative z-[4] min-h-[588px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }}>
                   {vlans.map((vlan) => {
                     const position = nodePositions[vlan.tag];
                     if (!position) return null;
@@ -1130,6 +1345,10 @@ export default function PoliciesPage() {
                     const isDestination = dstVlan?.tag === vlan.tag;
                     const isPeer = peerTags.has(vlan.tag);
                     const isMuted = !!srcVlan && !isSource && !isPeer;
+                    const query = searchTerm.trim().toLowerCase();
+                    const matchesSearch = !query
+                      || vlan.name.toLowerCase().includes(query)
+                      || String(vlan.tag).includes(query);
                     const routeCount = degreeMap.get(vlan.tag) || 0;
                     const peerCount = (peerMap.get(vlan.tag) || new Set()).size;
                     const scale = isSource ? 1.16 : isDestination ? 1.1 : isPeer ? 1.02 : isMuted ? 0.96 : 1;
@@ -1155,11 +1374,11 @@ export default function PoliciesPage() {
                               : isPeer
                                 ? 'border-slate-500/80 bg-slate-800/92 hover:border-cyan-300/50'
                                 : 'border-slate-800 bg-slate-900/88 hover:border-slate-600 hover:bg-slate-900'
-                        }`}
+                        }${query && matchesSearch ? ' ring-2 ring-amber-300/60' : ''}`}
                         style={{
                           left: `${position.x}px`,
                           top: `${position.y}px`,
-                          opacity: isMuted ? MUTED_NODE_OPACITY : 1,
+                          opacity: query && !matchesSearch ? 0.22 : isMuted ? MUTED_NODE_OPACITY : 1,
                           transform: `translate(-50%, -50%) scale(${scale})`,
                         }}
                       >
@@ -1216,8 +1435,9 @@ export default function PoliciesPage() {
             <div className="mt-3 space-y-3 text-sm text-slate-300">
               <p>Pick a VLAN. It moves to the center.</p>
               <p>Existing neighbors pull into the inner ring so you can see what is already wired.</p>
-              <p>Route colors reflect the allowed service mix on that policy.</p>
+              <p>Route colors reflect the allowed service mix on that policy. Click a route to inspect or delete it.</p>
               <p>Outer-ring VLANs are still valid targets, but they are not currently linked to the selected source.</p>
+              <p className="text-xs text-slate-500">Scroll to zoom, drag empty space to pan, drag nodes to rearrange. Esc steps back out of any selection.</p>
             </div>
           </div>
 

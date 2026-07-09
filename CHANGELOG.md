@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-07-09 — Policy Mesh: zoom, route inspection, search, and keyboard control
+
+- **Scroll to zoom** the mesh (40%–250%), anchored on the cursor — plus a **zoom control** with +/− buttons and the current percentage in the bottom-right corner. Recenter now also resets zoom
+- **Click a route line** to open a small inspector: source → destination, service badges, allow/deny state, and a **Delete this policy** button — no more scrolling down to hunt for the row in the table
+- **Find VLAN…** search box in the top-left corner of the mesh highlights matching nodes (by name or tag) and fades the rest — handy once the mesh grows past a dozen VLANs
+- **Esc steps back out**: closes the create-policy modal, then the route inspector, then clears the selected source VLAN
+- The service **legend now dims services that no current policy uses**, and shows a red **Deny** chip when deny rules exist
+- Route tooltips **no longer clip** at the top or side edges of the canvas — they clamp inside and flip below the cursor near the top
+- Fixed the mesh canvas not tracking container resizes (the resize observer attached before the canvas existed)
+
 ## 2026-07-09 — Audit log now records the real client IP behind a reverse proxy
 
 - With an external reverse proxy (Caddy, Nginx Proxy Manager, …) in front, the audit log recorded the **proxy's IP** for every action instead of the actual client's. Cause: the request passes **two** proxies (external proxy + the bundled frontend nginx) but `TRUST_PROXY` defaulted to `1`, so Express stopped one hop short when walking `X-Forwarded-For`. The default is now `2`, matching the recommended topology. If clients reach port `8181` directly with no external proxy, set `TRUST_PROXY=1` in `.env` — otherwise a client could spoof its logged IP via a forged `X-Forwarded-For` header
