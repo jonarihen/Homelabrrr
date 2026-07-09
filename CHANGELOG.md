@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-10 — Background PVE tag auto-sync
+
+- The portal now **re-stamps owner + VLAN tags automatically in the background** on a schedule (default every **6 hours**), correcting drift caused by tags edited in the raw Proxmox UI, renamed VLANs, VM migrations/restores, or assignment writes that missed an unreachable node — no one has to remember to press a button
+- New **auto-sync status card** on the Assignments page: shows whether auto-sync is armed / paused / running, the interval, and a summary of the last run (time, duration, checked / updated / failed counts) with an expandable list of per-VM failures
+- **Pause / Resume** switch for auto-sync (e.g. during migrations or manual tag surgery). The paused state **survives backend restarts** and records who paused it and when
+- The interval is admin-configurable from the same card
+- The existing **Sync now** button now streams live progress (checked / updated / failed) and refuses to start a second run while one is already in flight (scheduled or manual)
+- Manual tags outside the portal's `<username>` and `vlan-*` namespaces are still left untouched. Scheduled runs, manual runs, and pause/resume are audit-logged as summary lines
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder

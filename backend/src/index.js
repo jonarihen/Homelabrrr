@@ -24,6 +24,8 @@ import portalRoutes from './routes/portal.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
+import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.js';
+import { logAuditEntry } from './utils/audit.js';
 
 const app = express();
 const server = createServer(app);
@@ -473,6 +475,53 @@ for (const k of ppkKeys) {
     console.warn(`Could not auto-convert PPK key id=${k.id} (may be encrypted): ${err.message}`);
   }
 }
+
+// ─── Background PVE tag auto-sync scheduler ───────────────────────────────────
+//
+// Periodically walks the fleet and corrects owner/VLAN tag drift (VMs re-tagged
+// in the raw PVE UI, renamed VLANs, migrations/restores, lost assignment writes).
+// The tick is coarse (every few minutes); each tick checks whether a full run is
+// actually due based on the persisted interval and last-run time, so the cadence
+// survives restarts and honours the DB-backed pause switch. A run is skipped when
+// paused or when one is already in flight (in-memory single-run lock lives in
+// utils/vmTags.js — the backend is single-process). Shares the exact fleet loop
+// used by POST /admin/sync-vm-tags via runFullTagSync().
+//
+// NOTE (#21/#26 tie-in): these issues propose shared background-scheduler
+// plumbing. This feature ships its own self-contained ticker; if that shared
+// scheduler lands, this block can be folded into it.
+const TAG_SYNC_TICK_MS = 5 * 60 * 1000;   // re-evaluate whether a run is due
+const tagSyncSchedulerStart = Date.now();
+
+async function tagSyncTick() {
+  try {
+    if (isTagSyncRunning()) return;
+    const settings = getTagSyncSettings();
+    if (settings.paused) return;
+
+    // Anchor the cadence to the last completed run (persisted) so restarts don't
+    // reset the clock; fall back to process start when nothing has run yet.
+    const lastRunAt = settings.lastRun?.time ? Date.parse(settings.lastRun.time) : NaN;
+    const anchor = Number.isFinite(lastRunAt) ? lastRunAt : tagSyncSchedulerStart;
+    const dueAt = anchor + settings.intervalHours * 60 * 60 * 1000;
+    if (Date.now() < dueAt) return;
+
+    const summary = await runFullTagSync({ trigger: 'scheduled' });
+    logAuditEntry({
+      username: 'system',
+      action: 'vm_tags_sync_scheduled',
+      target: 'all',
+      detail: `${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed`,
+    });
+    console.log(`[tag-sync] scheduled run: ${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed (${summary.durationMs}ms)`);
+  } catch (err) {
+    if (err.code === 'TAG_SYNC_BUSY') return;   // manual run raced us — fine
+    console.warn(`[tag-sync] scheduled run failed: ${err.message}`);
+  }
+}
+
+const tagSyncTimer = setInterval(() => { tagSyncTick(); }, TAG_SYNC_TICK_MS);
+tagSyncTimer.unref?.();   // don't keep the process alive just for the ticker
 
 const PORT_NUM = parseInt(process.env.PORT || '3000');
 server.listen(PORT_NUM, () => {

@@ -9,7 +9,10 @@ import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
-import { syncVmTagsSafe } from '../utils/vmTags.js';
+import {
+  syncVmTagsSafe, runFullTagSync, isTagSyncRunning, getTagSyncProgress,
+  getTagSyncSettings, setTagSyncPaused, setTagSyncIntervalHours,
+} from '../utils/vmTags.js';
 import { PERMISSION_KEYS } from '../utils/permissions.js';
 
 const router = Router();
@@ -564,21 +567,74 @@ router.delete('/assignments/:id', pAssignments, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Re-stamp owner/VLAN tags on every VM the portal can see — for the first
-// rollout, or after NIC/VLAN changes made outside the portal
-router.post('/sync-vm-tags', pAssignments, async (req, res) => {
+// ─── PVE tag auto-sync (background scheduler + manual force-sync) ─────────────
+
+// Snapshot of the auto-sync state for the Assignments status card: whether
+// auto-sync is armed or paused (and by whom/when), the interval, whether a run
+// is in flight right now (with live progress), and last-run stats/failures.
+router.get('/tag-sync/status', pAssignments, (req, res) => {
   try {
-    const vms = await getAllVMs();
-    let updated = 0;
-    let failed = 0;
-    for (const vm of vms) {
-      const result = await syncVmTagsSafe(vm.nodeRef, vm.vmid);
-      if (result.error) failed += 1;
-      else if (result.changed) updated += 1;
-    }
-    logAudit(req, 'vm_tags_sync', 'all', `${vms.length} checked, ${updated} updated, ${failed} failed`);
-    res.json({ checked: vms.length, updated, failed });
+    const settings = getTagSyncSettings();
+    res.json({
+      ...settings,
+      running: isTagSyncRunning(),
+      progress: getTagSyncProgress(),
+    });
   } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Pause the background scheduler. Persisted to `settings`, so it survives a
+// backend restart; records who paused it and when for provenance.
+router.post('/tag-sync/pause', pAssignments, (req, res) => {
+  try {
+    setTagSyncPaused(true, req.session?.username);
+    logAudit(req, 'vm_tags_sync_pause', 'all', 'auto-sync paused');
+    res.json({ ...getTagSyncSettings(), running: isTagSyncRunning(), progress: getTagSyncProgress() });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Re-arm the background scheduler.
+router.post('/tag-sync/resume', pAssignments, (req, res) => {
+  try {
+    setTagSyncPaused(false, req.session?.username);
+    logAudit(req, 'vm_tags_sync_resume', 'all', 'auto-sync resumed');
+    res.json({ ...getTagSyncSettings(), running: isTagSyncRunning(), progress: getTagSyncProgress() });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Change the auto-sync interval (hours).
+router.post('/tag-sync/interval', pAssignments, (req, res) => {
+  try {
+    const hours = setTagSyncIntervalHours(req.body?.intervalHours);
+    logAudit(req, 'vm_tags_sync_interval', 'all', `interval set to ${hours}h`);
+    res.json({ ...getTagSyncSettings(), running: isTagSyncRunning(), progress: getTagSyncProgress() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Re-stamp owner/VLAN tags on every VM the portal can see — for the first
+// rollout, or after NIC/VLAN changes made outside the portal. Shares the fleet
+// loop with the background scheduler via runFullTagSync(). Only one run may be
+// in flight at a time (409 if the scheduler or another operator is mid-run).
+router.post('/sync-vm-tags', pAssignments, async (req, res) => {
+  if (isTagSyncRunning()) {
+    return res.status(409).json({ error: 'A tag sync is already running', running: true, progress: getTagSyncProgress() });
+  }
+  try {
+    const summary = await runFullTagSync({ trigger: 'manual' });
+    logAudit(req, 'vm_tags_sync', 'all', `${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed`);
+    res.json({ checked: summary.checked, updated: summary.updated, failed: summary.failed, failures: summary.failures });
+  } catch (err) {
+    if (err.code === 'TAG_SYNC_BUSY') {
+      return res.status(409).json({ error: 'A tag sync is already running', running: true, progress: getTagSyncProgress() });
+    }
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
