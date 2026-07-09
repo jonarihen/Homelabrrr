@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-09 — Per-user resource quotas
+
+- Admins can now set **quotas per user** — max CPU cores, max memory (GB), max storage (GB) — on the new **Quotas** tab of the Users page Manage dialog. Empty = unlimited, so nothing changes for existing users until you set a limit
+- Quotas count the **allocated** resources of the VMs assigned to the user and are enforced when creating a VM (cloud image, template clone, from-scratch) and when **raising** CPU/memory/disk on an existing VM — shrinking always works, and admins bypass quotas entirely
+- Rejections say exactly what's wrong: `Memory quota exceeded: 6/8 GB allocated, request needs 4 GB more`
+- The Users table shows each user's current allocation (red when a metric is at its limit), and users with a quota see **usage meters** at the top of the New VM page
+- Quota changes are audit-logged
+
 ## 2026-07-09 — Roles: reusable permission sets you assign to users
 
 - New **Roles** page (Access section of the sidebar): create a role, tick the permissions it grants, and assign it to users from the Users page — instead of clicking through ~14 checkboxes per account. **Editing a role instantly updates everyone who holds it**

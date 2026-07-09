@@ -13,6 +13,7 @@ export default function UsersPage() {
   const [allVMs, setAllVMs]         = useState([]);
   const [allVLANs, setAllVLANs]     = useState([]);
   const [roles, setRoles]           = useState([]);
+  const [usage, setUsage]           = useState({});
   const [loading, setLoading]       = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [manageUser, setManageUser] = useState(null);
@@ -35,6 +36,8 @@ export default function UsersPage() {
     } finally {
       setLoading(false);
     }
+    // Usage is a separate slower call — don't block the table on it
+    api.get('/admin/user-usage').then(r => setUsage(r.data || {})).catch(() => {});
   };
 
   useEffect(() => { load(); }, []);
@@ -88,6 +91,7 @@ export default function UsersPage() {
                 <th className="text-left px-4 py-3">Role</th>
                 <th className="text-left px-4 py-3">Permissions</th>
                 <th className="text-left px-4 py-3">VMs</th>
+                <th className="text-left px-4 py-3">Usage</th>
                 <th className="text-left px-4 py-3">Created</th>
                 <th className="px-4 py-3" />
               </tr>
@@ -127,6 +131,9 @@ export default function UsersPage() {
                     }
                   </td>
                   <td className="px-4 py-3 text-gray-400">{u.see_all_vms ? <span className="text-xs text-blue-400">All</span> : u.vm_count}</td>
+                  <td className="px-4 py-3">
+                    <UsageCell usage={usage[u.id]} user={u} />
+                  </td>
                   <td className="px-4 py-3 text-gray-500 text-xs">
                     {new Date(u.created_at).toLocaleDateString()}
                   </td>
@@ -182,6 +189,7 @@ export default function UsersPage() {
           allVMs={allVMs}
           allVLANs={allVLANs}
           roles={roles}
+          usage={usage[manageUser.id]}
           onClose={() => { setManageUser(null); load(); }}
         />
       )}
@@ -268,7 +276,7 @@ const PERM_DEFS = [
   { key: 'can_edit_vm_hardware',   label: 'Edit VM Hardware',   desc: 'Change CPU, memory, and disk size on assigned VMs' },
 ];
 
-function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], onClose }) {
+function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usage, onClose }) {
   const canGrantPrivileges = !!currentUser?.isAdmin;
   const [tab, setTab]           = useState(() => canGrantPrivileges ? 'permissions' : 'vms');
   const [userVMs, setUserVMs]   = useState([]);
@@ -399,6 +407,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], onCl
       <div className="flex border-b border-gray-700 overflow-x-auto">
         {[
           ...(canGrantPrivileges ? [{ id: 'permissions', label: 'Permissions' }] : []),
+          ...(canGrantPrivileges ? [{ id: 'quotas', label: 'Quotas' }] : []),
           { id: 'vms', label: 'VM Assignments' },
           { id: 'vlans', label: 'VLAN Access' },
           { id: 'account', label: 'Account' },
@@ -508,6 +517,10 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], onCl
               </>
             )}
           </div>
+        )}
+
+        {canGrantPrivileges && tab === 'quotas' && (
+          <QuotasTab user={user} usage={usage} onError={setError} />
         )}
 
         {tab === 'vms' && (
@@ -648,6 +661,84 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], onCl
   );
 }
 
+// ─── Quotas tab ───────────────────────────────────────────────────────────────
+
+function QuotasTab({ user, usage, onError }) {
+  const [form, setForm] = useState({
+    maxCores: user.max_cores ?? '',
+    maxMemoryGb: user.max_memory_gb ?? '',
+    maxStorageGb: user.max_storage_gb ?? '',
+  });
+  const [msg, setMsg] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setMsg('');
+    try {
+      await api.put(`/admin/users/${user.id}/quotas`, form);
+      setMsg('Quotas saved');
+    } catch (err) {
+      onError(err.response?.data?.error || 'Failed to save quotas');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const rows = [
+    { key: 'maxCores', label: 'Max CPU cores', unit: 'cores', used: usage?.cores },
+    { key: 'maxMemoryGb', label: 'Max memory', unit: 'GB', used: usage?.memoryGb },
+    { key: 'maxStorageGb', label: 'Max storage', unit: 'GB', used: usage?.diskGb },
+  ];
+
+  return (
+    <form onSubmit={save} className="space-y-4 max-w-md">
+      {user.is_admin ? (
+        <div className="bg-blue-900/20 border border-blue-800/30 rounded-lg px-4 py-3">
+          <p className="text-sm text-blue-300 font-medium">This user is an admin</p>
+          <p className="text-xs text-blue-400/70 mt-0.5">Admins bypass quotas; any values set here have no effect.</p>
+        </div>
+      ) : (
+        <p className="text-xs text-gray-500">
+          Limits on the total resources allocated to this user's VMs. Empty = unlimited.
+          Checked when the user creates a VM or raises its hardware; lowering always works.
+        </p>
+      )}
+
+      {rows.map(row => {
+        const limit = form[row.key];
+        const overQuota = limit !== '' && row.used != null && row.used >= parseInt(limit, 10);
+        return (
+          <div key={row.key} className="bg-gray-800 rounded-lg px-4 py-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-sm text-white">{row.label}</label>
+              {row.used != null && (
+                <span className={`text-xs ${overQuota ? 'text-red-400' : 'text-gray-500'}`}>
+                  {row.used} {row.unit} allocated
+                </span>
+              )}
+            </div>
+            <input
+              type="number"
+              min="0"
+              placeholder="Unlimited"
+              value={form[row.key]}
+              onChange={e => { setForm(f => ({ ...f, [row.key]: e.target.value })); setMsg(''); }}
+              className={inputCls}
+            />
+          </div>
+        );
+      })}
+
+      {msg && <p className="text-xs text-green-400">{msg}</p>}
+      <button type="submit" disabled={saving} className={btnCls}>
+        {saving ? 'Saving...' : 'Save Quotas'}
+      </button>
+    </form>
+  );
+}
+
 // ─── Shared sub-components ────────────────────────────────────────────────────
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
@@ -692,6 +783,24 @@ function Row({ label, sub, badge, action }) {
 
 function Empty({ text }) {
   return <p className="text-xs text-gray-600 italic py-2 px-3">{text}</p>;
+}
+
+// Compact per-user allocation, red per metric when at/over its quota
+function UsageCell({ usage, user }) {
+  if (!usage || usage.vmCount === 0) return <span className="text-xs text-gray-600">—</span>;
+  const metric = (used, limit, suffix) => {
+    const over = limit != null && used >= limit;
+    return (
+      <span className={over ? 'text-red-400' : ''} title={limit != null ? `${used}/${limit} ${suffix}` : `${used} ${suffix} (no limit)`}>
+        {used}{suffix}
+      </span>
+    );
+  };
+  return (
+    <span className="text-xs text-gray-400 font-mono whitespace-nowrap">
+      {metric(usage.cores, user.max_cores, 'c')} · {metric(usage.memoryGb, user.max_memory_gb, 'G')} · {metric(usage.diskGb, user.max_storage_gb, 'G')}
+    </span>
+  );
 }
 
 function BlueBtn({ children, onClick }) {

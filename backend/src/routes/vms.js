@@ -14,6 +14,7 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { userCanAccessVm, userOwnsVm } from '../utils/vmAccess.js';
 import { userHasPermission } from '../utils/permissions.js';
+import { assertUserQuota, sizeToGb } from '../utils/quota.js';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 
@@ -862,6 +863,21 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
       details.push(`memory=${memMb}MB`);
     }
 
+    // Quota: only the increase over the VM's current allocation counts —
+    // a user at their quota can still shrink resources
+    if (!req.session.isAdmin) {
+      const current = (await getAllVMs()).find((v) => Number(v.vmid) === Number(vmid));
+      const curCores = current?.maxcpu || 0;
+      const curMemMb = (current?.maxmem || 0) / (1024 * 1024);
+      const newCores = updates.cores ? updates.sockets * updates.cores : curCores;
+      const newMemMb = updates.memory || curMemMb;
+      const addCores = Math.max(0, newCores - curCores);
+      const addMemoryMb = Math.max(0, newMemMb - curMemMb);
+      if (addCores > 0 || addMemoryMb > 0) {
+        await assertUserQuota(req.session.userId, { addCores, addMemoryMb });
+      }
+    }
+
     await updateVMConfig(node, vmid, updates);
     logAudit(req, 'vm_hardware_change', `${node}/${vmid}`, details.join(', '));
     res.json({ ok: true });
@@ -894,11 +910,29 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
   }
 
   try {
+    // Quota: count only the growth (PVE resize can never shrink). Relative
+    // sizes ("+10G") are the delta directly; absolute sizes are compared to
+    // the disk's current size from the VM config.
+    if (!req.session.isAdmin) {
+      let addDiskGb = 0;
+      if (size.startsWith('+')) {
+        addDiskGb = sizeToGb(size.slice(1)) || 0;
+      } else {
+        const config = await getVMConfig(node, vmid);
+        const currentGb = sizeToGb(String(config?.[disk] || '').match(/(?:^|,)size=(\d+[MGT])/)?.[1]) || 0;
+        addDiskGb = Math.max(0, (sizeToGb(size) || 0) - currentGb);
+      }
+      if (addDiskGb > 0) {
+        await assertUserQuota(req.session.userId, { addDiskGb });
+      }
+    }
+
     await resizeVMDisk(node, vmid, disk, size);
     logAudit(req, 'vm_disk_resize', `${node}/${vmid}`, `${disk}=${size}`);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    const status = err.status || 500;
+    res.status(status).json({ error: err.status ? err.message : sanitizeError(err.message) });
   }
 });
 

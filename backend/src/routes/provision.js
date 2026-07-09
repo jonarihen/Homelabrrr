@@ -11,6 +11,7 @@ import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
+import { assertUserQuota, getUserQuota, getUserResourceUsage } from '../utils/quota.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { getRolePermissions } from '../utils/permissions.js';
 
@@ -110,6 +111,24 @@ function loadProvisioner(req) {
       : user.can_provision,
   };
 }
+
+// ─── Own quota + current usage (any authenticated user) ─────────────────────
+
+router.get('/quota', async (req, res) => {
+  try {
+    const quota = getUserQuota(req.session.userId);
+    if (!quota) return res.status(401).json({ error: 'Unauthorized' });
+    const usage = await getUserResourceUsage(req.session.userId);
+    res.json({
+      usage,
+      limits: quota.isAdmin
+        ? { maxCores: null, maxMemoryGb: null, maxStorageGb: null }
+        : { maxCores: quota.maxCores, maxMemoryGb: quota.maxMemoryGb, maxStorageGb: quota.maxStorageGb },
+    });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
 
 // ─── Templates (public, read-only for users) ────────────────────────────────
 
@@ -229,6 +248,12 @@ router.post('/clone', async (req, res) => {
       memoryMb: finalMem,
       diskGb: finalDisk,
       storage: storage || template.default_storage,
+    });
+    // Per-user resource quota (skips admins / users without quotas)
+    await assertUserQuota(req.session.userId, {
+      addCores: parseInt(finalCores, 10) || 0,
+      addMemoryMb: finalMem,
+      addDiskGb: parseFloat(finalDisk) || 0,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
@@ -378,6 +403,12 @@ router.post('/from-image', async (req, res) => {
 
   try {
     await assertNodeCapacity(image.node, { memoryMb, diskGb: baseDiskGb, storage });
+    // Per-user resource quota (skips admins / users without quotas)
+    await assertUserQuota(req.session.userId, {
+      addCores: parseInt(cores, 10) || 0,
+      addMemoryMb: memoryMb,
+      addDiskGb: baseDiskGb,
+    });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     throw err;
@@ -482,6 +513,13 @@ router.post('/create', requireAdmin, async (req, res) => {
       memoryMb: Math.round(parseFloat(memoryGb) * 1024),
       diskGb: String(diskSize).replace(/[^0-9]/g, ''),
       storage,
+    });
+    // Per-user resource quota — no-op for admins today (route is
+    // requireAdmin), but keeps the rail in place for #20
+    await assertUserQuota(req.session.userId, {
+      addCores: parseInt(cores, 10) || 0,
+      addMemoryMb: Math.round(parseFloat(memoryGb) * 1024),
+      addDiskGb: parseFloat(String(diskSize).replace(/[^0-9.]/g, '')) || 0,
     });
 
     const config = {

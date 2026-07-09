@@ -9,6 +9,42 @@ import { displayNode, routeNode } from '../utils/nodeRef.js';
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-all ${active ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`;
 
+// Usage-vs-quota meters; renders nothing when the user has no limits set
+function QuotaBanner({ quota }) {
+  if (!quota?.limits) return null;
+  const rows = [
+    { label: 'CPU', used: quota.usage.cores, limit: quota.limits.maxCores, unit: 'cores' },
+    { label: 'Memory', used: quota.usage.memoryGb, limit: quota.limits.maxMemoryGb, unit: 'GB' },
+    { label: 'Storage', used: quota.usage.diskGb, limit: quota.limits.maxStorageGb, unit: 'GB' },
+  ].filter(r => r.limit != null);
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl px-5 py-4">
+      <p className="text-[10px] uppercase tracking-[0.22em] text-gray-500 mb-3">Your resource quota</p>
+      <div className="grid gap-3 sm:grid-cols-3">
+        {rows.map(row => {
+          const pct = Math.min(100, Math.round((row.used / row.limit) * 100));
+          const barColor = pct >= 100 ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-blue-500';
+          return (
+            <div key={row.label}>
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="text-gray-400">{row.label}</span>
+                <span className={pct >= 100 ? 'text-red-400' : 'text-gray-500'}>
+                  {row.used} / {row.limit} {row.unit}
+                </span>
+              </div>
+              <div className="h-1.5 rounded-full bg-gray-800 overflow-hidden">
+                <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function ProvisionPage() {
   useDocumentTitle('New VM');
   const { user } = useAuth();
@@ -25,6 +61,13 @@ export default function ProvisionPage() {
   const [tab, setTab] = useState(() => tabs[0] || 'image');
   // Active deployment job — while set, the page shows the progress stepper.
   const [deploying, setDeploying] = useState(null);
+  // Own quota + allocated usage (null until loaded; hidden when no limits set)
+  const [quota, setQuota] = useState(null);
+
+  useEffect(() => {
+    if (!canProvision && !canCreate) return;
+    api.get('/provision/quota').then(r => setQuota(r.data)).catch(() => {});
+  }, [canProvision, canCreate]);
 
   if (!canProvision && !canCreate) {
     return (
@@ -53,6 +96,8 @@ export default function ProvisionPage() {
             Deploy directly from a cloud image, clone a template, or build a VM from scratch
           </p>
         </div>
+
+        <QuotaBanner quota={quota} />
 
         {deploying ? (
           <DeploymentProgress job={deploying} onDeployAnother={() => setDeploying(null)} />

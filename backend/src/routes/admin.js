@@ -163,6 +163,7 @@ router.get('/users', pUsers, (req, res) => {
       u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_port_forwards, u.can_manage_vlans, u.can_manage_policies,
       u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log, u.can_edit_vm_hardware,
       u.created_at, u.role_id, r.name AS role_name,
+      u.max_cores, u.max_memory_gb, u.max_storage_gb,
       (SELECT COUNT(*) FROM vm_assignments WHERE user_id = u.id) as vm_count,
       (SELECT COUNT(*) FROM login_attempts WHERE username = u.username AND attempted_at > ?) as recent_failures,
       (SELECT COALESCE(MAX(ip_count), 0) FROM (
@@ -290,6 +291,67 @@ router.put('/users/:id/permission', requireAdmin, (req, res) => {
   db.prepare(`UPDATE users SET ${permission} = ? WHERE id = ?`).run(enabled ? 1 : 0, req.params.id);
   logAudit(req, 'admin_toggle_permission', req.params.id, `${permission}=${enabled ? 1 : 0}`);
   res.json({ ok: true });
+});
+
+// ─── Quotas ───────────────────────────────────────────────────────────────────
+
+function parseQuotaValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = parseInt(value, 10);
+  return Number.isInteger(n) && n >= 0 ? n : undefined; // undefined = invalid
+}
+
+router.put('/users/:id/quotas', requireAdmin, (req, res) => {
+  const user = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const maxCores = parseQuotaValue(req.body.maxCores);
+  const maxMemoryGb = parseQuotaValue(req.body.maxMemoryGb);
+  const maxStorageGb = parseQuotaValue(req.body.maxStorageGb);
+  if (maxCores === undefined || maxMemoryGb === undefined || maxStorageGb === undefined) {
+    return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
+  }
+
+  db.prepare('UPDATE users SET max_cores = ?, max_memory_gb = ?, max_storage_gb = ? WHERE id = ?')
+    .run(maxCores, maxMemoryGb, maxStorageGb, user.id);
+  logAudit(req, 'admin_set_quotas', user.username,
+    `cores=${maxCores ?? '∞'} memory=${maxMemoryGb ?? '∞'}GB storage=${maxStorageGb ?? '∞'}GB`);
+  res.json({ ok: true });
+});
+
+// Per-user allocated usage for the Users page — one resource-list call
+// covers every user, so this stays cheap even with many accounts.
+router.get('/user-usage', pUsers, async (req, res) => {
+  try {
+    const assignments = db.prepare('SELECT user_id, vmid FROM vm_assignments').all();
+    const byUser = new Map();
+    for (const a of assignments) {
+      if (!byUser.has(a.user_id)) byUser.set(a.user_id, new Set());
+      byUser.get(a.user_id).add(Number(a.vmid));
+    }
+    const vms = await getAllVMs();
+    const vmByVmid = new Map(vms.map((v) => [Number(v.vmid), v]));
+    const GB = 1024 ** 3;
+
+    const usage = {};
+    for (const [userId, vmids] of byUser) {
+      const u = { cores: 0, memoryGb: 0, diskGb: 0, vmCount: 0 };
+      for (const vmid of vmids) {
+        const vm = vmByVmid.get(vmid);
+        if (!vm) continue;
+        u.vmCount += 1;
+        u.cores += vm.maxcpu || 0;
+        u.memoryGb += (vm.maxmem || 0) / GB;
+        u.diskGb += (vm.maxdisk || 0) / GB;
+      }
+      u.memoryGb = Math.round(u.memoryGb * 10) / 10;
+      u.diskGb = Math.round(u.diskGb * 10) / 10;
+      usage[userId] = u;
+    }
+    res.json(usage);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
 });
 
 // ─── Roles (RBAC) ─────────────────────────────────────────────────────────────

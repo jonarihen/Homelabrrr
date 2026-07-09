@@ -246,6 +246,11 @@ db.exec(`
 `);
 try { db.exec('ALTER TABLE users ADD COLUMN role_id INTEGER DEFAULT NULL'); } catch { /* exists */ }
 
+// Resource quotas — NULL means unlimited (see utils/quota.js)
+try { db.exec('ALTER TABLE users ADD COLUMN max_cores INTEGER DEFAULT NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE users ADD COLUMN max_memory_gb INTEGER DEFAULT NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE users ADD COLUMN max_storage_gb INTEGER DEFAULT NULL'); } catch { /* exists */ }
+
 // Seed the built-in roles once (empty table = first run after this migration).
 // "Administrator" grants every portal permission (it does NOT make the account
 // an admin — is_admin stays a separate flag); "User" is the no-extra-perms base.
