@@ -6,6 +6,7 @@ import QRCode from 'qrcode';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { logAudit } from '../utils/audit.js';
+import { notify, portalLink } from '../utils/notify.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { effectivePermissions } from '../utils/permissions.js';
@@ -144,6 +145,14 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     logAudit({ session: { username: username }, headers: req.headers, ip: req.ip }, 'login_failed', username, '');
     const remaining = LOCKOUT_MAX - (count + 1);
     if (remaining <= 0) {
+      // This failed attempt just tripped the lockout — notify once (subsequent
+      // attempts short-circuit at the guard above, so this fires a single time).
+      notify('security.lockout', {
+        domain: username,
+        status: 'locked out',
+        detail: `Account locked after ${LOCKOUT_MAX} failed logins from ${clientIp || 'unknown address'}`,
+        url: portalLink('/admin/audit-log'),
+      });
       return res.status(423).json({ error: 'Too many failed attempts for this account from your address. Try again in 10 minutes or contact an admin.' });
     }
     return res.status(401).json({ error: `Invalid credentials (${remaining} attempt${remaining !== 1 ? 's' : ''} remaining before lockout)` });

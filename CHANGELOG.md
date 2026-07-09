@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-10 — Discord webhook notifications
+
+- New **Notifications** admin page (Access section of the sidebar): add one or more **Discord webhooks**, tick which event types each one receives, and hit **Send test** to confirm the wiring end-to-end
+- Events sent as compact Discord embeds (event, VM/resource, owner, status, and a link back to the portal page): **VM deployment finished / failed**, **backup created / failed**, **node unreachable / recovered**, **new notice published**, and **account locked out** (security)
+- Webhook outages can never break a flow — sends are **fire-and-forget** and rate-limited per webhook to stay under Discord's ~30 requests/minute
+- Webhook URLs are **encrypted at rest** and only ever shown masked; every webhook config change is audit-logged
+- Users can **opt out** of notifications about their own resources from the Account page
+- New env knobs: `PORTAL_BASE_URL` (link-back base for embeds, falls back to `ALLOWED_ORIGIN`) and `NODE_HEALTH_POLL_MS` (health-monitor interval; `0` disables it)
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder

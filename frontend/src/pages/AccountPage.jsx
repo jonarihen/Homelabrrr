@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
@@ -45,6 +45,7 @@ export default function AccountPage() {
           </>
         )}
         <TwoFactorSection user={user} setUser={setUser} />
+        {!enrollmentOnly && <NotificationsSection />}
       </div>
     </Layout>
   );
@@ -152,6 +153,63 @@ function PasswordSection() {
           {saving ? 'Updating...' : 'Change Password'}
         </button>
       </form>
+    </div>
+  );
+}
+
+// ── Notification preferences ─────────────────────────────────────────────────
+
+function NotificationsSection() {
+  const [optOut, setOptOut] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => {
+    api.get('/notifications/preferences')
+      .then(({ data }) => setOptOut(!!data.optOut))
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+
+  const toggle = async () => {
+    const next = !optOut;
+    setSaving(true); setMsg('');
+    try {
+      await api.put('/notifications/preferences', { optOut: next });
+      setOptOut(next);
+      setMsg(next ? 'You will no longer be included in notifications about your resources.' : 'Notifications about your resources are on.');
+    } catch (e) {
+      setMsg('error:' + (e.response?.data?.error || 'Failed to save'));
+    } finally { setSaving(false); }
+  };
+
+  const isError = msg.startsWith('error:');
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4">
+      <div className="flex items-center gap-3">
+        <div className="w-9 h-9 bg-orange-500/10 rounded-xl flex items-center justify-center">
+          <svg className="w-4.5 h-4.5 text-orange-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+          </svg>
+        </div>
+        <div>
+          <h2 className="text-sm font-semibold text-white">Notifications</h2>
+          <p className="text-xs text-gray-500">Discord alerts about your own VMs and backups</p>
+        </div>
+      </div>
+      <label className={`flex items-center justify-between gap-3 ${loaded ? 'cursor-pointer' : 'opacity-50'}`}>
+        <span className="text-sm text-gray-300">Include my resources in Discord notifications</span>
+        <input
+          type="checkbox"
+          checked={!optOut}
+          disabled={!loaded || saving}
+          onChange={toggle}
+          className="accent-blue-500 w-4 h-4"
+        />
+      </label>
+      {msg && <p className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import {
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
+import { notify, portalLink } from '../utils/notify.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
@@ -56,6 +57,29 @@ function setStep(provisionId, key, status, note) {
   step.status = status;
   if (note !== undefined) step.note = note;
   db.prepare('UPDATE provisioned_vms SET steps = ? WHERE id = ?').run(JSON.stringify(steps), provisionId);
+}
+
+// Fire a Discord notification for a deployment that has reached a terminal
+// state. Reads the current row so it maps status → deployment.finished (ready /
+// warning) or deployment.failed (error / timeout). Fire-and-forget: notify()
+// never throws, so this can never break the provisioning flow.
+function notifyDeployment(provisionId) {
+  try {
+    const row = db.prepare(
+      'SELECT pv.*, u.username FROM provisioned_vms pv LEFT JOIN users u ON u.id = pv.user_id WHERE pv.id = ?'
+    ).get(provisionId);
+    if (!row) return;
+    const failed = row.status === 'error' || row.status === 'timeout';
+    const { nodeName } = decodeNodeRef(row.node);
+    notify(failed ? 'deployment.failed' : 'deployment.finished', {
+      vm: `${row.name} (#${row.vmid}${nodeName ? ` on ${nodeName}` : ''})`,
+      owner: row.username || undefined,
+      ownerUserId: row.user_id,
+      status: row.status,
+      detail: row.status_detail || undefined,
+      url: portalLink(`/vm/${row.node}/${row.vmid}`),
+    });
+  } catch { /* notifications are best-effort */ }
 }
 
 // ─── Cloud-init option parsing (shared by clone + from-image) ────────────────
@@ -569,12 +593,14 @@ router.post('/create', requireAdmin, async (req, res) => {
           await syncVmTagsSafe(node, vmid);
           setStep(row.lastInsertRowid, 'tags', 'done');
           db.prepare("UPDATE provisioned_vms SET status = 'ready', status_detail = '' WHERE id = ?").run(row.lastInsertRowid);
+          notifyDeployment(row.lastInsertRowid);
         })
         .catch((err) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
     } else {
       setStep(row.lastInsertRowid, 'tags', 'active');
       db.prepare("UPDATE provisioned_vms SET status = 'ready', status_detail = '' WHERE id = ?").run(row.lastInsertRowid);
       syncVmTagsSafe(node, vmid).finally(() => setStep(row.lastInsertRowid, 'tags', 'done'));
+      notifyDeployment(row.lastInsertRowid);
     }
 
     logAudit(req, 'vm_create', `${node}/${vmid}`, name);
@@ -759,12 +785,14 @@ async function pollTaskCompletion(provisionId, node, upid, { maxAttempts = 120 }
         if (task.exitstatus === 'OK') return true;
         db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
           .run('error', task.exitstatus || 'Task failed', provisionId);
+        notifyDeployment(provisionId);
         return false;
       }
     } catch { /* keep polling */ }
   }
   db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
     .run('timeout', 'Timed out while waiting for the Proxmox task to finish', provisionId);
+  notifyDeployment(provisionId);
   return false;
 }
 
@@ -857,11 +885,13 @@ async function pollAndConfigure(provisionId, node, vmid, upid, opts) {
       db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
         .run('ready', '', provisionId);
     }
+    notifyDeployment(provisionId);
   } catch (err) {
     console.error(`Post-clone config failed for VM ${vmid}:`, err.message);
     setStep(provisionId, 'configure', 'error', err.message);
     db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
       .run('warning', err.message || 'Post-clone configuration failed', provisionId);
+    notifyDeployment(provisionId);
   }
 }
 
@@ -926,6 +956,7 @@ async function finishImageProvision(provisionId, node, vmid, upid, opts) {
 
   db.prepare('UPDATE provisioned_vms SET status = ?, status_detail = ? WHERE id = ?')
     .run(warnings.length ? 'warning' : 'ready', warnings.join('; '), provisionId);
+  notifyDeployment(provisionId);
 }
 
 export default router;

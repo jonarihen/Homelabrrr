@@ -21,6 +21,8 @@ import sftpRoutes from './routes/sftp.js';
 import provisionRoutes from './routes/provision.js';
 import cloudImageRoutes from './routes/cloudimages.js';
 import portalRoutes from './routes/portal.js';
+import notificationRoutes from './routes/notifications.js';
+import { pollNodeHealth } from './utils/notify.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
@@ -114,6 +116,7 @@ app.use('/api/sftp',  sftpRoutes);
 app.use('/api/provision', provisionRoutes);
 app.use('/api/cloud-images', cloudImageRoutes);
 app.use('/api/portal', portalRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 // Global error handler — sanitize leaked details
@@ -472,6 +475,16 @@ for (const k of ppkKeys) {
   } catch (err) {
     console.warn(`Could not auto-convert PPK key id=${k.id} (may be encrypted): ${err.message}`);
   }
+}
+
+// ─── Node health monitor (Discord notifications for node up/down) ────────────
+// Polls the same host/node health the Overview page shows and fires
+// node.unreachable / node.recovered on state transitions. Fully self-contained
+// and best-effort — pollNodeHealth() never throws. Disable by setting the
+// interval to 0.
+const NODE_HEALTH_POLL_MS = parseInt(process.env.NODE_HEALTH_POLL_MS || '60000');
+if (NODE_HEALTH_POLL_MS > 0) {
+  setInterval(() => { pollNodeHealth().catch(() => {}); }, NODE_HEALTH_POLL_MS);
 }
 
 const PORT_NUM = parseInt(process.env.PORT || '3000');

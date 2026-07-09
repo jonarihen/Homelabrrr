@@ -4,6 +4,7 @@ import { getHosts, getHostStatus } from '../proxmox.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
+import { notify, portalLink } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -88,6 +89,12 @@ router.post('/notices', requireAdmin, (req, res) => {
   ).run(String(title).trim(), String(body || '').trim(), level, req.session.username || '');
 
   logAudit(req, 'notice_create', String(info.lastInsertRowid), String(title).trim());
+  notify('notice.published', {
+    domain: String(title).trim(),
+    status: level,
+    detail: String(body || '').trim() || undefined,
+    url: portalLink('/welcome'),
+  });
   res.json(db.prepare('SELECT * FROM portal_notices WHERE id = ?').get(info.lastInsertRowid));
 });
 
