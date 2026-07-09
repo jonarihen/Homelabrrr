@@ -8,6 +8,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { logAudit } from '../utils/audit.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
+import { effectivePermissions } from '../utils/permissions.js';
 
 const router = Router();
 
@@ -34,25 +35,28 @@ const verifyTwoFactorLimiter = rateLimit({
 });
 
 function serializeUser(user) {
+  // Effective permissions: legacy per-user column OR role grant
+  const perms = effectivePermissions(user);
   return {
     id: user.id,
     username: user.username,
     isAdmin: user.is_admin === 1,
     twoFactorEnabled: !!user.totp_enabled,
     require2fa: !!user.require_2fa,
-    canProvision: !!user.can_provision,
-    canCreateVms: !!user.can_create_vms,
+    roleId: user.role_id || null,
+    canProvision: perms.can_provision,
+    canCreateVms: perms.can_create_vms,
     permissions: {
-      canManageHosts: !!user.can_manage_hosts,
-      canManageFirewalls: !!user.can_manage_firewalls,
-      canManagePortForwards: !!user.can_manage_port_forwards,
-      canManageVlans: !!user.can_manage_vlans,
-      canManagePolicies: !!user.can_manage_policies,
-      canManageTemplates: !!user.can_manage_templates,
-      canManageUsers: !!user.can_manage_users,
-      canManageAssignments: !!user.can_manage_assignments,
-      canViewAuditLog: !!user.can_view_audit_log,
-      canEditVmHardware: !!user.can_edit_vm_hardware,
+      canManageHosts: perms.can_manage_hosts,
+      canManageFirewalls: perms.can_manage_firewalls,
+      canManagePortForwards: perms.can_manage_port_forwards,
+      canManageVlans: perms.can_manage_vlans,
+      canManagePolicies: perms.can_manage_policies,
+      canManageTemplates: perms.can_manage_templates,
+      canManageUsers: perms.can_manage_users,
+      canManageAssignments: perms.can_manage_assignments,
+      canViewAuditLog: perms.can_view_audit_log,
+      canEditVmHardware: perms.can_edit_vm_hardware,
     },
   };
 }
@@ -236,13 +240,7 @@ router.get('/me', (req, res) => {
   if (!req.session?.userId) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  const user = db.prepare(`
-    SELECT id, username, is_admin, totp_enabled, require_2fa, can_provision, can_create_vms,
-      can_manage_hosts, can_manage_firewalls, can_manage_port_forwards, can_manage_vlans, can_manage_policies,
-      can_manage_templates, can_manage_users, can_manage_assignments, can_view_audit_log, can_edit_vm_hardware
-    FROM users
-    WHERE id = ?
-  `).get(req.session.userId);
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
   if (!user) {
     return res.status(401).json({ error: 'Unauthorized' });
   }

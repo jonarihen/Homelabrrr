@@ -12,6 +12,7 @@ import { decodeNodeRef } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
+import { getRolePermissions } from '../utils/permissions.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -97,8 +98,14 @@ function parseCloudInitOptions({ ciUser, ciPassword, sshKeyIds, ipMode, ipAddres
 }
 
 // A non-admin needs can_provision to reach clone / from-image / images.
+// can_provision here is the effective value (per-user column OR role grant).
 function loadProvisioner(req) {
-  return db.prepare('SELECT id, can_provision, is_admin FROM users WHERE id = ?').get(req.session.userId);
+  const user = db.prepare('SELECT id, can_provision, is_admin, role_id FROM users WHERE id = ?').get(req.session.userId);
+  if (!user) return user;
+  return {
+    ...user,
+    can_provision: (user.can_provision === 1 || getRolePermissions(user.role_id).has('can_provision')) ? 1 : 0,
+  };
 }
 
 // ─── Templates (public, read-only for users) ────────────────────────────────

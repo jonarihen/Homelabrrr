@@ -10,6 +10,7 @@ import { encryptSecret } from '../utils/secrets.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
+import { PERMISSION_KEYS } from '../utils/permissions.js';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -161,7 +162,7 @@ router.get('/users', pUsers, (req, res) => {
     SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_provision, u.can_create_vms, u.totp_enabled, u.require_2fa,
       u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_port_forwards, u.can_manage_vlans, u.can_manage_policies,
       u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log, u.can_edit_vm_hardware,
-      u.created_at,
+      u.created_at, u.role_id, r.name AS role_name,
       (SELECT COUNT(*) FROM vm_assignments WHERE user_id = u.id) as vm_count,
       (SELECT COUNT(*) FROM login_attempts WHERE username = u.username AND attempted_at > ?) as recent_failures,
       (SELECT COALESCE(MAX(ip_count), 0) FROM (
@@ -169,6 +170,7 @@ router.get('/users', pUsers, (req, res) => {
         WHERE username = u.username AND attempted_at > ? GROUP BY ip
       )) as max_ip_failures
     FROM users u
+    LEFT JOIN roles r ON r.id = u.role_id
     ORDER BY u.username
   `).all(windowStart, windowStart);
   // Lockout is per (username, ip) — a user counts as locked when any single
@@ -287,6 +289,110 @@ router.put('/users/:id/permission', requireAdmin, (req, res) => {
   }
   db.prepare(`UPDATE users SET ${permission} = ? WHERE id = ?`).run(enabled ? 1 : 0, req.params.id);
   logAudit(req, 'admin_toggle_permission', req.params.id, `${permission}=${enabled ? 1 : 0}`);
+  res.json({ ok: true });
+});
+
+// ─── Roles (RBAC) ─────────────────────────────────────────────────────────────
+// Mutations are requireAdmin (editing a role changes live permissions of every
+// holder, same weight class as the per-user permission toggles). Reading is
+// pUsers so the Users page can render role names.
+
+function serializeRole(role) {
+  return {
+    ...role,
+    builtIn: role.built_in === 1,
+    permissions: db.prepare('SELECT permission FROM role_permissions WHERE role_id = ?')
+      .all(role.id).map((r) => r.permission),
+    userCount: db.prepare('SELECT COUNT(*) AS c FROM users WHERE role_id = ?').get(role.id).c,
+  };
+}
+
+function validatePermissionList(permissions) {
+  if (!Array.isArray(permissions)) return null;
+  const unique = [...new Set(permissions)];
+  if (unique.some((p) => !PERMISSION_KEYS.includes(p))) return null;
+  return unique;
+}
+
+const setRolePermissions = db.transaction((roleId, permissions) => {
+  db.prepare('DELETE FROM role_permissions WHERE role_id = ?').run(roleId);
+  const ins = db.prepare('INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)');
+  for (const p of permissions) ins.run(roleId, p);
+});
+
+router.get('/roles', pUsers, (req, res) => {
+  const roles = db.prepare('SELECT * FROM roles ORDER BY built_in DESC, name').all();
+  res.json({ roles: roles.map(serializeRole), permissionKeys: PERMISSION_KEYS });
+});
+
+router.post('/roles', requireAdmin, (req, res) => {
+  const { name, description = '', permissions = [] } = req.body;
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'Role name required' });
+  const perms = validatePermissionList(permissions);
+  if (!perms) return res.status(400).json({ error: 'Invalid permission list' });
+  try {
+    const r = db.prepare('INSERT INTO roles (name, description) VALUES (?, ?)')
+      .run(String(name).trim(), String(description));
+    setRolePermissions(r.lastInsertRowid, perms);
+    logAudit(req, 'admin_create_role', String(name).trim(), perms.join(','));
+    res.json(serializeRole(db.prepare('SELECT * FROM roles WHERE id = ?').get(r.lastInsertRowid)));
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Role name already exists' });
+    throw err;
+  }
+});
+
+router.put('/roles/:id', requireAdmin, (req, res) => {
+  const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+
+  const { name, description, permissions } = req.body;
+  // Built-in roles keep their name/description; their permissions stay editable
+  if (!role.built_in && name !== undefined) {
+    if (!String(name).trim()) return res.status(400).json({ error: 'Role name required' });
+    try {
+      db.prepare('UPDATE roles SET name = ? WHERE id = ?').run(String(name).trim(), role.id);
+    } catch (err) {
+      if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Role name already exists' });
+      throw err;
+    }
+  }
+  if (!role.built_in && description !== undefined) {
+    db.prepare('UPDATE roles SET description = ? WHERE id = ?').run(String(description), role.id);
+  }
+  if (permissions !== undefined) {
+    const perms = validatePermissionList(permissions);
+    if (!perms) return res.status(400).json({ error: 'Invalid permission list' });
+    setRolePermissions(role.id, perms);
+  }
+  logAudit(req, 'admin_update_role', role.name, Array.isArray(permissions) ? permissions.join(',') : '');
+  res.json(serializeRole(db.prepare('SELECT * FROM roles WHERE id = ?').get(role.id)));
+});
+
+router.delete('/roles/:id', requireAdmin, (req, res) => {
+  const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+  if (role.built_in) return res.status(400).json({ error: 'Built-in roles cannot be deleted' });
+  // Unassign holders first, then delete (role_permissions cascade away)
+  db.prepare('UPDATE users SET role_id = NULL WHERE role_id = ?').run(role.id);
+  db.prepare('DELETE FROM roles WHERE id = ?').run(role.id);
+  logAudit(req, 'admin_delete_role', role.name, '');
+  res.json({ ok: true });
+});
+
+router.put('/users/:id/role', requireAdmin, (req, res) => {
+  const user = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const { roleId } = req.body;
+  if (roleId === null || roleId === undefined || roleId === '') {
+    db.prepare('UPDATE users SET role_id = NULL WHERE id = ?').run(user.id);
+    logAudit(req, 'admin_assign_role', user.username, 'none');
+    return res.json({ ok: true });
+  }
+  const role = db.prepare('SELECT id, name FROM roles WHERE id = ?').get(roleId);
+  if (!role) return res.status(400).json({ error: 'Role not found' });
+  db.prepare('UPDATE users SET role_id = ? WHERE id = ?').run(role.id, user.id);
+  logAudit(req, 'admin_assign_role', user.username, role.name);
   res.json({ ok: true });
 });
 

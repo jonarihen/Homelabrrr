@@ -9,6 +9,7 @@ import VNCPage from './pages/VNCPage.jsx';
 import SSHPage from './pages/SSHPage.jsx';
 import AdminLayout from './pages/admin/AdminLayout.jsx';
 import UsersPage from './pages/admin/UsersPage.jsx';
+import RolesPage from './pages/admin/RolesPage.jsx';
 import VLANsPage from './pages/admin/VLANsPage.jsx';
 import AssignmentsPage from './pages/admin/AssignmentsPage.jsx';
 import PVEHostsPage from './pages/admin/PVEHostsPage.jsx';
@@ -90,6 +91,7 @@ export default function App() {
             <Route path="/admin" element={<AdminRoute><AdminLayout /></AdminRoute>}>
               <Route index element={<AdminIndexRedirect />} />
               <Route path="users" element={<UsersPage />} />
+              <Route path="roles" element={<RolesPage />} />
               <Route path="vlans" element={<VLANsPage />} />
               <Route path="assignments" element={<AssignmentsPage />} />
               <Route path="hosts" element={<PVEHostsPage />} />

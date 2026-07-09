@@ -1,11 +1,12 @@
 import db from '../db.js';
 import { nodeLookupCandidates } from './nodeRef.js';
+import { userHasPermission } from './permissions.js';
 
 export function userCanAccessVm(userId, node, vmid, isAdmin) {
   if (isAdmin) return true;
 
-  const user = db.prepare('SELECT see_all_vms FROM users WHERE id = ?').get(userId);
-  if (user?.see_all_vms) return true;
+  // Effective check: per-user column OR role grant
+  if (userHasPermission(userId, 'see_all_vms')) return true;
 
   return userOwnsVm(userId, node, vmid);
 }

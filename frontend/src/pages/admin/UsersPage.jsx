@@ -12,6 +12,7 @@ export default function UsersPage() {
   const [users, setUsers]           = useState([]);
   const [allVMs, setAllVMs]         = useState([]);
   const [allVLANs, setAllVLANs]     = useState([]);
+  const [roles, setRoles]           = useState([]);
   const [loading, setLoading]       = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [manageUser, setManageUser] = useState(null);
@@ -19,14 +20,16 @@ export default function UsersPage() {
 
   const load = async () => {
     try {
-      const [u, v, vl] = await Promise.all([
+      const [u, v, vl, r] = await Promise.all([
         api.get('/admin/users'),
         api.get('/admin/vms'),
         api.get('/admin/vlans'),
+        api.get('/admin/roles'),
       ]);
       setUsers(u.data);
       setAllVMs(v.data);
       setAllVLANs(vl.data);
+      setRoles(r.data.roles || []);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to load');
     } finally {
@@ -97,7 +100,9 @@ export default function UsersPage() {
                     <div className="flex items-center gap-1.5">
                       {u.is_admin
                         ? <span className="text-xs bg-blue-900 text-blue-300 px-2 py-0.5 rounded">Admin</span>
-                        : <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded">User</span>
+                        : u.role_name
+                          ? <span className="text-xs bg-purple-900/60 text-purple-300 px-2 py-0.5 rounded">{u.role_name}</span>
+                          : <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded">User</span>
                       }
                       {u.twoFactorEnabled
                         ? <span className="text-xs bg-green-900 text-green-300 px-2 py-0.5 rounded">2FA</span>
@@ -172,6 +177,7 @@ export default function UsersPage() {
           user={manageUser}
           allVMs={allVMs}
           allVLANs={allVLANs}
+          roles={roles}
           onClose={() => { setManageUser(null); load(); }}
         />
       )}
@@ -258,11 +264,12 @@ const PERM_DEFS = [
   { key: 'can_edit_vm_hardware',   label: 'Edit VM Hardware',   desc: 'Change CPU, memory, and disk size on assigned VMs' },
 ];
 
-function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
+function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], onClose }) {
   const canGrantPrivileges = !!currentUser?.isAdmin;
   const [tab, setTab]           = useState(() => canGrantPrivileges ? 'permissions' : 'vms');
   const [userVMs, setUserVMs]   = useState([]);
   const [userVLANs, setUserVLANs] = useState([]);
+  const [roleId, setRoleId]     = useState(user.role_id || '');
   const [seeAllVMs, setSeeAllVMs] = useState(!!user.see_all_vms);
   const [canProvision, setCanProvision] = useState(!!user.canProvision);
   const [require2fa, setRequire2fa] = useState(!!user.require2fa);
@@ -288,6 +295,13 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
   };
 
   useEffect(() => { loadUserData(); }, [user.id]);
+
+  const changeRole = async (value) => {
+    try {
+      await api.put(`/admin/users/${user.id}/role`, { roleId: value === '' ? null : parseInt(value, 10) });
+      setRoleId(value);
+    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
+  };
 
   const toggleSeeAllVMs = async (enabled) => {
     try {
@@ -414,6 +428,27 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, onClose }) {
                 <p className="text-xs text-gray-500">Control which admin features this user can access. Admins always have full access.</p>
 
                 <div className="space-y-1">
+                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Role</p>
+                  <div className="bg-gray-800 rounded-lg px-4 py-3">
+                    <select
+                      value={roleId}
+                      onChange={e => changeRole(e.target.value)}
+                      className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+                    >
+                      <option value="">No role — per-user permissions only</option>
+                      {roles.map(r => (
+                        <option key={r.id} value={r.id}>
+                          {r.name} ({r.permissions.length} permission{r.permissions.length !== 1 ? 's' : ''})
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-2">
+                      Effective access is the role's permissions <span className="text-gray-400">plus</span> any toggles enabled below (per-user overrides). Manage roles on the Roles page.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-1 pt-2">
                   <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">VM Access</p>
                   <PermToggle
                     label="Access all VMs"

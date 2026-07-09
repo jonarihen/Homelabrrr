@@ -119,6 +119,11 @@ export default function Layout({ children }) {
                         <Icon d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /> Users
                       </NavLink>
                     )}
+                    {can('canManageUsers') && (
+                      <NavLink to="/admin/roles" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
+                        <Icon d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /> Roles
+                      </NavLink>
+                    )}
                     {can('canViewAuditLog') && (
                       <NavLink to="/admin/audit-log" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
                         <Icon d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /> Audit Log

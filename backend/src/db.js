@@ -1,6 +1,9 @@
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { assertSecretEncryptionKey, encryptSecret, secretNeedsMigration } from './utils/secrets.js';
+// Safe circular import: permissions.js only touches the db binding inside
+// functions, never at module-evaluation time.
+import { PERMISSION_KEYS } from './utils/permissions.js';
 
 const DB_PATH = process.env.DB_PATH || '/app/data/db.sqlite';
 const INITIAL_ADMIN_USERNAME = process.env.INITIAL_ADMIN_USERNAME || '';
@@ -223,6 +226,39 @@ try { db.exec('ALTER TABLE users ADD COLUMN can_manage_assignments INTEGER DEFAU
 try { db.exec('ALTER TABLE users ADD COLUMN can_view_audit_log INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_create_vms INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_edit_vm_hardware INTEGER DEFAULT 0'); } catch { /* exists */ }
+
+// ─── Roles (RBAC) ─────────────────────────────────────────────────────────────
+// A role is a named permission set; a user's effective permissions are their
+// legacy per-user columns OR their role's permissions (see utils/permissions.js).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS roles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT DEFAULT '',
+    built_in INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS role_permissions (
+    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    permission TEXT NOT NULL,
+    UNIQUE(role_id, permission)
+  );
+`);
+try { db.exec('ALTER TABLE users ADD COLUMN role_id INTEGER DEFAULT NULL'); } catch { /* exists */ }
+
+// Seed the built-in roles once (empty table = first run after this migration).
+// "Administrator" grants every portal permission (it does NOT make the account
+// an admin — is_admin stays a separate flag); "User" is the no-extra-perms base.
+if (db.prepare('SELECT COUNT(*) AS c FROM roles').get().c === 0) {
+  const adminRole = db.prepare(
+    "INSERT INTO roles (name, description, built_in) VALUES ('Administrator', 'Every portal permission (does not grant admin account status)', 1)"
+  ).run();
+  const insertPerm = db.prepare('INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)');
+  for (const key of PERMISSION_KEYS) insertPerm.run(adminRole.lastInsertRowid, key);
+  db.prepare(
+    "INSERT INTO roles (name, description, built_in) VALUES ('User', 'Basic access — no extra permissions', 1)"
+  ).run();
+}
 
 // Audit log
 try { db.exec(`

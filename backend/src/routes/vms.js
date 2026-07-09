@@ -13,6 +13,7 @@ import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { userCanAccessVm, userOwnsVm } from '../utils/vmAccess.js';
+import { userHasPermission } from '../utils/permissions.js';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 
@@ -314,9 +315,7 @@ async function resolveVmDhcpScope(node, vmid, netInterface, firewallId = null) {
 // ─── User's assigned VMs ──────────────────────────────────────────────────────
 
 router.get('/', async (req, res) => {
-  const user = db.prepare('SELECT see_all_vms FROM users WHERE id = ?').get(req.session.userId);
-
-  if (user?.see_all_vms) {
+  if (userHasPermission(req.session.userId, 'see_all_vms')) {
     try {
       const vms = await getAllVMs();
       return res.json(vms.map(vm => ({
