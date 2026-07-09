@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import StatusBadge from './StatusBadge.jsx';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
+import { sleepLabel } from '../utils/schedule.js';
 
 function fmt(bytes) {
   if (!bytes) return '—';
@@ -53,6 +54,16 @@ export default function VMCard({ vm, selected, onSelect }) {
             )}
           </h3>
           <p className="text-[10px] text-gray-500 mt-1 font-mono uppercase tracking-[0.1em]">ID {vm.vmid} / {displayNode(vm.node)}</p>
+          {vm.schedule?.enabled && (
+            <span
+              title={`Power schedule — ${sleepLabel(vm.schedule)}${vm.schedule.skipActive ? ' (skipping next shutdown)' : ''}`}
+              className="mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 border border-indigo-500/30 bg-indigo-500/10 font-mono text-[9px] uppercase tracking-wide text-indigo-300 whitespace-nowrap"
+            >
+              <svg className="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" /></svg>
+              {sleepLabel(vm.schedule)}
+              {vm.schedule.skipActive && <span className="text-yellow-300">· skip</span>}
+            </span>
+          )}
         </div>
         <StatusBadge status={vm.status} />
       </div>

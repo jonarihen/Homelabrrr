@@ -5,6 +5,7 @@ import StatusBadge from '../components/StatusBadge.jsx';
 import Modal from '../components/Modal.jsx';
 import VLANModal from '../components/VLANModal.jsx';
 import VMHardwareModal from '../components/VMHardwareModal.jsx';
+import VMScheduleModal from '../components/VMScheduleModal.jsx';
 import VMIPManagementPanel from '../components/VMIPManagementPanel.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import useSSHConfig from '../hooks/useSSHConfig.js';
@@ -12,6 +13,7 @@ import { useConsoleSessions } from '../contexts/ConsoleSessionsContext.jsx';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
+import { sleepLabel, describeDays } from '../utils/schedule.js';
 
 // ── Formatters ───────────────────────────────────────────────────────────────
 
@@ -144,6 +146,8 @@ export default function VMPage() {
   const [disks, setDisks] = useState([]);
   const [vlanModal, setVlanModal] = useState(false);
   const [hardwareModal, setHardwareModal] = useState(false);
+  const [scheduleModal, setScheduleModal] = useState(false);
+  const [schedule, setSchedule] = useState(null);
   const [deleteModal, setDeleteModal] = useState(false);
   const { user } = useAuth();
 
@@ -188,6 +192,14 @@ export default function VMPage() {
   }, [node, vmid]);
 
   useEffect(() => { loadDisks(); }, [loadDisks]);
+
+  const loadSchedule = useCallback(() => {
+    api.get(`/vms/${node}/${vmid}/schedule`)
+      .then(r => setSchedule(r.data?.schedule || null))
+      .catch(() => {});
+  }, [node, vmid]);
+
+  useEffect(() => { loadSchedule(); }, [loadSchedule]);
 
   useEffect(() => {
     let cancelled = false;
@@ -264,7 +276,19 @@ export default function VMPage() {
               <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mt-1.5">VMID {vm.vmid} / {displayNode(vm.node)}</p>
             </div>
           </div>
-          <StatusBadge status={vm.status} />
+          <div className="flex items-center gap-2.5">
+            {schedule?.enabled && (
+              <span
+                title={`${sleepLabel(schedule)} · ${describeDays(schedule.days)} · ${schedule.timezone}${schedule.skipActive ? ' · skipping next shutdown' : ''}`}
+                className="inline-flex items-center gap-1.5 px-2 py-1 border border-indigo-500/30 bg-indigo-500/10 font-mono text-[10px] uppercase tracking-wide text-indigo-300 whitespace-nowrap"
+              >
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" /></svg>
+                {sleepLabel(schedule)}
+                {schedule.skipActive && <span className="text-yellow-300">· skip</span>}
+              </span>
+            )}
+            <StatusBadge status={vm.status} />
+          </div>
         </div>
 
         {/* ── Action Bar ── */}
@@ -324,6 +348,10 @@ export default function VMPage() {
             <ActionBtn color="gray" onClick={() => setVlanModal(true)} icon={
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" /></svg>
             }>VLAN</ActionBtn>
+
+            <ActionBtn color={schedule?.enabled ? 'blue' : 'gray'} onClick={() => setScheduleModal(true)} icon={
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            }>Schedule</ActionBtn>
 
             {(user?.isAdmin || user?.permissions?.canEditVmHardware) && (
               <>
@@ -538,6 +566,7 @@ export default function VMPage() {
 
       {vlanModal && <VLANModal vm={vm} onClose={() => setVlanModal(false)} onSaved={loadVm} />}
       {hardwareModal && <VMHardwareModal vm={vm} disks={disks} onClose={() => setHardwareModal(false)} onSaved={() => { loadVm(); loadDisks(); }} />}
+      {scheduleModal && <VMScheduleModal vm={vm} node={node} vmid={vmid} onClose={() => setScheduleModal(false)} onSaved={(s) => setSchedule(s)} />}
       {deleteModal && <DeleteVMModal vm={vm} node={node} onClose={() => setDeleteModal(false)} />}
     </Layout>
   );

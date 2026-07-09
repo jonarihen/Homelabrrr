@@ -24,6 +24,7 @@ import portalRoutes from './routes/portal.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
+import { startScheduler } from './scheduler.js';
 
 const app = express();
 const server = createServer(app);
@@ -473,6 +474,9 @@ for (const k of ppkKeys) {
     console.warn(`Could not auto-convert PPK key id=${k.id} (may be encrypted): ${err.message}`);
   }
 }
+
+// Background enforcement of per-VM power schedules (vm_schedules).
+startScheduler();
 
 const PORT_NUM = parseInt(process.env.PORT || '3000');
 server.listen(PORT_NUM, () => {

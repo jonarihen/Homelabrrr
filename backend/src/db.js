@@ -376,6 +376,36 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// Per-VM power schedules — automatic stop/start windows enforced by the
+// background scheduler loop (scheduler.js). `days` is a 7-bit mask
+// (bit 0 = Sunday … bit 6 = Saturday) of the days the STOP fires on;
+// `timezone` is an IANA zone evaluated with Intl. `skip_until` is an epoch-ms
+// "skip tonight" one-off. The remaining columns are scheduler bookkeeping:
+// `last_off` is the previous tick's off-window state (edge detection across
+// restarts), `stopped_this_window` records that the scheduler already stopped
+// the VM for the current window, and `running_due_to_manual` marks that a
+// manual start inside the off-window should be respected until the next stop.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS vm_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node TEXT NOT NULL,
+    vmid INTEGER NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    stop_time TEXT DEFAULT '',
+    start_time TEXT DEFAULT '',
+    days INTEGER DEFAULT 127,
+    timezone TEXT DEFAULT 'UTC',
+    skip_until INTEGER DEFAULT 0,
+    running_due_to_manual INTEGER DEFAULT 0,
+    stopped_this_window INTEGER DEFAULT 0,
+    last_off INTEGER DEFAULT -1,
+    last_action TEXT DEFAULT '',
+    last_action_at INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(node, vmid)
+  )
+`); } catch { /* exists */ }
+
 assertSecretEncryptionKey();
 
 function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-10 — Per-VM power schedules
+
+- VMs can now sleep on a schedule: open a VM and hit **Schedule** to set an automatic **stop time, start time, active days, and timezone** (e.g. stop 23:00, start 08:00 on weekdays) so idle dev VMs stop holding cluster memory overnight
+- The backend enforces it every minute: a **graceful shutdown** is tried first, with a **hard-stop fallback** after a timeout, and the VM is started again at the configured time — all evaluated in the schedule's IANA timezone (DST-aware) on the chosen days
+- **Manual overrides always win** — manually starting a VM inside its off-window keeps it running until the *next* scheduled stop, and a **Skip tonight** button skips just the next shutdown before normal enforcement resumes
+- Schedule state is visible at a glance: a **"sleeps 23:00–08:00"** badge shows on the VM card and the VM page header
+- Owners edit their own VM's schedule (**admins can edit any**); every automatic stop/start (and its outcome) is written to the **audit log**
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder
