@@ -33,7 +33,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | VM & LXC access | Assigned VM/container listing, status/actions, browser VNC, snapshots, backups grouped by storage (with PBS encryption/verification status), and file-level backup restore |
 | Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, pop-out tabs, and clipboard paste into VNC (typed into the guest as keystrokes, no agent needed) |
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
-| Provisioning | Deploy straight from a cloud image, clone a template, or admin create-from-scratch — all with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, pre-flight capacity checks (node free memory + storage space), per-user resource quotas (cores/memory/storage, enforced on creation and hardware upgrades), and a live step-by-step deployment progress stepper |
+| Provisioning | Deploy straight from a cloud image, clone a template, or build a VM from scratch / from an available ISO — from-scratch is available to admins and to users holding the **Create VMs** permission (non-admins are pinned to the default bridge and self-assigned the VM) — all with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, pre-flight capacity checks (node free memory + storage space), per-user resource quotas (cores/memory/storage, enforced on creation and hardware upgrades), and a live step-by-step deployment progress stepper |
 | Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) as the provisioning source: deploy a new VM directly from an image with `import-from` (no static template needed), configuring guest user, SSH keys, and DHCP/static network via cloud-init on first boot; optional one-click conversion to a reusable template remains (requires a storage with the Import content type; PVE 9) |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
@@ -46,7 +46,7 @@ This project pulls those into one interface so users can work inside guardrails 
 ### User side
 
 - `My VMs` — assigned VM/LXC inventory with search, filter, sort, selection, and bulk actions
-- `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and create-from-scratch for admins, each with a live deployment progress stepper
+- `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and build-from-scratch (from an available ISO) for admins and users with the **Create VMs** permission, each with a live deployment progress stepper
 - `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore; backups are grouped per storage location and show encryption, verification, and protection status for PBS-backed stores
 - `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs; VNC consoles have a Paste button that types the clipboard into the guest (SSH terminals take native browser paste)
 - `SSH Keys` — uploaded keys used by browser SSH and SFTP sessions

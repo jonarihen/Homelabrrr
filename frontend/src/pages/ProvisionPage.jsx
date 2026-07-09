@@ -49,7 +49,7 @@ export default function ProvisionPage() {
   useDocumentTitle('New VM');
   const { user } = useAuth();
   const canProvision = user?.isAdmin || user?.canProvision;
-  const canCreate = user?.isAdmin;
+  const canCreate = user?.isAdmin || user?.canCreateVms;
 
   // Tabs available to this user, in display order. Cloud Image is the primary
   // provisioning path; template cloning and from-scratch stay available.
@@ -940,6 +940,7 @@ function CloneForm({ onStarted }) {
 
 function CreateForm({ onStarted }) {
   const { user } = useAuth();
+  const isAdmin = !!user?.isAdmin;
   const [nodes, setNodes] = useState([]);
   const [storages, setStorages] = useState([]);
   const [isos, setIsos] = useState([]);
@@ -972,12 +973,16 @@ function CreateForm({ onStarted }) {
         setForm(f => ({ ...f, storage: lvm.storage }));
       }
     }).catch(() => {});
-    api.get(`/provision/nodes/${form.node}/networks`).then(r => {
-      setBridges(r.data);
-      if (r.data.length > 0 && !r.data.find(b => b.iface === form.bridge)) {
-        setForm(f => ({ ...f, bridge: r.data[0].iface }));
-      }
-    }).catch(() => {});
+    // The networks list is admin-only; non-admins are pinned to vmbr0 on the
+    // backend and don't see the bridge field, so skip the fetch entirely.
+    if (isAdmin) {
+      api.get(`/provision/nodes/${form.node}/networks`).then(r => {
+        setBridges(r.data);
+        if (r.data.length > 0 && !r.data.find(b => b.iface === form.bridge)) {
+          setForm(f => ({ ...f, bridge: r.data[0].iface }));
+        }
+      }).catch(() => {});
+    }
   }, [form.node]);
 
   useEffect(() => {
@@ -1056,7 +1061,7 @@ function CreateForm({ onStarted }) {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className={`grid ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'} gap-4`}>
           <div>
             <label className="block text-xs text-gray-400 mb-1.5 font-medium">Storage</label>
             <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls}>
@@ -1066,13 +1071,17 @@ function CreateForm({ onStarted }) {
               ))}
             </select>
           </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Network Bridge</label>
-            <select value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className={inputCls}>
-              {bridges.map(b => <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` — ${b.comments}` : ''}</option>)}
-              {bridges.length === 0 && <option value="vmbr0">vmbr0</option>}
-            </select>
-          </div>
+          {/* Network bridge is admin-only — non-admins are pinned to the default
+              (vmbr0) on the backend to prevent VLAN-injection via bridge=...,tag=N. */}
+          {isAdmin && (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Network Bridge</label>
+              <select value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className={inputCls}>
+                {bridges.map(b => <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` — ${b.comments}` : ''}</option>)}
+                {bridges.length === 0 && <option value="vmbr0">vmbr0</option>}
+              </select>
+            </div>
+          )}
         </div>
 
         {vlans.length > 0 && (
