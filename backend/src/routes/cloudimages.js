@@ -8,6 +8,7 @@ import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
+import { assertPublicDownloadUrl } from '../utils/urlGuard.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -50,6 +51,12 @@ router.post('/', async (req, res) => {
   }
   if (!/^https?:\/\//i.test(url)) {
     return res.status(400).json({ error: 'URL must be http(s)' });
+  }
+  // The PVE host fetches this URL server-side — refuse internal targets (SSRF)
+  try {
+    await assertPublicDownloadUrl(url);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
   }
 
   const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'cloud-image';

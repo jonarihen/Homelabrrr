@@ -452,6 +452,17 @@ router.post('/create', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Node and name are required' });
   }
 
+  // These land in PVE property strings — same strict identifier rule as
+  // /from-image and /clone (admin-only route, but keep the layers consistent).
+  for (const [field, value] of Object.entries({ name, storage, bridge, ostype, bios, scsihw })) {
+    if (!/^[a-zA-Z0-9._-]+$/.test(String(value))) {
+      return res.status(400).json({ error: `Invalid ${field}` });
+    }
+  }
+  if (iso && !/^[a-zA-Z0-9._/:-]+$/.test(String(iso))) {
+    return res.status(400).json({ error: 'Invalid iso' });
+  }
+
   try {
     const vmid = await getNextVmid();
     const cpuLayout = await computeCpuTopology(node, cores);

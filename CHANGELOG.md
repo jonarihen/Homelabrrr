@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-07-09 — Security: low-severity hardening round (L1–L9)
+
+- **Login timing**: unknown usernames now take as long to reject as wrong passwords (dummy bcrypt compare), closing a user-enumeration side channel
+- **`SESSION_SECRET` is validated at startup** — the backend refuses to boot with a missing or short secret instead of silently signing sessions with a weak one
+- **Cloud-image downloads reject internal targets**: download URLs that resolve to loopback, RFC1918, link-local (`169.254.169.254`), or other reserved ranges are refused (blind-SSRF hardening). Homelabs with an internal image mirror can opt out with `ALLOW_INTERNAL_IMAGE_URLS=true`
+- **SSH fingerprint scans are rate-limited** (10/min per user) and written to the audit log, so the scan endpoint can't be quietly used as an internal port probe
+- The admin-only **full VM create** endpoint now validates `name`/`storage`/`bridge`/`ostype`/`bios`/`scsihw`/`iso` with the same strict identifier rules as the other provisioning routes
+- **SFTP download filenames are sanitized** in the `Content-Disposition` header (quotes/control characters stripped, full name carried RFC5987-encoded)
+- The frontend now sends a **Content-Security-Policy** header
+- **`FRONTEND_BIND_ADDRESS` now defaults to `127.0.0.1`** in docker-compose, matching `.env.example` — set `0.0.0.0` explicitly if the UI must be reachable from other hosts. **Heads-up:** if you relied on the old default to expose port 8181 beyond localhost, add `FRONTEND_BIND_ADDRESS=0.0.0.0` to your `.env`
+- Startup PPK key migration now uses `uuidv4()` temp filenames instead of `Math.random()`
+
 ## 2026-07-07 — Cluster CPU and memory meters on the Overview page
 
 - The **System status** panel on the Overview page now shows **cluster-wide CPU and memory usage** — visible to every user, not just admins. CPU is core-weighted across all reachable nodes; memory shows used / total. The bars shift green → amber → red at 70% and 90% load, with the exact percentage always printed next to them

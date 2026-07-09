@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import https from 'https';
 import { Client as SSHClient } from 'ssh2';
 import { execFile } from 'child_process';
+import { v4 as uuidv4 } from 'uuid';
 import { writeFile, readFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -49,6 +50,13 @@ if (ALLOWED_ORIGIN) {
     credentials: true,
   }));
 }
+// An empty/weak secret boots fine but yields trivially forgeable session
+// signatures — fail fast instead (SECRET_ENCRYPTION_KEY is already asserted
+// the same way in utils/secrets.js).
+if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 16) {
+  throw new Error('SESSION_SECRET must be set to a random string of at least 16 characters');
+}
+
 const SqliteSessionStore = SqliteStore(session);
 const sessionMiddleware = session({
   store: new SqliteSessionStore({
@@ -430,7 +438,7 @@ sshWss.on('connection', (clientWs, sshSession) => {
 // ─── Migrate any stored PPK keys to OpenSSH at startup ───────────────────────
 
 async function convertPpkKey(ppkContent) {
-  const id = Math.random().toString(36).slice(2);
+  const id = uuidv4();
   const inPath      = join(tmpdir(), `${id}.ppk`);
   const outPath     = join(tmpdir(), `${id}.pem`);
   const newPassPath = join(tmpdir(), `${id}.newpass`);

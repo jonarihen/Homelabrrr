@@ -11,6 +11,7 @@ services:
       - COOKIE_SECURE=${COOKIE_SECURE:-true}
       - TRUST_PROXY=${TRUST_PROXY:-1}
       - ALLOW_INSECURE_UPSTREAM_TLS=${ALLOW_INSECURE_UPSTREAM_TLS:-false}
+      - ALLOW_INTERNAL_IMAGE_URLS=${ALLOW_INTERNAL_IMAGE_URLS:-false}
       - INITIAL_ADMIN_USERNAME=${INITIAL_ADMIN_USERNAME:-}
       - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD:-}
       - PORT=3000
@@ -29,7 +30,7 @@ services:
       - target: 80
         published: 8181
         protocol: tcp
-        host_ip: ${FRONTEND_BIND_ADDRESS:-0.0.0.0}
+        host_ip: ${FRONTEND_BIND_ADDRESS:-127.0.0.1}
     depends_on:
       - backend
     networks:

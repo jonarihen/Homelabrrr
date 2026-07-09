@@ -11,6 +11,7 @@ import { nodeLookupCandidates } from '../utils/nodeRef.js';
 import { normalizeSshHostFingerprint, scanSshHostFingerprint } from '../utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 import { derivePublicKey } from '../utils/sshPublicKey.js';
+import { logAudit } from '../utils/audit.js';
 
 // Convert a PPK key (any version) to OpenSSH PEM using puttygen.
 // passphrase is the PPK decryption passphrase (empty string if unencrypted).
@@ -202,6 +203,25 @@ router.put('/config/:node/:vmid', (req, res) => {
   res.json({ ok: true });
 });
 
+// The scan opens a TCP/SSH handshake to a user-supplied host/port, which could
+// be abused as an internal port probe. Legit use is a handful of scans while
+// configuring a VM — rate-limit per user and leave an audit trail.
+const scanAttempts = new Map(); // userId → [timestamps]
+const SCAN_WINDOW_MS = 60 * 1000;
+const SCAN_MAX_PER_WINDOW = 10;
+
+function scanRateLimited(userId) {
+  const now = Date.now();
+  const recent = (scanAttempts.get(userId) || []).filter((t) => now - t < SCAN_WINDOW_MS);
+  if (recent.length >= SCAN_MAX_PER_WINDOW) {
+    scanAttempts.set(userId, recent);
+    return true;
+  }
+  recent.push(now);
+  scanAttempts.set(userId, recent);
+  return false;
+}
+
 router.post('/config/:node/:vmid/scan-fingerprint', async (req, res) => {
   const { node, vmid } = req.params;
   const { host, port = 22 } = req.body;
@@ -209,6 +229,11 @@ router.post('/config/:node/:vmid/scan-fingerprint', async (req, res) => {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!host) return res.status(400).json({ error: 'Host/IP required' });
+  if (scanRateLimited(req.session.userId)) {
+    return res.status(429).json({ error: 'Too many fingerprint scans — try again in a minute' });
+  }
+
+  logAudit(req, 'ssh_fingerprint_scan', `${node}/${vmid}`, `${host}:${port}`);
 
   try {
     const hostFingerprint = await scanSshHostFingerprint(host, parseInt(port, 10) || 22);

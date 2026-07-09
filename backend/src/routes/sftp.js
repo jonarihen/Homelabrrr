@@ -186,7 +186,13 @@ router.get('/download', async (req, res) => {
       sftp.stat(filePath, (err, s) => (err ? reject(err) : resolve(s)));
     });
 
-    res.setHeader('Content-Disposition', `attachment; filename="${basename(filePath)}"`);
+    // Remote filename is untrusted — strip quotes/control chars from the ASCII
+    // fallback and carry the real name RFC5987-encoded in filename*.
+    const rawName = basename(filePath);
+    const asciiName = rawName.replace(/["\\\x00-\x1f\x7f]/g, '_');
+    const encodedName = encodeURIComponent(rawName)
+      .replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    res.setHeader('Content-Disposition', `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`);
     res.setHeader('Content-Type', 'application/octet-stream');
     if (stat.size != null) res.setHeader('Content-Length', stat.size);
 

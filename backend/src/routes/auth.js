@@ -105,6 +105,10 @@ function clearTwoFactorAttempts(username) {
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
+// Dummy hash compared against when the username doesn't exist, so unknown and
+// known usernames take the same time (blocks user enumeration via timing).
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync('homelabrrr-timing-equalizer', 10);
+
 router.post('/login', loginLimiter, async (req, res, next) => {
   const { username, password } = req.body;
   if (!username || !password) {
@@ -125,7 +129,8 @@ router.post('/login', loginLimiter, async (req, res, next) => {
   }
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  if (!user || !bcrypt.compareSync(password, user.password)) {
+  const passwordOk = bcrypt.compareSync(password, user ? user.password : DUMMY_PASSWORD_HASH);
+  if (!user || !passwordOk) {
     db.prepare('INSERT INTO login_attempts (username, attempted_at) VALUES (?, ?)').run(username, now);
     logAudit({ session: { username: username }, headers: req.headers, ip: req.ip }, 'login_failed', username, '');
     const remaining = LOCKOUT_MAX - (count + 1);

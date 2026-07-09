@@ -153,8 +153,8 @@ Recommended model:
 - the proxy forwards traffic to the frontend container
 - the frontend nginx container proxies `/api/*` and websocket upgrades to the backend over the internal Docker network
 
-By default, the frontend is published on port `8181`.
-Use `FRONTEND_BIND_ADDRESS=127.0.0.1` if the proxy runs on the same host and you do not want the UI exposed directly.
+By default, the frontend is published on port `8181` and bound to `127.0.0.1` (loopback only, matching `.env.example`).
+Set `FRONTEND_BIND_ADDRESS=0.0.0.0` if the reverse proxy runs on another host and needs to reach the UI directly.
 
 ## Local Development
 
@@ -194,9 +194,10 @@ Example values live in [`.env.example`](.env.example).
 | `COOKIE_SECURE` | Marks auth cookies as `Secure` (default `true`; set to `false` only for plain-HTTP local dev) |
 | `TRUST_PROXY` | Number or mode used for Express proxy trust |
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
+| `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
-| `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing |
+| `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing (default `127.0.0.1`; set `0.0.0.0` to expose on all interfaces) |
 
 Useful implementation defaults:
 
