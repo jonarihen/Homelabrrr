@@ -386,13 +386,14 @@ export async function getISOImages(node, storage) {
   return content || [];
 }
 
-// Ask PVE to download a file from a URL into a storage as `import` content —
-// the only content type (besides images) that qemu's import-from accepts as a
-// disk source on PVE 9. The storage must have the Import content type
-// enabled. Returns the download task UPID.
-export async function downloadUrlToStorage(node, storage, url, filename, checksum, checksumAlgorithm) {
+// Ask PVE to download a file from a URL into a storage. Defaults to `import`
+// content — the only content type (besides images) that qemu's import-from
+// accepts as a disk source on PVE 9; the storage must have the Import content
+// type enabled. Pass content='iso' to populate the ISO catalog (storage needs
+// the ISO content type enabled). Returns the download task UPID.
+export async function downloadUrlToStorage(node, storage, url, filename, checksum, checksumAlgorithm, content = 'import') {
   const { host, nodeName } = await resolveNode(node);
-  const body = { content: 'import', url, filename };
+  const body = { content, url, filename };
   if (checksum) {
     body.checksum = checksum;
     body['checksum-algorithm'] = checksumAlgorithm || 'sha256';

@@ -35,6 +35,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
 | Provisioning | Deploy straight from a cloud image, clone a template, or admin create-from-scratch — all with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, pre-flight capacity checks (node free memory + storage space), per-user resource quotas (cores/memory/storage, enforced on creation and hardware upgrades), and a live step-by-step deployment progress stepper |
 | Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) as the provisioning source: deploy a new VM directly from an image with `import-from` (no static template needed), configuring guest user, SSH keys, and DHCP/static network via cloud-init on first boot; optional one-click conversion to a reusable template remains (requires a storage with the Import content type; PVE 9) |
+| ISO catalog | Download installer ISOs by URL — Proxmox fetches them onto a storage as `iso` content with live download-progress polling; list with size/status and remove (deletes the PVE volume and the row). Same SSRF URL guard as cloud images; ready ISOs feed the from-scratch create-VM picker |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
@@ -55,7 +56,7 @@ This project pulls those into one interface so users can work inside guardrails 
 ### Admin side
 
 - `PVE Hosts` — multi-host Proxmox registration with status monitoring
-- `Templates` — register source VMs with auto-populated defaults from Proxmox config; cloud image catalog with downloads used as the direct provisioning source (deploy VMs straight from an image) plus optional one-click cloud-init template builds
+- `Templates` — register source VMs with auto-populated defaults from Proxmox config; cloud image catalog with downloads used as the direct provisioning source (deploy VMs straight from an image) plus optional one-click cloud-init template builds; and an ISO catalog to download installer ISOs by URL for from-scratch installs
 - `Firewalls` — FortiGate registration, VDOM/link settings, WAN settings, and managed-switch discovery
 - `VLANs` — managed or tagged-only network definitions, subnet data, and FortiGate sync
 - `Policies` — visual traffic mesh plus address/service object management for admins
@@ -195,7 +196,7 @@ Example values live in [`.env.example`](.env.example).
 | `COOKIE_SECURE` | Marks auth cookies as `Secure` (default `true`; set to `false` only for plain-HTTP local dev) |
 | `TRUST_PROXY` | Number of proxy hops in front of the backend (default `2`: external reverse proxy + bundled nginx; set `1` if clients reach port 8181 directly) |
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
-| `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
+| `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image and ISO downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
 | `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing (default `127.0.0.1`; set `0.0.0.0` to expose on all interfaces) |
