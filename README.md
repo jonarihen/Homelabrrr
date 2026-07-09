@@ -35,6 +35,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
 | Provisioning | Deploy straight from a cloud image, clone a template, or admin create-from-scratch — all with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, pre-flight capacity checks (node free memory + storage space), per-user resource quotas (cores/memory/storage, enforced on creation and hardware upgrades), and a live step-by-step deployment progress stepper |
 | Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) as the provisioning source: deploy a new VM directly from an image with `import-from` (no static template needed), configuring guest user, SSH keys, and DHCP/static network via cloud-init on first boot; optional one-click conversion to a reusable template remains (requires a storage with the Import content type; PVE 9) |
+| VM leases | Per-VM expiry so the lab doesn't fill with zombie VMs: a lease starts at provisioning, owners see a countdown ("Expires in 12 days") and renew in one click, and a background sweep gracefully stops (never deletes) expired VMs, then surfaces them in an admin reclaimable list after a grace period. Admins set the default duration/grace, exempt infra VMs, and adjust/extend any lease |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
@@ -63,6 +64,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `Assignments` — VM and VLAN-to-user mapping, grouped per user with unassigned VMs listed first; unassigned VMs can be claimed for your own account (per VM, or all at once — handy for fleets that predate the portal); owner + VLAN are stamped as Proxmox tags on each VM (with a bulk "Sync PVE Tags" action) so ownership is visible in the PVE UI too
 - `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, lockout unlocks, and enforced 2FA
 - `Roles` — named permission sets (built-in Administrator/User plus custom roles); editing a role updates every user holding it
+- `VM Leases` — set the default lease duration + grace period, review every VM's lease with owner and live status, renew/adjust/extend any lease, exempt infra VMs, run the expiry sweep on demand, and backfill leases onto VMs that predate the feature; expired-past-grace VMs are highlighted as reclaimable
 - `Audit Log` — change tracking with user/IP/timestamp
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user
 
@@ -199,6 +201,7 @@ Example values live in [`.env.example`](.env.example).
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
 | `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing (default `127.0.0.1`; set `0.0.0.0` to expose on all interfaces) |
+| `LEASE_CHECK_INTERVAL_MS` | How often the background VM-lease sweeper runs to gracefully stop expired VMs (default `900000` = 15 min; minimum `60000`). Default lease duration and grace period are set in-app on the admin VM Leases page |
 
 Useful implementation defaults:
 

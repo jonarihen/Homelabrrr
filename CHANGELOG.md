@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-10 — VM leases: expiry with auto-stop and one-click renewal
+
+- Every provisioned VM now gets a **lease** — a TTL that starts at provisioning. VM cards and the VM page show a countdown badge (e.g. **"Expires in 12 days"**) that turns amber near expiry and red once expired
+- Owners can **renew** in one click from the VM page — it resets the clock and bumps a renewal count that admins can see
+- On expiry a background checker **gracefully stops** the VM (never deletes it) and flags it. After an admin-configurable **grace period** it appears in a new admin **VM Leases** reclaimable list for manual deletion
+- New admin **VM Leases** page (Infrastructure section): set the **default lease duration** and **grace period**, see the whole roster with owner + live status, **renew / adjust / extend** any lease, **exempt** infra VMs so they never expire, run the sweep on demand, and **backfill** leases onto VMs that predate the feature
+- All lease actions (auto-stop, renew, adjust, sweep) are audit-logged; the sweep runs `system` audit entries. Owner expiry notifications are stubbed pending the notifications feature (#22)
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder

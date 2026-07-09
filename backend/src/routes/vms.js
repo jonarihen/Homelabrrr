@@ -14,6 +14,7 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { userCanAccessVm, userOwnsVm } from '../utils/vmAccess.js';
 import { userHasPermission } from '../utils/permissions.js';
+import { summarizeLease, renewLease } from '../utils/leases.js';
 import { assertUserQuota, sizeToGb } from '../utils/quota.js';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
@@ -319,10 +320,14 @@ router.get('/', async (req, res) => {
   if (userHasPermission(req.session.userId, 'see_all_vms')) {
     try {
       const vms = await getAllVMs();
-      return res.json(vms.map(vm => ({
-        ...vm,
-        ...serializeNodeIdentity(vm.nodeRef || vm.node),
-      })));
+      return res.json(vms.map(vm => {
+        const identity = serializeNodeIdentity(vm.nodeRef || vm.node);
+        return {
+          ...vm,
+          ...identity,
+          lease: summarizeLease(identity.nodeRef, vm.vmid),
+        };
+      }));
     } catch (err) {
       return res.status(500).json({ error: sanitizeError(err.message) });
     }
@@ -332,11 +337,12 @@ router.get('/', async (req, res) => {
 
   const results = await Promise.all(assignments.map(async (a) => {
     const nodeIdentity = serializeNodeIdentity(a.node);
+    const lease = summarizeLease(a.node, a.vmid);
     try {
       const status = await getVMStatus(a.node, a.vmid);
-      return { ...status, ...nodeIdentity, assignmentId: a.id };
+      return { ...status, ...nodeIdentity, assignmentId: a.id, lease };
     } catch {
-      return { vmid: a.vmid, ...nodeIdentity, name: `VM ${a.vmid}`, status: 'error', assignmentId: a.id };
+      return { vmid: a.vmid, ...nodeIdentity, name: `VM ${a.vmid}`, status: 'error', assignmentId: a.id, lease };
     }
   }));
 
@@ -352,13 +358,34 @@ router.get('/:node/:vmid/status', async (req, res) => {
   }
   try {
     const nodeIdentity = serializeNodeIdentity(node);
+    const lease = summarizeLease(node, vmid);
     try {
-      res.json({ ...(await getVMStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'qemu' });
+      res.json({ ...(await getVMStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'qemu', lease });
     } catch {
-      res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'lxc' });
+      res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'lxc', lease });
     }
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// ─── VM Lease renewal ─────────────────────────────────────────────────────────
+// Strict ownership (like deletion) — an assignment, not see_all_vms, is
+// required. Renewing resets the clock and bumps the renewal count.
+router.post('/:node/:vmid/lease/renew', (req, res) => {
+  const { node, vmid } = req.params;
+
+  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+    return res.status(403).json({ error: 'You can only renew leases for VMs assigned to you' });
+  }
+
+  try {
+    const lease = renewLease(node, vmid, { createdBy: req.session.username });
+    if (!lease) return res.status(404).json({ error: 'This VM has no lease to renew' });
+    logAudit(req, 'lease_renew', `${node}/${vmid}`, `renewal #${lease.renewal_count}`);
+    res.json({ ok: true, lease: summarizeLease(node, vmid) });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
@@ -429,7 +456,7 @@ router.delete('/:node/:vmid', async (req, res) => {
     const parsedVmid = parseInt(vmid, 10);
     const candidates = nodeLookupCandidates(node);
     const placeholders = candidates.map(() => '?').join(', ');
-    for (const table of ['vm_assignments', 'vm_ssh_configs', 'vm_ssh_user_configs', 'provisioned_vms']) {
+    for (const table of ['vm_assignments', 'vm_ssh_configs', 'vm_ssh_user_configs', 'provisioned_vms', 'vm_leases']) {
       db.prepare(`DELETE FROM ${table} WHERE vmid = ? AND node IN (${placeholders})`).run(parsedVmid, ...candidates);
     }
 

@@ -14,6 +14,7 @@ import { assertNodeCapacity } from '../utils/capacity.js';
 import { assertUserQuota, getUserQuota, getUserResourceUsage } from '../utils/quota.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { getRolePermissions } from '../utils/permissions.js';
+import { createLeaseForVm } from '../utils/leases.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -295,6 +296,9 @@ router.post('/clone', async (req, res) => {
       } catch { /* may already be assigned */ }
     }
 
+    // Start the VM's lease clock at provisioning (default duration from settings)
+    createLeaseForVm(template.node, newVmid, { createdBy: req.session.username });
+
     // Do config changes after clone finishes — poll in background
     pollAndConfigure(row.lastInsertRowid, template.node, newVmid, upid, {
       cores: finalCores,
@@ -457,6 +461,9 @@ router.post('/from-image', async (req, res) => {
       } catch { /* may already be assigned */ }
     }
 
+    // Start the VM's lease clock at provisioning (default duration from settings)
+    createLeaseForVm(image.node, vmid, { createdBy: req.session.username });
+
     finishImageProvision(row.lastInsertRowid, image.node, vmid, upid, {
       diskGb: baseDiskGb,
       ...cloudInitOpts,
@@ -558,6 +565,9 @@ router.post('/create', requireAdmin, async (req, res) => {
           .run(targetUser, node, vmid);
       } catch { /* already assigned */ }
     }
+
+    // Start the VM's lease clock at provisioning (default duration from settings)
+    createLeaseForVm(node, vmid, { createdBy: req.session.username });
 
     // Poll for completion, then stamp PVE owner/VLAN tags on the new VM
     if (upid) {

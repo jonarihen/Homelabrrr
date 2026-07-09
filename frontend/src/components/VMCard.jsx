@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import StatusBadge from './StatusBadge.jsx';
+import LeaseBadge from './LeaseBadge.jsx';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
 
 function fmt(bytes) {
@@ -53,6 +54,7 @@ export default function VMCard({ vm, selected, onSelect }) {
             )}
           </h3>
           <p className="text-[10px] text-gray-500 mt-1 font-mono uppercase tracking-[0.1em]">ID {vm.vmid} / {displayNode(vm.node)}</p>
+          {vm.lease && <LeaseBadge lease={vm.lease} className="mt-1.5" />}
         </div>
         <StatusBadge status={vm.status} />
       </div>
