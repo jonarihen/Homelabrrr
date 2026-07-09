@@ -98,13 +98,16 @@ function parseCloudInitOptions({ ciUser, ciPassword, sshKeyIds, ipMode, ipAddres
 }
 
 // A non-admin needs can_provision to reach clone / from-image / images.
-// can_provision here is the effective value (per-user column OR role grant).
+// can_provision here is the effective value: role assigned → the role
+// decides; no role → the per-user column.
 function loadProvisioner(req) {
   const user = db.prepare('SELECT id, can_provision, is_admin, role_id FROM users WHERE id = ?').get(req.session.userId);
   if (!user) return user;
   return {
     ...user,
-    can_provision: (user.can_provision === 1 || getRolePermissions(user.role_id).has('can_provision')) ? 1 : 0,
+    can_provision: user.role_id
+      ? (getRolePermissions(user.role_id).has('can_provision') ? 1 : 0)
+      : user.can_provision,
   };
 }
 

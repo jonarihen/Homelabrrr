@@ -55,7 +55,7 @@ export default function RolesPage() {
   useEffect(() => { load(); }, []);
 
   const deleteRole = async (role) => {
-    if (!confirm(`Delete the role "${role.name}"? Users holding it lose its permissions (their per-user overrides stay).`)) return;
+    if (!confirm(`Delete the role "${role.name}"? Users holding it fall back to their per-user permissions.`)) return;
     try {
       await api.delete(`/admin/roles/${role.id}`);
       load();

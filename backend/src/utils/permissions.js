@@ -30,30 +30,36 @@ export function getRolePermissions(roleId) {
 }
 
 /**
- * Effective permission check: admin bypasses everything; otherwise a
- * permission counts if the legacy per-user column is 1 OR the user's role
- * grants it. Accepts multiple keys — passes if any one is granted.
+ * Effective permission check: admin bypasses everything. A user WITH a role
+ * gets exactly the role's permissions (the per-user columns are ignored);
+ * a user WITHOUT a role falls back to the per-user columns. Accepts multiple
+ * keys — passes if any one is granted.
  */
 export function userHasPermission(userId, ...keys) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) return false;
   if (user.is_admin === 1) return true;
-  if (keys.some((k) => user[k] === 1)) return true;
-  const rolePerms = getRolePermissions(user.role_id);
-  return keys.some((k) => rolePerms.has(k));
+  if (user.role_id) {
+    const rolePerms = getRolePermissions(user.role_id);
+    return keys.some((k) => rolePerms.has(k));
+  }
+  return keys.some((k) => user[k] === 1);
 }
 
 /**
  * Full effective map for a loaded user row (must include the permission
- * columns and role_id): { key: boolean } with column OR role semantics.
- * Deliberately does NOT fold in is_admin — admin bypass stays at the check
- * sites, matching how the frontend treats isAdmin separately.
+ * columns and role_id): { key: boolean }. Role assigned → the role defines
+ * the set; no role → the per-user columns. Deliberately does NOT fold in
+ * is_admin — admin bypass stays at the check sites, matching how the
+ * frontend treats isAdmin separately.
  */
 export function effectivePermissions(userRow) {
-  const rolePerms = getRolePermissions(userRow?.role_id);
   const out = {};
-  for (const key of PERMISSION_KEYS) {
-    out[key] = userRow?.[key] === 1 || rolePerms.has(key);
+  if (userRow?.role_id) {
+    const rolePerms = getRolePermissions(userRow.role_id);
+    for (const key of PERMISSION_KEYS) out[key] = rolePerms.has(key);
+  } else {
+    for (const key of PERMISSION_KEYS) out[key] = userRow?.[key] === 1;
   }
   return out;
 }

@@ -115,9 +115,13 @@ export default function UsersPage() {
                     {u.is_admin
                       ? <span className="text-xs text-blue-400">Full access</span>
                       : (() => {
-                        const count = PERM_DEFS.filter(p => u[p.key]).length + (u.can_provision ? 1 : 0);
+                        // Role assigned → the role defines the permission set
+                        const role = u.role_id ? roles.find(r => r.id === u.role_id) : null;
+                        const count = role
+                          ? role.permissions.length
+                          : PERM_DEFS.filter(p => u[p.key]).length + (u.can_provision ? 1 : 0);
                         return count > 0
-                          ? <span className="text-xs text-purple-400">{count} granted</span>
+                          ? <span className="text-xs text-purple-400">{count} granted{role ? ' (role)' : ''}</span>
                           : <span className="text-xs text-gray-600">None</span>;
                       })()
                     }
@@ -443,39 +447,54 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], onCl
                       ))}
                     </select>
                     <p className="text-xs text-gray-500 mt-2">
-                      Effective access is the role's permissions <span className="text-gray-400">plus</span> any toggles enabled below (per-user overrides). Manage roles on the Roles page.
+                      {roleId
+                        ? 'This role fully defines the user’s permissions. Remove the role to set per-user permissions instead.'
+                        : 'No role — set per-user permissions below, or assign a role to manage them centrally on the Roles page.'}
                     </p>
                   </div>
                 </div>
 
-                <div className="space-y-1 pt-2">
-                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">VM Access</p>
-                  <PermToggle
-                    label="Access all VMs"
-                    desc="Grant access to every VM on Proxmox without individual assignments"
-                    checked={seeAllVMs}
-                    onChange={toggleSeeAllVMs}
-                  />
-                  <PermToggle
-                    label="Provision VMs"
-                    desc="Allow this user to create VMs from templates"
-                    checked={canProvision}
-                    onChange={toggleCanProvision}
-                  />
-                </div>
+                {roleId ? (
+                  <div className="bg-purple-900/15 border border-purple-800/30 rounded-lg px-4 py-3">
+                    <p className="text-sm text-purple-300 font-medium">
+                      Permissions come from the “{roles.find(r => String(r.id) === String(roleId))?.name || 'assigned'}” role
+                    </p>
+                    <p className="text-xs text-purple-400/70 mt-0.5">
+                      Edit the role on the Roles page to change what everyone holding it can do — or remove the role above to manage this user individually.
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="space-y-1 pt-2">
+                      <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">VM Access</p>
+                      <PermToggle
+                        label="Access all VMs"
+                        desc="Grant access to every VM on Proxmox without individual assignments"
+                        checked={seeAllVMs}
+                        onChange={toggleSeeAllVMs}
+                      />
+                      <PermToggle
+                        label="Provision VMs"
+                        desc="Allow this user to create VMs from templates"
+                        checked={canProvision}
+                        onChange={toggleCanProvision}
+                      />
+                    </div>
 
-                <div className="space-y-1 pt-2">
-                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Admin Features</p>
-                  {PERM_DEFS.map(pDef => (
-                    <PermToggle
-                      key={pDef.key}
-                      label={pDef.label}
-                      desc={pDef.desc}
-                      checked={perms[pDef.key]}
-                      onChange={(enabled) => togglePermission(pDef.key, enabled)}
-                    />
-                  ))}
-                </div>
+                    <div className="space-y-1 pt-2">
+                      <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Admin Features</p>
+                      {PERM_DEFS.map(pDef => (
+                        <PermToggle
+                          key={pDef.key}
+                          label={pDef.label}
+                          desc={pDef.desc}
+                          checked={perms[pDef.key]}
+                          onChange={(enabled) => togglePermission(pDef.key, enabled)}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
 
                 <div className="space-y-1 pt-2">
                   <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Security</p>

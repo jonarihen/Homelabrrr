@@ -3,7 +3,7 @@
 ## 2026-07-09 — Roles: reusable permission sets you assign to users
 
 - New **Roles** page (Access section of the sidebar): create a role, tick the permissions it grants, and assign it to users from the Users page — instead of clicking through ~14 checkboxes per account. **Editing a role instantly updates everyone who holds it**
-- A user's effective access is their **role's permissions plus any per-user toggles** — existing accounts keep exactly the permissions they had, nothing changes until you start using roles
+- A user **with a role** gets exactly the role's permissions — the per-user toggles disappear from the Manage dialog while a role is assigned. A user **without a role** keeps their per-user toggles, so existing accounts behave exactly as before until you start using roles
 - Two built-in roles ship out of the box: **Administrator** (every portal permission — note this does not make the account an admin) and **User** (no extra permissions). Built-ins can't be renamed or deleted, but their permissions are editable
 - The Users page now shows each user's role, and the Manage dialog has a role dropdown above the permission toggles
 - Role changes (create/edit/delete/assign) are audit-logged
