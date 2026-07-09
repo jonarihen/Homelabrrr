@@ -24,6 +24,7 @@ import portalRoutes from './routes/portal.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
+import { sweepExpiredMaintenance } from './utils/nodeMaintenance.js';
 
 const app = express();
 const server = createServer(app);
@@ -473,6 +474,21 @@ for (const k of ppkKeys) {
     console.warn(`Could not auto-convert PPK key id=${k.id} (may be encrypted): ${err.message}`);
   }
 }
+
+// ─── Node maintenance auto-expire ────────────────────────────────────────────
+// Lifts any node maintenance whose end time has passed and closes its notice.
+// Runs once at startup (catches windows that expired while the server was down)
+// then on a one-minute tick.
+function tickMaintenance() {
+  try {
+    const lifted = sweepExpiredMaintenance();
+    if (lifted > 0) console.log(`[maintenance] auto-expired ${lifted} node maintenance window(s)`);
+  } catch (err) {
+    console.error('[maintenance] sweep failed:', err.message);
+  }
+}
+tickMaintenance();
+setInterval(tickMaintenance, 60_000);
 
 const PORT_NUM = parseInt(process.env.PORT || '3000');
 server.listen(PORT_NUM, () => {

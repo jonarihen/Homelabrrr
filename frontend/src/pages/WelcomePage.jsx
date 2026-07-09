@@ -237,6 +237,26 @@ export default function WelcomePage() {
                       </div>
                     )}
 
+                    {/* Node maintenance — amber, shown to every user. A drained
+                        node is "maintenance", never a red "down"/"degraded" state. */}
+                    {status?.maintenance?.length > 0 && (
+                      <div className="border-t border-gray-800 px-4 py-3 space-y-2">
+                        {status.maintenance.map(m => (
+                          <div key={m.id} className="flex items-center gap-2.5 flex-wrap">
+                            <span className="aaris-led aaris-led--warning" />
+                            <span className="border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] border-amber-500/40 text-amber-400">
+                              Maintenance
+                            </span>
+                            <span className="font-mono text-xs text-gray-200 uppercase tracking-[0.08em]">{m.node}</span>
+                            {m.untilLabel && (
+                              <span className="font-mono text-[10px] text-gray-500 uppercase tracking-[0.1em]">until ~{m.untilLabel}</span>
+                            )}
+                            {m.reason && <span className="text-xs text-gray-500 truncate">— {m.reason}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                     {/* Admin-only: per-host breakdown + fleet totals */}
                     {isAdmin && status?.hosts?.length > 0 && (
                       <div className="border-t border-gray-800">
@@ -336,7 +356,11 @@ export default function WelcomePage() {
                           </span>
                         </div>
                         {n.body && <p className="text-sm text-gray-400 mt-1.5 whitespace-pre-wrap">{n.body}</p>}
-                        {isAdmin && (
+                        {isAdmin && n.source === 'node_maintenance' ? (
+                          <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                            Auto-managed — closes when the node leaves maintenance (PVE Hosts)
+                          </p>
+                        ) : isAdmin && (
                           <div className="flex gap-3 mt-2 font-mono text-[10px] uppercase tracking-[0.1em]">
                             <button onClick={() => { setNoticeForm({ id: n.id, title: n.title, body: n.body, level: n.level }); setNoticeError(''); }} className="text-gray-500 hover:text-gray-200 transition-colors">Edit</button>
                             <button onClick={() => toggleNotice(n)} className="text-gray-500 hover:text-gray-200 transition-colors">

@@ -12,6 +12,11 @@ export default function PVEHostsPage() {
   const [form, setForm] = useState({ name: '', host: '', port: 8006, tokenId: '', tokenSecret: '', verifyTls: true });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  // Node maintenance drain form: { hostId, nodeRef, nodeName } | null
+  const [maintTarget, setMaintTarget] = useState(null);
+  const [maintForm, setMaintForm] = useState({ reason: '', until: '' });
+  const [maintSaving, setMaintSaving] = useState(false);
+  const [maintError, setMaintError] = useState('');
 
   const load = () => {
     api.get('/admin/pve-hosts').then(r => {
@@ -68,6 +73,49 @@ export default function PVEHostsPage() {
       load();
     } catch (e) {
       alert(e.response?.data?.error || 'Failed to delete');
+    }
+  };
+
+  const refreshHostStatus = (id) => {
+    setStatuses(prev => ({ ...prev, [id]: { ...prev[id], loading: true } }));
+    api.get(`/admin/pve-hosts/${id}/status`).then(sr => {
+      setStatuses(prev => ({ ...prev, [id]: { ...sr.data, loading: false } }));
+    }).catch(() => {
+      setStatuses(prev => ({ ...prev, [id]: { online: false, loading: false, error: 'Failed to check' } }));
+    });
+  };
+
+  const openMaint = (host, node) => {
+    setMaintTarget({ hostId: host.id, nodeRef: node.nodeRef || `${host.id}~${node.node}`, nodeName: node.node });
+    setMaintForm({ reason: '', until: '' });
+    setMaintError('');
+  };
+
+  const saveMaint = async () => {
+    if (!maintTarget) return;
+    setMaintSaving(true); setMaintError('');
+    try {
+      await api.post('/admin/node-maintenance', {
+        node: maintTarget.nodeRef,
+        reason: maintForm.reason,
+        until: maintForm.until || null,
+      });
+      const hostId = maintTarget.hostId;
+      setMaintTarget(null);
+      refreshHostStatus(hostId);
+    } catch (e) {
+      setMaintError(e.response?.data?.error || 'Failed to enter maintenance');
+    } finally { setMaintSaving(false); }
+  };
+
+  const endMaint = async (host, node) => {
+    if (!node.maintenance) return;
+    if (!confirm(`Lift maintenance on ${node.node}? New deployments will be allowed again and the notice will close.`)) return;
+    try {
+      await api.delete(`/admin/node-maintenance/${node.maintenance.id}`);
+      refreshHostStatus(host.id);
+    } catch (e) {
+      alert(e.response?.data?.error || 'Failed to end maintenance');
     }
   };
 
@@ -184,13 +232,26 @@ export default function PVEHostsPage() {
                           {s.nodes.map(n => {
                             const memPct = n.maxmem ? (n.mem / n.maxmem * 100).toFixed(0) : 0;
                             const cpuPct = n.cpu ? (n.cpu * 100).toFixed(1) : 0;
+                            const m = n.maintenance;
                             return (
-                              <div key={n.node} className="bg-gray-800/50 border border-gray-700/30 rounded-xl px-4 py-3 flex items-center justify-between">
-                                <div className="flex items-center gap-3">
-                                  <span className={`w-2 h-2 rounded-full shrink-0 ${n.status === 'online' ? 'bg-green-400' : 'bg-red-500'}`} />
-                                  <div>
-                                    <span className="text-sm text-white font-medium">{n.node}</span>
-                                    <span className="text-xs text-gray-500 ml-2">up {fmtUptime(n.uptime)}</span>
+                              <div key={n.node} className={`bg-gray-800/50 border rounded-xl px-4 py-3 flex items-center justify-between ${m ? 'border-yellow-500/30' : 'border-gray-700/30'}`}>
+                                <div className="flex items-center gap-3 min-w-0">
+                                  <span
+                                    className={`w-2 h-2 rounded-full shrink-0 ${m ? 'bg-yellow-500' : n.status === 'online' ? 'bg-green-400' : 'bg-red-500'}`}
+                                    title={m ? 'In maintenance' : n.status}
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-sm text-white font-medium">{n.node}</span>
+                                      {m ? (
+                                        <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded border border-yellow-500/40 text-yellow-400">
+                                          Maintenance{m.untilLabel ? ` · until ~${m.untilLabel}` : ''}
+                                        </span>
+                                      ) : (
+                                        <span className="text-xs text-gray-500">up {fmtUptime(n.uptime)}</span>
+                                      )}
+                                    </div>
+                                    {m?.reason && <span className="block text-xs text-yellow-500/70 mt-0.5 truncate">{m.reason}</span>}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-6 text-xs">
@@ -208,7 +269,21 @@ export default function PVEHostsPage() {
                                     </div>
                                     <span className="text-gray-300 font-mono w-10 text-right">{memPct}%</span>
                                   </div>
-                                  <span className="text-gray-500">{fmtMem(n.maxmem)} total</span>
+                                  {m ? (
+                                    <button
+                                      onClick={() => endMaint(h, n)}
+                                      className="shrink-0 text-[11px] font-medium px-2.5 py-1 rounded-lg border border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10 transition-colors"
+                                    >
+                                      End maintenance
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={() => openMaint(h, n)}
+                                      className="shrink-0 text-[11px] font-medium px-2.5 py-1 rounded-lg border border-gray-700 text-gray-400 hover:text-yellow-400 hover:border-yellow-500/40 transition-colors"
+                                    >
+                                      Drain
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                             );
@@ -308,6 +383,52 @@ export default function PVEHostsPage() {
               </div>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Node maintenance (drain) modal */}
+      {maintTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={e => { if (e.target === e.currentTarget) setMaintTarget(null); }}>
+          <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl">
+            <div className="h-0.5 bg-yellow-500" />
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+              <h2 className="text-white font-semibold">Drain node — {maintTarget.nodeName}</h2>
+              <button type="button" onClick={() => setMaintTarget(null)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-gray-400">
+                New VMs cannot be deployed to this node while it is in maintenance. A notice is published to all users and Overview shows it as amber. Running VMs keep running — this is a soft drain.
+              </p>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1.5 font-medium">Reason (optional)</label>
+                <input
+                  type="text" value={maintForm.reason}
+                  onChange={e => setMaintForm(f => ({ ...f, reason: e.target.value }))}
+                  className={inputCls} placeholder="e.g. Kernel upgrade + reboot"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1.5 font-medium">Expected end (optional)</label>
+                <input
+                  type="datetime-local" value={maintForm.until}
+                  onChange={e => setMaintForm(f => ({ ...f, until: e.target.value }))}
+                  className={inputCls}
+                />
+                <p className="text-xs text-gray-600 mt-1">If set, maintenance lifts itself automatically at this time.</p>
+              </div>
+              {maintError && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{maintError}</p>}
+              <div className="flex gap-3 pt-1">
+                <button type="button" onClick={() => setMaintTarget(null)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">
+                  Cancel
+                </button>
+                <button type="button" onClick={saveMaint} disabled={maintSaving} className="flex-1 bg-yellow-600 hover:bg-yellow-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+                  {maintSaving ? 'Saving...' : 'Start maintenance'}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

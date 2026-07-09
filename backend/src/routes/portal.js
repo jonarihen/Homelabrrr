@@ -4,6 +4,8 @@ import { getHosts, getHostStatus } from '../proxmox.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
+import { encodeNodeRef } from '../utils/nodeRef.js';
+import { listMaintenance } from '../utils/nodeMaintenance.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -23,7 +25,18 @@ router.get('/status', async (req, res) => {
       : online === hosts.length ? 'operational'
         : online === 0 ? 'down' : 'degraded';
 
-    const payload = { overall, hostsTotal: hosts.length, hostsOnline: online };
+    // Active node maintenance — visible to every user (the same info is in the
+    // auto-published notice). A drained node is amber "maintenance", never a red
+    // "down"/"degraded" state, since the host itself is still reachable.
+    const maintenance = listMaintenance();
+
+    const payload = {
+      overall,
+      hostsTotal: hosts.length,
+      hostsOnline: online,
+      maintenance,
+      maintenanceCount: maintenance.length,
+    };
 
     // Cluster-wide CPU/memory usage across all reachable nodes — aggregate
     // only, so it is safe to show every user. CPU is core-weighted: each
@@ -52,9 +65,14 @@ router.get('/status', async (req, res) => {
           name: h.name,
           online: s.online,
           version: s.version || null,
-          nodes: (s.nodes || []).map(n => ({
-            node: n.node, status: n.status, cpu: n.cpu, mem: n.mem, maxmem: n.maxmem, uptime: n.uptime,
-          })),
+          nodes: (s.nodes || []).map(n => {
+            const nodeRef = encodeNodeRef(h.id, n.node);
+            const m = maintenance.find(x => x.nodeRef === nodeRef || (x.hostId == null && x.node === n.node));
+            return {
+              node: n.node, nodeRef, status: n.status, cpu: n.cpu, mem: n.mem, maxmem: n.maxmem, uptime: n.uptime,
+              maintenance: m ? { id: m.id, reason: m.reason, until: m.until, untilLabel: m.untilLabel } : null,
+            };
+          }),
           vmCount: s.vmCount ?? null,
           runningVms: s.runningVms ?? null,
         };
@@ -94,6 +112,9 @@ router.post('/notices', requireAdmin, (req, res) => {
 router.put('/notices/:id', requireAdmin, (req, res) => {
   const existing = db.prepare('SELECT * FROM portal_notices WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Notice not found' });
+  if (existing.source === 'node_maintenance') {
+    return res.status(400).json({ error: 'This notice is managed by node maintenance — end maintenance on the PVE Hosts page to close it' });
+  }
 
   const title = req.body.title !== undefined ? String(req.body.title).trim() : existing.title;
   const body = req.body.body !== undefined ? String(req.body.body).trim() : existing.body;
@@ -113,6 +134,9 @@ router.put('/notices/:id', requireAdmin, (req, res) => {
 router.delete('/notices/:id', requireAdmin, (req, res) => {
   const existing = db.prepare('SELECT * FROM portal_notices WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Notice not found' });
+  if (existing.source === 'node_maintenance') {
+    return res.status(400).json({ error: 'This notice is managed by node maintenance — end maintenance on the PVE Hosts page to close it' });
+  }
   db.prepare('DELETE FROM portal_notices WHERE id = ?').run(existing.id);
   logAudit(req, 'notice_delete', String(existing.id), existing.title);
   res.json({ ok: true });

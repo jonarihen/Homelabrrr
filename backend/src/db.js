@@ -376,6 +376,26 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// Marks notices auto-published by a subsystem (e.g. node maintenance) so they
+// can be found and closed automatically — '' means an admin-authored notice.
+try { db.exec("ALTER TABLE portal_notices ADD COLUMN source TEXT DEFAULT ''"); } catch { /* exists */ }
+
+// Node maintenance mode (soft drain). node_name holds a nodeRef ('<hostId>~<node>')
+// via the nodeRef encoding; legacy bare names are matched with nodeLookupCandidates.
+// notice_id links the auto-published portal_notices row so exit can close it.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS node_maintenance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pve_host_id INTEGER,
+    node_name TEXT NOT NULL,
+    reason TEXT DEFAULT '',
+    until TEXT DEFAULT NULL,
+    notice_id INTEGER,
+    created_by TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`); } catch { /* exists */ }
+
 assertSecretEncryptionKey();
 
 function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {
