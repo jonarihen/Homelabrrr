@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, useId } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
@@ -145,6 +145,8 @@ export default function VMPage() {
   const [vlanModal, setVlanModal] = useState(false);
   const [hardwareModal, setHardwareModal] = useState(false);
   const [deleteModal, setDeleteModal] = useState(false);
+  const [credModal, setCredModal] = useState(false);
+  const [cloudInit, setCloudInit] = useState({ canReset: false, ciuser: '' });
   const { user } = useAuth();
 
   useDocumentTitle(vm ? (vm.name || `VM ${vm.vmid}`) : 'VM Details');
@@ -188,6 +190,15 @@ export default function VMPage() {
   }, [node, vmid]);
 
   useEffect(() => { loadDisks(); }, [loadDisks]);
+
+  // Whether a cloud-init credential reset is offered (owner + cloud-init drive).
+  const loadCloudInit = useCallback(() => {
+    api.get(`/vms/${node}/${vmid}/cloudinit`)
+      .then(r => setCloudInit({ canReset: !!r.data?.canReset, ciuser: r.data?.ciuser || '' }))
+      .catch(() => setCloudInit({ canReset: false, ciuser: '' }));
+  }, [node, vmid]);
+
+  useEffect(() => { loadCloudInit(); }, [loadCloudInit]);
 
   useEffect(() => {
     let cancelled = false;
@@ -324,6 +335,12 @@ export default function VMPage() {
             <ActionBtn color="gray" onClick={() => setVlanModal(true)} icon={
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" /></svg>
             }>VLAN</ActionBtn>
+
+            {cloudInit.canReset && (
+              <ActionBtn color="gray" onClick={() => setCredModal(true)} icon={
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" /></svg>
+              }>Credentials</ActionBtn>
+            )}
 
             {(user?.isAdmin || user?.permissions?.canEditVmHardware) && (
               <>
@@ -539,7 +556,204 @@ export default function VMPage() {
       {vlanModal && <VLANModal vm={vm} onClose={() => setVlanModal(false)} onSaved={loadVm} />}
       {hardwareModal && <VMHardwareModal vm={vm} disks={disks} onClose={() => setHardwareModal(false)} onSaved={() => { loadVm(); loadDisks(); }} />}
       {deleteModal && <DeleteVMModal vm={vm} node={node} onClose={() => setDeleteModal(false)} />}
+      {credModal && (
+        <CloudInitCredentialsModal
+          vm={vm}
+          node={node}
+          vmid={vmid}
+          ciuser={cloudInit.ciuser}
+          onClose={() => setCredModal(false)}
+          onApplied={loadVm}
+        />
+      )}
     </Layout>
+  );
+}
+
+// ── Cloud-init Credentials Modal ─────────────────────────────────────────────
+
+function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied }) {
+  const notify = useNotify();
+  const [storedKeys, setStoredKeys] = useState([]);
+  const [keyMode, setKeyMode] = useState('none'); // 'none' | 'stored' | 'paste'
+  const [selectedKeyId, setSelectedKeyId] = useState('');
+  const [pastedKey, setPastedKey] = useState('');
+  const [password, setPassword] = useState('');
+  const [reboot, setReboot] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const pwId = useId();
+  const keyPasteId = useId();
+
+  useEffect(() => {
+    api.get('/ssh/keys')
+      .then(r => {
+        const usable = (r.data || []).filter(k => k.public_key);
+        setStoredKeys(usable);
+      })
+      .catch(() => setStoredKeys([]));
+  }, []);
+
+  const submit = async () => {
+    setError('');
+    const trimmedPw = password.trim();
+    const wantsKey = keyMode !== 'none';
+    if (!trimmedPw && !wantsKey) {
+      setError('Set a new password and/or an SSH public key.');
+      return;
+    }
+    if (trimmedPw && trimmedPw.length < 8) {
+      setError('Password must be at least 8 characters.');
+      return;
+    }
+    const body = { reboot };
+    if (trimmedPw) body.password = trimmedPw;
+    if (keyMode === 'stored') {
+      if (!selectedKeyId) { setError('Choose a stored SSH key.'); return; }
+      body.sshKeyId = selectedKeyId;
+    } else if (keyMode === 'paste') {
+      if (!pastedKey.trim()) { setError('Paste an SSH public key.'); return; }
+      body.sshKey = pastedKey.trim();
+    }
+
+    setSubmitting(true);
+    try {
+      const r = await api.post(`/vms/${node}/${vmid}/cloudinit-credentials`, body);
+      const bits = [];
+      if (r.data?.changedPassword) bits.push('password');
+      if (r.data?.changedSshKey) bits.push('SSH key');
+      const what = bits.join(' and ') || 'credentials';
+      if (r.data?.rebooted) {
+        notify.success(`Cloud-init ${what} updated — VM is ${vm?.status === 'running' ? 'rebooting' : 'starting'} to apply the change.`);
+      } else {
+        notify.warning(`Cloud-init ${what} updated. Reboot the VM to apply the new credentials.`, { title: 'Reboot required', ttl: 0 });
+      }
+      onApplied?.();
+      onClose();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to update credentials');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal title="Reset cloud-init credentials" onClose={submitting ? () => {} : onClose} size="md">
+      <div className="p-5 space-y-4">
+        <div className="flex items-start gap-3 bg-blue-900/15 border border-blue-800/40 rounded-xl p-4">
+          <svg className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
+          <div className="text-xs text-blue-200/80 space-y-1.5">
+            <p>
+              Set a new cloud-init password and/or replace the injected SSH public key for
+              <strong> {vm?.name || `VM ${vmid}`}</strong>{ciuser ? <> (login user <span className="font-mono text-blue-300">{ciuser}</span>)</> : null}.
+            </p>
+            <p>Cloud-init only re-applies credentials on boot, so a <strong>reboot is required</strong> for the change to take effect. The portal never stores your password.</p>
+          </div>
+        </div>
+
+        {/* New password */}
+        <div>
+          <label htmlFor={pwId} className="block text-xs text-gray-500 mb-1.5 font-medium">New password <span className="text-gray-600">(optional)</span></label>
+          <input
+            id={pwId}
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="Leave blank to keep the current password"
+            autoComplete="new-password"
+            disabled={submitting}
+            className="w-full bg-gray-800 border border-gray-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all"
+          />
+        </div>
+
+        {/* SSH public key */}
+        <div className="space-y-2">
+          <span className="block text-xs text-gray-500 font-medium">SSH public key <span className="text-gray-600">(optional)</span></span>
+          <div className="flex flex-wrap gap-2 font-mono text-[11px] uppercase tracking-[0.08em]">
+            {[
+              { key: 'none', label: 'Leave unchanged' },
+              { key: 'stored', label: 'Stored key' },
+              { key: 'paste', label: 'Paste key' },
+            ].map(opt => (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => setKeyMode(opt.key)}
+                disabled={submitting}
+                className={`px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-40 ${
+                  keyMode === opt.key
+                    ? 'border-orange-600 bg-orange-600/15 text-orange-400'
+                    : 'border-gray-700 text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {keyMode === 'stored' && (
+            storedKeys.length === 0 ? (
+              <p className="text-xs text-gray-500 bg-gray-800/50 rounded-lg p-3">
+                No stored SSH keys with a public key. Add one on the <span className="text-gray-300">SSH Keys</span> page or paste a key instead.
+              </p>
+            ) : (
+              <select
+                value={selectedKeyId}
+                onChange={e => setSelectedKeyId(e.target.value)}
+                disabled={submitting}
+                className="w-full bg-gray-800 border border-gray-700/50 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+              >
+                <option value="">Select a stored key…</option>
+                {storedKeys.map(k => (
+                  <option key={k.id} value={k.id}>{k.name}</option>
+                ))}
+              </select>
+            )
+          )}
+
+          {keyMode === 'paste' && (
+            <textarea
+              id={keyPasteId}
+              value={pastedKey}
+              onChange={e => setPastedKey(e.target.value)}
+              rows={3}
+              placeholder="ssh-ed25519 AAAA... user@host"
+              disabled={submitting}
+              className="w-full bg-gray-800 border border-gray-700/50 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all"
+            />
+          )}
+        </div>
+
+        <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={reboot}
+            onChange={e => setReboot(e.target.checked)}
+            disabled={submitting}
+            className="rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500/20"
+          />
+          {vm?.status === 'running' ? 'Reboot now to apply' : 'Start the VM now to apply'}
+        </label>
+
+        {error && <p role="alert" className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
+
+        <div className="flex items-center justify-end gap-3">
+          <button onClick={onClose} disabled={submitting} className="text-xs px-4 py-2 text-gray-400 hover:text-white transition-colors disabled:opacity-40">
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={submitting}
+            className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors inline-flex items-center gap-2"
+          >
+            {submitting && (
+              <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+            )}
+            {submitting ? 'Applying...' : 'Reset credentials'}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

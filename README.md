@@ -31,6 +31,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Area | What you get |
 | --- | --- |
 | VM & LXC access | Assigned VM/container listing, status/actions, browser VNC, snapshots, backups grouped by storage (with PBS encryption/verification status), and file-level backup restore |
+| Cloud-init recovery | Owners of a cloud-init VM can self-service **reset the cloud-init password and/or SSH public key** (picked from stored keys or pasted), with an inline reboot to apply — no admin round-trip, no secret ever stored |
 | Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, pop-out tabs, and clipboard paste into VNC (typed into the guest as keystrokes, no agent needed) |
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
 | Provisioning | Deploy straight from a cloud image, clone a template, or admin create-from-scratch — all with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, pre-flight capacity checks (node free memory + storage space), per-user resource quotas (cores/memory/storage, enforced on creation and hardware upgrades), and a live step-by-step deployment progress stepper |
@@ -47,7 +48,7 @@ This project pulls those into one interface so users can work inside guardrails 
 
 - `My VMs` — assigned VM/LXC inventory with search, filter, sort, selection, and bulk actions
 - `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and create-from-scratch for admins, each with a live deployment progress stepper
-- `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore; backups are grouped per storage location and show encryption, verification, and protection status for PBS-backed stores
+- `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore; backups are grouped per storage location and show encryption, verification, and protection status for PBS-backed stores. Cloud-init VMs you own also get a **Reset credentials** action to set a new password / SSH key (with an inline reboot to apply)
 - `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs; VNC consoles have a Paste button that types the clipboard into the guest (SSH terminals take native browser paste)
 - `SSH Keys` — uploaded keys used by browser SSH and SFTP sessions
 - `Account` — password and 2FA management
@@ -218,6 +219,7 @@ Current hardening in the codebase includes:
 - assignment-aware VM access (users only see their own VMs)
 - backup browse, download, restore, and delete verify that the named backup volume actually belongs to the VM being operated on (the VMID embedded in the volid must match; unparseable volids are rejected)
 - destructive operations (VM deletion, backup deletion, backup restore) require strict VM ownership — the see-all-VMs visibility flag does not grant them
+- cloud-init credential resets require strict VM ownership too, are only offered for VMs that actually have a cloud-init drive, and never persist or log the new password/SSH key (only the reset event is audited)
 - Proxmox node names are validated against a strict DNS-label pattern and URL-encoded before being interpolated into upstream API paths, so a crafted node name can't steer requests made with the privileged PVE API token (path injection / SSRF)
 - per-VM SSH authorization, stored destination config, and SSH host-key verification
 - SFTP access reuses the same authenticated SSH session setup and host-key checks as terminal access

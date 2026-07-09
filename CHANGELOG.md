@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-10 — Self-service cloud-init credential reset
+
+- Cloud-init VMs now have a **Reset credentials** action on the VM page: set a new password and/or replace the injected SSH public key without asking an admin.
+- The SSH public key can be **picked from your stored SSH keys** or pasted directly — the portal never stores the password.
+- Because cloud-init only re-applies credentials on boot, the dialog explains a **reboot is required** and offers to reboot (or start) the VM inline so the change takes effect right away.
+- The action only appears for VMs you **strictly own** that actually have a cloud-init drive; it stays hidden for everyone else (including view-only `see all VMs` users), and the reset event is written to the audit log **without** any secret.
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder
