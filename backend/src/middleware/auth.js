@@ -7,6 +7,18 @@ export function requireAuth(req, res, next) {
   next();
 }
 
+/**
+ * Reject requests authenticated with a personal API token. Sensitive account
+ * operations — managing API tokens, changing passwords, touching 2FA — are
+ * interactive-session only and must never be reachable with a Bearer token.
+ */
+export function requireInteractiveSession(req, res, next) {
+  if (req.apiToken) {
+    return res.status(403).json({ error: 'This operation requires an interactive session and cannot be performed with an API token' });
+  }
+  next();
+}
+
 export function requireAdmin(req, res, next) {
   if (!req.session?.userId) {
     return res.status(401).json({ error: 'Unauthorized' });

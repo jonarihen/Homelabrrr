@@ -4,10 +4,11 @@ import rateLimit from 'express-rate-limit';
 import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
 import db from '../db.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireInteractiveSession } from '../middleware/auth.js';
 import { logAudit } from '../utils/audit.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
+import { generateApiToken, hashApiToken } from '../utils/apiTokens.js';
 import { effectivePermissions } from '../utils/permissions.js';
 
 const router = Router();
@@ -252,7 +253,7 @@ router.get('/me', (req, res) => {
 
 // ─── Self-service account changes ────────────────────────────────────────
 
-router.put('/change-username', requireAuth, (req, res) => {
+router.put('/change-username', requireAuth, requireInteractiveSession, (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'Username required' });
   const previous = req.session.username;
@@ -272,7 +273,7 @@ router.put('/change-username', requireAuth, (req, res) => {
   }
 });
 
-router.put('/change-password', requireAuth, (req, res) => {
+router.put('/change-password', requireAuth, requireInteractiveSession, (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password required' });
   if (newPassword.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
@@ -290,7 +291,7 @@ router.put('/change-password', requireAuth, (req, res) => {
 // ─── 2FA management (requires existing full session) ─────────────────────────
 
 // Generate a new secret and return a QR code (does NOT enable 2FA yet)
-router.post('/2fa/setup', requireAuth, async (req, res) => {
+router.post('/2fa/setup', requireAuth, requireInteractiveSession, async (req, res) => {
   const user = db.prepare('SELECT username, totp_enabled FROM users WHERE id = ?').get(req.session.userId);
   // Never let setup clobber an active second factor — otherwise a single call
   // silently disables 2FA (totp_enabled=0) even if enrollment is never finished.
@@ -313,7 +314,7 @@ router.post('/2fa/setup', requireAuth, async (req, res) => {
 });
 
 // Verify code and activate 2FA
-router.post('/2fa/enable', requireAuth, (req, res) => {
+router.post('/2fa/enable', requireAuth, requireInteractiveSession, (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
@@ -331,7 +332,7 @@ router.post('/2fa/enable', requireAuth, (req, res) => {
 });
 
 // Disable 2FA (requires current TOTP code to confirm)
-router.post('/2fa/disable', requireAuth, (req, res) => {
+router.post('/2fa/disable', requireAuth, requireInteractiveSession, (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
@@ -344,6 +345,78 @@ router.post('/2fa/disable', requireAuth, (req, res) => {
 
   db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.session.userId);
   logAudit(req, '2fa_disabled', req.session.username, '');
+  res.json({ ok: true });
+});
+
+// ─── Personal API tokens ─────────────────────────────────────────────────────
+// Token management is interactive-session only — a token can never mint, list,
+// or revoke tokens (nor manage passwords / 2FA above).
+
+const TOKEN_NAME_MAX = 64;
+const TOKEN_EXPIRY_PRESETS = new Set([7, 30, 90, 365]);
+
+function serializeApiToken(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    lastUsedAt: row.last_used_at,
+    expired: !!row.expires_at && new Date(row.expires_at.replace(' ', 'T') + 'Z').getTime() < Date.now(),
+  };
+}
+
+// List the caller's own tokens (never exposes the secret or its hash).
+router.get('/tokens', requireAuth, requireInteractiveSession, (req, res) => {
+  const rows = db.prepare(
+    'SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC'
+  ).all(req.session.userId);
+  res.json(rows.map(serializeApiToken));
+});
+
+// Create a token. The plaintext secret is returned exactly once, here.
+router.post('/tokens', requireAuth, requireInteractiveSession, (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Token name required' });
+  if (name.length > TOKEN_NAME_MAX) return res.status(400).json({ error: `Token name must be ${TOKEN_NAME_MAX} characters or fewer` });
+
+  // Optional expiry expressed as a whole number of days from now.
+  let expiresInDays = req.body?.expiresInDays;
+  if (expiresInDays === '' || expiresInDays === undefined) expiresInDays = null;
+  if (expiresInDays !== null) {
+    expiresInDays = Number(expiresInDays);
+    if (!Number.isInteger(expiresInDays) || expiresInDays <= 0 || !TOKEN_EXPIRY_PRESETS.has(expiresInDays)) {
+      return res.status(400).json({ error: 'Invalid expiry — choose one of the offered durations or no expiry' });
+    }
+  }
+
+  const existing = db.prepare('SELECT 1 FROM api_tokens WHERE user_id = ? AND name = ?').get(req.session.userId, name);
+  if (existing) return res.status(400).json({ error: 'You already have a token with that name' });
+
+  const secret = generateApiToken();
+  const tokenHash = hashApiToken(secret);
+  const expiresClause = expiresInDays !== null ? `datetime('now', '+${expiresInDays} days')` : 'NULL';
+
+  const result = db.prepare(
+    `INSERT INTO api_tokens (user_id, name, token_hash, expires_at) VALUES (?, ?, ?, ${expiresClause})`
+  ).run(req.session.userId, name, tokenHash);
+
+  const row = db.prepare(
+    'SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE id = ?'
+  ).get(result.lastInsertRowid);
+
+  logAudit(req, 'api_token_created', name, expiresInDays ? `expires in ${expiresInDays} days` : 'no expiry');
+
+  // `token` is the one and only time the plaintext is ever returned.
+  res.status(201).json({ ...serializeApiToken(row), token: secret });
+});
+
+// Revoke one of the caller's own tokens.
+router.delete('/tokens/:id', requireAuth, requireInteractiveSession, (req, res) => {
+  const token = db.prepare('SELECT id, name FROM api_tokens WHERE id = ? AND user_id = ?').get(req.params.id, req.session.userId);
+  if (!token) return res.status(404).json({ error: 'Token not found' });
+  db.prepare('DELETE FROM api_tokens WHERE id = ?').run(token.id);
+  logAudit(req, 'api_token_revoked', token.name, '');
   res.json({ ok: true });
 });
 

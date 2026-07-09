@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
@@ -45,6 +45,7 @@ export default function AccountPage() {
           </>
         )}
         <TwoFactorSection user={user} setUser={setUser} />
+        {!enrollmentOnly && <ApiTokensSection />}
       </div>
     </Layout>
   );
@@ -313,6 +314,200 @@ function TwoFactorSection({ user, setUser }) {
           </div>
         </form>
       )}
+    </div>
+  );
+}
+
+// ── Personal API Tokens ──────────────────────────────────────────────────────
+
+const EXPIRY_OPTIONS = [
+  { label: 'No expiry', value: '' },
+  { label: '7 days', value: '7' },
+  { label: '30 days', value: '30' },
+  { label: '90 days', value: '90' },
+  { label: '1 year', value: '365' },
+];
+
+function fmtDate(v) {
+  if (!v) return '—';
+  const d = new Date(v.replace(' ', 'T') + 'Z');
+  return isNaN(d.getTime()) ? v : d.toLocaleString();
+}
+
+function ApiTokensSection() {
+  const [tokens, setTokens] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState('');
+  const [expiry, setExpiry] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [newToken, setNewToken] = useState(''); // plaintext, shown once
+  const [copied, setCopied] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const load = async () => {
+    try {
+      const { data } = await api.get('/auth/tokens');
+      setTokens(data);
+    } catch (e) {
+      setMsg('error:' + (e.response?.data?.error || 'Failed to load API tokens'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const create = async (e) => {
+    e.preventDefault();
+    setCreating(true); setMsg('');
+    try {
+      const { data } = await api.post('/auth/tokens', {
+        name: name.trim(),
+        expiresInDays: expiry === '' ? null : Number(expiry),
+      });
+      setNewToken(data.token);
+      setCopied(false);
+      setName(''); setExpiry('');
+      load();
+    } catch (e) {
+      setMsg('error:' + (e.response?.data?.error || 'Failed to create token'));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const copyToken = async () => {
+    try {
+      await navigator.clipboard.writeText(newToken);
+      setCopied(true);
+    } catch {
+      setMsg('error:Copy failed — select the token and copy it manually');
+    }
+  };
+
+  const revoke = async (token) => {
+    if (!window.confirm(`Revoke "${token.name}"? Any script using it will immediately lose access.`)) return;
+    setMsg('');
+    try {
+      await api.delete(`/auth/tokens/${token.id}`);
+      setMsg('Token revoked');
+      load();
+    } catch (e) {
+      setMsg('error:' + (e.response?.data?.error || 'Failed to revoke token'));
+    }
+  };
+
+  const isError = msg.startsWith('error:');
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4">
+      <div className="flex items-center gap-3">
+        <div className="w-9 h-9 border border-gray-700 bg-gray-800 flex items-center justify-center">
+          <svg aria-hidden="true" focusable="false" className="w-4.5 h-4.5 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+          </svg>
+        </div>
+        <div>
+          <h2 className="aaris-display text-sm text-white">API Tokens</h2>
+          <p className="text-xs text-gray-500">Authenticate scripts and automation without your session cookie</p>
+        </div>
+      </div>
+
+      <p className="text-xs text-gray-500">
+        A token acts as you, with exactly your permissions and VM access. Send it as
+        <code className="mx-1 px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 font-mono text-[11px]">Authorization: Bearer &lt;token&gt;</code>.
+        Tokens cannot manage tokens, passwords, or 2FA.
+      </p>
+
+      {/* One-time token reveal */}
+      {newToken && (
+        <div className="bg-green-900/20 border border-green-800/40 rounded-xl p-4 space-y-2">
+          <p className="text-xs text-green-300 font-medium">Your new token — copy it now. You won't be able to see it again.</p>
+          <div className="flex items-stretch gap-2">
+            <code className="flex-1 font-mono text-[11px] text-green-200 bg-gray-950/60 rounded-lg p-2.5 break-all select-all">{newToken}</code>
+            <button
+              type="button"
+              onClick={copyToken}
+              className="shrink-0 px-3 text-xs bg-green-700 hover:bg-green-600 text-white rounded-lg transition-colors"
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <button type="button" onClick={() => setNewToken('')} className="text-xs text-gray-400 hover:text-gray-200">
+            I've saved it — dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Create form */}
+      <form onSubmit={create} className="flex flex-col sm:flex-row sm:items-end gap-3 border-t border-gray-800 pt-4">
+        <div className="flex-1">
+          <label htmlFor="token-name" className="block text-xs text-gray-500 mb-1.5 font-medium">Token name</label>
+          <input
+            id="token-name"
+            type="text"
+            required
+            maxLength={64}
+            placeholder="ci-deploy"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            className={inputCls}
+          />
+        </div>
+        <div className="sm:w-40">
+          <label htmlFor="token-expiry" className="block text-xs text-gray-500 mb-1.5 font-medium">Expiry</label>
+          <select
+            id="token-expiry"
+            value={expiry}
+            onChange={e => setExpiry(e.target.value)}
+            className={inputCls}
+          >
+            {EXPIRY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <button
+          type="submit"
+          disabled={creating || !name.trim()}
+          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium rounded-xl transition-colors shrink-0"
+        >
+          {creating ? 'Creating...' : 'Create Token'}
+        </button>
+      </form>
+
+      {msg && <p role={isError ? 'alert' : 'status'} aria-live={isError ? undefined : 'polite'} className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
+
+      {/* List */}
+      <div className="border-t border-gray-800 pt-4">
+        {loading ? (
+          <div className="space-y-2">
+            {[1, 2].map(i => <div key={i} className="h-12 bg-gray-800/60 rounded-lg animate-pulse" />)}
+          </div>
+        ) : tokens.length === 0 ? (
+          <p className="text-xs text-gray-600 italic">No API tokens yet.</p>
+        ) : (
+          <ul className="space-y-2">
+            {tokens.map(t => (
+              <li key={t.id} className="flex items-center justify-between gap-3 bg-gray-800/50 rounded-lg px-3 py-2.5">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm text-white truncate font-mono">{t.name}</p>
+                    {t.expired && <span className="text-[10px] bg-red-900 text-red-300 px-1.5 py-0.5 rounded uppercase tracking-wide">Expired</span>}
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    Created {fmtDate(t.createdAt)} · Expires {t.expiresAt ? fmtDate(t.expiresAt) : 'never'} · Last used {fmtDate(t.lastUsedAt)}
+                  </p>
+                </div>
+                <button
+                  onClick={() => revoke(t)}
+                  className="shrink-0 text-xs px-3 py-1 bg-red-800 hover:bg-red-700 text-white rounded transition-colors"
+                >
+                  Revoke
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

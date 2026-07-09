@@ -24,6 +24,7 @@ import portalRoutes from './routes/portal.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
+import { authenticateApiToken } from './middleware/apiToken.js';
 
 const app = express();
 const server = createServer(app);
@@ -73,10 +74,23 @@ const sessionMiddleware = session({
     maxAge: 24 * 60 * 60 * 1000,
   },
 });
-app.use(sessionMiddleware);
+// A request carrying `Authorization: Bearer <token>` is authenticated by the
+// API-token middleware, which sets a plain req.session-shaped context and skips
+// the cookie session entirely (no session row/cookie is created for scripts).
+// Everything else falls through to the normal cookie session middleware.
+app.use((req, res, next) => {
+  const authz = req.headers.authorization;
+  if (authz && /^Bearer\s+/i.test(authz)) {
+    return authenticateApiToken(req, res, next);
+  }
+  return sessionMiddleware(req, res, next);
+});
 
 app.use((req, res, next) => {
   if (!req.session?.userId) return next();
+  // Token auth already resolved the live user; don't re-hydrate (and never try
+  // to destroy) the plain token session object.
+  if (req.apiToken) return next();
 
   const user = db.prepare('SELECT username, is_admin FROM users WHERE id = ?').get(req.session.userId);
   if (!user) {

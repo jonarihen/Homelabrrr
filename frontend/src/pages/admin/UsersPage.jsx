@@ -296,6 +296,9 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   const [usernameMsg, setUsernameMsg] = useState('');
   const [twoFaMsg, setTwoFaMsg] = useState('');
   const [error, setError]       = useState('');
+  const [tokens, setTokens]     = useState([]);
+  const [tokensLoaded, setTokensLoaded] = useState(false);
+  const [tokenMsg, setTokenMsg] = useState('');
 
   const loadUserData = async () => {
     const [vms, vlans] = await Promise.all([
@@ -307,6 +310,31 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   };
 
   useEffect(() => { loadUserData(); }, [user.id]);
+
+  const loadTokens = async () => {
+    try {
+      const { data } = await api.get(`/admin/users/${user.id}/tokens`);
+      setTokens(data);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to load tokens');
+    } finally {
+      setTokensLoaded(true);
+    }
+  };
+
+  useEffect(() => { if (tab === 'tokens') loadTokens(); }, [tab, user.id]);
+
+  const revokeToken = async (token) => {
+    if (!window.confirm(`Revoke "${token.name}" belonging to ${user.username}? Any script using it loses access immediately.`)) return;
+    setTokenMsg('');
+    try {
+      await api.delete(`/admin/tokens/${token.id}`);
+      setTokenMsg('Token revoked');
+      loadTokens();
+    } catch (e) {
+      setTokenMsg('Failed: ' + (e.response?.data?.error || 'Failed to revoke token'));
+    }
+  };
 
   const changeRole = async (value) => {
     try {
@@ -410,6 +438,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
           ...(canGrantPrivileges ? [{ id: 'quotas', label: 'Quotas' }] : []),
           { id: 'vms', label: 'VM Assignments' },
           { id: 'vlans', label: 'VLAN Access' },
+          { id: 'tokens', label: 'API Tokens' },
           { id: 'account', label: 'Account' },
         ].map(t => (
           <button
@@ -604,6 +633,37 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
           </div>
         )}
 
+        {tab === 'tokens' && (
+          <div className="space-y-3">
+            <p className="text-xs text-gray-500">Personal API tokens this user created. You can revoke any of them — the secret is never shown here.</p>
+            {tokenMsg && <p role={tokenMsg.startsWith('Failed') ? 'alert' : 'status'} aria-live="polite" className={`text-xs ${tokenMsg.startsWith('Failed') ? 'text-red-400' : 'text-green-400'}`}>{tokenMsg}</p>}
+            {!tokensLoaded ? (
+              <div className="space-y-2">
+                {[1, 2].map(i => <div key={i} className="h-12 bg-gray-800/60 rounded-lg animate-pulse" />)}
+              </div>
+            ) : tokens.length === 0 ? (
+              <Empty text="This user has no API tokens." />
+            ) : (
+              <div className="space-y-1">
+                {tokens.map(t => (
+                  <div key={t.id} className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2.5">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm text-white font-mono truncate">{t.name}</p>
+                        {t.expired && <span className="text-[10px] bg-red-900 text-red-300 px-1.5 py-0.5 rounded uppercase tracking-wide">Expired</span>}
+                      </div>
+                      <p className="text-[11px] text-gray-500 mt-0.5">
+                        Created {tokenDate(t.createdAt)} · Expires {t.expiresAt ? tokenDate(t.expiresAt) : 'never'} · Last used {tokenDate(t.lastUsedAt)}
+                      </p>
+                    </div>
+                    <DangerBtn onClick={() => revokeToken(t)}>Revoke</DangerBtn>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {tab === 'account' && (
           <div className="space-y-6 max-w-sm">
             <form onSubmit={changeUsername} className="space-y-4">
@@ -751,6 +811,12 @@ function QuotasTab({ user, usage, role, onError }) {
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 const btnCls   = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors';
+
+function tokenDate(v) {
+  if (!v) return '—';
+  const d = new Date(v.replace(' ', 'T') + 'Z');
+  return isNaN(d.getTime()) ? v : d.toLocaleString();
+}
 
 function Field({ label, children }) {
   return (

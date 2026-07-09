@@ -352,6 +352,36 @@ try { db.exec("ALTER TABLE managed_vips ADD COLUMN vlan_interface TEXT DEFAULT '
 try { db.exec("ALTER TABLE firewalls ADD COLUMN external_ip TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE firewalls ADD COLUMN root_wan_zone TEXT DEFAULT 'underlay'"); } catch { /* exists */ }
 
+// Personal API tokens — Bearer-token auth for scripting against the portal.
+// Only the SHA-256 hash of the secret is stored; the plaintext is shown once
+// on creation and never persisted. A token is never more powerful than its
+// owner: the live user is resolved on every request.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT DEFAULT NULL,
+    last_used_at TEXT DEFAULT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+  CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+`); } catch { /* exists */ }
+
+// Rate-limit failed Bearer-token authentication attempts (per client IP),
+// mirroring the login_attempts throttle.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS token_auth_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT NOT NULL,
+    attempted_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_token_auth_attempts ON token_auth_attempts(ip, attempted_at);
+`); } catch { /* exists */ }
+
 // Landing page: admin-managed notices (maintenance windows etc.) and useful links
 try { db.exec(`
   CREATE TABLE IF NOT EXISTS portal_notices (

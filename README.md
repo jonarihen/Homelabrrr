@@ -39,6 +39,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
 | Admin delegation | Role-based access control: named roles bundle the granular permission flags (hosts, firewalls, port forwards, VLANs, policies, templates, users, assignments, audit log, VM hardware, provisioning, VM visibility). A role fully defines its holder's permissions; users without a role use per-user flags |
+| API tokens | Personal `Authorization: Bearer` tokens for scripting (curl, cron, CI) with the owner's exact permissions and quotas — shown once, stored hashed, optionally expiring, revocable, and fully attributed in the audit log |
 | Security | Session auth, TOTP 2FA, login throttling, secrets encrypted at rest, upstream TLS enforcement, SSH host-key checks, audit logging |
 
 ## UI Overview
@@ -50,7 +51,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore; backups are grouped per storage location and show encryption, verification, and protection status for PBS-backed stores
 - `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs; VNC consoles have a Paste button that types the clipboard into the guest (SSH terminals take native browser paste)
 - `SSH Keys` — uploaded keys used by browser SSH and SFTP sessions
-- `Account` — password and 2FA management
+- `Account` — password, 2FA, and personal API token management (create/list/revoke)
 
 ### Admin side
 
@@ -61,7 +62,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `Policies` — visual traffic mesh plus address/service object management for admins
 - `Port Forwarding` — WAN VIP and firewall policy management, scoped for delegated users
 - `Assignments` — VM and VLAN-to-user mapping, grouped per user with unassigned VMs listed first; unassigned VMs can be claimed for your own account (per VM, or all at once — handy for fleets that predate the portal); owner + VLAN are stamped as Proxmox tags on each VM (with a bulk "Sync PVE Tags" action) so ownership is visible in the PVE UI too
-- `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, lockout unlocks, and enforced 2FA
+- `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, personal API token oversight (list/revoke), lockout unlocks, and enforced 2FA
 - `Roles` — named permission sets (built-in Administrator/User plus custom roles); editing a role updates every user holding it
 - `Audit Log` — change tracking with user/IP/timestamp
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user
@@ -114,6 +115,21 @@ Compatibility with existing installs:
 - new custom forwards can target the same VM when the internal port/protocol is different
 - duplicates are blocked for the same firewall, internal IP, internal port, and protocol
 - the WAN external port/protocol must still be unique on the firewall
+
+## API Tokens
+
+Personal API tokens let you script against the portal without a browser session or 2FA prompt. Create one under **Account → API Tokens** (name + optional expiry); the plaintext secret is shown **once** — copy it then. Only its SHA-256 hash is stored.
+
+Use it with a standard `Authorization: Bearer` header:
+
+```bash
+# List the VMs your account can see
+curl -H "Authorization: Bearer hlr_your_token_here" https://portal.example.com/api/vms
+```
+
+A token carries **exactly** its owner's permissions, VM ownership, and quotas, resolved live on every request — it is never more powerful than the user, and revoking it (or the user losing a permission) takes effect immediately. Every token request is attributed in the audit log as `username (token: <name>)`.
+
+Interactive-session-only endpoints reject token auth: managing API tokens, changing your password, and anything touching 2FA. The VNC/SSH console websockets also remain session-only. Admins can list and revoke any user's tokens from **Users → Manage → API Tokens**.
 
 ## Quick Start
 
@@ -215,6 +231,7 @@ Current hardening in the codebase includes:
 - optional mandatory 2FA enrollment
 - 2FA lifecycle protection: starting a new enrollment cannot silently disable an active second factor, admin 2FA resets require confirmation, and setup/enable/disable/reset are audit-logged
 - login and 2FA attempt throttling, with admin unlock support
+- personal API tokens are stored only as SHA-256 hashes (plaintext shown once at creation), resolve the live user on every request so they never exceed their owner's permissions, are rate-limited on failure, cannot perform interactive-only operations (token/password/2FA management), do not extend to the VNC/SSH websockets, and are attributed by token name in the audit log
 - assignment-aware VM access (users only see their own VMs)
 - backup browse, download, restore, and delete verify that the named backup volume actually belongs to the VM being operated on (the VMID embedded in the volid must match; unparseable volids are rejected)
 - destructive operations (VM deletion, backup deletion, backup restore) require strict VM ownership — the see-all-VMs visibility flag does not grant them
