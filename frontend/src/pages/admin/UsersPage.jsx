@@ -13,24 +13,28 @@ export default function UsersPage() {
   const [allVMs, setAllVMs]         = useState([]);
   const [allVLANs, setAllVLANs]     = useState([]);
   const [roles, setRoles]           = useState([]);
+  const [invites, setInvites]       = useState([]);
   const [usage, setUsage]           = useState({});
   const [loading, setLoading]       = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
   const [manageUser, setManageUser] = useState(null);
   const [error, setError]           = useState('');
 
   const load = async () => {
     try {
-      const [u, v, vl, r] = await Promise.all([
+      const [u, v, vl, r, inv] = await Promise.all([
         api.get('/admin/users'),
         api.get('/admin/vms'),
         api.get('/admin/vlans'),
         api.get('/admin/roles'),
+        api.get('/admin/invites'),
       ]);
       setUsers(u.data);
       setAllVMs(v.data);
       setAllVLANs(vl.data);
       setRoles(r.data.roles || []);
+      setInvites(inv.data || []);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to load');
     } finally {
@@ -38,6 +42,10 @@ export default function UsersPage() {
     }
     // Usage is a separate slower call — don't block the table on it
     api.get('/admin/user-usage').then(r => setUsage(r.data || {})).catch(() => {});
+  };
+
+  const loadInvites = async () => {
+    try { setInvites((await api.get('/admin/invites')).data || []); } catch { /* ignore */ }
   };
 
   useEffect(() => { load(); }, []);
@@ -68,12 +76,20 @@ export default function UsersPage() {
           <h1 className="aaris-display text-lg text-gray-100">Users</h1>
           <p className="text-sm text-gray-500 mt-0.5">{users.length} accounts</p>
         </div>
-        <button
-          onClick={() => setCreateOpen(true)}
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-        >
-          + New User
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setInviteOpen(true)}
+            className="flex items-center gap-2 border border-gray-700 hover:border-gray-500 text-gray-200 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            Generate invite
+          </button>
+          <button
+            onClick={() => setCreateOpen(true)}
+            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            + New User
+          </button>
+        </div>
       </div>
 
       {error && <p className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
@@ -174,11 +190,28 @@ export default function UsersPage() {
         </div>
       )}
 
+      {!loading && (
+        <InvitesPanel
+          invites={invites}
+          onChanged={loadInvites}
+        />
+      )}
+
       {createOpen && (
         <CreateUserModal
           canCreateAdmin={canGrantPrivileges}
           onClose={() => setCreateOpen(false)}
           onCreated={load}
+        />
+      )}
+
+      {inviteOpen && (
+        <GenerateInviteModal
+          canCreateAdmin={canGrantPrivileges}
+          roles={roles}
+          allVLANs={allVLANs}
+          onClose={() => setInviteOpen(false)}
+          onCreated={loadInvites}
         />
       )}
 
@@ -744,6 +777,353 @@ function QuotasTab({ user, usage, role, onError }) {
         {saving ? 'Saving...' : 'Save Quotas'}
       </button>
     </form>
+  );
+}
+
+// ─── Invites ──────────────────────────────────────────────────────────────────
+
+const INVITE_STATUS_STYLES = {
+  open:    'bg-green-900 text-green-300',
+  used:    'bg-gray-800 text-gray-400',
+  expired: 'bg-yellow-900 text-yellow-300',
+  revoked: 'bg-red-900 text-red-300',
+  invalid: 'bg-red-900 text-red-300',
+};
+
+function presetSummaryText(preset) {
+  if (!preset) return '—';
+  const bits = [];
+  if (preset.isAdmin) bits.push('Admin');
+  if (preset.role) bits.push(`Role: ${preset.role.name}`);
+  else if (preset.grantedPermissions?.length) bits.push(`${preset.grantedPermissions.length} permission${preset.grantedPermissions.length !== 1 ? 's' : ''}`);
+  if (preset.vlans?.length) bits.push(`${preset.vlans.length} VLAN${preset.vlans.length !== 1 ? 's' : ''}`);
+  const q = preset.quotas || {};
+  const qbits = [];
+  if (q.maxCores != null) qbits.push(`${q.maxCores}c`);
+  if (q.maxMemoryGb != null) qbits.push(`${q.maxMemoryGb}G RAM`);
+  if (q.maxStorageGb != null) qbits.push(`${q.maxStorageGb}G disk`);
+  if (qbits.length) bits.push(`Quota ${qbits.join('/')}`);
+  return bits.length ? bits.join(' · ') : 'Basic user';
+}
+
+function InvitesPanel({ invites, onChanged }) {
+  const [revoking, setRevoking] = useState(null); // invite pending revoke confirm
+  const [error, setError] = useState('');
+
+  const revoke = async () => {
+    if (!revoking) return;
+    try {
+      await api.delete(`/admin/invites/${revoking.id}`);
+      setRevoking(null);
+      onChanged();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to revoke invite');
+      setRevoking(null);
+    }
+  };
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-baseline gap-3 mb-3">
+        <span className="font-mono text-xs font-semibold text-orange-600 tracking-[0.12em]">02</span>
+        <h2 className="aaris-display text-sm text-gray-200">Invites</h2>
+        <span className="text-xs text-gray-500">{invites.length} total</span>
+      </div>
+      {error && <p className="text-red-400 text-sm mb-3 bg-red-900/20 rounded p-2">{error}</p>}
+      {invites.length === 0 ? (
+        <p className="text-xs text-gray-600 italic border border-gray-800 bg-gray-900 rounded-xl px-4 py-6 text-center">
+          No invites yet. Generate one to onboard a user without setting a password by hand.
+        </p>
+      ) : (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
+          <table className="w-full min-w-[720px] text-sm">
+            <thead>
+              <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
+                <th className="text-left px-4 py-3">Status</th>
+                <th className="text-left px-4 py-3">Preset</th>
+                <th className="text-left px-4 py-3">2FA</th>
+                <th className="text-left px-4 py-3">Created by</th>
+                <th className="text-left px-4 py-3">Expires</th>
+                <th className="text-left px-4 py-3">Used by</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {invites.map(inv => (
+                <tr key={inv.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 transition-colors">
+                  <td className="px-4 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded uppercase tracking-wide ${INVITE_STATUS_STYLES[inv.status] || 'bg-gray-800 text-gray-400'}`}>
+                      {inv.status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-gray-300 text-xs">{presetSummaryText(inv.preset)}</td>
+                  <td className="px-4 py-3 text-xs">
+                    {inv.requires2fa
+                      ? <span className="text-green-400">Required</span>
+                      : <span className="text-gray-600">—</span>}
+                  </td>
+                  <td className="px-4 py-3 text-gray-400 text-xs">{inv.createdBy || '—'}</td>
+                  <td className="px-4 py-3 text-gray-500 text-xs">
+                    {inv.expiresAt ? new Date(inv.expiresAt).toLocaleDateString() : 'Never'}
+                  </td>
+                  <td className="px-4 py-3 text-gray-400 text-xs">{inv.usedBy || '—'}</td>
+                  <td className="px-4 py-3 text-right">
+                    {inv.status === 'open' ? (
+                      <button
+                        onClick={() => { setError(''); setRevoking(inv); }}
+                        className="text-xs text-red-500 hover:text-red-400 px-2 py-1 rounded hover:bg-gray-700 transition-colors"
+                      >
+                        Revoke
+                      </button>
+                    ) : (
+                      <span className="text-xs text-gray-700">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {revoking && (
+        <Modal title="Revoke invite" onClose={() => setRevoking(null)} size="sm">
+          <div className="p-5 space-y-4">
+            <p className="text-sm text-gray-300">
+              Revoke this invite? The link will stop working immediately and cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setRevoking(null)}
+                className="text-sm text-gray-400 hover:text-gray-200 border border-gray-700 hover:border-gray-500 px-4 py-2 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={revoke}
+                className="text-sm text-white bg-red-700 hover:bg-red-600 px-4 py-2 rounded-lg transition-colors"
+              >
+                Revoke
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreated }) {
+  const [form, setForm] = useState({
+    isAdmin: false,
+    roleId: '',
+    maxCores: '',
+    maxMemoryGb: '',
+    maxStorageGb: '',
+    expiresInDays: '7',
+    require2fa: false,
+  });
+  const [perms, setPerms] = useState({});      // granular can_* flags (no role only)
+  const [vlanIds, setVlanIds] = useState([]);  // selected VLAN ids
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState(null);  // { url, requires2fa, ... }
+  const [copied, setCopied] = useState(false);
+
+  const usePerUser = !form.roleId;
+
+  const togglePerm = (key) => setPerms(p => ({ ...p, [key]: !p[key] }));
+  const toggleVlan = (id) => setVlanIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setError('');
+    try {
+      const body = {
+        isAdmin: form.isAdmin,
+        roleId: form.roleId || null,
+        permissions: usePerUser ? perms : {},
+        maxCores: form.maxCores,
+        maxMemoryGb: form.maxMemoryGb,
+        maxStorageGb: form.maxStorageGb,
+        vlanIds,
+        expiresInDays: form.expiresInDays,
+        require2fa: form.require2fa,
+      };
+      const r = await api.post('/admin/invites', body);
+      const url = `${window.location.origin}/invite/${r.data.token}`;
+      setResult({ url, requires2fa: r.data.requires2fa, expiresAt: r.data.expiresAt });
+      onCreated();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to generate invite');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(result.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard blocked — the field is selectable as a fallback */ }
+  };
+
+  if (result) {
+    return (
+      <Modal title="Invite created" onClose={onClose} size="md">
+        <div className="p-5 space-y-4">
+          <p className="text-sm text-gray-300">
+            Share this single-use link. It won't be shown again — copy it now.
+          </p>
+          <div className="flex gap-2">
+            <input
+              readOnly
+              value={result.url}
+              onFocus={e => e.target.select()}
+              className={`${inputCls} font-mono text-xs`}
+            />
+            <button
+              onClick={copy}
+              className="shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <div className="text-xs text-gray-500 space-y-1">
+            <p>Expires: {result.expiresAt ? new Date(result.expiresAt).toLocaleString() : 'Never'}</p>
+            {result.requires2fa && <p className="text-green-400">The invitee must enroll in 2FA before accessing the portal.</p>}
+          </div>
+          <div className="flex justify-end">
+            <button onClick={onClose} className="text-sm text-gray-300 border border-gray-700 hover:border-gray-500 px-4 py-2 rounded-lg transition-colors">
+              Done
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Generate invite" onClose={onClose} size="lg">
+      <form onSubmit={submit} className="p-5 space-y-5">
+        <p className="text-xs text-gray-500">
+          Creates a one-time link that lets someone self-register with exactly the access you pick here.
+        </p>
+
+        {canCreateAdmin && (
+          <label className="flex items-center gap-3 cursor-pointer bg-gray-800 rounded-lg px-4 py-2.5">
+            <input
+              type="checkbox"
+              checked={form.isAdmin}
+              onChange={e => setForm(f => ({ ...f, isAdmin: e.target.checked }))}
+              className="accent-blue-500"
+            />
+            <div>
+              <span className="text-sm text-gray-200">Admin account</span>
+              <p className="text-xs text-gray-500">Full access. Bypasses all permission and quota checks.</p>
+            </div>
+          </label>
+        )}
+
+        {!form.isAdmin && (
+          <>
+            <Field label="Role preset">
+              <select
+                value={form.roleId}
+                onChange={e => setForm(f => ({ ...f, roleId: e.target.value }))}
+                className={inputCls}
+              >
+                <option value="">No role — set individual permissions</option>
+                {roles.map(r => (
+                  <option key={r.id} value={r.id}>
+                    {r.name} ({r.permissions.length} permission{r.permissions.length !== 1 ? 's' : ''})
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            {usePerUser && (
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Permissions</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  {[{ key: 'see_all_vms', label: 'Access all VMs' }, { key: 'can_provision', label: 'Provision VMs' }, { key: 'can_create_vms', label: 'Create VMs' }, ...PERM_DEFS].map(p => (
+                    <label key={p.key} className="flex items-center gap-2.5 bg-gray-800 rounded-lg px-3 py-2 cursor-pointer hover:bg-gray-800/80 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={!!perms[p.key]}
+                        onChange={() => togglePerm(p.key)}
+                        className="accent-blue-500 shrink-0"
+                      />
+                      <span className="text-xs text-gray-300">{p.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        <div>
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Quotas (empty = {form.roleId ? 'inherit from role' : 'unlimited'})</p>
+          <div className="grid grid-cols-3 gap-2">
+            <Field label="Max cores">
+              <input type="number" min="0" value={form.maxCores} placeholder="∞"
+                onChange={e => setForm(f => ({ ...f, maxCores: e.target.value }))} className={inputCls} />
+            </Field>
+            <Field label="Max RAM (GB)">
+              <input type="number" min="0" value={form.maxMemoryGb} placeholder="∞"
+                onChange={e => setForm(f => ({ ...f, maxMemoryGb: e.target.value }))} className={inputCls} />
+            </Field>
+            <Field label="Max disk (GB)">
+              <input type="number" min="0" value={form.maxStorageGb} placeholder="∞"
+                onChange={e => setForm(f => ({ ...f, maxStorageGb: e.target.value }))} className={inputCls} />
+            </Field>
+          </div>
+        </div>
+
+        {allVLANs.length > 0 && (
+          <div>
+            <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">VLAN access</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-40 overflow-y-auto">
+              {allVLANs.map(v => (
+                <label key={v.id} className="flex items-center gap-2.5 bg-gray-800 rounded-lg px-3 py-2 cursor-pointer hover:bg-gray-800/80 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={vlanIds.includes(v.id)}
+                    onChange={() => toggleVlan(v.id)}
+                    className="accent-blue-500 shrink-0"
+                  />
+                  <span className="text-xs text-gray-300">{v.name} <span className="text-gray-500">· {v.tag}</span></span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Expires in (days, empty = never)">
+            <input type="number" min="1" value={form.expiresInDays} placeholder="Never"
+              onChange={e => setForm(f => ({ ...f, expiresInDays: e.target.value }))} className={inputCls} />
+          </Field>
+          <label className="flex items-center gap-3 cursor-pointer bg-gray-800 rounded-lg px-4 py-2.5 self-end">
+            <input
+              type="checkbox"
+              checked={form.require2fa}
+              onChange={e => setForm(f => ({ ...f, require2fa: e.target.checked }))}
+              className="accent-blue-500"
+            />
+            <span className="text-sm text-gray-200">Require 2FA enrollment</span>
+          </label>
+        </div>
+
+        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        <button type="submit" disabled={saving} className={btnCls}>
+          {saving ? 'Generating…' : 'Generate invite link'}
+        </button>
+      </form>
+    </Modal>
   );
 }
 

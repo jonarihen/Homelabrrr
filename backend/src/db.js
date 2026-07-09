@@ -376,6 +376,33 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// Invite links: one-time self-registration tokens. We store only a HASH of the
+// raw token (never the token itself — the raw value is shown to the admin once
+// and discarded), the same discipline as PVE tokens / API keys elsewhere.
+// `preset` is a generic JSON blob holding the role id, is_admin flag, the
+// legacy per-user can_* permission columns, the quota numbers, and the VLAN ids
+// to apply verbatim when the invite is redeemed. Modelling the preset as JSON
+// keeps it decoupled from the roles (#14) / quota (#18) schema — whatever a
+// preset holds is applied as-is at redemption time.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by INTEGER,
+    created_by_username TEXT DEFAULT '',
+    preset TEXT NOT NULL DEFAULT '{}',
+    require_2fa INTEGER DEFAULT 0,
+    expires_at TEXT,
+    used_at TEXT,
+    used_by INTEGER,
+    used_by_username TEXT DEFAULT '',
+    revoked_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
+  )
+`); } catch { /* exists */ }
+
 assertSecretEncryptionKey();
 
 function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {

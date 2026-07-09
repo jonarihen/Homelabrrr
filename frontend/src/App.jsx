@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
 import { ConsoleSessionsProvider } from './contexts/ConsoleSessionsContext.jsx';
 import Login from './pages/Login.jsx';
+import AcceptInvite from './pages/AcceptInvite.jsx';
 import WelcomePage from './pages/WelcomePage.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import VMPage from './pages/VMPage.jsx';
@@ -75,6 +76,8 @@ export default function App() {
         <ConsoleSessionsProvider>
           <Routes>
             <Route path="/login" element={<Login />} />
+            {/* Public one-time invite redemption — outside PrivateRoute */}
+            <Route path="/invite/:token" element={<AcceptInvite />} />
 
             <Route path="/" element={<PrivateRoute><RootRedirect /></PrivateRoute>} />
 

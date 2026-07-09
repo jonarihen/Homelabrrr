@@ -9,6 +9,7 @@ import { logAudit } from '../utils/audit.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { effectivePermissions } from '../utils/permissions.js';
+import { hashInviteToken, inviteStatus, summarizeInvitePreset, INVITE_PERMISSION_COLUMNS } from '../utils/invites.js';
 
 const router = Router();
 
@@ -223,6 +224,144 @@ router.post('/verify-2fa', verifyTwoFactorLimiter, async (req, res, next) => {
     startUserSession(req, user);
     logAudit(req, 'login', user.username, '2FA verified');
     return res.json(serializeUser(user));
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ─── Invite links (public self-registration) ─────────────────────────────────
+// These routes are intentionally NOT behind requireAuth — an invitee is
+// anonymous until they redeem. Rate-limited like login to blunt token guessing
+// and account-creation spam. Tokens are looked up by hash only.
+
+const inviteLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many invite attempts, please try again later.' },
+});
+
+function loadInviteByToken(token) {
+  if (!token) return null;
+  return db.prepare('SELECT * FROM invites WHERE token_hash = ?').get(hashInviteToken(token));
+}
+
+function inviteErrorResponse(status) {
+  switch (status) {
+    case 'used':    return { code: 410, error: 'This invite has already been used.' };
+    case 'expired': return { code: 410, error: 'This invite has expired.' };
+    case 'revoked': return { code: 410, error: 'This invite has been revoked.' };
+    default:        return { code: 404, error: 'Invite not found.' };
+  }
+}
+
+function parsePreset(invite) {
+  try { return JSON.parse(invite.preset || '{}'); } catch { return {}; }
+}
+
+// Validate an invite and return a safe preset summary (no secrets, no token)
+router.get('/invite/:token', inviteLimiter, (req, res) => {
+  const invite = loadInviteByToken(req.params.token);
+  const status = inviteStatus(invite);
+  if (status !== 'open') {
+    const r = inviteErrorResponse(status);
+    return res.status(r.code).json({ error: r.error });
+  }
+  res.json({
+    valid: true,
+    requires2fa: !!invite.require_2fa,
+    expiresAt: invite.expires_at,
+    invitedBy: invite.created_by_username || null,
+    preset: summarizeInvitePreset(parsePreset(invite)),
+  });
+});
+
+// Redeem an invite: create the account with EXACTLY the preset's grants inside
+// a single transaction, then mark the invite used and log the user straight in.
+router.post('/invite/:token', inviteLimiter, async (req, res, next) => {
+  const invite = loadInviteByToken(req.params.token);
+  const status = inviteStatus(invite);
+  if (status !== 'open') {
+    const r = inviteErrorResponse(status);
+    return res.status(r.code).json({ error: r.error });
+  }
+
+  const { username, password } = req.body;
+  // Username policy identical to admin-created users (non-empty + unique);
+  // password is policy-checked to a minimum length for self-registration.
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password required' });
+  }
+  if (String(password).length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+
+  const preset = parsePreset(invite);
+  const hash = bcrypt.hashSync(password, 10);
+  const require2fa = invite.require_2fa ? 1 : 0;
+
+  let newUser;
+  try {
+    const redeem = db.transaction(() => {
+      // Re-check inside the transaction to close the double-redeem race.
+      const fresh = db.prepare('SELECT * FROM invites WHERE id = ?').get(invite.id);
+      if (inviteStatus(fresh) !== 'open') {
+        const err = new Error('INVITE_CONSUMED');
+        err.code = 'INVITE_CONSUMED';
+        throw err;
+      }
+      const perms = preset.permissions || {};
+      const cols = [
+        'username', 'password', 'is_admin', 'role_id', 'require_2fa',
+        'max_cores', 'max_memory_gb', 'max_storage_gb',
+        ...INVITE_PERMISSION_COLUMNS,
+      ];
+      const vals = [
+        username,
+        hash,
+        preset.isAdmin ? 1 : 0,
+        preset.roleId ?? null,
+        require2fa,
+        preset.maxCores ?? null,
+        preset.maxMemoryGb ?? null,
+        preset.maxStorageGb ?? null,
+        ...INVITE_PERMISSION_COLUMNS.map((k) => (perms[k] ? 1 : 0)),
+      ];
+      const placeholders = cols.map(() => '?').join(', ');
+      const result = db.prepare(`INSERT INTO users (${cols.join(', ')}) VALUES (${placeholders})`).run(...vals);
+      const userId = result.lastInsertRowid;
+
+      const insVlan = db.prepare('INSERT OR IGNORE INTO user_vlans (user_id, vlan_id) VALUES (?, ?)');
+      for (const vlanId of (preset.vlanIds || [])) insVlan.run(userId, vlanId);
+
+      db.prepare('UPDATE invites SET used_at = ?, used_by = ?, used_by_username = ? WHERE id = ?')
+        .run(new Date().toISOString(), userId, username, invite.id);
+
+      return db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+    });
+    newUser = redeem();
+  } catch (err) {
+    if (err.code === 'INVITE_CONSUMED') {
+      return res.status(410).json({ error: 'This invite has already been used.' });
+    }
+    if (err.message?.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+    return next(err);
+  }
+
+  try {
+    await regenerateSession(req);
+    if (require2fa) {
+      // Land in the existing enrollment-only gate — must set up 2FA first.
+      startUserSession(req, newUser, { twoFactorEnrollmentOnly: true });
+      logAudit(req, 'invite_consumed', username, `invite #${invite.id} · 2FA enrollment required`);
+      return res.json({ ...serializeUser(newUser), twoFactorSetupRequired: true });
+    }
+    startUserSession(req, newUser);
+    logAudit(req, 'invite_consumed', username, `invite #${invite.id}`);
+    return res.json(serializeUser(newUser));
   } catch (err) {
     return next(err);
   }
