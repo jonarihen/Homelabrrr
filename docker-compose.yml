@@ -9,7 +9,10 @@ services:
       - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:?SECRET_ENCRYPTION_KEY must be set in .env}
       - ALLOWED_ORIGIN=${ALLOWED_ORIGIN:-}
       - COOKIE_SECURE=${COOKIE_SECURE:-true}
-      - TRUST_PROXY=${TRUST_PROXY:-1}
+      # 2 hops in the recommended topology: external reverse proxy (Caddy/NPM)
+      # + the bundled frontend nginx. Set to 1 if clients hit port 8181 directly
+      # (no external proxy), otherwise X-Forwarded-For can be spoofed.
+      - TRUST_PROXY=${TRUST_PROXY:-2}
       - ALLOW_INSECURE_UPSTREAM_TLS=${ALLOW_INSECURE_UPSTREAM_TLS:-false}
       - ALLOW_INTERNAL_IMAGE_URLS=${ALLOW_INTERNAL_IMAGE_URLS:-false}
       - INITIAL_ADMIN_USERNAME=${INITIAL_ADMIN_USERNAME:-}

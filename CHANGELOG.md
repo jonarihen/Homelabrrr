@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-09 — Audit log now records the real client IP behind a reverse proxy
+
+- With an external reverse proxy (Caddy, Nginx Proxy Manager, …) in front, the audit log recorded the **proxy's IP** for every action instead of the actual client's. Cause: the request passes **two** proxies (external proxy + the bundled frontend nginx) but `TRUST_PROXY` defaulted to `1`, so Express stopped one hop short when walking `X-Forwarded-For`. The default is now `2`, matching the recommended topology. If clients reach port `8181` directly with no external proxy, set `TRUST_PROXY=1` in `.env` — otherwise a client could spoof its logged IP via a forged `X-Forwarded-For` header
+
 ## 2026-07-09 — Security: low-severity hardening round (L1–L9)
 
 - **Login timing**: unknown usernames now take as long to reject as wrong passwords (dummy bcrypt compare), closing a user-enumeration side channel

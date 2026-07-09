@@ -192,7 +192,7 @@ Example values live in [`.env.example`](.env.example).
 | `SECRET_ENCRYPTION_KEY` | 32-byte master key for encrypting secrets at rest; accepted as base64, 64-char hex, or exactly 32 bytes of raw text |
 | `ALLOWED_ORIGIN` | Exact public browser origin allowed for CORS and websocket upgrades |
 | `COOKIE_SECURE` | Marks auth cookies as `Secure` (default `true`; set to `false` only for plain-HTTP local dev) |
-| `TRUST_PROXY` | Number or mode used for Express proxy trust |
+| `TRUST_PROXY` | Number of proxy hops in front of the backend (default `2`: external reverse proxy + bundled nginx; set `1` if clients reach port 8181 directly) |
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
 | `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
