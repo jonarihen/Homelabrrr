@@ -392,9 +392,15 @@ router.post('/roles', requireAdmin, (req, res) => {
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Role name required' });
   const perms = validatePermissionList(permissions);
   if (!perms) return res.status(400).json({ error: 'Invalid permission list' });
+  const maxCores = parseQuotaValue(req.body.maxCores);
+  const maxMemoryGb = parseQuotaValue(req.body.maxMemoryGb);
+  const maxStorageGb = parseQuotaValue(req.body.maxStorageGb);
+  if (maxCores === undefined || maxMemoryGb === undefined || maxStorageGb === undefined) {
+    return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
+  }
   try {
-    const r = db.prepare('INSERT INTO roles (name, description) VALUES (?, ?)')
-      .run(String(name).trim(), String(description));
+    const r = db.prepare('INSERT INTO roles (name, description, max_cores, max_memory_gb, max_storage_gb) VALUES (?, ?, ?, ?, ?)')
+      .run(String(name).trim(), String(description), maxCores, maxMemoryGb, maxStorageGb);
     setRolePermissions(r.lastInsertRowid, perms);
     logAudit(req, 'admin_create_role', String(name).trim(), perms.join(','));
     res.json(serializeRole(db.prepare('SELECT * FROM roles WHERE id = ?').get(r.lastInsertRowid)));
@@ -426,6 +432,17 @@ router.put('/roles/:id', requireAdmin, (req, res) => {
     const perms = validatePermissionList(permissions);
     if (!perms) return res.status(400).json({ error: 'Invalid permission list' });
     setRolePermissions(role.id, perms);
+  }
+  // Quotas are editable on every role, including built-ins (like permissions)
+  if ('maxCores' in req.body || 'maxMemoryGb' in req.body || 'maxStorageGb' in req.body) {
+    const maxCores = parseQuotaValue(req.body.maxCores);
+    const maxMemoryGb = parseQuotaValue(req.body.maxMemoryGb);
+    const maxStorageGb = parseQuotaValue(req.body.maxStorageGb);
+    if (maxCores === undefined || maxMemoryGb === undefined || maxStorageGb === undefined) {
+      return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
+    }
+    db.prepare('UPDATE roles SET max_cores = ?, max_memory_gb = ?, max_storage_gb = ? WHERE id = ?')
+      .run(maxCores, maxMemoryGb, maxStorageGb, role.id);
   }
   logAudit(req, 'admin_update_role', role.name, Array.isArray(permissions) ? permissions.join(',') : '');
   res.json(serializeRole(db.prepare('SELECT * FROM roles WHERE id = ?').get(role.id)));

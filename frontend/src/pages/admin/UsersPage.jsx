@@ -132,7 +132,7 @@ export default function UsersPage() {
                   </td>
                   <td className="px-4 py-3 text-gray-400">{u.see_all_vms ? <span className="text-xs text-blue-400">All</span> : u.vm_count}</td>
                   <td className="px-4 py-3">
-                    <UsageCell usage={usage[u.id]} user={u} />
+                    <UsageCell usage={usage[u.id]} user={u} role={u.role_id ? roles.find(r => r.id === u.role_id) : null} />
                   </td>
                   <td className="px-4 py-3 text-gray-500 text-xs">
                     {new Date(u.created_at).toLocaleDateString()}
@@ -520,7 +520,12 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
         )}
 
         {canGrantPrivileges && tab === 'quotas' && (
-          <QuotasTab user={user} usage={usage} onError={setError} />
+          <QuotasTab
+            user={user}
+            usage={usage}
+            role={roleId ? roles.find(r => String(r.id) === String(roleId)) : null}
+            onError={setError}
+          />
         )}
 
         {tab === 'vms' && (
@@ -663,7 +668,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
 // ─── Quotas tab ───────────────────────────────────────────────────────────────
 
-function QuotasTab({ user, usage, onError }) {
+function QuotasTab({ user, usage, role, onError }) {
   const [form, setForm] = useState({
     maxCores: user.max_cores ?? '',
     maxMemoryGb: user.max_memory_gb ?? '',
@@ -701,14 +706,17 @@ function QuotasTab({ user, usage, onError }) {
         </div>
       ) : (
         <p className="text-xs text-gray-500">
-          Limits on the total resources allocated to this user's VMs. Empty = unlimited.
+          Limits on the total resources allocated to this user's VMs. Empty = {role ? 'inherit from the role' : 'unlimited'}.
           Checked when the user creates a VM or raises its hardware; lowering always works.
         </p>
       )}
 
       {rows.map(row => {
-        const limit = form[row.key];
-        const overQuota = limit !== '' && row.used != null && row.used >= parseInt(limit, 10);
+        // Role default applies when the per-user field is empty
+        const roleKey = { maxCores: 'max_cores', maxMemoryGb: 'max_memory_gb', maxStorageGb: 'max_storage_gb' }[row.key];
+        const roleDefault = role?.[roleKey];
+        const effective = form[row.key] !== '' ? parseInt(form[row.key], 10) : roleDefault;
+        const overQuota = effective != null && row.used != null && row.used >= effective;
         return (
           <div key={row.key} className="bg-gray-800 rounded-lg px-4 py-3">
             <div className="flex items-center justify-between mb-1.5">
@@ -722,7 +730,7 @@ function QuotasTab({ user, usage, onError }) {
             <input
               type="number"
               min="0"
-              placeholder="Unlimited"
+              placeholder={roleDefault != null ? `${roleDefault} (from role)` : 'Unlimited'}
               value={form[row.key]}
               onChange={e => { setForm(f => ({ ...f, [row.key]: e.target.value })); setMsg(''); }}
               className={inputCls}
@@ -785,8 +793,9 @@ function Empty({ text }) {
   return <p className="text-xs text-gray-600 italic py-2 px-3">{text}</p>;
 }
 
-// Compact per-user allocation, red per metric when at/over its quota
-function UsageCell({ usage, user }) {
+// Compact per-user allocation, red per metric when at/over its effective
+// quota (per-user value, else the role's default)
+function UsageCell({ usage, user, role }) {
   if (!usage || usage.vmCount === 0) return <span className="text-xs text-gray-600">—</span>;
   const metric = (used, limit, suffix) => {
     const over = limit != null && used >= limit;
@@ -796,9 +805,14 @@ function UsageCell({ usage, user }) {
       </span>
     );
   };
+  const limits = {
+    cores: user.max_cores ?? role?.max_cores,
+    memory: user.max_memory_gb ?? role?.max_memory_gb,
+    storage: user.max_storage_gb ?? role?.max_storage_gb,
+  };
   return (
     <span className="text-xs text-gray-400 font-mono whitespace-nowrap">
-      {metric(usage.cores, user.max_cores, 'c')} · {metric(usage.memoryGb, user.max_memory_gb, 'G')} · {metric(usage.diskGb, user.max_storage_gb, 'G')}
+      {metric(usage.cores, limits.cores, 'c')} · {metric(usage.memoryGb, limits.memory, 'G')} · {metric(usage.diskGb, limits.storage, 'G')}
     </span>
   );
 }

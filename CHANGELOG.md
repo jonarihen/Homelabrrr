@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-09 — Roles can carry default quotas
+
+- Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder
+- The Roles table lists each role's quota next to its permission count
+
 ## 2026-07-09 — Per-user resource quotas
 
 - Admins can now set **quotas per user** — max CPU cores, max memory (GB), max storage (GB) — on the new **Quotas** tab of the Users page Manage dialog. Empty = unlimited, so nothing changes for existing users until you set a limit

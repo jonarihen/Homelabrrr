@@ -39,17 +39,26 @@ export async function getUserResourceUsage(userId) {
   return usage;
 }
 
-/** The user's quota limits (null = unlimited) or null when the user has none set. */
+/**
+ * The user's effective quota limits (null = unlimited), or null when the
+ * user doesn't exist. Per metric: an explicit per-user value overrides the
+ * role's default; otherwise the role's value applies (if any role is set).
+ */
 export function getUserQuota(userId) {
-  const user = db.prepare(
-    'SELECT is_admin, max_cores, max_memory_gb, max_storage_gb FROM users WHERE id = ?'
-  ).get(userId);
+  const user = db.prepare(`
+    SELECT u.is_admin, u.max_cores, u.max_memory_gb, u.max_storage_gb,
+           r.max_cores AS role_max_cores, r.max_memory_gb AS role_max_memory_gb,
+           r.max_storage_gb AS role_max_storage_gb
+    FROM users u
+    LEFT JOIN roles r ON r.id = u.role_id
+    WHERE u.id = ?
+  `).get(userId);
   if (!user) return null;
   return {
     isAdmin: user.is_admin === 1,
-    maxCores: user.max_cores,
-    maxMemoryGb: user.max_memory_gb,
-    maxStorageGb: user.max_storage_gb,
+    maxCores: user.max_cores ?? user.role_max_cores,
+    maxMemoryGb: user.max_memory_gb ?? user.role_max_memory_gb,
+    maxStorageGb: user.max_storage_gb ?? user.role_max_storage_gb,
   };
 }
 

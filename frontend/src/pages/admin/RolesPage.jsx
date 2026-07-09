@@ -114,6 +114,15 @@ export default function RolesPage() {
                     {role.permissions.length > 0
                       ? <span className="text-xs text-purple-400">{role.permissions.length} granted</span>
                       : <span className="text-xs text-gray-600">None</span>}
+                    {(role.max_cores != null || role.max_memory_gb != null || role.max_storage_gb != null) && (
+                      <p className="text-xs text-gray-500 font-mono mt-0.5">
+                        {[
+                          role.max_cores != null ? `${role.max_cores}c` : null,
+                          role.max_memory_gb != null ? `${role.max_memory_gb}G mem` : null,
+                          role.max_storage_gb != null ? `${role.max_storage_gb}G disk` : null,
+                        ].filter(Boolean).join(' · ')}
+                      </p>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-gray-400">{role.userCount}</td>
                   <td className="px-4 py-3 text-right">
@@ -168,6 +177,11 @@ function RoleModal({ role, onClose, onSaved }) {
   const [name, setName] = useState(role?.name || '');
   const [description, setDescription] = useState(role?.description || '');
   const [perms, setPerms] = useState(() => new Set(role?.permissions || []));
+  const [quotas, setQuotas] = useState({
+    maxCores: role?.max_cores ?? '',
+    maxMemoryGb: role?.max_memory_gb ?? '',
+    maxStorageGb: role?.max_storage_gb ?? '',
+  });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -185,7 +199,7 @@ function RoleModal({ role, onClose, onSaved }) {
     setSaving(true);
     setError('');
     try {
-      const payload = { name, description, permissions: [...perms] };
+      const payload = { name, description, permissions: [...perms], ...quotas };
       if (editing) await api.put(`/admin/roles/${role.id}`, payload);
       else await api.post('/admin/roles', payload);
       onSaved();
@@ -254,6 +268,32 @@ function RoleModal({ role, onClose, onSaved }) {
             ))}
           </div>
         ))}
+
+        <div className="space-y-1">
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Resource Quotas</p>
+          <p className="text-xs text-gray-500 mb-2">
+            Default limits for every user holding this role. Empty = unlimited. A per-user quota set on the Users page overrides the role's value for that metric.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {[
+              { key: 'maxCores', label: 'Max CPU cores' },
+              { key: 'maxMemoryGb', label: 'Max memory (GB)' },
+              { key: 'maxStorageGb', label: 'Max storage (GB)' },
+            ].map(q => (
+              <div key={q.key}>
+                <label className="block text-xs text-gray-400 mb-1.5">{q.label}</label>
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="Unlimited"
+                  value={quotas[q.key]}
+                  onChange={e => setQuotas(f => ({ ...f, [q.key]: e.target.value }))}
+                  className={inputCls}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
 
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <button

@@ -246,10 +246,14 @@ db.exec(`
 `);
 try { db.exec('ALTER TABLE users ADD COLUMN role_id INTEGER DEFAULT NULL'); } catch { /* exists */ }
 
-// Resource quotas — NULL means unlimited (see utils/quota.js)
+// Resource quotas — NULL means unlimited (see utils/quota.js). Roles carry
+// default quotas; a per-user value overrides the role's, per metric.
 try { db.exec('ALTER TABLE users ADD COLUMN max_cores INTEGER DEFAULT NULL'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN max_memory_gb INTEGER DEFAULT NULL'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN max_storage_gb INTEGER DEFAULT NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE roles ADD COLUMN max_cores INTEGER DEFAULT NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE roles ADD COLUMN max_memory_gb INTEGER DEFAULT NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE roles ADD COLUMN max_storage_gb INTEGER DEFAULT NULL'); } catch { /* exists */ }
 
 // Seed the built-in roles once (empty table = first run after this migration).
 // "Administrator" grants every portal permission (it does NOT make the account
