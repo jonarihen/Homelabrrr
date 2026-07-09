@@ -380,6 +380,21 @@ export async function getStorages(node) {
   return storages.filter(s => s.active && s.enabled);
 }
 
+// Resolve a node ref to the id of the pve_hosts row that owns it. Used by the
+// storage-visibility guard, which is keyed by (pve_host_id, storage).
+export async function getHostIdForNode(node) {
+  const host = await hostForNode(node);
+  return host.id;
+}
+
+// All storage pools configured on a host (cluster-wide storage.cfg view), so the
+// admin exposure UI can list every pool — including ones not currently active on
+// a particular node. Takes a raw pve_hosts row.
+export async function getHostStoragePools(host) {
+  const pools = await makeRequest(host, 'GET', '/storage');
+  return pools || [];
+}
+
 export async function getISOImages(node, storage) {
   const { host, nodeName } = await resolveNode(node);
   const content = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/content?content=iso`);

@@ -38,6 +38,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
+| Storage exposure | Admins pick which Proxmox storage pools users may deploy onto, per host; hidden pools vanish from the provisioning dropdowns and are rejected server-side. Every pool is exposed by default, so nothing changes until you restrict one |
 | Admin delegation | Role-based access control: named roles bundle the granular permission flags (hosts, firewalls, port forwards, VLANs, policies, templates, users, assignments, audit log, VM hardware, provisioning, VM visibility). A role fully defines its holder's permissions; users without a role use per-user flags |
 | Security | Session auth, TOTP 2FA, login throttling, secrets encrypted at rest, upstream TLS enforcement, SSH host-key checks, audit logging |
 
@@ -54,7 +55,7 @@ This project pulls those into one interface so users can work inside guardrails 
 
 ### Admin side
 
-- `PVE Hosts` — multi-host Proxmox registration with status monitoring
+- `PVE Hosts` — multi-host Proxmox registration with status monitoring, plus per-host **storage pool exposure** toggles (choose which pools users may deploy onto)
 - `Templates` — register source VMs with auto-populated defaults from Proxmox config; cloud image catalog with downloads used as the direct provisioning source (deploy VMs straight from an image) plus optional one-click cloud-init template builds
 - `Firewalls` — FortiGate registration, VDOM/link settings, WAN settings, and managed-switch discovery
 - `VLANs` — managed or tagged-only network definitions, subnet data, and FortiGate sync
@@ -226,6 +227,7 @@ Current hardening in the codebase includes:
 - per-host Proxmox TLS verification settings
 - granular admin permissions for delegation (10 independent flags)
 - user-scoped VLAN, policy, and port-forward management
+- storage pool exposure is enforced server-side on every create path (clone, from-image, from-scratch), not just hidden in the UI — a non-admin naming a hidden pool directly is rejected; pools are exposed by default so existing setups are unchanged until an admin restricts one, and every toggle is audit-logged
 - hardware editing is separately permission-gated and audit-logged
 - audit logging for all significant actions with user/IP/timestamp
 - error message sanitization (strips internal IPs and paths from API responses)
