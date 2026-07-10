@@ -87,8 +87,14 @@ export class FortiGateAPI {
           if (res.statusCode >= 200 && res.statusCode < 300) {
             resolve(parsed);
           } else {
-            const errMsg = parsed?.results?.[0]?.error || parsed?.cli_error || parsed?.http_status || `HTTP ${res.statusCode}`;
-            reject(new Error(`FortiGate API error: ${errMsg}`));
+            // FortiOS 7.6 returns cli_error as an ARRAY (often empty) — an
+            // empty array is truthy but stringifies to '', which used to
+            // swallow the real status. Join arrays and let empty fall through.
+            const cliError = Array.isArray(parsed?.cli_error) ? parsed.cli_error.join('; ') : parsed?.cli_error;
+            const errMsg = parsed?.results?.[0]?.error || cliError || parsed?.http_status || `HTTP ${res.statusCode}`;
+            const err = new Error(`FortiGate API error: ${errMsg}`);
+            err.statusCode = res.statusCode;
+            reject(err);
           }
         });
       });

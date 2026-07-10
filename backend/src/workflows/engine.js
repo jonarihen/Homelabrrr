@@ -128,7 +128,7 @@ export async function teardownArtifacts(client, artifacts) {
     try {
       await deleteArtifact(client, a);
     } catch (e) {
-      if (ARTIFACT_GONE_RE.test(e.message)) {
+      if (e.statusCode === 404 || ARTIFACT_GONE_RE.test(e.message)) {
         entry.status = 'already_gone';
       } else if (a.type === 'switch_controller_vlan') {
         // FortiLink auto-manages this entry alongside the interface; a refusal
