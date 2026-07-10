@@ -27,6 +27,7 @@ const PERM_GROUPS = [
       { key: 'can_manage_users',       label: 'Manage Users',       desc: 'Create, edit, delete user accounts and permissions' },
       { key: 'can_manage_assignments', label: 'Manage Assignments', desc: 'Assign VMs and VLANs to users' },
       { key: 'can_view_audit_log',     label: 'View Audit Log',     desc: 'Read the system audit log' },
+      { key: 'can_manage_websites',    label: 'Manage Websites',    desc: 'Register the Caddy reverse proxy, see all published sites, and assign site ownership' },
     ],
   },
 ];

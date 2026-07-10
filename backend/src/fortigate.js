@@ -312,6 +312,63 @@ export class FortiGateAPI {
     return res.results || [];
   }
 
+  // ─── Certificates ────────────────────────────────────────────────────────────
+
+  /**
+   * List local (server) certificates. `caddy-forticertsync` drops each synced
+   * Let's Encrypt cert here, so this is how Homelabrrr discovers the cert to
+   * attach to an SSL/SSH inspection profile.
+   */
+  async getLocalCertificates(vdomOverride = null) {
+    const res = await this.request('GET', 'cmdb/vpn.certificate/local', null, vdomOverride);
+    return res.results || [];
+  }
+
+  async getLocalCertificate(name, vdomOverride = null) {
+    try {
+      const res = await this.request('GET', `cmdb/vpn.certificate/local/${encodeURIComponent(name)}`, null, vdomOverride);
+      return res.results?.[0] || null;
+    } catch { return null; }
+  }
+
+  // ─── SSL/SSH inspection profiles ─────────────────────────────────────────────
+
+  async getSslSshProfiles(vdomOverride = null) {
+    const res = await this.request('GET', 'cmdb/firewall/ssl-ssh-profile', null, vdomOverride);
+    return res.results || [];
+  }
+
+  async getSslSshProfile(name, vdomOverride = null) {
+    try {
+      const res = await this.request('GET', `cmdb/firewall/ssl-ssh-profile/${encodeURIComponent(name)}`, null, vdomOverride);
+      return res.results?.[0] || null;
+    } catch { return null; }
+  }
+
+  /**
+   * Attach a synced server certificate to an SSL/SSH inspection profile so
+   * inbound inspection ("Protecting SSL Server") presents the real Let's
+   * Encrypt cert instead of the FortiGate's default. FortiOS keeps the inbound
+   * server certificate list under `server-cert` with `server-cert-mode` set to
+   * `replace`. The existing list is read first so we append rather than clobber
+   * any certs an admin already attached by hand.
+   */
+  async setInspectionServerCert(profileName, certName, vdomOverride = null) {
+    const profile = await this.getSslSshProfile(profileName, vdomOverride);
+    if (!profile) throw new Error(`SSL/SSH inspection profile "${profileName}" not found`);
+
+    const existing = Array.isArray(profile['server-cert']) ? profile['server-cert'] : [];
+    const already = existing.some((c) => (c.name || c) === certName);
+    const serverCert = already
+      ? existing.map((c) => ({ name: c.name || c }))
+      : [...existing.map((c) => ({ name: c.name || c })), { name: certName }];
+
+    return this.request('PUT', `cmdb/firewall/ssl-ssh-profile/${encodeURIComponent(profileName)}`, {
+      'server-cert-mode': 'replace',
+      'server-cert': serverCert,
+    }, vdomOverride);
+  }
+
   // ─── Switch-controller managed-switch ──────────────────────────────────────
 
   /**
