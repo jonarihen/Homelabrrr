@@ -31,6 +31,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Area | What you get |
 | --- | --- |
 | VM & LXC access | Assigned VM/container listing, status/actions, browser VNC, snapshots, backups grouped by storage (with PBS encryption/verification status), and file-level backup restore |
+| Power schedules | Per-VM automatic stop/start windows (e.g. stop 23:00, start 08:00 on weekdays) enforced by a minute-granularity background loop: graceful shutdown with a hard-stop fallback, timezone- and day-aware evaluation, manual-override-wins semantics, a "skip tonight" one-off, and a "sleeps 23:00–08:00" badge on the card/detail page — every action audit-logged |
 | Console workflow | Floating multi-session SSH/VNC console dock with minimize/restore, tiling, pop-out tabs, and clipboard paste into VNC (typed into the guest as keystrokes, no agent needed) |
 | SSH & SFTP | Browser SSH terminal, uploaded encrypted keys, host-key verification, and SFTP upload/download/file management |
 | Provisioning | Deploy straight from a cloud image, clone a template, or build a VM from scratch / from an available ISO — from-scratch is available to admins and to users holding the **Create VMs** permission (non-admins are pinned to the default bridge and self-assigned the VM) — all with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, pre-flight capacity checks (node free memory + storage space), per-user resource quotas (cores/memory/storage, enforced on creation and hardware upgrades), and a live step-by-step deployment progress stepper |
@@ -56,6 +57,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `My VMs` — assigned VM/LXC inventory with search, filter, sort, selection, and bulk actions
 - `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and build-from-scratch (from an available ISO) for admins and users with the **Create VMs** permission, each with a live deployment progress stepper
 - `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore; backups are grouped per storage location and show encryption, verification, and protection status for PBS-backed stores
+- `Power Schedule` — from a VM's detail page, set an automatic stop/start window (stop time, start time, active days, timezone) so idle VMs sleep overnight; manually starting inside the off-window keeps the VM up until the next scheduled stop, and a "skip tonight" button skips just the next shutdown
 - `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs; VNC consoles have a Paste button that types the clipboard into the guest (SSH terminals take native browser paste)
 - `SSH Keys` — uploaded keys used by browser SSH and SFTP sessions
 - `Account` — password, 2FA management, personal API token management (create/list/revoke), and a notification opt-out toggle for events about your own resources
@@ -228,6 +230,7 @@ Example values live in [`.env.example`](.env.example).
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
 | `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing (default `127.0.0.1`; set `0.0.0.0` to expose on all interfaces) |
 | `LEASE_CHECK_INTERVAL_MS` | How often the background VM-lease sweeper runs to gracefully stop expired VMs (default `900000` = 15 min; minimum `60000`). Default lease duration and grace period are set in-app on the admin VM Leases page |
+| `VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS` | How long a scheduled graceful shutdown waits before the hard-stop fallback fires (default `120000`) |
 
 Useful implementation defaults:
 

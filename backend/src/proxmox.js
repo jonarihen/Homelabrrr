@@ -487,6 +487,48 @@ async function waitForTaskCompletion(host, nodeName, upid, timeoutMs = 300_000) 
   throw new Error('Timed out waiting for Proxmox task to complete');
 }
 
+// Detect whether a VMID is a qemu VM or an lxc container on its host, returning
+// both the type and its current status row.
+async function detectGuest(host, nodeName, vmid) {
+  try {
+    const status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/current`);
+    return { vmtype: 'qemu', status };
+  } catch {
+    const status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/current`);
+    return { vmtype: 'lxc', status };
+  }
+}
+
+// Scheduler-driven graceful stop: ask the guest OS to shut down and wait up to
+// `timeoutMs`; if it doesn't stop in time, fall back to a hard stop. Returns
+// `{ method }` describing what actually stopped it ('none' | 'shutdown' | 'stop').
+export async function scheduledStopVM(node, vmid, { timeoutMs = 120_000 } = {}) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  const { vmtype, status } = await detectGuest(host, nodeName, vmid);
+  if (status.status === 'stopped') return { vmtype, method: 'none' };
+
+  const base = `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/status`;
+  try {
+    await makeRequest(host, 'POST', `${base}/shutdown`, {});
+    await waitForGuestStopped(host, nodeName, vmtype, vmid, timeoutMs);
+    return { vmtype, method: 'shutdown' };
+  } catch (shutdownErr) {
+    // Graceful shutdown timed out or was refused — force it off.
+    await makeRequest(host, 'POST', `${base}/stop`, {});
+    await waitForGuestStopped(host, nodeName, vmtype, vmid, 60_000);
+    return { vmtype, method: 'stop', shutdownError: shutdownErr.message };
+  }
+}
+
+// Scheduler-driven start (qemu or lxc). No-op if already running.
+export async function scheduledStartVM(node, vmid) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  const { vmtype, status } = await detectGuest(host, nodeName, vmid);
+  if (status.status === 'running') return { vmtype, method: 'none' };
+  await makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/status/start`, {});
+  return { vmtype, method: 'start' };
+}
+
 export async function deleteVM(node, vmid) {
   const { host, nodeName } = await resolveNode(node, { vmid });
 

@@ -31,6 +31,7 @@ import { sweepExpiredMaintenance } from './utils/nodeMaintenance.js';
 import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.js';
 import { logAuditEntry } from './utils/audit.js';
 import { authenticateApiToken } from './middleware/apiToken.js';
+import { startScheduler } from './scheduler.js';
 
 const app = express();
 const server = createServer(app);
@@ -592,6 +593,8 @@ const NODE_HEALTH_POLL_MS = parseInt(process.env.NODE_HEALTH_POLL_MS || '60000')
 if (NODE_HEALTH_POLL_MS > 0) {
   setInterval(() => { pollNodeHealth().catch(() => {}); }, NODE_HEALTH_POLL_MS);
 }
+// Background enforcement of per-VM power schedules (vm_schedules).
+startScheduler();
 
 const PORT_NUM = parseInt(process.env.PORT || '3000');
 server.listen(PORT_NUM, () => {

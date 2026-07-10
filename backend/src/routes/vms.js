@@ -19,6 +19,10 @@ import { summarizeLease, renewLease } from '../utils/leases.js';
 import { assertUserQuota, sizeToGb } from '../utils/quota.js';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
+import {
+  isValidTime, isValidDaysMask, isValidTimezone, timeToMinutes,
+  serializeSchedule, scheduleBadge, nextTimeOccurrence, ALL_DAYS,
+} from '../utils/schedule.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -55,6 +59,30 @@ function serializeNodeIdentity(nodeValue) {
     node: nodeName || String(nodeValue || ''),
     nodeRef: nodeRef || String(nodeValue || ''),
   };
+}
+
+// Overlay a lightweight power-schedule badge ({ stopTime, startTime, days, … })
+// onto a VM listing so the dashboard can render "sleeps 23:00–08:00" without an
+// extra round-trip per card. Matches on vmid + any node-ref candidate.
+function attachSchedules(list) {
+  const rows = db.prepare('SELECT * FROM vm_schedules WHERE enabled = 1').all();
+  if (rows.length === 0) return list;
+  const now = Date.now();
+  return list.map((item) => {
+    const candidates = new Set(nodeLookupCandidates(item.nodeRef || item.node));
+    const row = rows.find((r) => (
+      Number(r.vmid) === Number(item.vmid)
+      && nodeLookupCandidates(r.node).some((c) => candidates.has(c))
+    ));
+    const badge = row ? scheduleBadge(row, now) : null;
+    return badge ? { ...item, schedule: badge } : item;
+  });
+}
+
+// Editing a schedule requires strict ownership (admins bypass) — mirrors the
+// destructive-op gate. Reads use userCanAccessVm at the call site.
+function canEditSchedule(req, node, vmid) {
+  return req.session.isAdmin || userOwnsVm(req.session.userId, node, vmid);
 }
 
 function badRequest(message) {
@@ -321,14 +349,14 @@ router.get('/', async (req, res) => {
   if (userHasPermission(req.session.userId, 'see_all_vms')) {
     try {
       const vms = await getAllVMs();
-      return res.json(vms.map(vm => {
+      return res.json(attachSchedules(vms.map(vm => {
         const identity = serializeNodeIdentity(vm.nodeRef || vm.node);
         return {
           ...vm,
           ...identity,
           lease: summarizeLease(identity.nodeRef, vm.vmid),
         };
-      }));
+      })));
     } catch (err) {
       return res.status(500).json({ error: sanitizeError(err.message) });
     }
@@ -347,7 +375,7 @@ router.get('/', async (req, res) => {
     }
   }));
 
-  res.json(results);
+  res.json(attachSchedules(results));
 });
 
 // ─── VM Status ────────────────────────────────────────────────────────────────
@@ -1194,6 +1222,129 @@ router.post('/:node/:vmid/snapshots/:snapname/rollback', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
+});
+
+// ─── VM Power Schedule ───────────────────────────────────────────────────────
+// Owners (and admins) define an automatic OFF window — stop_time/start_time on a
+// set of days in a timezone — enforced by the background scheduler (scheduler.js).
+
+function loadScheduleRow(node, vmid) {
+  const candidates = nodeLookupCandidates(node);
+  const parsedVmid = parseInt(vmid, 10);
+  for (const candidate of candidates) {
+    const row = db.prepare('SELECT * FROM vm_schedules WHERE node = ? AND vmid = ?').get(candidate, parsedVmid);
+    if (row) return row;
+  }
+  return null;
+}
+
+// Read the schedule (view access is enough).
+router.get('/:node/:vmid/schedule', (req, res) => {
+  const { node, vmid } = req.params;
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  const row = loadScheduleRow(node, vmid);
+  res.json({ schedule: serializeSchedule(row) });
+});
+
+// Create / update the schedule (strict ownership; admin bypass).
+router.put('/:node/:vmid/schedule', (req, res) => {
+  const { node, vmid } = req.params;
+  if (!canEditSchedule(req, node, vmid)) {
+    return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
+  }
+
+  const {
+    enabled = true,
+    stopTime,
+    startTime,
+    days = ALL_DAYS,
+    timezone = 'UTC',
+  } = req.body || {};
+
+  if (!isValidTime(stopTime) || !isValidTime(startTime)) {
+    return res.status(400).json({ error: 'stopTime and startTime must be valid HH:MM (24-hour) values' });
+  }
+  if (stopTime === startTime) {
+    return res.status(400).json({ error: 'stopTime and startTime cannot be identical' });
+  }
+  const daysMask = parseInt(days, 10);
+  if (!isValidDaysMask(daysMask)) {
+    return res.status(400).json({ error: 'days must be a bitmask between 1 and 127 (at least one active day)' });
+  }
+  if (!isValidTimezone(timezone)) {
+    return res.status(400).json({ error: 'timezone must be a valid IANA timezone (e.g. Europe/Copenhagen)' });
+  }
+
+  const parsedVmid = parseInt(vmid, 10);
+  const enabledInt = enabled ? 1 : 0;
+
+  // Reset scheduler bookkeeping so a re-defined window is evaluated fresh.
+  db.prepare(`
+    INSERT INTO vm_schedules
+      (node, vmid, enabled, stop_time, start_time, days, timezone,
+       skip_until, running_due_to_manual, stopped_this_window, last_off, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, -1, datetime('now'))
+    ON CONFLICT(node, vmid) DO UPDATE SET
+      enabled = excluded.enabled,
+      stop_time = excluded.stop_time,
+      start_time = excluded.start_time,
+      days = excluded.days,
+      timezone = excluded.timezone,
+      skip_until = 0,
+      running_due_to_manual = 0,
+      stopped_this_window = 0,
+      last_off = -1,
+      updated_at = datetime('now')
+  `).run(node, parsedVmid, enabledInt, stopTime, startTime, daysMask, timezone);
+
+  logAudit(req, 'vm_schedule_set', `${node}/${vmid}`, `${enabledInt ? 'on' : 'off'} stop=${stopTime} start=${startTime} days=${daysMask} tz=${timezone}`);
+  res.json({ schedule: serializeSchedule(loadScheduleRow(node, vmid)) });
+});
+
+// Delete the schedule entirely.
+router.delete('/:node/:vmid/schedule', (req, res) => {
+  const { node, vmid } = req.params;
+  if (!canEditSchedule(req, node, vmid)) {
+    return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
+  }
+  const candidates = nodeLookupCandidates(node);
+  const parsedVmid = parseInt(vmid, 10);
+  const placeholders = candidates.map(() => '?').join(', ');
+  db.prepare(`DELETE FROM vm_schedules WHERE vmid = ? AND node IN (${placeholders})`).run(parsedVmid, ...candidates);
+  logAudit(req, 'vm_schedule_delete', `${node}/${vmid}`, '');
+  res.json({ ok: true });
+});
+
+// "Skip tonight": suppress scheduler actions until the next start_time so the
+// upcoming shutdown is skipped once, then normal enforcement resumes.
+router.post('/:node/:vmid/schedule/skip', (req, res) => {
+  const { node, vmid } = req.params;
+  if (!canEditSchedule(req, node, vmid)) {
+    return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
+  }
+  const row = loadScheduleRow(node, vmid);
+  if (!row || row.enabled !== 1 || !isValidTime(row.start_time) || !isValidTimezone(row.timezone)) {
+    return res.status(400).json({ error: 'No active schedule to skip' });
+  }
+  const skipUntil = nextTimeOccurrence(Date.now(), row.timezone, timeToMinutes(row.start_time));
+  db.prepare('UPDATE vm_schedules SET skip_until = ? WHERE id = ?').run(skipUntil, row.id);
+  logAudit(req, 'vm_schedule_skip', `${node}/${vmid}`, new Date(skipUntil).toISOString());
+  res.json({ schedule: serializeSchedule(loadScheduleRow(node, vmid)) });
+});
+
+// Cancel a pending "skip tonight".
+router.delete('/:node/:vmid/schedule/skip', (req, res) => {
+  const { node, vmid } = req.params;
+  if (!canEditSchedule(req, node, vmid)) {
+    return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
+  }
+  const row = loadScheduleRow(node, vmid);
+  if (!row) return res.status(404).json({ error: 'No schedule found' });
+  db.prepare('UPDATE vm_schedules SET skip_until = 0 WHERE id = ?').run(row.id);
+  logAudit(req, 'vm_schedule_skip_cancel', `${node}/${vmid}`, '');
+  res.json({ schedule: serializeSchedule(loadScheduleRow(node, vmid)) });
 });
 
 // ─── User's allowed VLANs ────────────────────────────────────────────────────
