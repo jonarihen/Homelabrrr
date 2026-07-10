@@ -12,6 +12,7 @@ import { decodeNodeRef } from '../utils/nodeRef.js';
 import { assertStorageExposed, filterExposedStorages } from '../utils/storageVisibility.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
+import { assertNodeAvailable } from '../utils/nodeMaintenance.js';
 import { assertUserQuota, getUserQuota, getUserResourceUsage } from '../utils/quota.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { getRolePermissions } from '../utils/permissions.js';
@@ -249,6 +250,13 @@ router.post('/clone', async (req, res) => {
     throw err;
   }
 
+  // Refuse deployment to a node the admin has drained for maintenance
+  try {
+    assertNodeAvailable(template.node);
+  } catch (err) {
+    return res.status(err.status || 423).json({ error: err.message });
+  }
+
   // Validate CPU count against node's physical cores before cloning
   const finalCores = cores || template.default_cores;
   try {
@@ -417,6 +425,13 @@ router.post('/from-image', async (req, res) => {
     throw err;
   }
 
+  // Refuse deployment to a node the admin has drained for maintenance
+  try {
+    assertNodeAvailable(image.node);
+  } catch (err) {
+    return res.status(err.status || 423).json({ error: err.message });
+  }
+
   // CPU topology + node capacity checks run on the image's node (import-from
   // requires the disk source and target to share a host).
   let cpuLayout;
@@ -565,6 +580,9 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
   }
 
   try {
+    // Refuse deployment to a node the admin has drained for maintenance
+    assertNodeAvailable(node);
+
     const vmid = await getNextVmid();
     const cpuLayout = await computeCpuTopology(node, cores);
 

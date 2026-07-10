@@ -942,6 +942,7 @@ function CreateForm({ onStarted }) {
   const { user } = useAuth();
   const isAdmin = !!user?.isAdmin;
   const [nodes, setNodes] = useState([]);
+  const [maint, setMaint] = useState([]);
   const [storages, setStorages] = useState([]);
   const [isos, setIsos] = useState([]);
   const [bridges, setBridges] = useState([]);
@@ -959,10 +960,14 @@ function CreateForm({ onStarted }) {
   useEffect(() => {
     api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
+    api.get('/portal/status').then(r => setMaint(r.data.maintenance || [])).catch(() => {});
     if (user?.isAdmin) {
       api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
     }
   }, [user?.isAdmin]);
+
+  // A node draining for maintenance is greyed out in the picker with its reason.
+  const maintenanceFor = (n) => maint.find(m => m.nodeRef === routeNode(n) || m.node === displayNode(n.node));
 
   useEffect(() => {
     if (!form.node) return;
@@ -1033,11 +1038,15 @@ function CreateForm({ onStarted }) {
             <label className="block text-xs text-gray-400 mb-1.5 font-medium">Node</label>
             <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
               <option value="">Select node...</option>
-              {uniqueNodes.map(n => (
-                <option key={routeNode(n)} value={routeNode(n)}>
-                  {displayNode(n.node)}{n.hostName ? ` (${n.hostName})` : ''}
-                </option>
-              ))}
+              {uniqueNodes.map(n => {
+                const m = maintenanceFor(n);
+                return (
+                  <option key={routeNode(n)} value={routeNode(n)} disabled={!!m}>
+                    {displayNode(n.node)}{n.hostName ? ` (${n.hostName})` : ''}
+                    {m ? ` — MAINTENANCE${m.untilLabel ? ` until ~${m.untilLabel}` : ''}${m.reason ? `: ${m.reason}` : ''}` : ''}
+                  </option>
+                );
+              })}
             </select>
           </div>
           <div>

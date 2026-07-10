@@ -8,7 +8,8 @@ import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
-import { decodeNodeRef } from '../utils/nodeRef.js';
+import { decodeNodeRef, encodeNodeRef } from '../utils/nodeRef.js';
+import { listMaintenance, enterMaintenance, exitMaintenanceById } from '../utils/nodeMaintenance.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { PERMISSION_KEYS } from '../utils/permissions.js';
@@ -967,6 +968,16 @@ router.get('/pve-hosts/:id/status', pHosts, async (req, res) => {
   const host = getHost(parseInt(req.params.id));
   if (!host) return res.status(404).json({ error: 'Host not found' });
   const status = await getHostStatus(host);
+  // Annotate each node with its maintenance state (amber, not down) so the
+  // PVE Hosts page can render the drain and offer the per-node toggle.
+  const maint = listMaintenance();
+  if (Array.isArray(status.nodes)) {
+    status.nodes = status.nodes.map((n) => {
+      const nodeRef = encodeNodeRef(host.id, n.node);
+      const m = maint.find((x) => x.nodeRef === nodeRef || (x.hostId == null && x.node === n.node));
+      return { ...n, nodeRef, maintenance: m ? { id: m.id, reason: m.reason, until: m.until, untilLabel: m.untilLabel } : null };
+    });
+  }
   res.json(status);
 });
 
@@ -1056,6 +1067,41 @@ router.put('/pve-hosts/:id/storages/:storage', pHosts, (req, res) => {
   setStorageExposed(hostId, storage, exposed);
   logAudit(req, 'storage_visibility_change', `${host.name}/${storage}`, exposed ? 'exposed' : 'hidden');
   res.json({ ok: true, storage, exposed });
+});
+
+// ─── Node maintenance (soft drain) ───────────────────────────────────────────
+// Toggle per-node maintenance. While active, provisioning to the node is
+// blocked, a notice is auto-published, and Overview health renders it amber.
+// Running VMs are untouched.
+
+router.get('/node-maintenance', pHosts, (req, res) => {
+  try {
+    res.json(listMaintenance());
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.post('/node-maintenance', pHosts, (req, res) => {
+  const { node, reason = '', until = null } = req.body;
+  if (!node) return res.status(400).json({ error: 'A node is required' });
+  try {
+    const row = enterMaintenance({ node, reason, until, req });
+    res.json(row);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.delete('/node-maintenance/:id', pHosts, (req, res) => {
+  try {
+    const ok = exitMaintenanceById(parseInt(req.params.id, 10), req);
+    if (!ok) return res.status(404).json({ error: 'Maintenance entry not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
 });
 
 // ─── Firewalls ─────────────────────────────────────────────────────────────

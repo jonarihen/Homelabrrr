@@ -21,6 +21,15 @@
 - **No behavior change until you restrict a pool:** every existing pool is exposed by default, so current deployments are unaffected until an admin hides one.
 - Admins always see and can use every pool. Every exposure toggle is written to the **audit log**.
 
+## 2026-07-10 — Node maintenance mode (soft drain)
+
+- Admins can now put a **Proxmox node into maintenance** from the **PVE Hosts** page: each node has a **Drain** button that opens a small dialog for an optional reason and expected end time. While a node is draining, its node card turns **amber** with a `Maintenance` badge
+- **Effects while active:** all provisioning paths (clone from template, deploy from cloud image, create from scratch) **reject the node** with a clear error — `Node pve1 is in maintenance until ~18:00 (Kernel upgrade)…`; the node is **greyed out in the New VM node picker** with its reason; and an **Overview notice is auto-published** so every user sees it at login
+- **Overview health** treats a drained node as **amber "maintenance"**, never a red "down"/"Degraded" state — the host is still reachable, so there's no false outage
+- **Running VMs are untouched** — this is a soft drain, not an evacuation
+- **Auto-expire:** if you set an end time, maintenance **lifts itself** on a background tick and the notice closes automatically. Ending it manually does the same immediately
+- The auto-published notice is system-managed (it can't be edited or deleted by hand — end maintenance to close it). Entering and exiting maintenance is **audit-logged**
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder

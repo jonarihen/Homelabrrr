@@ -40,6 +40,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
 | Storage exposure | Admins pick which Proxmox storage pools users may deploy onto, per host; hidden pools vanish from the provisioning dropdowns and are rejected server-side. Every pool is exposed by default, so nothing changes until you restrict one |
+| Node maintenance | Soft-drain a Proxmox node before a planned reboot/upgrade: new provisioning to it is blocked with a clear reason, the node is greyed out in pickers, an Overview notice is auto-published for every user, and health shows amber "maintenance" (not red "down"). Running VMs are untouched, and maintenance can auto-expire at a set end time |
 | Admin delegation | Role-based access control: named roles bundle the granular permission flags (hosts, firewalls, port forwards, VLANs, policies, templates, users, assignments, audit log, VM hardware, provisioning, VM visibility). A role fully defines its holder's permissions; users without a role use per-user flags |
 | Security | Session auth, TOTP 2FA, login throttling, secrets encrypted at rest, upstream TLS enforcement, SSH host-key checks, audit logging |
 
@@ -56,7 +57,7 @@ This project pulls those into one interface so users can work inside guardrails 
 
 ### Admin side
 
-- `PVE Hosts` — multi-host Proxmox registration with status monitoring, plus per-host **storage pool exposure** toggles (choose which pools users may deploy onto)
+- `PVE Hosts` — multi-host Proxmox registration with status monitoring, per-host **storage pool exposure** toggles (choose which pools users may deploy onto), and per-node **maintenance mode** (soft drain): a Drain button per node takes an optional reason and expected end time, blocks new provisioning to that node, auto-publishes an Overview notice, and shows the node amber; maintenance lifts itself at the end time or when ended manually
 - `Templates` — register source VMs with auto-populated defaults from Proxmox config; cloud image catalog with downloads used as the direct provisioning source (deploy VMs straight from an image) plus optional one-click cloud-init template builds; and an ISO catalog to download installer ISOs by URL for from-scratch installs
 - `Firewalls` — FortiGate registration, VDOM/link settings, WAN settings, and managed-switch discovery
 - `VLANs` — managed or tagged-only network definitions, subnet data, and FortiGate sync

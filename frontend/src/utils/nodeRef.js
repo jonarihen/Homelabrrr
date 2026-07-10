@@ -1,3 +1,11 @@
+export function encodeNodeRef(hostId, nodeName) {
+  const node = String(nodeName || '').trim();
+  if (!node) return '';
+  const parsedHostId = Number.parseInt(hostId, 10);
+  if (!Number.isInteger(parsedHostId) || parsedHostId <= 0) return node;
+  return `${parsedHostId}~${node}`;
+}
+
 export function decodeNodeRef(value) {
   const raw = String(value || '').trim();
   if (!raw) return { hostId: null, nodeName: '', nodeRef: '' };
