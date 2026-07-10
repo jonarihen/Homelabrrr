@@ -2,7 +2,7 @@
 
 ## 2026-07-10 — Invite links for one-click onboarding
 
-- Admins (and users with **Manage Users**) can now **generate one-time invite links** from the Users page. Pick a role or individual permissions, resource quotas, VLAN access, an expiry, and whether the new account must enroll in 2FA — then copy a single-use URL to share (e.g. paste into Discord).
+- Admins can now **generate one-time invite links** from the Users page. Pick a role or individual permissions, resource quotas, VLAN access, an expiry, and whether the new account must enroll in 2FA — then copy a single-use URL to share (e.g. paste into Discord). Users with **Manage Users** (but not full admin) can also generate invites, but — exactly as when they create an account by hand — those invites produce a **basic account only**; attaching a role, permissions, quotas, or VLAN access stays admin-only.
 - The invitee opens the link, sees exactly what access they'll get, **picks their own username and password**, and — if the invite requires it — is dropped straight into 2FA enrollment before anything else. On success they land on the Overview page already signed in, with the preset's permissions, quotas, and VLAN access applied.
 - Open invites are listed on the Users page with their preset, creator, expiry, and status; unused ones can be **revoked**. Used, expired, or revoked links show a clear error and can't be redeemed twice.
 - Security: invite tokens are **stored hashed** (only a SHA-256 hash is kept — the raw token is shown once and never persisted), redemption runs inside a single transaction, the public endpoints are **rate-limited like login**, and every generate/consume/revoke is **audit-logged**.

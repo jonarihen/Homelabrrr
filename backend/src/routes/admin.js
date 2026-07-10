@@ -501,7 +501,10 @@ router.get('/invites', pUsers, (req, res) => {
 });
 
 router.post('/invites', pUsers, (req, res) => {
-  const { preset, error } = normalizeInvitePreset(req.body, { allowAdmin: !!req.session.isAdmin });
+  const { preset, error } = normalizeInvitePreset(req.body, {
+    allowAdmin: !!req.session.isAdmin,
+    allowPrivileges: !!req.session.isAdmin,
+  });
   if (error) return res.status(400).json({ error });
 
   // Expiry: positive number of days, or empty/omitted for "never expires".

@@ -37,8 +37,14 @@ export function inviteStatus(invite, now = Date.now()) {
 
 // Build (and validate) a stored preset object from the admin generate request.
 // Returns { preset } on success or { error } with a message on bad input.
-// `allowAdmin` is false for non-admin creators (they cannot mint admin accounts).
-export function normalizeInvitePreset(body, { allowAdmin } = { allowAdmin: false }) {
+// `allowAdmin` is false for non-admin creators (they cannot mint admin
+// accounts). `allowPrivileges` is false for non-admin creators too: every
+// privilege-granting route (role, permission, quota, see-all-vms, ...) is
+// admin-only, and POST /admin/users only lets a can_manage_users delegate
+// create a BARE account. An invite must not become a side-channel for the
+// delegate to grant access they could never grant directly, so their preset
+// is constrained to a bare account exactly like a manually created one.
+export function normalizeInvitePreset(body, { allowAdmin = false, allowPrivileges = false } = {}) {
   const isAdmin = body.isAdmin ? 1 : 0;
   if (isAdmin && !allowAdmin) {
     return { error: 'Only admins can create invites for admin accounts' };
@@ -46,6 +52,7 @@ export function normalizeInvitePreset(body, { allowAdmin } = { allowAdmin: false
 
   let roleId = null;
   if (body.roleId !== null && body.roleId !== undefined && body.roleId !== '') {
+    if (!allowPrivileges) return { error: 'Only admins can attach a role to an invite' };
     roleId = parseInt(body.roleId, 10);
     if (!Number.isInteger(roleId)) return { error: 'Invalid role' };
     const role = db.prepare('SELECT id FROM roles WHERE id = ?').get(roleId);
@@ -59,6 +66,9 @@ export function normalizeInvitePreset(body, { allowAdmin } = { allowAdmin: false
   for (const key of INVITE_PERMISSION_COLUMNS) {
     permissions[key] = incoming[key] ? 1 : 0;
   }
+  if (!allowPrivileges && INVITE_PERMISSION_COLUMNS.some((k) => permissions[k])) {
+    return { error: 'Only admins can grant permissions through an invite' };
+  }
 
   const maxCores = parseQuotaValue(body.maxCores);
   const maxMemoryGb = parseQuotaValue(body.maxMemoryGb);
@@ -66,10 +76,16 @@ export function normalizeInvitePreset(body, { allowAdmin } = { allowAdmin: false
   if (maxCores === undefined || maxMemoryGb === undefined || maxStorageGb === undefined) {
     return { error: 'Quota values must be non-negative integers (empty = unlimited)' };
   }
+  if (!allowPrivileges && (maxCores !== null || maxMemoryGb !== null || maxStorageGb !== null)) {
+    return { error: 'Only admins can set quotas on an invite' };
+  }
 
   let vlanIds = [];
   if (Array.isArray(body.vlanIds)) {
     vlanIds = [...new Set(body.vlanIds.map((v) => parseInt(v, 10)).filter(Number.isInteger))];
+    if (!allowPrivileges && vlanIds.length) {
+      return { error: 'Only admins can grant VLAN access through an invite' };
+    }
     for (const id of vlanIds) {
       const vlan = db.prepare('SELECT id FROM vlans WHERE id = ?').get(id);
       if (!vlan) return { error: `VLAN ${id} not found` };

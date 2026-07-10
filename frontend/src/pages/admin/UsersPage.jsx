@@ -1009,7 +1009,9 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
     <Modal title="Generate invite" onClose={onClose} size="lg">
       <form onSubmit={submit} className="p-5 space-y-5">
         <p className="text-xs text-gray-500">
-          Creates a one-time link that lets someone self-register with exactly the access you pick here.
+          {canCreateAdmin
+            ? 'Creates a one-time link that lets someone self-register with exactly the access you pick here.'
+            : 'Creates a one-time link that lets someone self-register a basic account (no roles, permissions, quotas, or VLAN access — only an admin can preload those).'}
         </p>
 
         {canCreateAdmin && (
@@ -1027,7 +1029,7 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
           </label>
         )}
 
-        {!form.isAdmin && (
+        {canCreateAdmin && !form.isAdmin && (
           <>
             <Field label="Role preset">
               <select
@@ -1065,25 +1067,27 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
           </>
         )}
 
-        <div>
-          <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Quotas (empty = {form.roleId ? 'inherit from role' : 'unlimited'})</p>
-          <div className="grid grid-cols-3 gap-2">
-            <Field label="Max cores">
-              <input type="number" min="0" value={form.maxCores} placeholder="∞"
-                onChange={e => setForm(f => ({ ...f, maxCores: e.target.value }))} className={inputCls} />
-            </Field>
-            <Field label="Max RAM (GB)">
-              <input type="number" min="0" value={form.maxMemoryGb} placeholder="∞"
-                onChange={e => setForm(f => ({ ...f, maxMemoryGb: e.target.value }))} className={inputCls} />
-            </Field>
-            <Field label="Max disk (GB)">
-              <input type="number" min="0" value={form.maxStorageGb} placeholder="∞"
-                onChange={e => setForm(f => ({ ...f, maxStorageGb: e.target.value }))} className={inputCls} />
-            </Field>
+        {canCreateAdmin && (
+          <div>
+            <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Quotas (empty = {form.roleId ? 'inherit from role' : 'unlimited'})</p>
+            <div className="grid grid-cols-3 gap-2">
+              <Field label="Max cores">
+                <input type="number" min="0" value={form.maxCores} placeholder="∞"
+                  onChange={e => setForm(f => ({ ...f, maxCores: e.target.value }))} className={inputCls} />
+              </Field>
+              <Field label="Max RAM (GB)">
+                <input type="number" min="0" value={form.maxMemoryGb} placeholder="∞"
+                  onChange={e => setForm(f => ({ ...f, maxMemoryGb: e.target.value }))} className={inputCls} />
+              </Field>
+              <Field label="Max disk (GB)">
+                <input type="number" min="0" value={form.maxStorageGb} placeholder="∞"
+                  onChange={e => setForm(f => ({ ...f, maxStorageGb: e.target.value }))} className={inputCls} />
+              </Field>
+            </div>
           </div>
-        </div>
+        )}
 
-        {allVLANs.length > 0 && (
+        {canCreateAdmin && allVLANs.length > 0 && (
           <div>
             <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">VLAN access</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-40 overflow-y-auto">
