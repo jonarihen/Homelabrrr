@@ -108,6 +108,12 @@ export default function Dashboard() {
     return result;
   }, [vms, search, statusFilter, typeFilter, sortBy]);
 
+  // Lease expiry notices for the owner (Overview notice). Derived from each
+  // VM's lease status returned by the API — expired VMs have been auto-stopped
+  // and can be renewed; expiring-soon VMs get a lighter heads-up.
+  const expiredVms = useMemo(() => vms.filter(v => v.lease?.status === 'expired'), [vms]);
+  const expiringVms = useMemo(() => vms.filter(v => v.lease?.status === 'expiring'), [vms]);
+
   // Summary stats
   const running = vms.filter(v => v.status === 'running').length;
   const stopped = vms.length - running;
@@ -258,6 +264,60 @@ export default function Dashboard() {
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-400">Running VMs</span>
               <span className="text-sm font-mono text-green-400 font-medium">{running}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Lease expiry notices (Overview notice) */}
+        {!loading && expiredVms.length > 0 && (
+          <div className="bg-red-950/30 border border-red-800/50 rounded-xl p-4 mb-5 flex items-start gap-3">
+            <svg className="w-5 h-5 text-red-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+            </svg>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-red-300 font-medium">
+                {expiredVms.length} of your VM{expiredVms.length === 1 ? ' has' : 's have'} expired and been stopped
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                Open a VM and renew its lease to restart the clock. Expired VMs may be reclaimed by an admin after the grace period.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-2.5">
+                {expiredVms.map(vm => (
+                  <button
+                    key={`${vm.node}-${vm.vmid}`}
+                    onClick={() => navigate(`/vm/${routeNode(vm)}/${vm.vmid}`)}
+                    className="font-mono text-[11px] uppercase tracking-[0.1em] text-red-300 hover:text-red-200 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 px-2.5 py-1 transition-colors"
+                  >
+                    {vm.name || `VM ${vm.vmid}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+        {!loading && expiredVms.length === 0 && expiringVms.length > 0 && (
+          <div className="bg-amber-950/20 border border-amber-800/40 rounded-xl p-4 mb-5 flex items-start gap-3">
+            <svg className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-amber-300 font-medium">
+                {expiringVms.length} of your VM{expiringVms.length === 1 ? ' is' : 's are'} expiring soon
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                Renew a VM's lease before it expires to avoid it being auto-stopped.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-2.5">
+                {expiringVms.map(vm => (
+                  <button
+                    key={`${vm.node}-${vm.vmid}`}
+                    onClick={() => navigate(`/vm/${routeNode(vm)}/${vm.vmid}`)}
+                    className="font-mono text-[11px] uppercase tracking-[0.1em] text-amber-300 hover:text-amber-200 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 px-2.5 py-1 transition-colors"
+                  >
+                    {vm.name || `VM ${vm.vmid}`} · {vm.lease.daysRemaining}d
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}

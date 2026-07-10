@@ -466,6 +466,34 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// VM leases — per-VM TTL so the lab doesn't fill with zombie VMs. Keyed on
+// (node, vmid) rather than a provisioned_vms.id so leases also cover VMs that
+// were assigned/claimed outside the provisioning flow (pre-portal VMs). A lease
+// starts at provisioning; on expiry the background checker gracefully stops
+// (never deletes) the VM, flags it expired, and — after a grace period — the
+// admin reclaimable list surfaces it for manual deletion. `expires_at` NULL =
+// unlimited; `exempt` = infra VM that never expires. Timestamps are stored in
+// SQLite's UTC 'YYYY-MM-DD HH:MM:SS' form (parse as UTC on read).
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS vm_leases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node TEXT NOT NULL,
+    vmid INTEGER NOT NULL,
+    lease_days INTEGER DEFAULT 0,
+    started_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT,
+    renewal_count INTEGER DEFAULT 0,
+    last_renewed_at TEXT,
+    exempt INTEGER DEFAULT 0,
+    expired INTEGER DEFAULT 0,
+    expired_at TEXT,
+    auto_stopped INTEGER DEFAULT 0,
+    created_by TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(node, vmid)
+  )
+`); } catch { /* exists */ }
+
 assertSecretEncryptionKey();
 
 function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {

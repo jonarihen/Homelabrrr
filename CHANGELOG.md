@@ -46,6 +46,15 @@
 - Open invites are listed on the Users page with their preset, creator, expiry, and status; unused ones can be **revoked**. Used, expired, or revoked links show a clear error and can't be redeemed twice.
 - Security: invite tokens are **stored hashed** (only a SHA-256 hash is kept — the raw token is shown once and never persisted), redemption runs inside a single transaction, the public endpoints are **rate-limited like login**, and every generate/consume/revoke is **audit-logged**.
 
+## 2026-07-10 — VM leases: expiry with auto-stop and one-click renewal
+
+- Every provisioned VM now gets a **lease** — a TTL that starts at provisioning. VM cards and the VM page show a countdown badge (e.g. **"Expires in 12 days"**) that turns amber near expiry and red once expired
+- Owners can **renew** in one click from the VM page — it resets the clock and bumps a renewal count that admins can see
+- On expiry a background checker **gracefully stops** the VM (never deletes it) and flags it. After an admin-configurable **grace period** it appears in a new admin **VM Leases** reclaimable list for manual deletion
+- Owners get an **Overview notice** on their dashboard when a VM has expired (and been stopped) or is expiring soon, with one-click links to renew
+- New admin **VM Leases** page (Infrastructure section): set the **default lease duration** and **grace period**, see the whole roster with owner + live status, **renew / adjust / extend** any lease, **exempt** infra VMs so they never expire, run the sweep on demand, and **backfill** leases onto VMs that predate the feature
+- All lease actions (auto-stop, renew, adjust, sweep) are audit-logged; the sweep runs `system` audit entries. Discord expiry warnings remain a separate feature (#22)
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder

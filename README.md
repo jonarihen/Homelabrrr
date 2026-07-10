@@ -36,6 +36,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Provisioning | Deploy straight from a cloud image, clone a template, or build a VM from scratch / from an available ISO — from-scratch is available to admins and to users holding the **Create VMs** permission (non-admins are pinned to the default bridge and self-assigned the VM) — all with CPU topology validation, `cpu=host`, VLAN picker, GB-based memory, pre-flight capacity checks (node free memory + storage space), per-user resource quotas (cores/memory/storage, enforced on creation and hardware upgrades), and a live step-by-step deployment progress stepper |
 | Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) as the provisioning source: deploy a new VM directly from an image with `import-from` (no static template needed), configuring guest user, SSH keys, and DHCP/static network via cloud-init on first boot; optional one-click conversion to a reusable template remains (requires a storage with the Import content type; PVE 9) |
 | ISO catalog | Download installer ISOs by URL — Proxmox fetches them onto a storage as `iso` content with live download-progress polling; list with size/status and remove (deletes the PVE volume and the row). Same SSRF URL guard as cloud images; ready ISOs feed the from-scratch create-VM picker |
+| VM leases | Per-VM expiry so the lab doesn't fill with zombie VMs: a lease starts at provisioning, owners see a countdown ("Expires in 12 days") and renew in one click, and a background sweep gracefully stops (never deletes) expired VMs, then surfaces them in an admin reclaimable list after a grace period. Admins set the default duration/grace, exempt infra VMs, and adjust/extend any lease |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Tag auto-sync | Owner + VLAN tags are re-stamped on every VM automatically in the background on a schedule (default every 6h), correcting drift from raw PVE tag edits, renamed VLANs, or migrations — with an admin pause switch (persists across restarts), a configurable interval, live force-sync progress, and last-run / per-VM-failure visibility |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
@@ -69,6 +70,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, lockout unlocks, and enforced 2FA
 - `Invites` — generate one-time self-registration links (choose role/permissions, quotas, VLAN access, expiry, and optional required-2FA); copy the single-use URL, track open/used/expired/revoked invites, and revoke unused ones. Tokens are stored hashed and every generate/consume/revoke is audit-logged
 - `Roles` — named permission sets (built-in Administrator/User plus custom roles); editing a role updates every user holding it
+- `VM Leases` — set the default lease duration + grace period, review every VM's lease with owner and live status, renew/adjust/extend any lease, exempt infra VMs, run the expiry sweep on demand, and backfill leases onto VMs that predate the feature; expired-past-grace VMs are highlighted as reclaimable
 - `Audit Log` — change tracking with user/IP/timestamp
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user
 
@@ -205,6 +207,7 @@ Example values live in [`.env.example`](.env.example).
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
 | `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing (default `127.0.0.1`; set `0.0.0.0` to expose on all interfaces) |
+| `LEASE_CHECK_INTERVAL_MS` | How often the background VM-lease sweeper runs to gracefully stop expired VMs (default `900000` = 15 min; minimum `60000`). Default lease duration and grace period are set in-app on the admin VM Leases page |
 
 Useful implementation defaults:
 

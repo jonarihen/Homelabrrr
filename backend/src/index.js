@@ -541,6 +541,31 @@ async function tagSyncTick() {
 const tagSyncTimer = setInterval(() => { tagSyncTick(); }, TAG_SYNC_TICK_MS);
 tagSyncTimer.unref?.();   // don't keep the process alive just for the ticker
 
+// ─── VM lease sweeper ────────────────────────────────────────────────────────
+// Periodically finds expired leases and gracefully stops (never deletes) the
+// VMs, flagging them for the admin reclaimable view. Interval is configurable;
+// a short initial delay lets the cluster connections settle after boot.
+import { runLeaseSweep } from './utils/leases.js';
+
+const LEASE_CHECK_INTERVAL_MS = Math.max(
+  60_000,
+  parseInt(process.env.LEASE_CHECK_INTERVAL_MS || '900000', 10) || 900_000,
+);
+
+async function sweepLeasesSafe() {
+  try {
+    const result = await runLeaseSweep();
+    if (result.checked > 0) {
+      console.log(`[leases] sweep: checked ${result.checked}, stopped ${result.stopped}`);
+    }
+  } catch (err) {
+    console.warn(`[leases] sweep failed: ${err.message}`);
+  }
+}
+
+setTimeout(sweepLeasesSafe, 30_000);
+setInterval(sweepLeasesSafe, LEASE_CHECK_INTERVAL_MS);
+
 const PORT_NUM = parseInt(process.env.PORT || '3000');
 server.listen(PORT_NUM, () => {
   console.log(`Backend running on port ${PORT_NUM}`);

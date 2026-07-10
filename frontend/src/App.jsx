@@ -19,6 +19,7 @@ import AuditLogPage from './pages/admin/AuditLogPage.jsx';
 import FirewallsPage from './pages/admin/FirewallsPage.jsx';
 import PoliciesPage from './pages/admin/PoliciesPage.jsx';
 import PortForwardingPage from './pages/admin/PortForwardingPage.jsx';
+import LeasesPage from './pages/admin/LeasesPage.jsx';
 import SSHKeysPage from './pages/SSHKeysPage.jsx';
 import AccountPage from './pages/AccountPage.jsx';
 import ProvisionPage from './pages/ProvisionPage.jsx';
@@ -102,6 +103,7 @@ export default function App() {
               <Route path="policies" element={<PoliciesPage />} />
               <Route path="port-forwarding" element={<PortForwardingPage />} />
               <Route path="templates" element={<TemplatesPage />} />
+              <Route path="leases" element={<LeasesPage />} />
               <Route path="audit-log" element={<AuditLogPage />} />
             </Route>
 

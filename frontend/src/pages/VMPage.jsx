@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
+import LeaseBadge from '../components/LeaseBadge.jsx';
 import Modal from '../components/Modal.jsx';
 import VLANModal from '../components/VLANModal.jsx';
 import VMHardwareModal from '../components/VMHardwareModal.jsx';
@@ -209,6 +210,16 @@ export default function VMPage() {
     } finally { setActionLoading(false); }
   };
 
+  const renewLease = async () => {
+    setActionLoading(true); setActionError('');
+    try {
+      await api.post(`/vms/${node}/${vmid}/lease/renew`);
+      await loadVm();
+    } catch (e) {
+      setActionError(e.response?.data?.error || 'Failed to renew lease');
+    } finally { setActionLoading(false); }
+  };
+
   const isRunning = vm?.status === 'running';
   const cpuData = rrd?.map(d => d.cpu != null ? d.cpu * 100 : null) || [];
   const memData = rrd?.map(d => d.mem != null && d.maxmem ? (d.mem / d.maxmem) * 100 : null) || [];
@@ -262,6 +273,7 @@ export default function VMPage() {
             <div>
               <h1 className="aaris-display text-xl text-gray-100">{vm.name || `VM ${vm.vmid}`}</h1>
               <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mt-1.5">VMID {vm.vmid} / {displayNode(vm.node)}</p>
+              {vm.lease && <LeaseBadge lease={vm.lease} className="mt-2" />}
             </div>
           </div>
           <StatusBadge status={vm.status} />
@@ -331,6 +343,18 @@ export default function VMPage() {
                 <ActionBtn color="gray" onClick={() => setHardwareModal(true)} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25z" /></svg>
                 }>Hardware</ActionBtn>
+              </>
+            )}
+
+            {vm.lease?.hasLease && !vm.lease.exempt && (
+              <>
+                <Divider />
+                <SectionLabel icon={
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                } text="Lease" />
+                <ActionBtn color="green" onClick={renewLease} disabled={actionLoading} icon={
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                }>Renew</ActionBtn>
               </>
             )}
 

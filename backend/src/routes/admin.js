@@ -8,7 +8,7 @@ import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
-import { decodeNodeRef, encodeNodeRef } from '../utils/nodeRef.js';
+import { decodeNodeRef, encodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { listMaintenance, enterMaintenance, exitMaintenanceById } from '../utils/nodeMaintenance.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
 import {
@@ -17,6 +17,10 @@ import {
 } from '../utils/vmTags.js';
 import { PERMISSION_KEYS } from '../utils/permissions.js';
 import { generateInviteToken, hashInviteToken, normalizeInvitePreset, summarizeInvitePreset, inviteStatus } from '../utils/invites.js';
+import {
+  getLeaseSettings, setLeaseSettings, computeLeaseView, updateLease, renewLease,
+  runLeaseSweep, backfillLeases,
+} from '../utils/leases.js';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -1081,6 +1085,118 @@ router.put('/settings/:key', requireAdmin, (req, res) => {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
     .run(req.params.key, String(value), String(value));
   res.json({ ok: true });
+});
+
+// ─── VM Leases (expiry / reclaim) ────────────────────────────────────────────
+// Admin-only: default lease duration + grace period, the full lease roster with
+// live VM state and owner, exempt/adjust/extend/renew any lease, a reclaimable
+// view, a manual sweep, and a backfill for pre-feature VMs.
+
+router.get('/lease-settings', requireAdmin, (req, res) => {
+  res.json(getLeaseSettings());
+});
+
+router.put('/lease-settings', requireAdmin, (req, res) => {
+  const { defaultDays, graceDays } = req.body || {};
+  const settings = setLeaseSettings({ defaultDays, graceDays });
+  logAudit(req, 'lease_settings_update', '', `default=${settings.defaultDays}d grace=${settings.graceDays}d`);
+  res.json(settings);
+});
+
+router.get('/leases', requireAdmin, async (req, res) => {
+  try {
+    const { graceDays } = getLeaseSettings();
+    const rows = db.prepare('SELECT * FROM vm_leases ORDER BY (expires_at IS NULL), expires_at ASC').all();
+
+    // Live VM name/status/type + owner from assignments (best-effort — the
+    // cluster may be briefly unreachable, in which case we still return leases).
+    let vms = [];
+    try { vms = await getAllVMs(); } catch { vms = []; }
+    const vmByKey = new Map();
+    for (const v of vms) {
+      if (v.nodeRef) vmByKey.set(`${v.nodeRef}#${v.vmid}`, v);
+      if (v.node) vmByKey.set(`${v.node}#${v.vmid}`, v);
+    }
+
+    const leases = rows.map((row) => {
+      const view = computeLeaseView(row, graceDays);
+      const identity = serializeNodeIdentity(row.node);
+      const live = vmByKey.get(`${row.node}#${row.vmid}`)
+        || vmByKey.get(`${identity.node}#${row.vmid}`)
+        || null;
+      const ownerCandidates = nodeLookupCandidates(row.node);
+      const owner = db.prepare(`
+        SELECT u.username FROM vm_assignments a JOIN users u ON u.id = a.user_id
+        WHERE a.vmid = ? AND a.node IN (${ownerCandidates.map(() => '?').join(', ')}) LIMIT 1
+      `).get(row.vmid, ...ownerCandidates);
+
+      return {
+        ...view,
+        node: identity.node,
+        nodeRef: identity.nodeRef,
+        vmid: row.vmid,
+        name: live?.name || `VM ${row.vmid}`,
+        type: live?.type || null,
+        vmStatus: live?.status || 'unknown',
+        owner: owner?.username || null,
+        createdBy: row.created_by || '',
+      };
+    });
+
+    res.json({ settings: getLeaseSettings(), leases });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.put('/leases/:node/:vmid', requireAdmin, (req, res) => {
+  const { node, vmid } = req.params;
+  const { exempt, leaseDays, extendDays } = req.body || {};
+  try {
+    const lease = updateLease(node, vmid, { exempt, leaseDays, extendDays, createdBy: req.session.username });
+    if (!lease) return res.status(400).json({ error: 'Could not update lease' });
+    const detail = [
+      exempt !== undefined ? `exempt=${exempt ? 1 : 0}` : null,
+      leaseDays !== undefined && leaseDays !== null ? `leaseDays=${leaseDays}` : null,
+      extendDays !== undefined && extendDays !== null ? `extendDays=${extendDays}` : null,
+    ].filter(Boolean).join(' ');
+    logAudit(req, 'lease_adjust', `${node}/${vmid}`, detail);
+    res.json({ ok: true, lease: computeLeaseView(lease) });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.post('/leases/:node/:vmid/renew', requireAdmin, (req, res) => {
+  const { node, vmid } = req.params;
+  try {
+    const lease = renewLease(node, vmid, { createdBy: req.session.username });
+    if (!lease) return res.status(404).json({ error: 'This VM has no lease to renew' });
+    logAudit(req, 'lease_renew', `${node}/${vmid}`, `admin renewal #${lease.renewal_count}`);
+    res.json({ ok: true, lease: computeLeaseView(lease) });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.post('/leases/sweep', requireAdmin, async (req, res) => {
+  try {
+    const result = await runLeaseSweep();
+    logAudit(req, 'lease_sweep', 'all', `checked=${result.checked} stopped=${result.stopped}`);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.post('/leases/backfill', requireAdmin, (req, res) => {
+  try {
+    const created = backfillLeases({ createdBy: req.session.username });
+    logAudit(req, 'lease_backfill', 'all', `created=${created}`);
+    res.json({ ok: true, created });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
 });
 
 // ─── PVE Hosts ──────────────────────────────────────────────────────────────
