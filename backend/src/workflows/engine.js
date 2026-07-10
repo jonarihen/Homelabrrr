@@ -84,11 +84,22 @@ export async function runWorkflow({ steps, context, client }) {
   return { status: 'success', log, artifacts, outputs };
 }
 
+// Reverse creation order, except switch-controller VLAN registrations go last:
+// FortiLink couples them to the VLAN interface, so they can only be removed
+// (or are auto-removed) once the interface itself is gone. Mirrors the legacy
+// deprovisionVlan order (interface first, switch-controller registration last).
+function teardownOrder(artifacts) {
+  const reversed = [...artifacts].reverse();
+  return [
+    ...reversed.filter((a) => a.type !== 'switch_controller_vlan'),
+    ...reversed.filter((a) => a.type === 'switch_controller_vlan'),
+  ];
+}
+
 async function rollback(client, artifacts, log) {
   if (artifacts.length === 0) return;
   const rbEntry = { ts: nowIso(), status: 'rolled_back', action: '(rollback)', label: 'Rollback', calls: [], reverted: [] };
-  for (let i = artifacts.length - 1; i >= 0; i -= 1) {
-    const a = artifacts[i];
+  for (const a of teardownOrder(artifacts)) {
     try {
       await deleteArtifact(client, a);
       rbEntry.reverted.push({ artifact: describeArtifact(a), ok: true });
@@ -99,6 +110,10 @@ async function rollback(client, artifacts, log) {
   log.push(rbEntry);
 }
 
+// FortiGate "already gone" responses — treated as success so a retried
+// teardown (e.g. after a partial first pass) is idempotent.
+const ARTIFACT_GONE_RE = /not found|does not exist|no such|404/i;
+
 /**
  * Artifact-based teardown for deprovision. Deletes the recorded artifacts of a
  * previous run in reverse order (best-effort). Never re-derives from the current
@@ -108,15 +123,24 @@ export async function teardownArtifacts(client, artifacts) {
   const list = Array.isArray(artifacts) ? artifacts : [];
   const log = [];
   const errors = [];
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    const a = list[i];
+  for (const a of teardownOrder(list)) {
     const entry = { ts: nowIso(), artifact: describeArtifact(a), type: a.type, status: 'ok' };
     try {
       await deleteArtifact(client, a);
     } catch (e) {
-      entry.status = 'error';
-      entry.error = e.message;
-      errors.push(`${describeArtifact(a)}: ${e.message}`);
+      if (ARTIFACT_GONE_RE.test(e.message)) {
+        entry.status = 'already_gone';
+      } else if (a.type === 'switch_controller_vlan') {
+        // FortiLink auto-manages this entry alongside the interface; a refusal
+        // here is not a leak. Warn-only — same tolerance as the legacy path
+        // (deprovisionVlan step 6 never counted this as an error).
+        entry.status = 'warning';
+        entry.error = e.message;
+      } else {
+        entry.status = 'error';
+        entry.error = e.message;
+        errors.push(`${describeArtifact(a)}: ${e.message}`);
+      }
     }
     log.push(entry);
   }

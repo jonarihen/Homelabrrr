@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-10 — Fix: VLAN deletion through the workflow engine
+
+- Deleting a VLAN synced by the new workflow engine no longer fails with a partial-cleanup error. The artifact teardown now removes the **switch-controller VLAN registration last** (FortiLink ties it to the VLAN interface, so it can only go once the interface is gone — the same order the pre-engine code used) and treats a refusal there as a warning, not a blocker
+- Teardown is now **idempotent**: objects that are already gone on the FortiGate (e.g. removed by an earlier partial attempt) count as cleaned up, so retrying a failed delete completes instead of erroring forever
+
 ## 2026-07-10 — Users can build VMs from scratch with the Create VMs permission
 
 - The **Create VMs** permission (`can_create_vms`) is now wired up: a user who holds it (directly, or via a role) can build a VM **from scratch / from an available ISO** on the **From Scratch** tab of the New VM page — no admin rights needed
