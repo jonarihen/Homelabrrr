@@ -163,7 +163,9 @@ router.get('/images', (req, res) => {
 
 // ─── Proxmox resources (for form dropdowns) ─────────────────────────────────
 
-router.get('/nodes', requirePermission('can_manage_templates'), async (req, res) => {
+// can_create_vms holders need the node list to pick a deploy target for the
+// from-scratch flow (same nodes the admin create form uses).
+router.get('/nodes', requirePermission('can_manage_templates', 'can_create_vms'), async (req, res) => {
   try {
     res.json(await getNodes());
   } catch (err) {
@@ -171,7 +173,7 @@ router.get('/nodes', requirePermission('can_manage_templates'), async (req, res)
   }
 });
 
-router.get('/nodes/:node/storages', requirePermission('can_provision', 'can_manage_templates'), async (req, res) => {
+router.get('/nodes/:node/storages', requirePermission('can_provision', 'can_manage_templates', 'can_create_vms'), async (req, res) => {
   try {
     const storages = await getStorages(req.params.node);
     res.json(storages);
@@ -180,7 +182,11 @@ router.get('/nodes/:node/storages', requirePermission('can_provision', 'can_mana
   }
 });
 
-router.get('/nodes/:node/isos/:storage', requireAdmin, async (req, res) => {
+// Open to can_create_vms so from-scratch users can pick a boot ISO.
+// TODO(#19): when storage-exposure lands, restrict the storages a non-admin
+// may list ISOs from to those explicitly exposed (mirror the disk-storage
+// picker). For now any provisionable node/storage is listable.
+router.get('/nodes/:node/isos/:storage', requirePermission('can_create_vms'), async (req, res) => {
   try {
     res.json(await getISOImages(req.params.node, req.params.storage));
   } catch (err) {
@@ -477,13 +483,23 @@ router.post('/from-image', async (req, res) => {
   }
 });
 
-// ─── Full VM creation (admin only) ──────────────────────────────────────────
+// ─── Full VM creation from scratch / ISO (admin OR can_create_vms) ───────────
+//
+// Gated on can_create_vms so permission-holders can build a VM from an
+// available ISO. Non-admin callers are constrained exactly like /from-image:
+// the network bridge is pinned to the default (vmbr0) so they can't inject a
+// `bridge=...,tag=N` NIC onto a VLAN they lack access to, assignTo is ignored
+// (the VM is self-assigned to the creator), and owner/VLAN PVE tags are stamped
+// as usual. Node capacity + per-user quota (#18) already run below.
+// TODO(#19): when storage-exposure lands, reject a `storage` the caller has not
+// been granted (same check the disk-storage picker will use).
 
-router.post('/create', requireAdmin, async (req, res) => {
+router.post('/create', requirePermission('can_create_vms'), async (req, res) => {
+  const isAdmin = !!req.session.isAdmin;
   const {
     node, name, cores = 2, memoryGb = 2,
     diskSize = '20G', storage = 'local-lvm',
-    iso, bridge = 'vmbr0', ostype = 'l26',
+    iso, ostype = 'l26',
     bios = 'seabios', scsihw = 'virtio-scsi-single',
     description = '',
     assignTo, vlanTag,
@@ -493,8 +509,13 @@ router.post('/create', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Node and name are required' });
   }
 
+  // Non-admins can't pick a bridge (the networks list is admin-only) — pin them
+  // to vmbr0. This also blocks a `bridge=vmbr0,tag=N` injection that would put
+  // the NIC on a VLAN the user has no access to, bypassing the VLAN check below.
+  const bridge = isAdmin ? String(req.body.bridge || 'vmbr0') : 'vmbr0';
+
   // These land in PVE property strings — same strict identifier rule as
-  // /from-image and /clone (admin-only route, but keep the layers consistent).
+  // /from-image and /clone.
   for (const [field, value] of Object.entries({ name, storage, bridge, ostype, bios, scsihw })) {
     if (!/^[a-zA-Z0-9._-]+$/.test(String(value))) {
       return res.status(400).json({ error: `Invalid ${field}` });
@@ -502,6 +523,14 @@ router.post('/create', requireAdmin, async (req, res) => {
   }
   if (iso && !/^[a-zA-Z0-9._/:-]+$/.test(String(iso))) {
     return res.status(400).json({ error: 'Invalid iso' });
+  }
+
+  // Validate VLAN access for non-admins (same guard as /from-image and /clone).
+  if (vlanTag && !isAdmin) {
+    const allowed = db.prepare(
+      'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
+    ).get(req.session.userId, parseInt(vlanTag));
+    if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
   }
 
   try {
@@ -514,8 +543,9 @@ router.post('/create', requireAdmin, async (req, res) => {
       diskGb: String(diskSize).replace(/[^0-9]/g, ''),
       storage,
     });
-    // Per-user resource quota — no-op for admins today (route is
-    // requireAdmin), but keeps the rail in place for #20
+    // Per-user resource quota (skips admins / users without quotas). Now that
+    // the route is open to can_create_vms holders, this rail actually bounds
+    // non-admin from-scratch builds.
     await assertUserQuota(req.session.userId, {
       addCores: parseInt(cores, 10) || 0,
       addMemoryMb: Math.round(parseFloat(memoryGb) * 1024),
@@ -550,8 +580,9 @@ router.post('/create', requireAdmin, async (req, res) => {
       "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, steps, status, upid) VALUES (?, ?, ?, ?, 'create', ?, 'creating', ?)"
     ).run(req.session.userId, node, vmid, name, steps, upid || '');
 
-    // Assign VM — admins only get an assignment if they explicitly pick a target user
-    const targetUser = req.session.isAdmin ? (assignTo || null) : req.session.userId;
+    // Assign VM — admins only get an assignment if they explicitly pick a
+    // target user; non-admins always self-assign (assignTo is ignored).
+    const targetUser = isAdmin ? (assignTo || null) : req.session.userId;
     if (targetUser) {
       try {
         db.prepare('INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)')

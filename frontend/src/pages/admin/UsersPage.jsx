@@ -284,6 +284,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   const [roleId, setRoleId]     = useState(user.role_id || '');
   const [seeAllVMs, setSeeAllVMs] = useState(!!user.see_all_vms);
   const [canProvision, setCanProvision] = useState(!!user.canProvision);
+  const [canCreateVms, setCanCreateVms] = useState(!!user.canCreateVms);
   const [require2fa, setRequire2fa] = useState(!!user.require2fa);
   const [perms, setPerms]       = useState(() => {
     const p = {};
@@ -326,6 +327,13 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
     try {
       await api.put(`/admin/users/${user.id}/can-provision`, { enabled });
       setCanProvision(enabled);
+    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
+  };
+
+  const toggleCanCreateVms = async (enabled) => {
+    try {
+      await api.put(`/admin/users/${user.id}/can-create-vms`, { enabled });
+      setCanCreateVms(enabled);
     } catch (e) { setError(e.response?.data?.error || 'Failed'); }
   };
 
@@ -487,6 +495,12 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                         desc="Allow this user to create VMs from templates"
                         checked={canProvision}
                         onChange={toggleCanProvision}
+                      />
+                      <PermToggle
+                        label="Create VMs"
+                        desc="Build VMs from scratch / from an available ISO (self-assigned, default bridge)"
+                        checked={canCreateVms}
+                        onChange={toggleCanCreateVms}
                       />
                     </div>
 

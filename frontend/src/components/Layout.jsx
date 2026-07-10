@@ -45,7 +45,7 @@ export default function Layout({ children }) {
           <NavLink to="/dashboard" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
             <Icon d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2z" /> My VMs
           </NavLink>
-          {(user?.isAdmin || user?.canProvision) && (
+          {(user?.isAdmin || user?.canProvision || user?.canCreateVms) && (
             <NavLink to="/provision" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
               <Icon d="M12 4.5v15m7.5-7.5h-15" /> New VM
             </NavLink>
