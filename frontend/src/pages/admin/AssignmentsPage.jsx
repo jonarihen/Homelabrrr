@@ -1,9 +1,270 @@
-import { Fragment, useState, useEffect } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
 import api from '../../api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode, vmIdentityKey } from '../../utils/nodeRef.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+
+function formatDuration(ms) {
+  if (!ms || ms < 0) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return rem ? `${m}m ${rem}s` : `${m}m`;
+}
+
+function formatWhen(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString();
+}
+
+// ─── PVE tag auto-sync status card ─────────────────────────────────────────────
+
+function TagSyncCard() {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);       // pause/resume/interval in flight
+  const [syncing, setSyncing] = useState(false);  // manual force-sync in flight
+  const [intervalDraft, setIntervalDraft] = useState('');
+  const [showFailures, setShowFailures] = useState(false);
+  const [msg, setMsg] = useState({ text: '', kind: 'info' });
+  const pollRef = useRef(null);
+
+  const note = (text, kind = 'info') => setMsg({ text, kind });
+
+  const loadStatus = async () => {
+    try {
+      const { data } = await api.get('/admin/tag-sync/status');
+      setStatus(data);
+      setIntervalDraft((prev) => (prev === '' ? String(data.intervalHours ?? '') : prev));
+      return data;
+    } catch (e) {
+      note(e.response?.data?.error || 'Failed to load tag-sync status', 'error');
+      return null;
+    }
+  };
+
+  useEffect(() => { loadStatus(); /* eslint-disable-next-line */ }, []);
+
+  // Poll live while a run is in flight (manual or scheduled), then stop.
+  useEffect(() => {
+    if (status?.running && !pollRef.current) {
+      pollRef.current = setInterval(loadStatus, 2000);
+    } else if (!status?.running && pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    // eslint-disable-next-line
+  }, [status?.running]);
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  const togglePause = async () => {
+    if (!status) return;
+    setBusy(true);
+    try {
+      const path = status.paused ? '/admin/tag-sync/resume' : '/admin/tag-sync/pause';
+      const { data } = await api.post(path);
+      setStatus(data);
+      note(status.paused ? 'Auto-sync resumed' : 'Auto-sync paused', 'success');
+    } catch (e) {
+      note(e.response?.data?.error || 'Failed to update auto-sync', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveInterval = async () => {
+    const hours = Number(intervalDraft);
+    if (!Number.isFinite(hours) || hours <= 0) {
+      note('Interval must be a positive number of hours', 'error');
+      return;
+    }
+    setBusy(true);
+    try {
+      const { data } = await api.post('/admin/tag-sync/interval', { intervalHours: hours });
+      setStatus(data);
+      note(`Interval set to ${hours}h`, 'success');
+    } catch (e) {
+      note(e.response?.data?.error || 'Failed to set interval', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncNow = async () => {
+    setSyncing(true);
+    note('', 'info');
+    // Kick off polling immediately so progress shows while the request runs.
+    if (!pollRef.current) pollRef.current = setInterval(loadStatus, 2000);
+    try {
+      const { data } = await api.post('/admin/sync-vm-tags');
+      note(`${data.checked} checked · ${data.updated} retagged${data.failed ? ` · ${data.failed} failed` : ''}`, data.failed ? 'warning' : 'success');
+    } catch (e) {
+      if (e.response?.status === 409) {
+        note('A tag sync is already running', 'warning');
+      } else {
+        note(e.response?.data?.error || 'Tag sync failed', 'error');
+      }
+    } finally {
+      setSyncing(false);
+      loadStatus();
+    }
+  };
+
+  if (!status) {
+    return <div className="h-24 bg-gray-900 border border-gray-800 rounded-xl animate-pulse mb-6" />;
+  }
+
+  const { running, paused, progress, lastRun: last } = status;
+
+  const ledClass = running
+    ? 'bg-orange-500 animate-pulse'
+    : paused ? 'bg-yellow-500' : 'bg-green-500';
+  const stateLabel = running ? 'Running' : paused ? 'Paused' : 'Armed';
+  const stateColor = running ? 'text-orange-400' : paused ? 'text-yellow-500' : 'text-green-400';
+  const msgColor = msg.kind === 'error' ? 'text-red-400'
+    : msg.kind === 'warning' ? 'text-yellow-500'
+    : msg.kind === 'success' ? 'text-green-400' : 'text-gray-500';
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`inline-block w-2 h-2 rounded-sm ${ledClass}`} aria-hidden="true" />
+            <h2 className="font-mono text-[11px] uppercase tracking-[0.12em] text-gray-300">
+              PVE Tag Auto-Sync
+            </h2>
+            <span className={`font-mono text-[10px] uppercase tracking-[0.1em] ${stateColor}`}>{stateLabel}</span>
+          </div>
+          <p className="text-xs text-gray-500 mt-1">
+            {paused
+              ? <>Paused{status.pausedBy ? <> by <span className="text-gray-400">{status.pausedBy}</span></> : ''}{status.pausedAt ? <> · {formatWhen(status.pausedAt)}</> : ''} — scheduled runs are held.</>
+              : <>Runs automatically every <span className="text-gray-400 font-mono">{status.intervalHours}h</span> and corrects owner/VLAN tag drift.</>
+            }
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {msg.text && (
+            <span className={`text-xs font-mono ${msgColor}`}>{msg.text}</span>
+          )}
+          <button
+            onClick={togglePause}
+            disabled={busy}
+            className={`text-xs font-mono uppercase tracking-[0.08em] disabled:opacity-40 px-3 py-2 rounded-lg transition-colors bg-gray-800 hover:bg-gray-700 ${
+              paused ? 'text-green-400 hover:text-green-300' : 'text-yellow-500 hover:text-yellow-400'
+            }`}
+          >
+            {paused ? 'Resume' : 'Pause'}
+          </button>
+          <button
+            onClick={syncNow}
+            disabled={syncing || running}
+            title="Walk every VM and re-stamp owner + VLAN tags now"
+            className="text-xs font-mono uppercase tracking-[0.08em] text-orange-400 hover:text-orange-300 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 px-3 py-2 rounded-lg transition-colors"
+          >
+            {running ? `Syncing ${progress ? `${progress.checked}/${progress.total}` : ''}…` : 'Sync now'}
+          </button>
+        </div>
+      </div>
+
+      {/* Live progress while running */}
+      {running && progress && (
+        <div className="mt-3">
+          <div className="h-1.5 bg-gray-800 rounded overflow-hidden">
+            <div
+              className="h-full bg-orange-500 transition-all"
+              style={{ width: `${progress.total ? Math.round((progress.checked / progress.total) * 100) : 0}%` }}
+            />
+          </div>
+          <p className="text-[11px] font-mono text-gray-500 mt-1">
+            {progress.checked}/{progress.total} checked · {progress.updated} updated · {progress.failed} failed
+            {progress.trigger === 'scheduled' ? ' · scheduled' : ''}
+          </p>
+        </div>
+      )}
+
+      {/* Interval + last run */}
+      <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-[10px] font-mono uppercase tracking-[0.1em] text-gray-600 mb-1">
+            Interval (hours)
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={intervalDraft}
+              onChange={(e) => setIntervalDraft(e.target.value)}
+              className="w-24 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-orange-500 transition-colors"
+            />
+            <button
+              onClick={saveInterval}
+              disabled={busy || String(status.intervalHours) === String(intervalDraft)}
+              className="text-xs font-mono uppercase tracking-[0.08em] text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 disabled:opacity-40 px-3 py-1.5 rounded-lg transition-colors"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <div className="text-[10px] font-mono uppercase tracking-[0.1em] text-gray-600 mb-1">Last run</div>
+          {last ? (
+            <div className="text-xs text-gray-400 font-mono">
+              {formatWhen(last.time)} · {formatDuration(last.durationMs)}
+              <span className="text-gray-600"> · {last.trigger}</span>
+              <div className="mt-0.5">
+                <span className="text-gray-300">{last.checked}</span> checked ·{' '}
+                <span className="text-blue-400">{last.updated}</span> updated ·{' '}
+                <span className={last.failed ? 'text-red-400' : 'text-gray-300'}>{last.failed}</span> failed
+                {last.failures?.length > 0 && (
+                  <button
+                    onClick={() => setShowFailures((v) => !v)}
+                    className="ml-2 text-red-400 hover:text-red-300 underline decoration-dotted"
+                  >
+                    {showFailures ? 'hide' : 'show'} failures
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-600 font-mono italic">No run recorded yet</div>
+          )}
+        </div>
+      </div>
+
+      {/* Per-VM failures */}
+      {showFailures && last?.failures?.length > 0 && (
+        <div className="mt-3 border border-gray-800 rounded-lg overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-gray-800 text-gray-600 uppercase tracking-wider">
+                <th className="text-left px-3 py-1.5 font-mono">Node / VMID</th>
+                <th className="text-left px-3 py-1.5 font-mono">Name</th>
+                <th className="text-left px-3 py-1.5 font-mono">Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {last.failures.map((f, i) => (
+                <tr key={`${f.node}-${f.vmid}-${i}`} className="border-b border-gray-800 last:border-0">
+                  <td className="px-3 py-1.5 font-mono text-gray-500 whitespace-nowrap">{displayNode(f.node)} / {f.vmid}</td>
+                  <td className="px-3 py-1.5 text-gray-400">{f.name || '—'}</td>
+                  <td className="px-3 py-1.5 text-red-400">{f.error}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function AssignmentsPage() {
   useDocumentTitle('Assignments');
@@ -11,7 +272,6 @@ export default function AssignmentsPage() {
   const [vms, setVms]       = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]   = useState('');
-  const [tagSync, setTagSync] = useState({ running: false, msg: '' });
   const [claiming, setClaiming] = useState(false);
   const [claimMsg, setClaimMsg] = useState('');
 
@@ -35,16 +295,6 @@ export default function AssignmentsPage() {
       load();
     } catch (e) {
       alert(e.response?.data?.error || 'Failed');
-    }
-  };
-
-  const syncTags = async () => {
-    setTagSync({ running: true, msg: '' });
-    try {
-      const { data } = await api.post('/admin/sync-vm-tags');
-      setTagSync({ running: false, msg: `${data.checked} VMs checked, ${data.updated} retagged${data.failed ? `, ${data.failed} failed` : ''}` });
-    } catch (e) {
-      setTagSync({ running: false, msg: 'Failed: ' + (e.response?.data?.error || e.message) });
     }
   };
 
@@ -115,11 +365,6 @@ export default function AssignmentsPage() {
           {claimMsg && (
             <span className="text-xs font-mono text-gray-500">{claimMsg}</span>
           )}
-          {tagSync.msg && (
-            <span className={`text-xs font-mono ${tagSync.msg.startsWith('Failed') ? 'text-red-400' : 'text-gray-500'}`}>
-              {tagSync.msg}
-            </span>
-          )}
           {unassigned.length > 0 && (
             <button
               onClick={claimAllUnassigned}
@@ -131,14 +376,6 @@ export default function AssignmentsPage() {
             </button>
           )}
           <button
-            onClick={syncTags}
-            disabled={tagSync.running}
-            title="Rewrite the owner + VLAN tags shown on VMs in the Proxmox UI"
-            className="text-sm text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 disabled:opacity-40 px-3 py-2 rounded-lg transition-colors"
-          >
-            {tagSync.running ? 'Syncing tags…' : 'Sync PVE Tags'}
-          </button>
-          <button
             onClick={load}
             className="text-sm text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors"
           >
@@ -146,6 +383,8 @@ export default function AssignmentsPage() {
           </button>
         </div>
       </div>
+
+      <TagSyncCard />
 
       {error && <p className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
 
