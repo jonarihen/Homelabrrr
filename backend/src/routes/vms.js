@@ -487,7 +487,7 @@ router.delete('/:node/:vmid', async (req, res) => {
     const parsedVmid = parseInt(vmid, 10);
     const candidates = nodeLookupCandidates(node);
     const placeholders = candidates.map(() => '?').join(', ');
-    for (const table of ['vm_assignments', 'vm_ssh_configs', 'vm_ssh_user_configs', 'provisioned_vms', 'vm_leases']) {
+    for (const table of ['vm_assignments', 'vm_ssh_configs', 'vm_ssh_user_configs', 'provisioned_vms', 'vm_leases', 'vm_schedules']) {
       db.prepare(`DELETE FROM ${table} WHERE vmid = ? AND node IN (${placeholders})`).run(parsedVmid, ...candidates);
     }
 

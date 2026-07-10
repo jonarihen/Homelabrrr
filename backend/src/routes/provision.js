@@ -211,14 +211,15 @@ router.get('/nodes/:node/storages', requirePermission('can_provision', 'can_mana
   }
 });
 
-// Open to can_create_vms so from-scratch users can pick a boot ISO.
-// TODO(#19): when storage-exposure lands, restrict the storages a non-admin
-// may list ISOs from to those explicitly exposed (mirror the disk-storage
-// picker). For now any provisionable node/storage is listable.
+// Open to can_create_vms so from-scratch users can pick a boot ISO. Non-admins
+// may only list ISOs from storages an admin has exposed (mirrors the
+// disk-storage picker).
 router.get('/nodes/:node/isos/:storage', requirePermission('can_create_vms'), async (req, res) => {
   try {
+    await assertStorageExposed(req.params.node, req.params.storage, { isAdmin: req.session.isAdmin });
     res.json(await getISOImages(req.params.node, req.params.storage));
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
@@ -557,9 +558,8 @@ router.post('/from-image', async (req, res) => {
 // the network bridge is pinned to the default (vmbr0) so they can't inject a
 // `bridge=...,tag=N` NIC onto a VLAN they lack access to, assignTo is ignored
 // (the VM is self-assigned to the creator), and owner/VLAN PVE tags are stamped
-// as usual. Node capacity + per-user quota (#18) already run below.
-// TODO(#19): when storage-exposure lands, reject a `storage` the caller has not
-// been granted (same check the disk-storage picker will use).
+// as usual. Node capacity + per-user quota (#18) and storage exposure (#19)
+// already run below.
 
 router.post('/create', requirePermission('can_create_vms'), async (req, res) => {
   const isAdmin = !!req.session.isAdmin;
