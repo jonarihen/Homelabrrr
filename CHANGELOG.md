@@ -100,6 +100,12 @@ The hardcoded FortiGate provisioning sequences are now a **configurable workflow
 - On upgrade, built-in **default workflows are seeded that reproduce every previous hardcoded sequence exactly** — a VLAN sync and a port forward behave byte-for-byte as before until you edit the flow.
 - Runs record every created object; **deprovision deletes those recorded artifacts in reverse order** rather than re-deriving from the current definition, so editing a workflow never orphans objects. Rows created before the upgrade keep working through the original teardown path.
 - A failed run **rolls back everything it created**, in reverse. Every workflow edit, reset, dry-run, and run is written to the audit log.
+## 2026-07-10 — Self-service cloud-init credential reset
+
+- Cloud-init VMs now have a **Reset credentials** action on the VM page: set a new password and/or replace the injected SSH public key without asking an admin.
+- The SSH public key can be **picked from your stored SSH keys** or pasted directly — the portal never stores the password.
+- Because cloud-init only re-applies credentials on boot, the dialog explains a **reboot is required** and offers to reboot (or start) the VM inline so the change takes effect right away.
+- The action only appears for VMs you **strictly own** that actually have a cloud-init drive; it stays hidden for everyone else (including view-only `see all VMs` users), and the reset event is written to the audit log **without** any secret.
 
 ## 2026-07-09 — Roles can carry default quotas
 
