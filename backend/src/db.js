@@ -402,6 +402,23 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// Storage pool exposure: admins choose which Proxmox storage pools users may
+// pick when creating VMs / editing disks. A pool with NO row here is treated as
+// exposed (default-open), so existing deployments see zero behavior change until
+// an admin explicitly hides a pool — no async migration-time seeding required.
+// Rows are keyed by (pve_host_id, storage): Proxmox storage ids are unique per
+// host and shared across its nodes.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS storage_visibility (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pve_host_id INTEGER NOT NULL REFERENCES pve_hosts(id) ON DELETE CASCADE,
+    storage TEXT NOT NULL,
+    exposed INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(pve_host_id, storage)
+  )
+`); } catch { /* exists */ }
+
 assertSecretEncryptionKey();
 
 function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {

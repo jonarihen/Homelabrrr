@@ -9,6 +9,7 @@ import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
+import { assertStorageExposed, filterExposedStorages } from '../utils/storageVisibility.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
 import { assertUserQuota, getUserQuota, getUserResourceUsage } from '../utils/quota.js';
@@ -176,7 +177,9 @@ router.get('/nodes', requirePermission('can_manage_templates', 'can_create_vms')
 router.get('/nodes/:node/storages', requirePermission('can_provision', 'can_manage_templates', 'can_create_vms'), async (req, res) => {
   try {
     const storages = await getStorages(req.params.node);
-    res.json(storages);
+    // Non-admins only see storage pools an admin has exposed. Admins see all.
+    const visible = await filterExposedStorages(req.params.node, storages, { isAdmin: req.session.isAdmin });
+    res.json(visible);
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
@@ -235,6 +238,15 @@ router.post('/clone', async (req, res) => {
       'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
     ).get(req.session.userId, parseInt(vlanTag));
     if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
+  }
+
+  // Enforce storage exposure — never trust the dropdown. Non-admins can't clone
+  // onto a pool an admin has hidden, even by naming it directly.
+  try {
+    await assertStorageExposed(template.node, storage || template.default_storage, user);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    throw err;
   }
 
   // Validate CPU count against node's physical cores before cloning
@@ -396,6 +408,15 @@ router.post('/from-image', async (req, res) => {
     if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
   }
 
+  // Enforce storage exposure — never trust the dropdown. Non-admins can't
+  // deploy onto a pool an admin has hidden, even by naming it directly.
+  try {
+    await assertStorageExposed(image.node, storage, user);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+
   // CPU topology + node capacity checks run on the image's node (import-from
   // requires the disk source and target to share a host).
   let cpuLayout;
@@ -531,6 +552,16 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
       'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
     ).get(req.session.userId, parseInt(vlanTag));
     if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
+  }
+
+  // Enforce storage exposure — never trust the dropdown. Non-admin
+  // can_create_vms holders can't build onto a pool an admin has hidden,
+  // even by naming it directly.
+  try {
+    await assertStorageExposed(node, storage, { isAdmin });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    throw err;
   }
 
   try {

@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import db from '../db.js';
-import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig } from '../proxmox.js';
+import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools } from '../proxmox.js';
+import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibility.js';
 import { createClient, vlanTagToSubnet } from '../fortigate.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
@@ -1014,6 +1015,47 @@ router.delete('/pve-hosts/:id', pHosts, (req, res) => {
   }
   db.prepare('DELETE FROM pve_hosts WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
+});
+
+// ─── Storage pool exposure ───────────────────────────────────────────────────
+// Admins choose which Proxmox storage pools regular users may pick when creating
+// VMs / editing disks. A pool with no stored row is exposed by default, so there
+// is zero behavior change until an admin hides a pool.
+
+router.get('/pve-hosts/:id/storages', pHosts, async (req, res) => {
+  const hostId = parseInt(req.params.id, 10);
+  const host = getHost(hostId);
+  if (!host) return res.status(404).json({ error: 'Host not found' });
+  try {
+    const pools = await getHostStoragePools(host);
+    const visibility = storageVisibilityMap(hostId);
+    const rows = pools
+      .map((p) => ({
+        storage: p.storage,
+        type: p.type || '',
+        content: p.content || '',
+        // Missing row ⇒ exposed by default.
+        exposed: visibility.has(p.storage) ? visibility.get(p.storage) : true,
+      }))
+      .sort((a, b) => a.storage.localeCompare(b.storage));
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+router.put('/pve-hosts/:id/storages/:storage', pHosts, (req, res) => {
+  const hostId = parseInt(req.params.id, 10);
+  const host = getHost(hostId);
+  if (!host) return res.status(404).json({ error: 'Host not found' });
+  const storage = String(req.params.storage || '').trim();
+  if (!storage || !/^[a-zA-Z0-9._-]+$/.test(storage)) {
+    return res.status(400).json({ error: 'Invalid storage identifier' });
+  }
+  const exposed = req.body?.exposed !== false && req.body?.exposed !== 0;
+  setStorageExposed(hostId, storage, exposed);
+  logAudit(req, 'storage_visibility_change', `${host.name}/${storage}`, exposed ? 'exposed' : 'hidden');
+  res.json({ ok: true, storage, exposed });
 });
 
 // ─── Firewalls ─────────────────────────────────────────────────────────────

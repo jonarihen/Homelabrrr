@@ -222,6 +222,9 @@ export default function PVEHostsPage() {
                   {!s.online && !s.loading && s.error && (
                     <p className="text-xs text-red-400/70 bg-red-900/10 rounded-lg px-3 py-2 mt-1">{s.error}</p>
                   )}
+
+                  {/* Storage pool exposure */}
+                  <StoragePoolsSection hostId={h.id} online={s.online} loading={s.loading} />
                 </div>
               </div>
             );
@@ -315,3 +318,89 @@ export default function PVEHostsPage() {
 }
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
+
+// Per-host storage pool exposure. Admins flip a pool "exposed to users" off to
+// hide it from the provisioning dropdowns (and reject it server-side). Pools are
+// exposed by default, so a fresh install shows everything until an admin trims it.
+function StoragePoolsSection({ hostId, online, loading }) {
+  const [pools, setPools] = useState(null);
+  const [busy, setBusy] = useState({});      // storage -> saving
+  const [error, setError] = useState('');    // blocking load error
+  const [saveError, setSaveError] = useState('');
+  const [loadingPools, setLoadingPools] = useState(false);
+
+  useEffect(() => {
+    // Discovering pools needs a reachable host, so only fetch once it's online.
+    if (!online || loading) return;
+    let cancelled = false;
+    setLoadingPools(true);
+    setError('');
+    api.get(`/admin/pve-hosts/${hostId}/storages`)
+      .then((r) => { if (!cancelled) setPools(r.data); })
+      .catch((e) => { if (!cancelled) setError(e.response?.data?.error || 'Failed to load storage pools'); })
+      .finally(() => { if (!cancelled) setLoadingPools(false); });
+    return () => { cancelled = true; };
+  }, [hostId, online, loading]);
+
+  const toggle = async (pool) => {
+    const next = !pool.exposed;
+    setBusy((b) => ({ ...b, [pool.storage]: true }));
+    setSaveError('');
+    // Optimistic update
+    setPools((ps) => ps.map((p) => (p.storage === pool.storage ? { ...p, exposed: next } : p)));
+    try {
+      await api.put(`/admin/pve-hosts/${hostId}/storages/${encodeURIComponent(pool.storage)}`, { exposed: next });
+    } catch (e) {
+      // Revert on failure
+      setPools((ps) => ps.map((p) => (p.storage === pool.storage ? { ...p, exposed: pool.exposed } : p)));
+      setSaveError(e.response?.data?.error || `Failed to update ${pool.storage}`);
+    } finally {
+      setBusy((b) => ({ ...b, [pool.storage]: false }));
+    }
+  };
+
+  if (!online) return null;
+
+  return (
+    <div className="mt-4 pt-4 border-t border-gray-800">
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-[11px] font-mono uppercase tracking-[0.1em] text-gray-500">Storage pools</h4>
+        <span className="text-[10px] text-gray-600">exposed to users</span>
+      </div>
+      {loadingPools ? (
+        <div className="h-10 bg-gray-800/40 rounded-xl animate-pulse" />
+      ) : error ? (
+        <p className="text-xs text-red-400/70 bg-red-900/10 rounded-lg px-3 py-2">{error}</p>
+      ) : !pools || pools.length === 0 ? (
+        <p className="text-xs text-gray-600">No storage pools found on this host.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {saveError && (
+            <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">{saveError}</p>
+          )}
+          {pools.map((p) => (
+            <div key={p.storage} className="bg-gray-800/50 border border-gray-700/30 rounded-xl px-3 py-2 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <span className="text-sm text-white font-mono">{p.storage}</span>
+                <span className="text-[10px] text-gray-500 ml-2 uppercase tracking-wide">{p.type}{p.content ? ` · ${p.content}` : ''}</span>
+              </div>
+              <label className="flex items-center gap-2 shrink-0 cursor-pointer select-none">
+                <span className={`text-[10px] font-mono uppercase tracking-wide ${p.exposed ? 'text-green-400' : 'text-gray-500'}`}>
+                  {p.exposed ? 'Exposed' : 'Hidden'}
+                </span>
+                <input
+                  type="checkbox"
+                  className="accent-blue-500 w-4 h-4"
+                  checked={!!p.exposed}
+                  disabled={!!busy[p.storage]}
+                  onChange={() => toggle(p)}
+                  aria-label={`Expose storage pool ${p.storage} to users`}
+                />
+              </label>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

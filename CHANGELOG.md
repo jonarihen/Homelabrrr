@@ -14,6 +14,13 @@
 - Download URLs are validated against internal/reserved addresses (same SSRF guard and `ALLOW_INTERNAL_IMAGE_URLS` opt-out as cloud images); actions are audit-logged
 - Gated behind the same **Manage Templates** permission cloud images use. (The from-scratch create-VM ISO picker that consumes this catalog ships with #20.)
 
+## 2026-07-10 — Admin-controlled storage pool exposure
+
+- Admins can now choose **which Proxmox storage pools users may deploy onto**. Each PVE host on the **PVE Hosts** page lists its discovered pools with an **exposed to users** toggle.
+- Hidden pools disappear from the storage dropdowns for non-admins (clone, from-image, from-scratch create) **and are rejected server-side** if named directly in a request — the dropdown is never trusted.
+- **No behavior change until you restrict a pool:** every existing pool is exposed by default, so current deployments are unaffected until an admin hides one.
+- Admins always see and can use every pool. Every exposure toggle is written to the **audit log**.
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder
