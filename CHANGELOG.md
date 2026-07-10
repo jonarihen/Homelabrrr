@@ -54,6 +54,14 @@
 - Owners get an **Overview notice** on their dashboard when a VM has expired (and been stopped) or is expiring soon, with one-click links to renew
 - New admin **VM Leases** page (Infrastructure section): set the **default lease duration** and **grace period**, see the whole roster with owner + live status, **renew / adjust / extend** any lease, **exempt** infra VMs so they never expire, run the sweep on demand, and **backfill** leases onto VMs that predate the feature
 - All lease actions (auto-stop, renew, adjust, sweep) are audit-logged; the sweep runs `system` audit entries. Discord expiry warnings remain a separate feature (#22)
+## 2026-07-10 — Discord webhook notifications
+
+- New **Notifications** admin page (Access section of the sidebar): add one or more **Discord webhooks**, tick which event types each one receives, and hit **Send test** to confirm the wiring end-to-end
+- Events sent as compact Discord embeds (event, VM/resource, owner, status, and a link back to the portal page): **VM deployment finished / failed**, **backup created / failed**, **node unreachable / recovered**, **new notice published**, and **account locked out** (security)
+- Webhook outages can never break a flow — sends are **fire-and-forget** and rate-limited per webhook to stay under Discord's ~30 requests/minute
+- Webhook URLs are **encrypted at rest** and only ever shown masked; every webhook config change is audit-logged
+- Users can **opt out** of notifications about their own resources from the Account page
+- New env knobs: `PORTAL_BASE_URL` (link-back base for embeds, falls back to `ALLOWED_ORIGIN`) and `NODE_HEALTH_POLL_MS` (health-monitor interval; `0` disables it)
 
 ## 2026-07-09 — Roles can carry default quotas
 

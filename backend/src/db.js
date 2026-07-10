@@ -439,6 +439,20 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// Discord / webhook notifications: admin-configured channels + per-event
+// routing. The webhook URL is a bearer secret (whoever holds it can post to the
+// channel), so it is encrypted at rest with encryptSecret — see utils/notify.js.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS notification_webhooks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    event_types TEXT DEFAULT '[]',
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`); } catch { /* exists */ }
+
 // Invite links: one-time self-registration tokens. We store only a HASH of the
 // raw token (never the token itself — the raw value is shown to the admin once
 // and discarded), the same discipline as PVE tokens / API keys elsewhere.
@@ -493,6 +507,9 @@ try { db.exec(`
     UNIQUE(node, vmid)
   )
 `); } catch { /* exists */ }
+// Per-user opt-out for notifications about the user's own resources (default
+// opted-in). Owner-scoped events are suppressed when this is 1.
+try { db.exec('ALTER TABLE users ADD COLUMN notify_opt_out INTEGER DEFAULT 0'); } catch { /* exists */ }
 
 assertSecretEncryptionKey();
 
@@ -516,6 +533,7 @@ const migrateSecrets = db.transaction(() => {
     pveHosts: migrateEncryptedColumn('pve_hosts', 'id', 'token_secret'),
     users: migrateEncryptedColumn('users', 'id', 'totp_secret'),
     firewalls: migrateEncryptedColumn('firewalls', 'id', 'api_key'),
+    notificationWebhooks: migrateEncryptedColumn('notification_webhooks', 'id', 'url'),
   };
 
   const pveTlsMigrationKey = 'pve_verify_tls_secure_default_v1';

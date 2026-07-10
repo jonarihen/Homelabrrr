@@ -16,6 +16,7 @@ import AssignmentsPage from './pages/admin/AssignmentsPage.jsx';
 import PVEHostsPage from './pages/admin/PVEHostsPage.jsx';
 import TemplatesPage from './pages/admin/TemplatesPage.jsx';
 import AuditLogPage from './pages/admin/AuditLogPage.jsx';
+import NotificationsPage from './pages/admin/NotificationsPage.jsx';
 import FirewallsPage from './pages/admin/FirewallsPage.jsx';
 import PoliciesPage from './pages/admin/PoliciesPage.jsx';
 import PortForwardingPage from './pages/admin/PortForwardingPage.jsx';
@@ -104,6 +105,7 @@ export default function App() {
               <Route path="port-forwarding" element={<PortForwardingPage />} />
               <Route path="templates" element={<TemplatesPage />} />
               <Route path="leases" element={<LeasesPage />} />
+              <Route path="notifications" element={<NotificationsPage />} />
               <Route path="audit-log" element={<AuditLogPage />} />
             </Route>
 

@@ -12,6 +12,7 @@ import { createClient } from '../fortigate.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
+import { notify, portalLink } from '../utils/notify.js';
 import { userCanAccessVm, userOwnsVm } from '../utils/vmAccess.js';
 import { userHasPermission } from '../utils/permissions.js';
 import { summarizeLease, renewLease } from '../utils/leases.js';
@@ -1000,11 +1001,31 @@ router.post('/:node/:vmid/backup', async (req, res) => {
     return res.status(403).json({ error: 'Access denied' });
   }
   const { mode, compress, storage, notes } = req.body;
+  const { nodeName } = decodeNodeRef(node);
+  const vmLabel = `#${vmid}${nodeName ? ` on ${nodeName}` : ''}`;
   try {
     const upid = await createVMBackup(node, vmid, { mode, compress, storage, notes });
     logAudit(req, 'backup_create', `${node}/${vmid}`, storage || '');
+    // The backup task runs on Proxmox after this returns; notify that it was
+    // submitted (fire-and-forget — a webhook failure must not fail the request).
+    notify('backup.created', {
+      vm: vmLabel,
+      owner: req.session.username,
+      ownerUserId: req.session.userId,
+      status: 'started',
+      detail: storage ? `Backup to ${storage} started` : 'Backup started',
+      url: portalLink(`/vm/${node}/${vmid}`),
+    });
     res.json({ ok: true, upid });
   } catch (err) {
+    notify('backup.failed', {
+      vm: vmLabel,
+      owner: req.session.username,
+      ownerUserId: req.session.userId,
+      status: 'failed',
+      detail: 'Backup could not be started',
+      url: portalLink(`/vm/${node}/${vmid}`),
+    });
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
