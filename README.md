@@ -43,6 +43,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Storage exposure | Admins pick which Proxmox storage pools users may deploy onto, per host; hidden pools vanish from the provisioning dropdowns and are rejected server-side. Every pool is exposed by default, so nothing changes until you restrict one |
 | Node maintenance | Soft-drain a Proxmox node before a planned reboot/upgrade: new provisioning to it is blocked with a clear reason, the node is greyed out in pickers, an Overview notice is auto-published for every user, and health shows amber "maintenance" (not red "down"). Running VMs are untouched, and maintenance can auto-expire at a set end time |
 | Admin delegation | Role-based access control: named roles bundle the granular permission flags (hosts, firewalls, port forwards, VLANs, policies, templates, users, assignments, audit log, VM hardware, provisioning, VM visibility). A role fully defines its holder's permissions; users without a role use per-user flags |
+| Onboarding | One-time **invite links**: generate a shareable URL preloaded with a role/permissions, quotas, VLAN access, expiry, and optional required-2FA; the invitee self-registers (username + password), enrolls 2FA if required, and lands in the portal with exactly the preset access — no manual account creation or out-of-band password handoff |
 | Security | Session auth, TOTP 2FA, login throttling, secrets encrypted at rest, upstream TLS enforcement, SSH host-key checks, audit logging |
 
 ## UI Overview
@@ -66,6 +67,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `Port Forwarding` — WAN VIP and firewall policy management, scoped for delegated users
 - `Assignments` — VM and VLAN-to-user mapping, grouped per user with unassigned VMs listed first; unassigned VMs can be claimed for your own account (per VM, or all at once — handy for fleets that predate the portal); owner + VLAN are stamped as Proxmox tags on each VM so ownership is visible in the PVE UI too. A **PVE Tag Auto-Sync** card runs the fleet-wide tag sync automatically in the background (default every 6h) and lets an admin pause/resume it, change the interval, and force an on-demand sync with live progress and last-run / failure visibility
 - `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, lockout unlocks, and enforced 2FA
+- `Invites` — generate one-time self-registration links (choose role/permissions, quotas, VLAN access, expiry, and optional required-2FA); copy the single-use URL, track open/used/expired/revoked invites, and revoke unused ones. Tokens are stored hashed and every generate/consume/revoke is audit-logged
 - `Roles` — named permission sets (built-in Administrator/User plus custom roles); editing a role updates every user holding it
 - `Audit Log` — change tracking with user/IP/timestamp
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user
@@ -219,6 +221,7 @@ Current hardening in the codebase includes:
 - optional mandatory 2FA enrollment
 - 2FA lifecycle protection: starting a new enrollment cannot silently disable an active second factor, admin 2FA resets require confirmation, and setup/enable/disable/reset are audit-logged
 - login and 2FA attempt throttling, with admin unlock support
+- invite links are single-use and rate-limited like login; only a SHA-256 hash of the token is stored (the raw token is shown to the admin once), and redemption creates the account inside a single transaction that applies the preset and marks the invite consumed atomically
 - assignment-aware VM access (users only see their own VMs)
 - backup browse, download, restore, and delete verify that the named backup volume actually belongs to the VM being operated on (the VMID embedded in the volid must match; unparseable volids are rejected)
 - destructive operations (VM deletion, backup deletion, backup restore) require strict VM ownership — the see-all-VMs visibility flag does not grant them

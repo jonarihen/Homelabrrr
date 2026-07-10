@@ -16,6 +16,7 @@ import {
   getTagSyncSettings, setTagSyncPaused, setTagSyncIntervalHours,
 } from '../utils/vmTags.js';
 import { PERMISSION_KEYS } from '../utils/permissions.js';
+import { generateInviteToken, hashInviteToken, normalizeInvitePreset, summarizeInvitePreset, inviteStatus } from '../utils/invites.js';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -486,6 +487,79 @@ router.put('/users/:id/role', requireAdmin, (req, res) => {
   if (!role) return res.status(400).json({ error: 'Role not found' });
   db.prepare('UPDATE users SET role_id = ? WHERE id = ?').run(role.id, user.id);
   logAudit(req, 'admin_assign_role', user.username, role.name);
+  res.json({ ok: true });
+});
+
+// ─── Invites (one-time self-registration links) ──────────────────────────────
+// Managed by can_manage_users. Generate returns the raw token exactly once (the
+// DB only ever holds its hash); the admin UI turns it into a shareable URL.
+
+router.get('/invites', pUsers, (req, res) => {
+  const rows = db.prepare('SELECT * FROM invites ORDER BY created_at DESC').all();
+  res.json(rows.map((row) => {
+    let preset = {};
+    try { preset = JSON.parse(row.preset || '{}'); } catch { preset = {}; }
+    return {
+      id: row.id,
+      status: inviteStatus(row),
+      createdBy: row.created_by_username,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      usedAt: row.used_at,
+      usedBy: row.used_by_username,
+      revokedAt: row.revoked_at,
+      requires2fa: !!row.require_2fa,
+      preset: summarizeInvitePreset(preset),
+    };
+  }));
+});
+
+router.post('/invites', pUsers, (req, res) => {
+  const { preset, error } = normalizeInvitePreset(req.body, {
+    allowAdmin: !!req.session.isAdmin,
+    allowPrivileges: !!req.session.isAdmin,
+  });
+  if (error) return res.status(400).json({ error });
+
+  // Expiry: positive number of days, or empty/omitted for "never expires".
+  let expiresAt = null;
+  const rawExpiry = req.body.expiresInDays;
+  if (rawExpiry !== undefined && rawExpiry !== null && rawExpiry !== '') {
+    const days = parseInt(rawExpiry, 10);
+    if (!Number.isInteger(days) || days <= 0) {
+      return res.status(400).json({ error: 'Expiry must be a positive number of days (empty = never)' });
+    }
+    expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+  }
+
+  const require2fa = req.body.require2fa ? 1 : 0;
+  const token = generateInviteToken();
+  const tokenHash = hashInviteToken(token);
+
+  const r = db.prepare(`
+    INSERT INTO invites (token_hash, created_by, created_by_username, preset, require_2fa, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(tokenHash, req.session.userId, req.session.username, JSON.stringify(preset), require2fa, expiresAt);
+
+  logAudit(req, 'admin_create_invite', `invite #${r.lastInsertRowid}`, `role=${preset.roleId ?? 'none'} require2fa=${require2fa}`);
+
+  // Raw token returned ONCE — never persisted, never retrievable again.
+  res.json({
+    id: r.lastInsertRowid,
+    token,
+    expiresAt,
+    requires2fa: !!require2fa,
+    preset: summarizeInvitePreset(preset),
+  });
+});
+
+router.delete('/invites/:id', pUsers, (req, res) => {
+  const invite = db.prepare('SELECT * FROM invites WHERE id = ?').get(req.params.id);
+  if (!invite) return res.status(404).json({ error: 'Invite not found' });
+  if (invite.used_at) return res.status(400).json({ error: 'Invite has already been used' });
+  if (invite.revoked_at) return res.status(400).json({ error: 'Invite is already revoked' });
+  db.prepare('UPDATE invites SET revoked_at = ? WHERE id = ?').run(new Date().toISOString(), invite.id);
+  logAudit(req, 'admin_revoke_invite', `invite #${invite.id}`, '');
   res.json({ ok: true });
 });
 
