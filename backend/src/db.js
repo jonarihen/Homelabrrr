@@ -176,6 +176,23 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// ISO catalog (installer ISOs downloaded onto a PVE storage as `iso` content)
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS isos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    node TEXT NOT NULL,
+    storage TEXT NOT NULL,
+    volid TEXT DEFAULT '',
+    size INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'downloading',
+    status_detail TEXT DEFAULT '',
+    upid TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`); } catch { /* exists */ }
+
 // Track provisioned VMs
 try { db.exec(`
   CREATE TABLE IF NOT EXISTS provisioned_vms (
@@ -208,6 +225,15 @@ try { db.exec("ALTER TABLE provisioned_vms ADD COLUMN steps TEXT DEFAULT ''"); }
 try {
   db.prepare(
     "UPDATE provisioned_vms SET status = 'error', status_detail = 'Provisioning was interrupted by a server restart — check the VM in Proxmox' WHERE status IN ('cloning', 'creating', 'configuring')"
+  ).run();
+} catch { /* table may not exist yet on a brand-new DB */ }
+
+// ISO downloads are finalized by an in-process background poller too — a row
+// still 'downloading' at startup was orphaned by a restart and can never
+// finish, so mark it errored instead of spinning forever in the UI.
+try {
+  db.prepare(
+    "UPDATE isos SET status = 'error', status_detail = 'Download was interrupted by a server restart — remove it and add it again' WHERE status = 'downloading'"
   ).run();
 } catch { /* table may not exist yet on a brand-new DB */ }
 

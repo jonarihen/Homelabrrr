@@ -7,6 +7,13 @@
 - Admins can grant **Create VMs** per user on the Users page (next to Provision VMs) or on a role — the toggle now takes effect everywhere
 - Users without the permission are unchanged: the From Scratch tab stays hidden and both the create route and the ISO listing return 403
 
+## 2026-07-10 — ISO catalog: download and manage installer ISOs
+
+- New **ISO Catalog** on the Templates admin page (alongside Cloud Images): paste a name + URL + node + storage (and optional SHA256 checksum) and Proxmox downloads the ISO onto the storage as `iso` content, with live downloading / ready / error status polling — the same UX as the cloud-image catalog
+- List all catalogued ISOs with size and status; **Remove** deletes both the PVE volume and the catalog row
+- Download URLs are validated against internal/reserved addresses (same SSRF guard and `ALLOW_INTERNAL_IMAGE_URLS` opt-out as cloud images); actions are audit-logged
+- Gated behind the same **Manage Templates** permission cloud images use. (The from-scratch create-VM ISO picker that consumes this catalog ships with #20.)
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder

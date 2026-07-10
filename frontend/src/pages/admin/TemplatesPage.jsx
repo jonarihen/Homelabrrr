@@ -139,6 +139,8 @@ export default function TemplatesPage() {
 
       <CloudImagesSection onTemplatesChanged={load} />
 
+      <IsosSection />
+
       {showForm && (
         <TemplateFormModal
           template={editTemplate}
@@ -496,6 +498,240 @@ function CreateTemplateModal({ image, onClose, onStarted }) {
 
         <button type="submit" disabled={saving || !form.storage} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
           {saving ? 'Starting...' : 'Create Template'}
+        </button>
+      </form>
+    </Modal>
+  );
+}
+
+// ── ISO catalog (download installer ISOs onto a PVE storage) ────────────────
+
+const ISO_PRESETS = [
+  { label: 'Debian 12 netinst (amd64)', name: 'Debian 12 netinst', url: 'https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-12.11.0-amd64-netinst.iso' },
+  { label: 'Ubuntu 24.04 Live Server', name: 'Ubuntu 24.04 Server', url: 'https://releases.ubuntu.com/24.04/ubuntu-24.04.2-live-server-amd64.iso' },
+  { label: 'Rocky Linux 9 (minimal)', name: 'Rocky 9 minimal', url: 'https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso' },
+  { label: 'AlmaLinux 9 (minimal)', name: 'AlmaLinux 9 minimal', url: 'https://repo.almalinux.org/almalinux/9/isos/x86_64/AlmaLinux-9-latest-x86_64-minimal.iso' },
+];
+
+const isoStatusCls = {
+  ready: 'bg-green-500/10 text-green-400 ring-green-500/20',
+  downloading: 'bg-yellow-500/10 text-yellow-400 ring-yellow-500/20',
+  error: 'bg-red-500/10 text-red-400 ring-red-500/20',
+};
+
+function IsosSection() {
+  const [isos, setIsos] = useState([]);
+  const [showAdd, setShowAdd] = useState(false);
+
+  const load = async () => {
+    try {
+      const r = await api.get('/isos');
+      setIsos(r.data);
+    } catch { /* section is admin-only; errors surface on actions */ }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  // Poll while anything is downloading
+  useEffect(() => {
+    if (!isos.some(i => i.status === 'downloading')) return undefined;
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [isos]);
+
+  const remove = async (iso) => {
+    // NOTE: native confirm/alert mirrors the sibling CloudImagesSection on this
+    // page; the in-app notify/confirm dialogs live in a separate a11y branch and
+    // will convert this page's dialogs in one pass once merged.
+    if (!confirm(`Delete ISO "${iso.name}"? The downloaded file is removed from ${iso.storage}.`)) return;
+    try {
+      await api.delete(`/isos/${iso.id}`);
+      load();
+    } catch (e) {
+      alert(e.response?.data?.error || 'Failed to delete');
+    }
+  };
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <h2 className="aaris-display text-lg text-gray-100">ISO Catalog</h2>
+          <p className="text-sm text-gray-500 mt-1">Download installer ISOs by URL — Proxmox fetches them onto a storage, ready to boot a from-scratch VM</p>
+        </div>
+        <button
+          onClick={() => setShowAdd(true)}
+          className="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-gray-200 px-4 py-2 rounded-xl text-sm font-medium transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+          Add ISO
+        </button>
+      </div>
+
+      {isos.length === 0 ? (
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 text-center">
+          <p className="text-sm text-gray-500">No ISOs catalogued yet. Add an installer ISO by URL to boot from-scratch VMs from it.</p>
+        </div>
+      ) : (
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
+                <th className="text-left px-4 py-3">ISO</th>
+                <th className="text-left px-4 py-3">Location</th>
+                <th className="text-left px-4 py-3">Size</th>
+                <th className="text-left px-4 py-3">Status</th>
+                <th className="text-right px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {isos.map(iso => (
+                <tr key={iso.id} className="border-b border-gray-800 last:border-0">
+                  <td className="px-4 py-3">
+                    <p className="text-white font-medium">{iso.name}</p>
+                    {iso.status_detail && (
+                      <p className={`text-xs mt-1 ${iso.status === 'error' ? 'text-red-400' : 'text-gray-500'}`}>{iso.status_detail}</p>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-gray-500 font-mono text-xs">{displayNode(iso.node)} / {iso.storage}</td>
+                  <td className="px-4 py-3 text-gray-400 text-xs">{fmtSize(iso.size)}</td>
+                  <td className="px-4 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded-full ring-1 ${isoStatusCls[iso.status] || isoStatusCls.error}`}>
+                      {iso.status === 'downloading' ? (
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+                          {iso.status}
+                        </span>
+                      ) : iso.status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <button
+                      onClick={() => remove(iso)}
+                      disabled={iso.status === 'downloading'}
+                      className="text-xs text-red-400 hover:text-red-300 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 rounded-lg border border-red-500/20 hover:border-red-500/40 transition-colors"
+                    >
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {showAdd && <IsoFormModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); }} />}
+    </div>
+  );
+}
+
+function IsoFormModal({ onClose, onSaved }) {
+  const [nodes, setNodes] = useState([]);
+  const [storages, setStorages] = useState([]);
+  const [form, setForm] = useState({ preset: '', name: '', url: '', node: '', storage: '', checksum: '' });
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!form.node) return;
+    api.get(`/provision/nodes/${form.node}/storages`)
+      .then(r => {
+        const isoCapable = r.data.filter(s => s.content?.includes('iso'));
+        setStorages(isoCapable);
+        if (!isoCapable.find(s => s.storage === form.storage)) {
+          setForm(f => ({ ...f, storage: isoCapable[0]?.storage || '' }));
+        }
+      })
+      .catch(() => setStorages([]));
+  }, [form.node]);
+
+  const applyPreset = (idx) => {
+    const p = ISO_PRESETS[idx];
+    setForm(f => ({ ...f, preset: idx, ...(p ? { name: p.name, url: p.url } : {}) }));
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true); setError('');
+    try {
+      await api.post('/isos', {
+        name: form.name,
+        url: form.url,
+        node: form.node,
+        storage: form.storage,
+        checksum: form.checksum || undefined,
+      });
+      onSaved();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to start download');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal title="Add ISO" onClose={onClose} size="md">
+      <form onSubmit={submit} className="p-5 space-y-4">
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">Preset</label>
+          <select value={form.preset} onChange={e => applyPreset(e.target.value)} className={inputCls}>
+            <option value="">Custom URL…</option>
+            {ISO_PRESETS.map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">Name</label>
+          <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} placeholder="Debian 12 netinst" />
+        </div>
+
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">ISO URL</label>
+          <input type="url" required value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} className={inputCls} placeholder="https://cdimage.debian.org/…/debian-12-amd64-netinst.iso" />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5">Node</label>
+            <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
+              <option value="">Select node...</option>
+              {nodes.map(n => (
+                <option key={routeNode(n)} value={routeNode(n)}>
+                  {displayNode(n.node)}{n.hostName ? ` (${n.hostName})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5">Download to Storage</label>
+            <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
+              <option value="">Select...</option>
+              {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
+            </select>
+          </div>
+        </div>
+
+        {form.node && storages.length === 0 && (
+          <p className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/30 rounded-lg p-2.5">
+            No ISO-capable storage on this node. In the PVE UI, enable the "ISO image" content type on a
+            storage (Datacenter → Storage → e.g. local → Content) first.
+          </p>
+        )}
+
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">SHA256 checksum (optional)</label>
+          <input type="text" value={form.checksum} onChange={e => setForm(f => ({ ...f, checksum: e.target.value }))} className={`${inputCls} font-mono`} placeholder="Verify the download (recommended)" />
+        </div>
+
+        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
+
+        <button type="submit" disabled={saving || !form.node || !form.storage} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+          {saving ? 'Starting download...' : 'Download ISO'}
         </button>
       </form>
     </Modal>
