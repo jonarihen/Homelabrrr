@@ -21,6 +21,7 @@ import FirewallsPage from './pages/admin/FirewallsPage.jsx';
 import PoliciesPage from './pages/admin/PoliciesPage.jsx';
 import PortForwardingPage from './pages/admin/PortForwardingPage.jsx';
 import LeasesPage from './pages/admin/LeasesPage.jsx';
+import WorkflowsPage from './pages/admin/WorkflowsPage.jsx';
 import SSHKeysPage from './pages/SSHKeysPage.jsx';
 import AccountPage from './pages/AccountPage.jsx';
 import ProvisionPage from './pages/ProvisionPage.jsx';
@@ -105,6 +106,7 @@ export default function App() {
               <Route path="assignments" element={<AssignmentsPage />} />
               <Route path="hosts" element={<PVEHostsPage />} />
               <Route path="firewalls" element={<FirewallsPage />} />
+              <Route path="workflows" element={<WorkflowsPage />} />
               <Route path="policies" element={<PoliciesPage />} />
               <Route path="port-forwarding" element={<PortForwardingPage />} />
               <Route path="websites" element={<AdminWebsitesPage />} />

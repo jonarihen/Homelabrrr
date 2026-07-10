@@ -25,6 +25,8 @@ import portalRoutes from './routes/portal.js';
 import notificationRoutes from './routes/notifications.js';
 import { pollNodeHealth } from './utils/notify.js';
 import websiteRoutes from './routes/websites.js';
+import workflowRoutes from './routes/workflows.js';
+import { seedAllFirewalls } from './workflows/store.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
@@ -139,7 +141,17 @@ app.use('/api/isos', isoRoutes);
 app.use('/api/portal', portalRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/websites', websiteRoutes);
+app.use('/api/workflows', workflowRoutes);
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+// Seed built-in default workflows for every registered firewall (migration).
+// Idempotent: only inserts a workflow+steps for a (firewall, trigger) with none.
+try {
+  const count = seedAllFirewalls();
+  if (count > 0) console.log(`[workflows] Ensured default provisioning workflows for ${count} firewall(s)`);
+} catch (err) {
+  console.warn('[workflows] Default workflow seeding failed:', err.message);
+}
 
 // Global error handler — sanitize leaked details
 app.use((err, _req, res, _next) => {

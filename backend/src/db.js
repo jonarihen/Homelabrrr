@@ -620,6 +620,66 @@ try {
     "UPDATE caddy_sites SET status = 'error', status_detail = 'Publishing was interrupted by a server restart — retry from the Websites page' WHERE status IN ('validating', 'pushing', 'issuing', 'inspecting')"
   ).run();
 } catch { /* table may not exist yet on a brand-new DB */ }
+// ─── Configurable FortiGate provisioning workflows (#16) ─────────────────────
+// A workflow is an ordered, per-firewall+trigger list of whitelisted steps that
+// replaces the old hardcoded provisioning chains. Runs record every created
+// artifact so deprovision is artifact-based (reverse order), never re-derived.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS workflows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    firewall_id INTEGER NOT NULL REFERENCES firewalls(id) ON DELETE CASCADE,
+    trigger TEXT NOT NULL,
+    name TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    is_default INTEGER DEFAULT 1,
+    settings TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(firewall_id, trigger)
+  )
+`); } catch { /* exists */ }
+
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS workflow_steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    step_key TEXT DEFAULT '',
+    action TEXT NOT NULL,
+    label TEXT DEFAULT '',
+    params TEXT DEFAULT '{}',
+    condition TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    continue_on_error INTEGER DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_workflow_steps_wf ON workflow_steps(workflow_id, position);
+`); } catch { /* exists */ }
+
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS workflow_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER REFERENCES workflows(id) ON DELETE SET NULL,
+    firewall_id INTEGER,
+    trigger TEXT DEFAULT '',
+    subject_type TEXT DEFAULT '',
+    subject_id TEXT DEFAULT '',
+    subject_label TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    log TEXT DEFAULT '[]',
+    artifacts TEXT DEFAULT '[]',
+    dry_run INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_workflow_runs_wf ON workflow_runs(workflow_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_workflow_runs_subject ON workflow_runs(firewall_id, subject_type, subject_id);
+`); } catch { /* exists */ }
+
+// Artifact-based teardown: record every object a sync/port-forward run created
+// so deprovision removes exactly those (reverse order). Legacy rows have NULL
+// artifacts and keep working through the original live-query deprovision path.
+try { db.exec('ALTER TABLE firewall_vlan_sync ADD COLUMN artifacts TEXT DEFAULT NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE firewall_vlan_sync ADD COLUMN workflow_run_id INTEGER'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE managed_vips ADD COLUMN artifacts TEXT DEFAULT NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE managed_vips ADD COLUMN workflow_run_id INTEGER'); } catch { /* exists */ }
 
 assertSecretEncryptionKey();
 
