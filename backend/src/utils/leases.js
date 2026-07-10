@@ -253,32 +253,38 @@ export async function runLeaseSweep() {
 
   let stopped = 0;
   for (const lease of due) {
-    const candidates = nodeLookupCandidates(lease.node);
-    const live = vms.find(v => Number(v.vmid) === lease.vmid
-      && (candidates.includes(v.nodeRef) || candidates.includes(v.node)));
+    // Guard every lease independently: a single failing row (a stuck upstream
+    // call, a bad DB write) must never abort the sweep of the remaining ones.
+    try {
+      const candidates = nodeLookupCandidates(lease.node);
+      const live = vms.find(v => Number(v.vmid) === lease.vmid
+        && (candidates.includes(v.nodeRef) || candidates.includes(v.node)));
 
-    let autoStopped = 0;
-    if (live && live.status === 'running') {
-      try {
-        // Graceful ACPI shutdown — never a hard stop, never a delete.
-        if (live.type === 'lxc') await lxcAction(lease.node, lease.vmid, 'shutdown');
-        else await vmAction(lease.node, lease.vmid, 'shutdown');
-        autoStopped = 1;
-        stopped += 1;
-        logSystemAudit('lease_expired_autostop', `${lease.node}/${lease.vmid}`, 'Lease expired — VM gracefully shut down');
-      } catch (err) {
-        logSystemAudit('lease_autostop_failed', `${lease.node}/${lease.vmid}`, err.message);
+      let autoStopped = 0;
+      if (live && live.status === 'running') {
+        try {
+          // Graceful ACPI shutdown — never a hard stop, never a delete.
+          if (live.type === 'lxc') await lxcAction(lease.node, lease.vmid, 'shutdown');
+          else await vmAction(lease.node, lease.vmid, 'shutdown');
+          autoStopped = 1;
+          stopped += 1;
+          logSystemAudit('lease_expired_autostop', `${lease.node}/${lease.vmid}`, 'Lease expired — VM gracefully shut down');
+        } catch (err) {
+          logSystemAudit('lease_autostop_failed', `${lease.node}/${lease.vmid}`, err.message);
+        }
+      } else {
+        logSystemAudit('lease_expired', `${lease.node}/${lease.vmid}`, live ? 'VM already stopped' : 'VM not found in cluster');
       }
-    } else {
-      logSystemAudit('lease_expired', `${lease.node}/${lease.vmid}`, live ? 'VM already stopped' : 'VM not found in cluster');
+
+      // Owners are notified in-app via the Overview (Dashboard) expiry notice,
+      // which derives from each VM's lease status. Discord expiry warnings are a
+      // separate feature (#22) and are deliberately not wired here.
+
+      db.prepare("UPDATE vm_leases SET expired = 1, expired_at = datetime('now'), auto_stopped = ? WHERE id = ?")
+        .run(autoStopped, lease.id);
+    } catch (err) {
+      logSystemAudit('lease_sweep_error', `${lease.node}/${lease.vmid}`, err.message);
     }
-
-    // TODO(#22): notify the VM owner here (Overview notice + Discord webhook)
-    // when the notifications module lands. Deliberately NOT importing a notify
-    // module — it does not exist on this branch yet.
-
-    db.prepare("UPDATE vm_leases SET expired = 1, expired_at = datetime('now'), auto_stopped = ? WHERE id = ?")
-      .run(autoStopped, lease.id);
   }
 
   return { checked: due.length, stopped };

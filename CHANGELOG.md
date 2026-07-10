@@ -5,8 +5,9 @@
 - Every provisioned VM now gets a **lease** — a TTL that starts at provisioning. VM cards and the VM page show a countdown badge (e.g. **"Expires in 12 days"**) that turns amber near expiry and red once expired
 - Owners can **renew** in one click from the VM page — it resets the clock and bumps a renewal count that admins can see
 - On expiry a background checker **gracefully stops** the VM (never deletes it) and flags it. After an admin-configurable **grace period** it appears in a new admin **VM Leases** reclaimable list for manual deletion
+- Owners get an **Overview notice** on their dashboard when a VM has expired (and been stopped) or is expiring soon, with one-click links to renew
 - New admin **VM Leases** page (Infrastructure section): set the **default lease duration** and **grace period**, see the whole roster with owner + live status, **renew / adjust / extend** any lease, **exempt** infra VMs so they never expire, run the sweep on demand, and **backfill** leases onto VMs that predate the feature
-- All lease actions (auto-stop, renew, adjust, sweep) are audit-logged; the sweep runs `system` audit entries. Owner expiry notifications are stubbed pending the notifications feature (#22)
+- All lease actions (auto-stop, renew, adjust, sweep) are audit-logged; the sweep runs `system` audit entries. Discord expiry warnings remain a separate feature (#22)
 
 ## 2026-07-09 — Roles can carry default quotas
 
