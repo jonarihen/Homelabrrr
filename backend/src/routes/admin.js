@@ -279,6 +279,15 @@ router.put('/users/:id/can-provision', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+router.put('/users/:id/can-create-vms', requireAdmin, (req, res) => {
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const { enabled } = req.body;
+  db.prepare('UPDATE users SET can_create_vms = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
+  logAudit(req, 'admin_toggle_permission', req.params.id, `can_create_vms=${enabled ? 1 : 0}`);
+  res.json({ ok: true });
+});
+
 // Permission toggle endpoint for all granular permissions
 router.put('/users/:id/permission', requireAdmin, (req, res) => {
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);

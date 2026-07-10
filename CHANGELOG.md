@@ -4,6 +4,7 @@
 
 - The **Create VMs** permission (`can_create_vms`) is now wired up: a user who holds it (directly, or via a role) can build a VM **from scratch / from an available ISO** on the **From Scratch** tab of the New VM page — no admin rights needed
 - Non-admin builders are constrained the same way as the cloud-image flow: the **network bridge is pinned to the default (vmbr0)** — the bridge picker is hidden — the **VM is self-assigned to the creator** (the Assign-to field stays admin-only), only VLANs the user has access to can be tagged, and owner/VLAN PVE tags are stamped as usual. Node capacity and per-user quota checks still apply, and the deployment progress stepper works exactly as it does for the other flows
+- Admins can grant **Create VMs** per user on the Users page (next to Provision VMs) or on a role — the toggle now takes effect everywhere
 - Users without the permission are unchanged: the From Scratch tab stays hidden and both the create route and the ISO listing return 403
 
 ## 2026-07-09 — Roles can carry default quotas

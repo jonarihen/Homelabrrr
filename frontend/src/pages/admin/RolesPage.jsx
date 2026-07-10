@@ -11,7 +11,7 @@ const PERM_GROUPS = [
     perms: [
       { key: 'see_all_vms',    label: 'Access all VMs',  desc: 'See every VM on Proxmox without individual assignments' },
       { key: 'can_provision',  label: 'Provision VMs',   desc: 'Create VMs from templates and cloud images' },
-      { key: 'can_create_vms', label: 'Create VMs',      desc: 'Build VMs from scratch (reserved for upcoming ISO-based creation)' },
+      { key: 'can_create_vms', label: 'Create VMs',      desc: 'Build VMs from scratch / from an available ISO' },
       { key: 'can_edit_vm_hardware', label: 'Edit VM Hardware', desc: 'Change CPU, memory, and disk size on assigned VMs' },
     ],
   },
