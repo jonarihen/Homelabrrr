@@ -62,6 +62,14 @@
 - Webhook URLs are **encrypted at rest** and only ever shown masked; every webhook config change is audit-logged
 - Users can **opt out** of notifications about their own resources from the Account page
 - New env knobs: `PORTAL_BASE_URL` (link-back base for embeds, falls back to `ALLOWED_ORIGIN`) and `NODE_HEALTH_POLL_MS` (health-monitor interval; `0` disables it)
+## 2026-07-10 — Personal API tokens for scripting
+
+- You can now create **personal API tokens** from the Account page and use them to script against the portal — `curl`, cron jobs, CI, Terraform-style tooling — without your session cookie or juggling 2FA. Send the token as `Authorization: Bearer <token>`.
+- A token acts as **you**: it carries exactly your permissions, VM ownership, and quotas, resolved live on every request, so a token is never more powerful than its owner and any role change takes effect immediately.
+- The plaintext secret is shown **once** at creation and never again — only a SHA-256 hash is stored. Give each token a name, an optional expiry (7/30/90/365 days or never), see when it was last used, and **revoke** it instantly.
+- Sensitive account operations — managing tokens, changing your password, and anything touching 2FA — are **interactive-session only** and are rejected over token auth. VNC/SSH consoles also stay session-only.
+- Every token-authenticated action is attributed in the **audit log** as `username (token: <name>)`; creation and revocation are logged too. Failed token attempts are rate-limited like logins.
+- Admins can **list and revoke** any user's tokens from the new API Tokens tab in the Users → Manage dialog.
 
 ## 2026-07-09 — Roles can carry default quotas
 

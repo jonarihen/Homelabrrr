@@ -9,9 +9,15 @@ export function logAuditEntry({ userId = null, username = 'system', action, targ
 }
 
 export function logAudit(req, action, target = '', detail = '') {
+  let username = req.session?.username || 'anonymous';
+  // Attribute token-authenticated requests so scripted actions are traceable
+  // to the specific personal API token that made them.
+  if (req.apiToken?.name) {
+    username = `${username} (token: ${req.apiToken.name})`;
+  }
   logAuditEntry({
     userId: req.session?.userId || null,
-    username: req.session?.username || 'anonymous',
+    username,
     action,
     target,
     detail,

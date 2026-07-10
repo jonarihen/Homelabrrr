@@ -4,7 +4,7 @@ import db from '../db.js';
 import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools } from '../proxmox.js';
 import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibility.js';
 import { createClient, vlanTagToSubnet } from '../fortigate.js';
-import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
+import { requireAuth, requireAdmin, requirePermission, requireInteractiveSession } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
@@ -217,6 +217,38 @@ router.post('/users/:id/reset-2fa', requireAdmin, (req, res) => {
   if (!user) return res.status(404).json({ error: 'User not found' });
   db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.params.id);
   logAudit(req, 'admin_reset_2fa', req.params.id, '');
+  res.json({ ok: true });
+});
+
+// ─── API tokens (admin oversight) ─────────────────────────────────────────────
+// Admins (or can_manage_users delegates) can list and revoke any user's personal
+// API tokens. Token secrets/hashes are never exposed. Interactive-session only.
+
+router.get('/users/:id/tokens', requireInteractiveSession, pUsers, (req, res) => {
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const rows = db.prepare(
+    'SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC'
+  ).all(req.params.id);
+  res.json(rows.map(r => ({
+    id: r.id,
+    name: r.name,
+    createdAt: r.created_at,
+    expiresAt: r.expires_at,
+    lastUsedAt: r.last_used_at,
+    expired: !!r.expires_at && new Date(r.expires_at.replace(' ', 'T') + 'Z').getTime() < Date.now(),
+  })));
+});
+
+router.delete('/tokens/:id', requireInteractiveSession, pUsers, (req, res) => {
+  const token = db.prepare(`
+    SELECT t.id, t.name, u.username FROM api_tokens t
+    JOIN users u ON u.id = t.user_id
+    WHERE t.id = ?
+  `).get(req.params.id);
+  if (!token) return res.status(404).json({ error: 'Token not found' });
+  db.prepare('DELETE FROM api_tokens WHERE id = ?').run(token.id);
+  logAudit(req, 'admin_revoke_api_token', token.name, `owner: ${token.username}`);
   res.json({ ok: true });
 });
 
