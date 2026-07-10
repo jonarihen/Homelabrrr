@@ -24,6 +24,8 @@ import LeasesPage from './pages/admin/LeasesPage.jsx';
 import SSHKeysPage from './pages/SSHKeysPage.jsx';
 import AccountPage from './pages/AccountPage.jsx';
 import ProvisionPage from './pages/ProvisionPage.jsx';
+import WebsitesPage from './pages/WebsitesPage.jsx';
+import AdminWebsitesPage from './pages/admin/WebsitesPage.jsx';
 
 function PrivateRoute({ children, allow2faBypass }) {
   const { user, loading } = useAuth();
@@ -59,6 +61,7 @@ function AdminIndexRedirect() {
   if (can('canManageVlans')) return <Navigate to="/admin/vlans" replace />;
   if (can('canManagePolicies')) return <Navigate to="/admin/policies" replace />;
   if (can('canManagePortForwards')) return <Navigate to="/admin/port-forwarding" replace />;
+  if (can('canManageWebsites')) return <Navigate to="/admin/websites" replace />;
   if (can('canManageAssignments')) return <Navigate to="/admin/assignments" replace />;
   if (can('canViewAuditLog')) return <Navigate to="/admin/audit-log" replace />;
   return <Navigate to="/dashboard" replace />;
@@ -90,6 +93,7 @@ export default function App() {
             <Route path="/vnc/:node/:vmid" element={<PrivateRoute><VNCPage /></PrivateRoute>} />
             <Route path="/ssh/:node/:vmid" element={<PrivateRoute><SSHPage /></PrivateRoute>} />
             <Route path="/provision" element={<PrivateRoute><ProvisionPage /></PrivateRoute>} />
+            <Route path="/websites" element={<PrivateRoute><WebsitesPage /></PrivateRoute>} />
             <Route path="/ssh-keys" element={<PrivateRoute><SSHKeysPage /></PrivateRoute>} />
             <Route path="/account" element={<PrivateRoute allow2faBypass><AccountPage /></PrivateRoute>} />
 
@@ -103,6 +107,7 @@ export default function App() {
               <Route path="firewalls" element={<FirewallsPage />} />
               <Route path="policies" element={<PoliciesPage />} />
               <Route path="port-forwarding" element={<PortForwardingPage />} />
+              <Route path="websites" element={<AdminWebsitesPage />} />
               <Route path="templates" element={<TemplatesPage />} />
               <Route path="leases" element={<LeasesPage />} />
               <Route path="notifications" element={<NotificationsPage />} />

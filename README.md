@@ -41,6 +41,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Tag auto-sync | Owner + VLAN tags are re-stamped on every VM automatically in the background on a schedule (default every 6h), correcting drift from raw PVE tag edits, renamed VLANs, or migrations — with an admin pause switch (persists across restarts), a configurable interval, live force-sync progress, and last-run / per-VM-failure visibility |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
+| Website publishing | Self-service reverse-proxy publishing through an external Caddy server: DNS-validate a domain against the homelab WAN IP, push an `@id`-tagged route via the Caddy admin API, let Caddy obtain a Let's Encrypt cert, and attach the synced cert to the FortiGate SSL/SSH inspection profile — with per-user ownership and upstream-target restrictions |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
 | Storage exposure | Admins pick which Proxmox storage pools users may deploy onto, per host; hidden pools vanish from the provisioning dropdowns and are rejected server-side. Every pool is exposed by default, so nothing changes until you restrict one |
 | Node maintenance | Soft-drain a Proxmox node before a planned reboot/upgrade: new provisioning to it is blocked with a clear reason, the node is greyed out in pickers, an Overview notice is auto-published for every user, and health shows amber "maintenance" (not red "down"). Running VMs are untouched, and maintenance can auto-expire at a set end time |
@@ -56,6 +57,8 @@ This project pulls those into one interface so users can work inside guardrails 
 
 - `My VMs` — assigned VM/LXC inventory with search, filter, sort, selection, and bulk actions
 - `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and build-from-scratch (from an available ISO) for admins and users with the **Create VMs** permission, each with a live deployment progress stepper
+- `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and create-from-scratch for admins, each with a live deployment progress stepper
+- `Websites` — publish a domain through the homelab reverse proxy: DNS check → route pushed to Caddy → Let's Encrypt cert → cert attached to FortiGate SSL inspection, shown as a live step-progress flow; users see and manage only their own sites
 - `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore; backups are grouped per storage location and show encryption, verification, and protection status for PBS-backed stores
 - `Power Schedule` — from a VM's detail page, set an automatic stop/start window (stop time, start time, active days, timezone) so idle VMs sleep overnight; manually starting inside the off-window keeps the VM up until the next scheduled stop, and a "skip tonight" button skips just the next shutdown
 - `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs; VNC consoles have a Paste button that types the clipboard into the guest (SSH terminals take native browser paste)
@@ -73,6 +76,9 @@ This project pulls those into one interface so users can work inside guardrails 
 - `Assignments` — VM and VLAN-to-user mapping, grouped per user with unassigned VMs listed first; unassigned VMs can be claimed for your own account (per VM, or all at once — handy for fleets that predate the portal); owner + VLAN are stamped as Proxmox tags on each VM so ownership is visible in the PVE UI too. A **PVE Tag Auto-Sync** card runs the fleet-wide tag sync automatically in the background (default every 6h) and lets an admin pause/resume it, change the interval, and force an on-demand sync with live progress and last-run / failure visibility
 - `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, personal API token oversight (list/revoke), lockout unlocks, and enforced 2FA
 - `Invites` — generate one-time self-registration links (choose role/permissions, quotas, VLAN access, expiry, and optional required-2FA); copy the single-use URL, track open/used/expired/revoked invites, and revoke unused ones. Tokens are stored hashed and every generate/consume/revoke is audit-logged
+- `Websites` — register the external Caddy server (admin API URL, optional auth, TLS verify), set the homelab WAN IP (manual or auto-read from the linked FortiGate), pick the SSL/SSH inspection profile, and see every published site with its owner (with reassignment)
+- `Assignments` — VM and VLAN-to-user mapping, grouped per user with unassigned VMs listed first; unassigned VMs can be claimed for your own account (per VM, or all at once — handy for fleets that predate the portal); owner + VLAN are stamped as Proxmox tags on each VM (with a bulk "Sync PVE Tags" action) so ownership is visible in the PVE UI too
+- `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, lockout unlocks, and enforced 2FA
 - `Roles` — named permission sets (built-in Administrator/User plus custom roles); editing a role updates every user holding it
 - `VM Leases` — set the default lease duration + grace period, review every VM's lease with owner and live status, renew/adjust/extend any lease, exempt infra VMs, run the expiry sweep on demand, and backfill leases onto VMs that predate the feature; expired-past-grace VMs are highlighted as reclaimable
 - `Notifications` — add Discord webhooks, choose which event types each one receives, and send a test message; webhook URLs are encrypted at rest and all changes are audit-logged
@@ -142,6 +148,39 @@ curl -H "Authorization: Bearer hlr_your_token_here" https://portal.example.com/a
 A token carries **exactly** its owner's permissions, VM ownership, and quotas, resolved live on every request — it is never more powerful than the user, and revoking it (or the user losing a permission) takes effect immediately. Every token request is attributed in the audit log as `username (token: <name>)`.
 
 Interactive-session-only endpoints reject token auth: managing API tokens, changing your password, and anything touching 2FA. The VNC/SSH console websockets also remain session-only. Admins can list and revoke any user's tokens from **Users → Manage → API Tokens**.
+## Website Publishing (Caddy + FortiGate SSL inspection)
+
+Homelabrrr can drive an **external [Caddy](https://caddyserver.com/) reverse proxy** so users publish their own websites without an admin hand-editing the Caddy config. Caddy runs bare-metal on its own VM; Homelabrrr manages it entirely through the **Caddy admin API** (default `:2019`).
+
+### How it works
+
+1. An admin registers the Caddy server once on **Admin → Websites** (admin API URL, optional auth, TLS-verify), links a FortiGate, and sets the **homelab WAN IP** (typed manually or auto-read from the linked FortiGate's WAN interface / stored external IP). Optionally the admin picks the FortiGate **SSL/SSH inspection profile** to wire certs into.
+2. A user opens **Websites**, enters a domain, and picks an upstream target (address + port).
+3. Homelabrrr resolves the domain's **A record** (following CNAMEs) and checks it matches the homelab WAN IP. On a mismatch it says exactly what to point where.
+4. It builds the reverse-proxy route **JSON server-side** from the validated fields and pushes it to Caddy as an `@id`-tagged route (`homelabrrr-<site-id>`), so each site is created/updated/deleted individually and Homelabrrr **never touches a route it did not create**.
+5. Caddy obtains a **Let's Encrypt** certificate for the domain. The Caddy host runs [`caddy-forticertsync`](https://github.com/jonarihen/caddy-forticertsync), which syncs every issued/renewed cert into the FortiGate certificate store automatically.
+6. Homelabrrr finds the synced cert and attaches it to the FortiGate **SSL/SSH inspection profile** (`firewall/ssl-ssh-profile`, `server-cert`) so inbound inspection presents the real certificate.
+
+The whole flow is shown as a live step-progress stepper (DNS → route pushed → cert issued → inspection wired → live), and each step's state is persisted so it survives a page refresh.
+
+### Guardrails
+
+- **Ownership** — users see and manage only their own sites; admins see all sites with the owner shown and can reassign ownership.
+- **Upstream restriction** — a non-admin may only proxy to a target they own: the IP of a VM assigned to them, or an address inside one of their VLAN subnets. Admins are exempt.
+- **Domain uniqueness** — a domain already published by another user cannot be claimed again.
+- **No raw config injection** — users never submit Caddyfile/JSON; the domain is validated against a strict hostname regex and the upstream against IP/host + port validation, and the route JSON is assembled server-side.
+- **Rate limiting + audit** — DNS-validation checks are rate-limited, and every site create/update/delete and every ownership assignment is written to the audit log.
+- The **`can_manage_websites`** permission (grantable per user or via a role) gates the admin surface (server registration, all-sites view, assignment, WAN-IP config). Any authenticated user can publish their own sites once a Caddy server is registered.
+
+### ⚠️ Secure the Caddy admin API
+
+**The Caddy admin API is unauthenticated by default.** Anyone who can reach `:2019` has full control of Caddy's configuration. Before registering it:
+
+- Bind the admin API to an interface on a **management VLAN** that only Homelabrrr's backend can reach (Caddy's `admin` directive `listen`), **not** `0.0.0.0`.
+- Or front it with **mTLS / a token-checking reverse proxy** and register that endpoint (Homelabrrr can send a `Bearer`/`Basic`/raw `Authorization` header — encrypted at rest — for such a fronting proxy).
+- **Never** expose `:2019` to the internet or any untrusted network.
+
+Registered Caddy credentials, like all upstream secrets, are encrypted at rest. If the admin API URL is `https://` with a self-signed cert, TLS-verify can only be disabled when `ALLOW_INSECURE_UPSTREAM_TLS=true` is set (same policy as Proxmox/FortiGate).
 
 ## Quick Start
 

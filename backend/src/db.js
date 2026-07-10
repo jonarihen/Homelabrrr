@@ -252,6 +252,7 @@ try { db.exec('ALTER TABLE users ADD COLUMN can_manage_assignments INTEGER DEFAU
 try { db.exec('ALTER TABLE users ADD COLUMN can_view_audit_log INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_create_vms INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN can_edit_vm_hardware INTEGER DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE users ADD COLUMN can_manage_websites INTEGER DEFAULT 0'); } catch { /* exists */ }
 
 // ─── Roles (RBAC) ─────────────────────────────────────────────────────────────
 // A role is a named permission set; a user's effective permissions are their
@@ -570,6 +571,56 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// ─── Self-service website publishing (external Caddy + FortiGate SSL inspection) ──
+// A registered Caddy server is driven through its admin API; sites are the
+// individual reverse-proxy routes Homelabrrr owns (each tagged @id
+// homelabrrr-<site-id> in Caddy so we only ever touch our own routes).
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS caddy_servers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    api_url TEXT NOT NULL,
+    auth_type TEXT DEFAULT 'none',
+    auth_secret TEXT DEFAULT '',
+    server_name TEXT DEFAULT '',
+    verify_tls INTEGER DEFAULT 1,
+    wan_ip TEXT DEFAULT '',
+    fortigate_id INTEGER,
+    inspection_profile TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (fortigate_id) REFERENCES firewalls(id) ON DELETE SET NULL
+  )
+`); } catch { /* exists */ }
+
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS caddy_sites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    domain TEXT NOT NULL UNIQUE,
+    upstream_host TEXT NOT NULL,
+    upstream_port INTEGER NOT NULL DEFAULT 80,
+    owner_user_id INTEGER,
+    status TEXT DEFAULT 'pending',
+    status_detail TEXT DEFAULT '',
+    steps TEXT DEFAULT '',
+    fortigate_id INTEGER,
+    inspection_profile TEXT DEFAULT '',
+    cert_name TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (server_id) REFERENCES caddy_servers(id) ON DELETE CASCADE,
+    FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (fortigate_id) REFERENCES firewalls(id) ON DELETE SET NULL
+  )
+`); } catch { /* exists */ }
+
+// A publishing job left mid-flight at startup was orphaned by a crash/restart —
+// mark it so the UI stops spinning (same reasoning as provisioned_vms above).
+try {
+  db.prepare(
+    "UPDATE caddy_sites SET status = 'error', status_detail = 'Publishing was interrupted by a server restart — retry from the Websites page' WHERE status IN ('validating', 'pushing', 'issuing', 'inspecting')"
+  ).run();
+} catch { /* table may not exist yet on a brand-new DB */ }
+
 assertSecretEncryptionKey();
 
 function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {
@@ -593,6 +644,7 @@ const migrateSecrets = db.transaction(() => {
     users: migrateEncryptedColumn('users', 'id', 'totp_secret'),
     firewalls: migrateEncryptedColumn('firewalls', 'id', 'api_key'),
     notificationWebhooks: migrateEncryptedColumn('notification_webhooks', 'id', 'url'),
+    caddyServers: migrateEncryptedColumn('caddy_servers', 'id', 'auth_secret'),
   };
 
   const pveTlsMigrationKey = 'pve_verify_tls_secure_default_v1';

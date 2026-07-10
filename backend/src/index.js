@@ -24,6 +24,7 @@ import isoRoutes from './routes/isos.js';
 import portalRoutes from './routes/portal.js';
 import notificationRoutes from './routes/notifications.js';
 import { pollNodeHealth } from './utils/notify.js';
+import websiteRoutes from './routes/websites.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
@@ -137,6 +138,7 @@ app.use('/api/cloud-images', cloudImageRoutes);
 app.use('/api/isos', isoRoutes);
 app.use('/api/portal', portalRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/websites', websiteRoutes);
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 // Global error handler — sanitize leaked details

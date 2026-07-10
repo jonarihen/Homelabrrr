@@ -60,6 +60,7 @@ function serializeUser(user) {
       canManageAssignments: perms.can_manage_assignments,
       canViewAuditLog: perms.can_view_audit_log,
       canEditVmHardware: perms.can_edit_vm_hardware,
+      canManageWebsites: perms.can_manage_websites,
     },
   };
 }

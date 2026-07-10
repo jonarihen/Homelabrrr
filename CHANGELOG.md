@@ -77,6 +77,14 @@
 - **Manual overrides always win** — manually starting a VM inside its off-window keeps it running until the *next* scheduled stop, and a **Skip tonight** button skips just the next shutdown before normal enforcement resumes
 - Schedule state is visible at a glance: a **"sleeps 23:00–08:00"** badge shows on the VM card and the VM page header
 - Owners edit their own VM's schedule (**admins can edit any**); every automatic stop/start (and its outcome) is written to the **audit log**
+## 2026-07-10 — Self-service website publishing (Caddy + FortiGate SSL inspection)
+
+- New **Websites** page: publish a domain through the homelab reverse proxy without an admin hand-editing Caddy. Enter a domain, pick an upstream target, and Homelabrrr validates DNS, pushes the reverse-proxy route to the external **Caddy** admin API, waits for the Let's Encrypt certificate, and attaches the synced cert to the **FortiGate SSL/SSH inspection profile** — shown as a live step-progress flow like the VM deploy stepper
+- **DNS guardrail**: a domain is rejected with a clear message unless its A record (CNAMEs followed) points at the homelab WAN IP — the error tells you exactly what to point where
+- **Ownership guardrails**: users only ever see their own sites; a non-admin can only proxy to targets they own (an assigned VM's IP or an address inside their own VLAN subnet); a domain already published by someone else can't be claimed. Homelabrrr only ever touches the Caddy routes it created (each tagged `@id homelabrrr-<site-id>`) and never accepts raw Caddyfile/JSON — the route JSON is built server-side from validated fields
+- **Admin Websites page**: register the external Caddy server once (admin API URL, optional auth, TLS verify), configure the homelab WAN IP (manual or auto-read from the linked FortiGate), pick the SSL/SSH inspection profile, see **every** published site with its owner, and reassign site ownership
+- New **Manage Websites** permission (grantable per-user or via a role); Caddy admin-API credentials are **encrypted at rest**; every site create/update/delete/assign is **audit-logged**; DNS-validation checks are rate-limited
+- **Security note**: the Caddy admin API is unauthenticated by default — keep it on a management VLAN Homelabrrr can reach, or front it with mTLS / a token-checking proxy. Never expose `:2019` to untrusted networks (see README)
 
 ## 2026-07-09 — Roles can carry default quotas
 
