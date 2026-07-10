@@ -11,6 +11,9 @@ import { decodeNodeRef } from '../utils/nodeRef.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
 import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { PERMISSION_KEYS } from '../utils/permissions.js';
+import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.js';
+import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.js';
+import { deriveSubnet } from '../workflows/subnet.js';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -848,12 +851,19 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
     console.log(`[delete-vlan] Deprovisioning VLAN ${vlan.tag} (${sync.interface_name}) from ${sync.fw_name}`);
     try {
       const client = createClient(sync);
-      const policyIds = JSON.parse(sync.policy_ids || '[]');
-      const { errors } = await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
-        rootVdom: sync.root_vdom || 'root',
-        trunkSwitchSerial: sync.trunk_switch_serial || '',
-        trunkSwitchPort:   sync.trunk_switch_port   || '',
-      });
+      let errors;
+      if (sync.artifacts) {
+        // Artifact-based teardown of exactly what the sync run created.
+        ({ errors } = await teardownArtifacts(client, JSON.parse(sync.artifacts)));
+      } else {
+        // Legacy row — original live-query deprovision path.
+        const policyIds = JSON.parse(sync.policy_ids || '[]');
+        ({ errors } = await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
+          rootVdom: sync.root_vdom || 'root',
+          trunkSwitchSerial: sync.trunk_switch_serial || '',
+          trunkSwitchPort:   sync.trunk_switch_port   || '',
+        }));
+      }
       if (errors.length > 0) {
         console.warn(`[delete-vlan] Partial cleanup on ${sync.fw_name}:`, errors);
         fwResults.push({ firewall: sync.fw_name, status: 'partial', errors });
@@ -1099,6 +1109,9 @@ router.post('/firewalls', pFirewalls, (req, res) => {
     const r = db.prepare(
       'INSERT INTO firewalls (name, type, host, port, api_key, vdom, parent_interface, wan_interface, vlan_range_start, vlan_range_end, lab_vdom_link, root_vdom, root_vdom_link, route_gateway, trunk_switch_serial, trunk_switch_port, verify_tls, external_ip, root_wan_zone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(name, type, host, port, encryptSecret(apiKey), vdom, parentInterface, wanInterface, vlanRangeStart, vlanRangeEnd, labVdomLink, rootVdom, rootVdomLink, routeGateway, trunkSwitchSerial, trunkSwitchPort, verifyTls ? 1 : 0, externalIp, rootWanZone);
+    // Seed the built-in default provisioning workflows for the new firewall so
+    // it works out of the box; admins can then customize per trigger.
+    try { seedWorkflowsForFirewall(r.lastInsertRowid); } catch (e) { console.warn('[workflows] seed on firewall create failed:', e.message); }
     logAudit(req, 'admin_create_firewall', name, `${host}:${port} vdom=${vdom}`);
     res.json({ id: r.lastInsertRowid, name, host, port });
   } catch (err) {
@@ -1195,23 +1208,41 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
       try {
         console.log(`[sync] Provisioning VLAN ${vlan.tag} on ${fw.name} (${fw.host}:${fw.port} vdom=${fw.vdom})`);
         const client = createClient(fw);
-        const result = await client.provisionVlan(
-          vlan.tag, vlan.name, fw.parent_interface,
-          {
-            allowInternet, enableDhcp,
-            labVdomLink:  fw.lab_vdom_link  || 'lab-root0',
-            rootVdom:     fw.root_vdom      || 'root',
-            rootVdomLink: fw.root_vdom_link || 'lab-root1',
-            routeGateway: fw.route_gateway  || '10.255.254.2',
-            trunkSwitchSerial: fw.trunk_switch_serial || '',
-            trunkSwitchPort:   fw.trunk_switch_port   || '',
-          }
-        );
+
+        // Provisioning now runs through the configurable workflow engine. The
+        // seeded default `vlan_provision` workflow reproduces the historical
+        // hardcoded sequence exactly; edits to it change what the next sync does.
+        const bundle = getWorkflowBundle(fw.id, 'vlan_provision');
+        const settings = workflowSettings(bundle.workflow);
+        const subnet = deriveSubnet(vlan.tag, settings);
+        if (!subnet) throw new Error(`Cannot derive subnet from VLAN tag ${vlan.tag}`);
+        const context = {
+          tag: vlan.tag,
+          name: vlan.name,
+          subnet,
+          allowInternet: allowInternet !== false,
+          enableDhcp: enableDhcp !== false,
+          trunkConfigured: !!(fw.trunk_switch_serial && fw.trunk_switch_port),
+          firewall: buildFirewallContext(fw),
+        };
+        const { runId, outputs, artifacts } = await runBundle({
+          bundle, context, client, firewall: fw,
+          subjectType: 'vlan', subjectId: vlan.id, subjectLabel: `VLAN ${vlan.tag} (${vlan.name})`,
+        });
+        // Derive the legacy sync columns from step outputs generically so a
+        // renamed/reordered workflow still populates them. Artifacts (stored
+        // below) are the source of truth for teardown.
+        const outVals = Object.values(outputs);
+        const interfaceName = outVals.find((o) => o?.interfaceName)?.interfaceName || `vlan${vlan.tag}`;
+        const policyIds = outVals.map((o) => o?.policyId).filter((v) => v !== undefined && v !== null);
+        const dhcpServerId = outVals.find((o) => o?.dhcpServerId)?.dhcpServerId ?? null;
+        const staticRouteId = outVals.find((o) => o?.routeId)?.routeId ?? null;
+        const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet };
         console.log(`[sync] Success:`, JSON.stringify(result));
         db.prepare(
-          'INSERT INTO firewall_vlan_sync (firewall_id, vlan_id, interface_name, policy_ids, dhcp_server_id) VALUES (?, ?, ?, ?, ?)'
-        ).run(fw.id, vlan.id, result.interfaceName, JSON.stringify(result.policyIds), result.dhcpServerId || null);
-        logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${result.interfaceName} (${result.subnet.network})`);
+          'INSERT INTO firewall_vlan_sync (firewall_id, vlan_id, interface_name, policy_ids, dhcp_server_id, artifacts, workflow_run_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).run(fw.id, vlan.id, interfaceName, JSON.stringify(policyIds), dhcpServerId, JSON.stringify(artifacts), runId);
+        logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
         results.push({ firewall: fw.name, status: 'ok', ...result });
       } catch (err) {
         console.error(`[sync] Error provisioning VLAN ${vlan.tag} on ${fw.name}:`, err.message);
@@ -1236,12 +1267,18 @@ router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
 
   try {
     const client = createClient(sync);
-    const policyIds = JSON.parse(sync.policy_ids || '[]');
-    await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
-      rootVdom: sync.root_vdom || 'root',
-      trunkSwitchSerial: sync.trunk_switch_serial || '',
-      trunkSwitchPort:   sync.trunk_switch_port   || '',
-    });
+    if (sync.artifacts) {
+      // Artifact-based teardown: delete exactly what this run created (reverse order).
+      await teardownArtifacts(client, JSON.parse(sync.artifacts));
+    } else {
+      // Legacy row (synced before the workflow engine) — original live-query path.
+      const policyIds = JSON.parse(sync.policy_ids || '[]');
+      await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
+        rootVdom: sync.root_vdom || 'root',
+        trunkSwitchSerial: sync.trunk_switch_serial || '',
+        trunkSwitchPort:   sync.trunk_switch_port   || '',
+      });
+    }
   } catch (err) {
     console.error('Deprovision warning:', err.message);
   }
@@ -1371,47 +1408,38 @@ router.post('/policies', pPolicies, async (req, res) => {
     );
     if (dup) return res.status(409).json({ error: `Policy from ${srcVlan.interface_name} to ${dstVlan.interface_name} already exists (id: ${dup.policyid})` });
 
-    const policyIds = [];
-
-    // Forward policy
-    const fwdRes = await client.createPolicy({
-      name: `${srcVlan.interface_name}-to-${dstVlan.interface_name}`,
-      srcintf: [{ name: srcVlan.interface_name }],
-      dstintf: [{ name: dstVlan.interface_name }],
-      srcaddr: [{ name: srcAddrName }],
-      dstaddr: [{ name: dstAddrName }],
-      action,
-      schedule: 'always',
-      service: services.map(s => ({ name: s })),
-      logtraffic: 'all',
-      'global-label': `${srcVlan.name} (${srcVlan.interface_name})`,
-      comments: `Inter-VLAN policy created via VM Manager`,
-    });
-    if (fwdRes?.mkey) policyIds.push(fwdRes.mkey);
-
-    // Reverse policy if bidirectional
+    // The reverse policy is only created when bidirectional AND it doesn't
+    // already exist — decide here, then let the workflow's conditional step run.
+    let doReverse = false;
     if (bidirectional) {
       const revDup = existing.find(p =>
         (p.srcintf || []).some(i => i.name === dstVlan.interface_name) &&
         (p.dstintf || []).some(i => i.name === srcVlan.interface_name)
       );
-      if (!revDup) {
-        const revRes = await client.createPolicy({
-          name: `${dstVlan.interface_name}-to-${srcVlan.interface_name}`,
-          srcintf: [{ name: dstVlan.interface_name }],
-          dstintf: [{ name: srcVlan.interface_name }],
-          srcaddr: [{ name: dstAddrName }],
-          dstaddr: [{ name: srcAddrName }],
-          action,
-          schedule: 'always',
-          service: services.map(s => ({ name: s })),
-          logtraffic: 'all',
-          'global-label': `${dstVlan.name} (${dstVlan.interface_name})`,
-          comments: `Inter-VLAN policy created via VM Manager`,
-        });
-        if (revRes?.mkey) policyIds.push(revRes.mkey);
-      }
+      doReverse = !revDup;
     }
+
+    // Policy creation runs through the configurable workflow engine. The seeded
+    // default `policy_create` workflow reproduces the forward/reverse policy
+    // shapes exactly; the engine rolls back the forward policy if the reverse
+    // one fails.
+    const bundle = getWorkflowBundle(fw.id, 'policy_create');
+    const context = {
+      action,
+      bidirectional: doReverse,
+      services,
+      srcVlan: { interface_name: srcVlan.interface_name, name: srcVlan.name, tag: srcVlan.tag },
+      dstVlan: { interface_name: dstVlan.interface_name, name: dstVlan.name, tag: dstVlan.tag },
+      srcAddrName,
+      dstAddrName,
+      firewall: buildFirewallContext(fw),
+    };
+    const { outputs } = await runBundle({
+      bundle, context, client, firewall: fw,
+      subjectType: 'policy', subjectId: `${srcVlan.interface_name}->${dstVlan.interface_name}`,
+      subjectLabel: `${srcVlan.interface_name} → ${dstVlan.interface_name}`,
+    });
+    const policyIds = [outputs.forward?.policyId, outputs.reverse?.policyId].filter((v) => v !== undefined && v !== null);
 
     logAudit(req, 'admin_create_policy', `${srcVlan.interface_name} → ${dstVlan.interface_name}`, `services: ${services.join(',')} action: ${action}${bidirectional ? ' (bidirectional)' : ''}`);
     res.json({ policyIds });
@@ -1798,10 +1826,6 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
   name = buildPortSpecificCustomVipName(name, protocol, mappedPort);
 
   const serviceName = buildManagedVipServiceName(name, protocol, mappedPort);
-  let createdRootService = false;
-  let createdLabService = false;
-  let createdLabAddress = false;
-  let vipCreated = false;
   let policyId = null;
   let labPolicyId = null;
   let labAddressName = '';
@@ -1873,144 +1897,58 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
     if (existingService && !managedVipServiceMatches(existingService, protocol, mappedPort)) {
       return res.status(409).json({ error: `A managed service object named "${serviceName}" already exists with different port settings` });
     }
-    if (!existingService) {
-      await client.createServiceObject({
-        name: serviceName,
-        comment: `Managed port forward service for ${name}`,
-        ...(protocol === 'udp' ? { 'udp-portrange': String(mappedPort) } : { 'tcp-portrange': String(mappedPort) }),
-      }, rootVdom);
-      createdRootService = true;
-    }
 
     if (vlanInterface) {
       const existingLabService = await client.getServiceObject(serviceName, labVdom);
       if (existingLabService && !managedVipServiceMatches(existingLabService, protocol, mappedPort)) {
         return res.status(409).json({ error: `A lab VDOM service object named "${serviceName}" already exists with different port settings` });
       }
-      if (!existingLabService) {
-        await client.createServiceObject({
-          name: serviceName,
-          comment: `Managed port forward service for ${name}`,
-          ...(protocol === 'udp' ? { 'udp-portrange': String(mappedPort) } : { 'tcp-portrange': String(mappedPort) }),
-        }, labVdom);
-        createdLabService = true;
-      }
 
       const existingLabAddress = await client.getAddressObject(labAddressName, labVdom);
       if (existingLabAddress && !managedVipAddressMatches(existingLabAddress, mappedIp)) {
         return res.status(409).json({ error: `A lab VDOM address object named "${labAddressName}" already exists with a different IP` });
       }
-      if (!existingLabAddress) {
-        await client.createAddressObject({
-          name: labAddressName,
-          type: 'ipmask',
-          subnet: `${mappedIp} 255.255.255.255`,
-          comment: `Managed port forward destination for ${name}`,
-        }, '', labVdom);
-        createdLabAddress = true;
-      }
     }
 
-    // 1. Create the VIP
-    const vipPayload = {
+    // Object creation (service objects, VIP, and the inbound policy chain) runs
+    // through the configurable workflow engine. The seeded default
+    // `port_forward_create` workflow reproduces the historical sequence exactly;
+    // the engine records each created object and rolls back in reverse on failure.
+    const bundle = getWorkflowBundle(fw.id, 'port_forward_create');
+    const context = {
       name,
-      extip: externalIp,
-      mappedip: [{ range: mappedIp }],
-      extintf: 'any',
-      portforward: 'enable',
-      extport: String(extPort),
-      mappedport: String(mappedPort),
+      protocol,
+      externalPort: extPort,
+      internalIp: mappedIp,
+      internalPort: mappedPort,
+      dstInterface,
+      vlanInterface: vlanInterface || '',
+      srcAddresses,
+      serviceName,
+      labAddressName,
+      externalIp,
+      wanZone,
+      rootVdom,
+      labVdom,
+      labSrcInterface: fw.lab_vdom_link || 'lab-root0',
+      firewall: buildFirewallContext(fw),
     };
-    // Only set protocol if UDP (FortiGate defaults to tcp)
-    if (protocol === 'udp') vipPayload.protocol = 'udp';
+    const { runId, outputs, artifacts } = await runBundle({
+      bundle, context, client, firewall: fw,
+      subjectType: 'port_forward', subjectId: name, subjectLabel: name,
+    });
+    policyId = outputs.policy_root?.policyId ?? null;
+    labPolicyId = outputs.policy_lab?.policyId ?? null;
 
-    await client.createVip(vipPayload, rootVdom);
-    vipCreated = true;
-
-    // 2. Create the firewall policy in root VDOM (WAN → inter-VDOM link)
-    const policyRes = await client.createPolicy({
-      name: `PF: ${name}`,
-      srcintf: [{ name: wanZone }],
-      dstintf: [{ name: dstInterface }],
-      srcaddr: srcAddresses.map(a => ({ name: a })),
-      dstaddr: [{ name }],
-      action: 'accept',
-      schedule: 'always',
-      service: [{ name: serviceName }],
-      logtraffic: 'all',
-      'global-label': 'Port Forwarding (VM Manager)',
-      comments: `Auto-created by VM Manager for ${name}`,
-    }, rootVdom);
-    policyId = policyRes?.mkey || null;
-
-    // 3. Create the lab VDOM policy (inter-VDOM link → VLAN interface)
-    if (vlanInterface) {
-      const labSrcInterface = fw.lab_vdom_link || 'lab-root0';
-
-      // Find the VLAN's global-label for sequence grouping
-      const labPolicies = await client.getPolicies(labVdom);
-      const vlanGroupLabel = `Port Forwarding (${vlanInterface})`;
-
-      // Create the lab policy
-      const labPolicyRes = await client.createPolicy({
-        name: `PF: ${name}`,
-        srcintf: [{ name: labSrcInterface }],
-        dstintf: [{ name: vlanInterface }],
-        srcaddr: [{ name: 'all' }],
-        dstaddr: [{ name: labAddressName }],
-        action: 'accept',
-        schedule: 'always',
-        service: [{ name: serviceName }],
-        logtraffic: 'all',
-        'global-label': vlanGroupLabel,
-        comments: `Auto-created by VM Manager for ${name}`,
-      }, labVdom);
-      labPolicyId = labPolicyRes?.mkey || null;
-
-      // Move the new policy next to other policies in the same VLAN group
-      if (labPolicyId) {
-        const existingGroupPolicy = labPolicies.find(p =>
-          (p['global-label'] || '') === vlanGroupLabel && String(p.policyid) !== String(labPolicyId)
-        );
-        if (existingGroupPolicy) {
-          try { await client.movePolicy(labPolicyId, 'after', existingGroupPolicy.policyid, labVdom); } catch { /* best effort */ }
-        }
-      }
-    }
-
-    // 4. Track in DB
+    // Track in DB (with recorded artifacts for artifact-based teardown on delete)
     db.prepare(
-      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, service_name, protocol, ext_port, mapped_ip, mapped_port, dst_interface, lab_policy_id, vlan_interface) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(fw.id, name, policyId, serviceName, protocol, extPort, mappedIp, mappedPort, dstInterface, labPolicyId, vlanInterface || '');
+      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, service_name, protocol, ext_port, mapped_ip, mapped_port, dst_interface, lab_policy_id, vlan_interface, artifacts, workflow_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(fw.id, name, policyId, serviceName, protocol, extPort, mappedIp, mappedPort, dstInterface, labPolicyId, vlanInterface || '', JSON.stringify(artifacts), runId);
 
     logAudit(req, 'admin_create_port_forward', name, `${protocol}/${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}/${vlanInterface}`);
     res.json({ ok: true, vipName: name, policyId, labPolicyId, serviceName });
   } catch (err) {
-    const { client, rootVdom } = getRootClient(fw);
-    try {
-      const labVdom = fw.vdom || 'lab';
-      if (labPolicyId) {
-        try { await client.deletePolicy(labPolicyId, labVdom); } catch {}
-      }
-
-      if (policyId) {
-        try { await client.deletePolicy(policyId, rootVdom); } catch {}
-      }
-      if (vipCreated) {
-        try { await client.deleteVip(name, rootVdom); } catch {}
-      }
-      if (createdLabAddress && labAddressName) {
-        try { await client.deleteAddressObject(labAddressName, labVdom); } catch {}
-      }
-      if (createdLabService && serviceName) {
-        try { await client.deleteServiceObject(serviceName, labVdom); } catch {}
-      }
-      if (createdRootService && serviceName) {
-        try { await client.deleteServiceObject(serviceName, rootVdom); } catch {}
-      }
-    } catch {
-      // Best-effort rollback only.
-    }
+    // The engine already rolled back anything it created on failure.
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
@@ -2035,58 +1973,65 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
   try {
     const { client, rootVdom } = getRootClient(fw);
 
-    // Delete lab VDOM policy first
-    if (managed.lab_policy_id) {
-      const labVdom = fw.vdom || 'lab';
-      try { await client.deletePolicy(managed.lab_policy_id, labVdom); }
-      catch (e) { console.warn(`[vip-delete] Lab policy ${managed.lab_policy_id} delete warning:`, e.message); }
-    }
-
-    // Delete root VDOM policy (VIP can't be deleted while referenced by a policy)
-    if (managed.policy_id) {
-      try { await client.deletePolicy(managed.policy_id, rootVdom); }
-      catch (e) { console.warn(`[vip-delete] Policy ${managed.policy_id} delete warning:`, e.message); }
-    }
-
-    // Also search for any other policies referencing this VIP (stale ID safety)
-    try {
-      const policies = await client.getPolicies(rootVdom);
-      const refs = policies.filter(p =>
-        (p.dstaddr || []).some(a => a.name === vipName) &&
-        String(p.policyid) !== String(managed.policy_id)
-      );
-      for (const p of refs) {
-        try { await client.deletePolicy(p.policyid, rootVdom); }
-        catch (e) { console.warn(`[vip-delete] Extra policy ${p.policyid} warning:`, e.message); }
-      }
-    } catch (e) { console.warn(`[vip-delete] Policy search warning:`, e.message); }
-
-    // Delete VIP
-    await client.deleteVip(vipName, rootVdom);
-
-    if (managed.service_name) {
-      try {
-        await client.deleteServiceObject(managed.service_name, rootVdom);
-      } catch (e) {
-        console.warn(`[vip-delete] Service ${managed.service_name} warning:`, e.message);
-      }
-      if (managed.vlan_interface) {
+    if (managed.artifacts) {
+      // Artifact-based teardown: delete exactly what the create run recorded,
+      // in reverse order (lab policy → root policy → VIP → lab address → services).
+      await teardownArtifacts(client, JSON.parse(managed.artifacts));
+    } else {
+      // Legacy row (created before the workflow engine) — original delete path.
+      // Delete lab VDOM policy first
+      if (managed.lab_policy_id) {
         const labVdom = fw.vdom || 'lab';
+        try { await client.deletePolicy(managed.lab_policy_id, labVdom); }
+        catch (e) { console.warn(`[vip-delete] Lab policy ${managed.lab_policy_id} delete warning:`, e.message); }
+      }
+
+      // Delete root VDOM policy (VIP can't be deleted while referenced by a policy)
+      if (managed.policy_id) {
+        try { await client.deletePolicy(managed.policy_id, rootVdom); }
+        catch (e) { console.warn(`[vip-delete] Policy ${managed.policy_id} delete warning:`, e.message); }
+      }
+
+      // Also search for any other policies referencing this VIP (stale ID safety)
+      try {
+        const policies = await client.getPolicies(rootVdom);
+        const refs = policies.filter(p =>
+          (p.dstaddr || []).some(a => a.name === vipName) &&
+          String(p.policyid) !== String(managed.policy_id)
+        );
+        for (const p of refs) {
+          try { await client.deletePolicy(p.policyid, rootVdom); }
+          catch (e) { console.warn(`[vip-delete] Extra policy ${p.policyid} warning:`, e.message); }
+        }
+      } catch (e) { console.warn(`[vip-delete] Policy search warning:`, e.message); }
+
+      // Delete VIP
+      await client.deleteVip(vipName, rootVdom);
+
+      if (managed.service_name) {
         try {
-          await client.deleteServiceObject(managed.service_name, labVdom);
+          await client.deleteServiceObject(managed.service_name, rootVdom);
         } catch (e) {
-          console.warn(`[vip-delete] Lab service ${managed.service_name} warning:`, e.message);
+          console.warn(`[vip-delete] Service ${managed.service_name} warning:`, e.message);
+        }
+        if (managed.vlan_interface) {
+          const labVdom = fw.vdom || 'lab';
+          try {
+            await client.deleteServiceObject(managed.service_name, labVdom);
+          } catch (e) {
+            console.warn(`[vip-delete] Lab service ${managed.service_name} warning:`, e.message);
+          }
         }
       }
-    }
 
-    if (managed.vlan_interface) {
-      const labVdom = fw.vdom || 'lab';
-      const labAddressName = buildManagedVipAddressName(managed.vip_name, managed.mapped_ip);
-      try {
-        await client.deleteAddressObject(labAddressName, labVdom);
-      } catch (e) {
-        console.warn(`[vip-delete] Lab address ${labAddressName} warning:`, e.message);
+      if (managed.vlan_interface) {
+        const labVdom = fw.vdom || 'lab';
+        const labAddressName = buildManagedVipAddressName(managed.vip_name, managed.mapped_ip);
+        try {
+          await client.deleteAddressObject(labAddressName, labVdom);
+        } catch (e) {
+          console.warn(`[vip-delete] Lab address ${labAddressName} warning:`, e.message);
+        }
       }
     }
 

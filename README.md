@@ -37,6 +37,7 @@ This project pulls those into one interface so users can work inside guardrails 
 | Cloud images | Managed cloud image catalog (Ubuntu/Debian/Rocky presets or custom URLs) as the provisioning source: deploy a new VM directly from an image with `import-from` (no static template needed), configuring guest user, SSH keys, and DHCP/static network via cloud-init on first boot; optional one-click conversion to a reusable template remains (requires a storage with the Import content type; PVE 9) |
 | Networking | VLAN management with user-scoped access, FortiGate sync, managed/tagged-only VLAN modes, DHCP lease visibility, and IP reservations |
 | Port forwarding | FortiGate WAN/VIP policy creation with scoped access for assigned VMs and VLANs |
+| Provisioning workflows | Configurable per-firewall workflow engine driving VLAN/port-forward/policy provisioning: reorder, toggle, and parametrize whitelisted steps (or add a raw `/api/v2/` call), preview the exact API calls with a dry-run, and view a per-run log. Defaults reproduce the built-in sequences exactly; deprovision is artifact-based (removes what a run created, in reverse), and failed runs roll back |
 | Multi-host | Multiple Proxmox hosts with globally unique VMIDs across all connected clusters |
 | Admin delegation | Role-based access control: named roles bundle the granular permission flags (hosts, firewalls, port forwards, VLANs, policies, templates, users, assignments, audit log, VM hardware, provisioning, VM visibility). A role fully defines its holder's permissions; users without a role use per-user flags |
 | Security | Session auth, TOTP 2FA, login throttling, secrets encrypted at rest, upstream TLS enforcement, SSH host-key checks, audit logging |
@@ -57,6 +58,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `PVE Hosts` — multi-host Proxmox registration with status monitoring
 - `Templates` — register source VMs with auto-populated defaults from Proxmox config; cloud image catalog with downloads used as the direct provisioning source (deploy VMs straight from an image) plus optional one-click cloud-init template builds
 - `Firewalls` — FortiGate registration, VDOM/link settings, WAN settings, and managed-switch discovery
+- `Workflows` — per-firewall, per-trigger provisioning flows (VLAN provision/deprovision, port-forward create/delete, policy create/delete): drag-to-reorder step cards, per-action parameter forms with a variable picker, enable/disable and continue-on-error toggles, subnet-derivation setting, a dry-run preview of the exact API calls, and a run-log viewer
 - `VLANs` — managed or tagged-only network definitions, subnet data, and FortiGate sync
 - `Policies` — visual traffic mesh plus address/service object management for admins
 - `Port Forwarding` — WAN VIP and firewall policy management, scoped for delegated users

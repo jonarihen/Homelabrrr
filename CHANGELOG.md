@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-07-10 — Configurable FortiGate provisioning workflows
+
+The hardcoded FortiGate provisioning sequences are now a **configurable workflow engine**. Each flow — provision a VLAN, create a port forward, create an inter-VLAN policy, and their teardowns — is an ordered list of whitelisted steps you can reorder, enable/disable, parametrize, and extend, per firewall. Homelabrrr no longer assumes one specific vdom-link topology, naming scheme, or subnet formula.
+
+### What you get
+- New admin **Workflows** page (under Infrastructure, gated on *manage firewalls*): step cards with **drag-to-reorder**, per-action parameter forms, a **variable picker** (`{{tag}}`, `{{subnet.network}}`, `{{externalPort}}`, `{{steps.iface.interfaceName}}`, firewall fields, …), enable/disable and continue-on-error toggles, and per-step run conditions.
+- A **code-defined step catalog** (create VLAN interface, address/service objects, policy, static route, DHCP server, VIP, switch-port assignment, switch-controller VLAN) plus a power-user **custom API call** escape hatch (path must start with `/api/v2/`, size-limited body). The database only stores which steps run with which params — never arbitrary code.
+- **Dry-run preview**: render the exact API calls a run would make against a sample VLAN / port forward without touching the firewall.
+- **Run log** per execution — every step, request summary, result/error, and rollback — viewable in the UI.
+- **Subnet derivation** (previously a hardcoded `10.x.y.0/24`) is now a workflow setting (first-octet), defaulting to the original formula.
+
+### Safety
+- On upgrade, built-in **default workflows are seeded that reproduce every previous hardcoded sequence exactly** — a VLAN sync and a port forward behave byte-for-byte as before until you edit the flow.
+- Runs record every created object; **deprovision deletes those recorded artifacts in reverse order** rather than re-deriving from the current definition, so editing a workflow never orphans objects. Rows created before the upgrade keep working through the original teardown path.
+- A failed run **rolls back everything it created**, in reverse. Every workflow edit, reset, dry-run, and run is written to the audit log.
+
 ## 2026-07-09 — Roles can carry default quotas
 
 - Roles now have their own **CPU / memory / storage quota fields** — set them once on the role and every holder gets those limits. A per-user quota set on the Users page **overrides the role's value per metric** (leave a field empty to inherit); the Quotas tab shows the inherited value as the input placeholder
