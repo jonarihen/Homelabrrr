@@ -180,11 +180,11 @@ router.get('/images', (req, res) => {
   // Only ready images stored as import content can be used as an import-from
   // disk source; iso-content rows (downloaded before the import switch) can't.
   const rows = db.prepare(
-    "SELECT id, name, node, storage, volid, size FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' ORDER BY name"
+    "SELECT id, name, node, storage, default_storage, volid, size FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' ORDER BY name"
   ).all();
   res.json(rows.map((r) => {
     const { nodeName, nodeRef } = decodeNodeRef(r.node);
-    return { id: r.id, name: r.name, storage: r.storage, size: r.size, node: nodeName || r.node, nodeRef: nodeRef || r.node };
+    return { id: r.id, name: r.name, storage: r.storage, default_storage: r.default_storage || '', size: r.size, node: nodeName || r.node, nodeRef: nodeRef || r.node };
   }));
 });
 
@@ -394,21 +394,19 @@ router.post('/from-image', async (req, res) => {
     storage, bridge = 'vmbr0', description = '', assignTo, vlanTag, start = false,
   } = req.body;
 
-  if (!imageId || !name || !storage) {
-    return res.status(400).json({ error: 'Image, name and storage are required' });
+  if (!imageId || !name) {
+    return res.status(400).json({ error: 'Image and name are required' });
   }
 
-  // `bridge` and `storage` are concatenated into Proxmox property strings, so
-  // they must be strict identifiers. Non-admins can't pick a bridge (the
-  // networks list is admin-only) — pinning them to vmbr0 also blocks a
-  // `bridge=vmbr0,tag=N` injection that would put the NIC on a VLAN the user has
-  // no access to, bypassing the VLAN check below.
+  // `bridge` and the resolved target storage are concatenated into Proxmox
+  // property strings, so both must be strict identifiers (storage is validated
+  // below, once the image and its default are known). Non-admins can't pick a
+  // bridge (the networks list is admin-only) — pinning them to vmbr0 also blocks
+  // a `bridge=vmbr0,tag=N` injection that would put the NIC on a VLAN the user
+  // has no access to, bypassing the VLAN check below.
   const safeBridge = user.is_admin ? String(bridge || 'vmbr0') : 'vmbr0';
   if (!/^[a-zA-Z0-9._-]+$/.test(safeBridge)) {
     return res.status(400).json({ error: 'Invalid network bridge' });
-  }
-  if (!/^[a-zA-Z0-9._-]+$/.test(String(storage))) {
-    return res.status(400).json({ error: 'Invalid storage' });
   }
 
   const image = db.prepare("SELECT * FROM cloud_images WHERE id = ?").get(imageId);
@@ -418,6 +416,17 @@ router.post('/from-image', async (req, res) => {
   }
   if (!image.volid || image.volid.includes(':iso/')) {
     return res.status(400).json({ error: 'This image cannot be used as a disk source — remove it and add it again to re-download it as import content' });
+  }
+
+  // Resolve the disk target: an explicit choice wins, else the image's
+  // admin-set default. Validate here (the value is concatenated into Proxmox
+  // property strings) now that the image — and thus its default — is known.
+  const targetStorage = String(storage || image.default_storage || '').trim();
+  if (!targetStorage) {
+    return res.status(400).json({ error: 'Storage is required (this image has no default storage set)' });
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(targetStorage)) {
+    return res.status(400).json({ error: 'Invalid storage' });
   }
 
   // PVE VM names must be DNS-like — sanitize so the deploy doesn't fail late.
@@ -448,7 +457,7 @@ router.post('/from-image', async (req, res) => {
   // Enforce storage exposure — never trust the dropdown. Non-admins can't
   // deploy onto a pool an admin has hidden, even by naming it directly.
   try {
-    await assertStorageExposed(image.node, storage, user);
+    await assertStorageExposed(image.node, targetStorage, user);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     throw err;
@@ -473,7 +482,7 @@ router.post('/from-image', async (req, res) => {
   }
 
   try {
-    await assertNodeCapacity(image.node, { memoryMb, diskGb: baseDiskGb, storage });
+    await assertNodeCapacity(image.node, { memoryMb, diskGb: baseDiskGb, storage: targetStorage });
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
       addCores: parseInt(cores, 10) || 0,
@@ -497,8 +506,8 @@ router.post('/from-image', async (req, res) => {
       memory: memoryMb,
       ostype: 'l26',
       scsihw: 'virtio-scsi-single',
-      scsi0: `${storage}:0,import-from=${image.volid}`,
-      ide2: `${storage}:cloudinit`,
+      scsi0: `${targetStorage}:0,import-from=${image.volid}`,
+      ide2: `${targetStorage}:cloudinit`,
       boot: 'order=scsi0',
       serial0: 'socket',
       vga: 'serial0',

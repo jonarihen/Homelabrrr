@@ -45,12 +45,17 @@ router.get('/', (req, res) => {
 
 // Start downloading a cloud image onto a PVE storage
 router.post('/', async (req, res) => {
-  const { name, url, node, storage, checksum } = req.body;
+  const { name, url, node, storage, checksum, defaultStorage } = req.body;
   if (!name || !url || !node || !storage) {
     return res.status(400).json({ error: 'name, url, node and storage are required' });
   }
   if (!/^https?:\/\//i.test(url)) {
     return res.status(400).json({ error: 'URL must be http(s)' });
+  }
+  // Optional default *target* storage for direct-from-image provisioning.
+  const defStore = String(defaultStorage || '').trim();
+  if (defStore && !/^[a-zA-Z0-9._-]+$/.test(defStore)) {
+    return res.status(400).json({ error: 'Invalid default storage' });
   }
   // The PVE host fetches this URL server-side — refuse internal targets (SSRF)
   try {
@@ -62,8 +67,8 @@ router.post('/', async (req, res) => {
   const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'cloud-image';
 
   const row = db.prepare(
-    'INSERT INTO cloud_images (name, url, node, storage, status) VALUES (?, ?, ?, ?, ?)'
-  ).run(name, url, node, storage, 'downloading');
+    'INSERT INTO cloud_images (name, url, node, storage, default_storage, status) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(name, url, node, storage, defStore, 'downloading');
   const id = row.lastInsertRowid;
   // Stored as `import` content; the unique suffix avoids clobbering an
   // existing file. PVE derives the disk format from the extension, and
@@ -106,6 +111,20 @@ router.post('/', async (req, res) => {
     setImageStatus(id, 'error', sanitizeError(err.message));
     res.status(500).json({ error: sanitizeError(err.message) });
   }
+});
+
+// Update an image's default *target* storage (used to pre-select/fall back the
+// disk target when deploying a VM directly from this image). Empty clears it.
+router.put('/:id', (req, res) => {
+  const image = db.prepare('SELECT * FROM cloud_images WHERE id = ?').get(req.params.id);
+  if (!image) return res.status(404).json({ error: 'Image not found' });
+  const defStore = String(req.body?.defaultStorage ?? '').trim();
+  if (defStore && !/^[a-zA-Z0-9._-]+$/.test(defStore)) {
+    return res.status(400).json({ error: 'Invalid default storage' });
+  }
+  db.prepare('UPDATE cloud_images SET default_storage = ? WHERE id = ?').run(defStore, req.params.id);
+  logAudit(req, 'cloud_image_update', image.name, `default_storage=${defStore || '(none)'}`);
+  res.json({ ok: true });
 });
 
 router.delete('/:id', async (req, res) => {
