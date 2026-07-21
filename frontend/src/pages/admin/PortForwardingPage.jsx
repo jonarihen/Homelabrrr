@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
+import { shortenVipName, PORT_FORWARD_NAME_MAX } from '../../utils/vipName.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
@@ -23,11 +24,16 @@ function portProtocolLabel(port, protocol) {
 function buildRuleName(vmName, service, port, protocol) {
   const trimmedVmName = String(vmName || '').trim();
   if (!trimmedVmName) return '';
+  let raw;
   if (service === 'Custom') {
     const suffix = portProtocolLabel(port, protocol);
-    return `${trimmedVmName} - Custom${suffix ? ` ${suffix}` : ''}`;
+    raw = `${trimmedVmName} - Custom${suffix ? ` ${suffix}` : ''}`;
+  } else {
+    raw = `${trimmedVmName} - ${service}`;
   }
-  return `${trimmedVmName} - ${service}`;
+  // Shorten to FortiGate's limit so the previewed name matches what the backend
+  // persists (the backend re-applies the same shortener as a hard guard).
+  return shortenVipName(raw, PORT_FORWARD_NAME_MAX);
 }
 
 export default function PortForwardingPage() {
@@ -502,6 +508,7 @@ export default function PortForwardingPage() {
                   <label className="block text-[11px] text-gray-500 mb-0.5">Rule Name</label>
                   <input type="text" value={form.name}
                     onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                    maxLength={PORT_FORWARD_NAME_MAX}
                     className="bg-transparent border-none text-sm text-white p-0 focus:outline-none focus:ring-0 w-full"
                     required />
                 </div>

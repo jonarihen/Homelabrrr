@@ -9,6 +9,7 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
 import { decodeNodeRef, encodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
+import { shortenVipName, PORT_FORWARD_NAME_MAX } from '../utils/vipName.js';
 import { listMaintenance, enterMaintenance, exitMaintenanceById } from '../utils/nodeMaintenance.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
 import {
@@ -2200,6 +2201,11 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
     return res.status(400).json({ error: 'name, extPort, and mappedPort are required; ports must be between 1 and 65535' });
   }
   name = buildPortSpecificCustomVipName(name, protocol, mappedPort);
+  // Enforce FortiGate's object-name limit server-side, even if a client submits
+  // an overlong name. Bounded to PORT_FORWARD_NAME_MAX (not 35) so the derived
+  // "PF: <name>" policy name also stays within the 35-char cap. Matches the
+  // frontend preview (frontend/src/utils/vipName.js) exactly.
+  name = shortenVipName(name, PORT_FORWARD_NAME_MAX);
 
   const serviceName = buildManagedVipServiceName(name, protocol, mappedPort);
   let policyId = null;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-21 — Fix: port forwards for VMs with long names
+
+- **Creating a port forward for a VM with a long name no longer fails** with `string value name is too long ... the limit is 35`. FortiGate caps object names at 35 characters, and the rule name derived from the VM name plus its service/port label (e.g. `minecraft-fi-lille-ven - Custom 25565/tcp`) routinely exceeded that
+- Rule names are now **shortened deterministically**: short names are left untouched, long names keep a recognizable head and the trailing `Custom <port>/<proto>` label and gain a short `~<hash>` suffix so two long names that only differ after the truncated prefix still map to **distinct** FortiGate objects. The name shown in the form matches what is persisted on the firewall
+- The bound accounts for the `PF: ` prefix on the auto-created firewall policy (also 35-char limited), so the fix covers both the VIP and its policy. The backend re-applies the limit as a hard guard even if a client submits an overlong name
+
 ## 2026-07-21 — Security: non-admins can no longer place VMs on the untagged/native network
 
 - **Closed an authorization gap** where a non-admin could assign a VM to **untagged** (no VLAN) and land it on the native network where core infrastructure lives. VLAN access was only checked when a tag was present, so choosing "No VLAN (untagged)" / "Untagged (remove VLAN)" skipped the check entirely
