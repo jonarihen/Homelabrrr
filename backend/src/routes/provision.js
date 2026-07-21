@@ -10,6 +10,7 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
+import { checkVlanAssignment } from '../utils/vlanAccess.js';
 import { assertStorageExposed, filterExposedStorages } from '../utils/storageVisibility.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
@@ -259,13 +260,10 @@ router.post('/clone', async (req, res) => {
     cloudInitOpts = parsed.opts;
   }
 
-  // Validate VLAN access for non-admins
-  if (vlanTag && !user.is_admin) {
-    const allowed = db.prepare(
-      'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
-    ).get(req.session.userId, parseInt(vlanTag));
-    if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
-  }
+  // Authorize the target VLAN. Non-admins must place the VM on a VLAN assigned
+  // to them; the untagged/native network is admin-only (utils/vlanAccess.js).
+  const vlanErr = checkVlanAssignment(db, { userId: req.session.userId, isAdmin: user.is_admin, vlanTag });
+  if (vlanErr) return res.status(vlanErr.status).json({ error: vlanErr.error });
 
   // Enforce storage exposure — never trust the dropdown. Non-admins can't clone
   // onto a pool an admin has hidden, even by naming it directly.
@@ -446,13 +444,10 @@ router.post('/from-image', async (req, res) => {
   if (parsed.error) return res.status(parsed.error.status).json({ error: parsed.error.message });
   const cloudInitOpts = parsed.opts;
 
-  // Validate VLAN access for non-admins
-  if (vlanTag && !user.is_admin) {
-    const allowed = db.prepare(
-      'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
-    ).get(req.session.userId, parseInt(vlanTag));
-    if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
-  }
+  // Authorize the target VLAN. Non-admins must place the VM on a VLAN assigned
+  // to them; the untagged/native network is admin-only (utils/vlanAccess.js).
+  const vlanErr = checkVlanAssignment(db, { userId: req.session.userId, isAdmin: user.is_admin, vlanTag });
+  if (vlanErr) return res.status(vlanErr.status).json({ error: vlanErr.error });
 
   // Enforce storage exposure — never trust the dropdown. Non-admins can't
   // deploy onto a pool an admin has hidden, even by naming it directly.
@@ -601,13 +596,11 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
     return res.status(400).json({ error: 'Invalid iso' });
   }
 
-  // Validate VLAN access for non-admins (same guard as /from-image and /clone).
-  if (vlanTag && !isAdmin) {
-    const allowed = db.prepare(
-      'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?'
-    ).get(req.session.userId, parseInt(vlanTag));
-    if (!allowed) return res.status(403).json({ error: 'You do not have access to that VLAN' });
-  }
+  // Authorize the target VLAN (same guard as /from-image and /clone). Non-admins
+  // must place the VM on an assigned VLAN; the untagged/native network is
+  // admin-only (utils/vlanAccess.js).
+  const vlanErr = checkVlanAssignment(db, { userId: req.session.userId, isAdmin, vlanTag });
+  if (vlanErr) return res.status(vlanErr.status).json({ error: vlanErr.error });
 
   // Enforce storage exposure — never trust the dropdown. Non-admin
   // can_create_vms holders can't build onto a pool an admin has hidden,

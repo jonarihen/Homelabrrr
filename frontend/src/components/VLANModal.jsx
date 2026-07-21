@@ -2,9 +2,12 @@ import { useState, useEffect } from 'react';
 import Modal from './Modal.jsx';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
+import { useAuth } from '../contexts/AuthContext.jsx';
 
 export default function VLANModal({ vm, onClose, onSaved }) {
   const vmNode = routeNode(vm);
+  const { user } = useAuth();
+  const isAdmin = !!user?.isAdmin;
   const [vlans, setVlans]           = useState([]);
   const [config, setConfig]         = useState(null);
   const [selectedTag, setSelectedTag] = useState('');
@@ -89,17 +92,21 @@ export default function VLANModal({ vm, onClose, onSaved }) {
                 </p>
               ) : (
                 <div className="space-y-2">
-                  <label className="flex items-center gap-3 p-2.5 rounded-lg bg-gray-800 border border-gray-700 cursor-pointer hover:border-blue-500 transition-colors">
-                    <input
-                      type="radio"
-                      name="vlan"
-                      value=""
-                      checked={selectedTag === ''}
-                      onChange={() => setSelectedTag('')}
-                      className="accent-blue-500"
-                    />
-                    <span className="text-sm text-gray-300">Untagged (remove VLAN)</span>
-                  </label>
+                  {/* Untagged drops the VM onto the native network — admin-only.
+                      The backend enforces this too (see utils/vlanAccess.js). */}
+                  {isAdmin && (
+                    <label className="flex items-center gap-3 p-2.5 rounded-lg bg-gray-800 border border-gray-700 cursor-pointer hover:border-blue-500 transition-colors">
+                      <input
+                        type="radio"
+                        name="vlan"
+                        value=""
+                        checked={selectedTag === ''}
+                        onChange={() => setSelectedTag('')}
+                        className="accent-blue-500"
+                      />
+                      <span className="text-sm text-gray-300">Untagged (remove VLAN)</span>
+                    </label>
+                  )}
                   {vlans.map(v => (
                     <label
                       key={v.id}
@@ -128,7 +135,7 @@ export default function VLANModal({ vm, onClose, onSaved }) {
 
             <button
               onClick={() => setStep('confirm')}
-              disabled={vlans.length === 0}
+              disabled={vlans.length === 0 || (!isAdmin && selectedTag === '')}
               className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
             >
               Continue

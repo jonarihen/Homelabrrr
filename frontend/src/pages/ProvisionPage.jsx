@@ -632,7 +632,9 @@ function CloudImageForm({ onStarted }) {
             <div>
               <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
               <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
-                <option value="">No VLAN (untagged)</option>
+                {user?.isAdmin
+                  ? <option value="">No VLAN (untagged)</option>
+                  : <option value="" disabled>Select a VLAN…</option>}
                 {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
               </select>
             </div>
@@ -896,7 +898,9 @@ function CloneForm({ onStarted }) {
             <div>
               <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
               <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
-                <option value="">No VLAN (untagged)</option>
+                {user?.isAdmin
+                  ? <option value="">No VLAN (untagged)</option>
+                  : <option value="" disabled>Select a VLAN…</option>}
                 {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
               </select>
             </div>
@@ -1101,7 +1105,9 @@ function CreateForm({ onStarted }) {
           <div>
             <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
             <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
-              <option value="">No VLAN (untagged)</option>
+              {user?.isAdmin
+                ? <option value="">No VLAN (untagged)</option>
+                : <option value="" disabled>Select a VLAN…</option>}
               {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
             </select>
           </div>
