@@ -12,6 +12,12 @@
 - Non-admins must now place every VM on a **VLAN explicitly assigned to them** — for provisioning (clone, from-image, from-scratch) and for changing an existing VM's VLAN. The untagged/native network is **admin-only**; the backend refuses it with a clear error even if a client submits it directly. All four routes now share a single decision point (`utils/vlanAccess.js`)
 - The untagged option is **hidden from non-admins** in the provisioning forms and the Change-VLAN modal. Admins are unaffected — untagged and any VLAN remain available
 
+## 2026-07-21 — Cloud images can define a default target storage
+
+- **Each cloud image can now carry an admin-defined default VM storage** — the pool a VM's disk lands on when you deploy directly from that image. Set it when adding an image, or later via the new **Default storage** button on each image row (**Admin → Templates → Cloud Images**). This mirrors how templates already carry a `default_storage`
+- The **Create VM → Cloud Image** form pre-selects that default when you pick an image (falling back to `local-lvm`, then the first exposed pool, as before). The backend also falls back to it when no storage is submitted, so the default is authoritative — storage-exposure and identifier checks still apply
+- Images with no default set keep the previous auto-pick behavior; existing images are unaffected (the column defaults to empty). Note: `default_storage` is the *target* pool for new VM disks, distinct from the image's download pool
+
 ## 2026-07-10 — Fix: VLAN deletion through the workflow engine
 
 - Deleting a VLAN synced by the new workflow engine no longer fails with a partial-cleanup error. The artifact teardown now removes the **switch-controller VLAN registration last** (FortiLink ties it to the VLAN interface, so it can only go once the interface is gone — the same order the pre-engine code used) and treats a refusal there as a warning, not a blocker

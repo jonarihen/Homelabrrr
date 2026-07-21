@@ -178,6 +178,7 @@ function CloudImagesSection({ onTemplatesChanged }) {
   const [images, setImages] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
   const [templateImage, setTemplateImage] = useState(null);
+  const [editImage, setEditImage] = useState(null);
 
   const load = async () => {
     try {
@@ -254,7 +255,10 @@ function CloudImagesSection({ onTemplatesChanged }) {
                       <p className={`text-xs mt-1 ${img.status === 'error' ? 'text-red-400' : 'text-gray-500'}`}>{img.status_detail}</p>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-gray-500 font-mono text-xs">{displayNode(img.node)} / {img.storage}</td>
+                  <td className="px-4 py-3 text-gray-500 font-mono text-xs">
+                    <div>{displayNode(img.node)} / {img.storage}</div>
+                    <div className="text-[11px] text-gray-600">deploy target: {img.default_storage || 'auto'}</div>
+                  </td>
                   <td className="px-4 py-3 text-gray-400 text-xs">{fmtSize(img.size)}</td>
                   <td className="px-4 py-3">
                     <span className={`text-xs px-2 py-0.5 rounded-full ring-1 ${imageStatusCls[img.status] || imageStatusCls.error}`}>
@@ -267,6 +271,12 @@ function CloudImagesSection({ onTemplatesChanged }) {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <button
+                      onClick={() => setEditImage(img)}
+                      className="text-xs text-gray-400 hover:text-gray-200 px-3 py-1.5 rounded-lg border border-gray-600/30 hover:border-gray-500/50 transition-colors mr-2"
+                    >
+                      Default storage
+                    </button>
                     <button
                       onClick={() => setTemplateImage(img)}
                       disabled={img.status !== 'ready'}
@@ -290,6 +300,13 @@ function CloudImagesSection({ onTemplatesChanged }) {
       )}
 
       {showAdd && <CloudImageFormModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); }} />}
+      {editImage && (
+        <CloudImageDefaultStorageModal
+          image={editImage}
+          onClose={() => setEditImage(null)}
+          onSaved={() => { setEditImage(null); load(); }}
+        />
+      )}
       {templateImage && (
         <CreateTemplateModal
           image={templateImage}
@@ -301,12 +318,63 @@ function CloudImagesSection({ onTemplatesChanged }) {
   );
 }
 
+// Edit an existing image's default *target* storage (the disk pool pre-selected
+// when deploying a VM directly from it). Empty = auto-pick at deploy time.
+function CloudImageDefaultStorageModal({ image, onClose, onSaved }) {
+  const [storages, setStorages] = useState([]);
+  const [value, setValue] = useState(image.default_storage || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    api.get(`/provision/nodes/${image.nodeRef || image.node}/storages`)
+      .then(r => setStorages(r.data.filter(s => s.content?.includes('images'))))
+      .catch(() => setStorages([]));
+  }, [image]);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setSaving(true); setError('');
+    try {
+      await api.put(`/cloud-images/${image.id}`, { defaultStorage: value || undefined });
+      onSaved();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to save');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal title={`Default VM storage — ${image.name}`} onClose={onClose} size="sm">
+      <form onSubmit={save} className="p-5 space-y-4">
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">Default target storage</label>
+          <select value={value} onChange={e => setValue(e.target.value)} className={inputCls}>
+            <option value="">Auto (choose when deploying)</option>
+            {!storages.find(s => s.storage === value) && value && (
+              <option value={value}>{value}</option>
+            )}
+            {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
+          </select>
+          <p className="text-[11px] text-gray-600 mt-1">Pre-selected as the disk target when someone deploys a VM directly from this image.</p>
+        </div>
+        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
+        <button type="submit" disabled={saving} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+          {saving ? 'Saving...' : 'Save'}
+        </button>
+      </form>
+    </Modal>
+  );
+}
+
 function CloudImageFormModal({ onClose, onSaved }) {
   const [nodes, setNodes] = useState([]);
   const [storages, setStorages] = useState([]);
-  const [form, setForm] = useState({ preset: '', name: '', url: '', node: '', storage: '', checksum: '' });
+  const [form, setForm] = useState({ preset: '', name: '', url: '', node: '', storage: '', checksum: '', defaultStorage: '' });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+
+  const importStorages = storages.filter(s => s.content?.includes('import'));
+  const imageStorages = storages.filter(s => s.content?.includes('images'));
 
   useEffect(() => {
     api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
@@ -316,8 +384,8 @@ function CloudImageFormModal({ onClose, onSaved }) {
     if (!form.node) return;
     api.get(`/provision/nodes/${form.node}/storages`)
       .then(r => {
+        setStorages(r.data);
         const importCapable = r.data.filter(s => s.content?.includes('import'));
-        setStorages(importCapable);
         if (!importCapable.find(s => s.storage === form.storage)) {
           setForm(f => ({ ...f, storage: importCapable[0]?.storage || '' }));
         }
@@ -340,6 +408,7 @@ function CloudImageFormModal({ onClose, onSaved }) {
         node: form.node,
         storage: form.storage,
         checksum: form.checksum || undefined,
+        defaultStorage: form.defaultStorage || undefined,
       });
       onSaved();
     } catch (e) {
@@ -384,12 +453,21 @@ function CloudImageFormModal({ onClose, onSaved }) {
             <label className="block text-xs text-gray-400 mb-1.5">Download to Storage</label>
             <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
               <option value="">Select...</option>
-              {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
+              {importStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
             </select>
           </div>
         </div>
 
-        {form.node && storages.length === 0 && (
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">Default VM storage (optional)</label>
+          <select value={form.defaultStorage} onChange={e => setForm(f => ({ ...f, defaultStorage: e.target.value }))} className={inputCls}>
+            <option value="">Auto (choose when deploying)</option>
+            {imageStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
+          </select>
+          <p className="text-[11px] text-gray-600 mt-1">Pre-selected as the disk target when someone deploys a VM directly from this image.</p>
+        </div>
+
+        {form.node && importStorages.length === 0 && (
           <p className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/30 rounded-lg p-2.5">
             No import-capable storage on this node. In the PVE UI, enable the "Import" content type on a
             directory storage (Datacenter → Storage → e.g. local → Content) first.
@@ -423,7 +501,10 @@ function CreateTemplateModal({ image, onClose, onStarted }) {
       .then(r => {
         const imgCapable = r.data.filter(s => s.content?.includes('images'));
         setStorages(imgCapable);
-        setForm(f => ({ ...f, storage: f.storage || imgCapable.find(s => s.storage === 'local-lvm')?.storage || imgCapable[0]?.storage || '' }));
+        setForm(f => ({ ...f, storage: f.storage
+          || imgCapable.find(s => s.storage === image.default_storage)?.storage
+          || imgCapable.find(s => s.storage === 'local-lvm')?.storage
+          || imgCapable[0]?.storage || '' }));
       })
       .catch(() => setStorages([]));
     api.get(`/provision/nodes/${image.nodeRef || image.node}/networks`)

@@ -175,6 +175,10 @@ try { db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   )
 `); } catch { /* exists */ }
+// Admin-defined default *target* storage for VMs deployed directly from this
+// image (distinct from `storage`, which is where the image file downloaded).
+// Empty ⇒ no default; the provisioning form auto-picks as before.
+try { db.exec("ALTER TABLE cloud_images ADD COLUMN default_storage TEXT DEFAULT ''"); } catch { /* exists */ }
 
 // ISO catalog (installer ISOs downloaded onto a PVE storage as `iso` content)
 try { db.exec(`
