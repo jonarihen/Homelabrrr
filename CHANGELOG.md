@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-21 — Fix: port forwards for VMs with long names
+
+- **Creating a port forward for a VM with a long name no longer fails** with `string value name is too long ... the limit is 35`. FortiGate caps object names at 35 characters, and the rule name derived from the VM name plus its service/port label (e.g. `minecraft-fi-lille-ven - Custom 25565/tcp`) routinely exceeded that
+- Rule names are now **shortened deterministically**: short names are left untouched, long names keep a recognizable head and the trailing `Custom <port>/<proto>` label and gain a short `~<hash>` suffix so two long names that only differ after the truncated prefix still map to **distinct** FortiGate objects. The name shown in the form matches what is persisted on the firewall
+- The bound accounts for the `PF: ` prefix on the auto-created firewall policy (also 35-char limited), so the fix covers both the VIP and its policy. The backend re-applies the limit as a hard guard even if a client submits an overlong name
+
 ## 2026-07-10 — Fix: VLAN deletion through the workflow engine
 
 - Deleting a VLAN synced by the new workflow engine no longer fails with a partial-cleanup error. The artifact teardown now removes the **switch-controller VLAN registration last** (FortiLink ties it to the VLAN interface, so it can only go once the interface is gone — the same order the pre-engine code used) and treats a refusal there as a warning, not a blocker
