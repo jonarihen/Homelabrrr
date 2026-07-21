@@ -14,6 +14,7 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
 import { userCanAccessVm, userOwnsVm } from '../utils/vmAccess.js';
+import { checkVlanAssignment } from '../utils/vlanAccess.js';
 import { userHasPermission } from '../utils/permissions.js';
 import { summarizeLease, renewLease } from '../utils/leases.js';
 import { assertUserQuota, sizeToGb } from '../utils/quota.js';
@@ -985,18 +986,11 @@ router.put('/:node/:vmid/vlan', async (req, res) => {
     return res.status(403).json({ error: 'Access denied' });
   }
 
-  // Non-admins: verify they have access to the requested VLAN
-  if (!req.session.isAdmin && vlanTag !== null && vlanTag !== 0) {
-    const allowed = db.prepare(`
-      SELECT v.id FROM vlans v
-      JOIN user_vlans uv ON uv.vlan_id = v.id
-      WHERE uv.user_id = ? AND v.tag = ?
-    `).get(req.session.userId, parseInt(vlanTag));
-
-    if (!allowed) {
-      return res.status(403).json({ error: 'You do not have access to that VLAN' });
-    }
-  }
+  // Authorize the target VLAN. Non-admins must move the VM onto a VLAN assigned
+  // to them; setting it untagged (removing the tag) drops the VM onto the
+  // native network and is admin-only (utils/vlanAccess.js).
+  const vlanErr = checkVlanAssignment(db, { userId: req.session.userId, isAdmin: req.session.isAdmin, vlanTag });
+  if (vlanErr) return res.status(vlanErr.status).json({ error: vlanErr.error });
 
   try {
     const config = await getVMConfig(node, vmid);

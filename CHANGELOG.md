@@ -6,6 +6,12 @@
 - Rule names are now **shortened deterministically**: short names are left untouched, long names keep a recognizable head and the trailing `Custom <port>/<proto>` label and gain a short `~<hash>` suffix so two long names that only differ after the truncated prefix still map to **distinct** FortiGate objects. The name shown in the form matches what is persisted on the firewall
 - The bound accounts for the `PF: ` prefix on the auto-created firewall policy (also 35-char limited), so the fix covers both the VIP and its policy. The backend re-applies the limit as a hard guard even if a client submits an overlong name
 
+## 2026-07-21 — Security: non-admins can no longer place VMs on the untagged/native network
+
+- **Closed an authorization gap** where a non-admin could assign a VM to **untagged** (no VLAN) and land it on the native network where core infrastructure lives. VLAN access was only checked when a tag was present, so choosing "No VLAN (untagged)" / "Untagged (remove VLAN)" skipped the check entirely
+- Non-admins must now place every VM on a **VLAN explicitly assigned to them** — for provisioning (clone, from-image, from-scratch) and for changing an existing VM's VLAN. The untagged/native network is **admin-only**; the backend refuses it with a clear error even if a client submits it directly. All four routes now share a single decision point (`utils/vlanAccess.js`)
+- The untagged option is **hidden from non-admins** in the provisioning forms and the Change-VLAN modal. Admins are unaffected — untagged and any VLAN remain available
+
 ## 2026-07-10 — Fix: VLAN deletion through the workflow engine
 
 - Deleting a VLAN synced by the new workflow engine no longer fails with a partial-cleanup error. The artifact teardown now removes the **switch-controller VLAN registration last** (FortiLink ties it to the VLAN interface, so it can only go once the interface is gone — the same order the pre-engine code used) and treats a refusal there as a warning, not a blocker
