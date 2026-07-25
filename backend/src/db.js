@@ -385,6 +385,17 @@ try { db.exec("ALTER TABLE firewalls ADD COLUMN trunk_switch_serial TEXT DEFAULT
 try { db.exec("ALTER TABLE firewalls ADD COLUMN trunk_switch_port TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE pve_hosts ADD COLUMN verify_tls INTEGER DEFAULT 0'); } catch { /* exists */ }
 
+// Optional root SSH per PVE host, used only for the one hypervisor task the
+// API cannot do: removing a leftover VM config file after a shared-storage
+// migration (qm destroy would erase the shared disks the moved VM still uses).
+// ssh_secret is encrypted at rest; ssh_host_key pins the fingerprint on first use.
+try { db.exec("ALTER TABLE pve_hosts ADD COLUMN ssh_host TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE pve_hosts ADD COLUMN ssh_port INTEGER DEFAULT 22'); } catch { /* exists */ }
+try { db.exec("ALTER TABLE pve_hosts ADD COLUMN ssh_user TEXT DEFAULT 'root'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE pve_hosts ADD COLUMN ssh_auth_type TEXT DEFAULT 'key'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE pve_hosts ADD COLUMN ssh_secret TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE pve_hosts ADD COLUMN ssh_host_key TEXT DEFAULT ''"); } catch { /* exists */ }
+
 // Track VLAN sync state with firewalls
 try { db.exec(`
   CREATE TABLE IF NOT EXISTS firewall_vlan_sync (

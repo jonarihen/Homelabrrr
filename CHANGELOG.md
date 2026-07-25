@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-25 — Shared-storage migrations can now clean up after themselves
+
+- **The leftover source VM after a shared-storage migration can now be removed automatically.** Proxmox's API can only delete a VM *together with its disks* — fatal here, since the migrated VM keeps using the same shared volumes — so the only safe removal is taking the `.conf` file off `/etc/pve`, which needs a root shell
+- Each PVE host (Admin → PVE Hosts) can therefore get an **optional root SSH config** (key or password, encrypted at rest, host key pinned on first use). With SSH configured, an adopt-mode migration ends with a new **"Removing leftover source config"** step: the source VM must be verified stopped, then the config file is **archived to `/root/homelabrrr-migrated-<vmid>-<timestamp>.conf`** on the node (moved, not deleted — recoverable), and the migration reports the source as fully removed
+- Without SSH the behavior is unchanged: leftover kept stopped + protected, manual one-liner shown — plus a hint that configuring SSH automates it next time
+- SSH is used for nothing else; volumes are never touched over SSH
+
 ## 2026-07-25 — Fix: policy grouping now renders as real FortiGate sections
 
 - **The sequence groups from this morning's grouping feature now actually merge in the FortiGate GUI.** The first pass stamped the group's `global-label` on *every* policy — but FortiGate treats a non-empty label as the *start of a new section* (a section is one labeled anchor policy followed by unlabeled ones), so each policy rendered as its own `(#2) (#3)` fragment even though the ordering was perfectly contiguous

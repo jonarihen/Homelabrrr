@@ -374,9 +374,23 @@ export default function AssignmentsPage() {
   const unassigned = vms.filter(v => !v.assignment);
   // Migration only makes sense with 2+ registered hosts
   const multiHost = hostCount > 1 || new Set(vms.map(v => v.hostId).filter(Boolean)).size > 1;
+  // Migrations with a leftover source config stay visible past the 1h window —
+  // they represent a pending admin action (remove the leftover), not history.
   const visibleMigrations = migrations.filter(m =>
-    m.status === 'running' || (m.finished_at && Date.now() - new Date(m.finished_at.replace(' ', 'T') + 'Z').getTime() < 60 * 60 * 1000)
+    m.status === 'running' ||
+    (m.status === 'ok' && m.kept_source === 1) ||
+    (m.finished_at && Date.now() - new Date(m.finished_at.replace(' ', 'T') + 'Z').getTime() < 60 * 60 * 1000)
   );
+
+  const cleanupSource = async (m) => {
+    if (!confirm(`Remove the leftover source config of ${m.name || `VM ${m.vmid}`} from ${m.sourceHostName || m.sourceNodeName}? Its disks are never touched — the .conf file is archived under /root/ on the node.`)) return;
+    try {
+      await api.post(`/migrate/${m.id}/cleanup-source`);
+      loadMigrations();
+    } catch (e) {
+      alert(e.response?.data?.error || 'Cleanup failed');
+    }
+  };
 
   // Unassigned first, then one group per user (alphabetical), VMs by VMID
   const byVmid = (a, b) => (a.vmid ?? 0) - (b.vmid ?? 0);
@@ -447,6 +461,15 @@ export default function AssignmentsPage() {
               </span>
               {m.status === 'error' && m.status_detail && (
                 <span className="text-xs text-gray-500 truncate max-w-[24rem]" title={m.status_detail}>{m.status_detail}</span>
+              )}
+              {m.status === 'ok' && m.kept_source === 1 && (
+                <button
+                  onClick={() => cleanupSource(m)}
+                  title={m.status_detail}
+                  className="text-xs px-2.5 py-1 rounded-lg bg-amber-900/30 text-amber-400 border border-amber-800/40 hover:bg-amber-900/50 transition-colors"
+                >
+                  Remove leftover
+                </button>
               )}
             </div>
           ))}
