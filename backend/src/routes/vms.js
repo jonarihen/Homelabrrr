@@ -88,6 +88,14 @@ function canEditSchedule(req, node, vmid) {
   return req.session.isAdmin || userOwnsVm(req.session.userId, node, vmid);
 }
 
+// Display name of the PVE host a node ref belongs to — users get to SEE which
+// host their VM runs on (moving it stays admin-only via /api/migrate).
+function hostNameForNode(nodeValue) {
+  const { hostId } = decodeNodeRef(nodeValue);
+  if (!hostId) return '';
+  return db.prepare('SELECT name FROM pve_hosts WHERE id = ?').get(hostId)?.name || '';
+}
+
 function badRequest(message) {
   const err = new Error(message);
   err.statusCode = 400;
@@ -370,11 +378,12 @@ router.get('/', async (req, res) => {
   const results = await Promise.all(assignments.map(async (a) => {
     const nodeIdentity = serializeNodeIdentity(a.node);
     const lease = summarizeLease(a.node, a.vmid);
+    const hostName = hostNameForNode(a.node);
     try {
       const status = await getVMStatus(a.node, a.vmid);
-      return { ...status, ...nodeIdentity, assignmentId: a.id, lease };
+      return { ...status, ...nodeIdentity, hostName, assignmentId: a.id, lease };
     } catch {
-      return { vmid: a.vmid, ...nodeIdentity, name: `VM ${a.vmid}`, status: 'error', assignmentId: a.id, lease };
+      return { vmid: a.vmid, ...nodeIdentity, hostName, name: `VM ${a.vmid}`, status: 'error', assignmentId: a.id, lease };
     }
   }));
 
@@ -391,10 +400,11 @@ router.get('/:node/:vmid/status', async (req, res) => {
   try {
     const nodeIdentity = serializeNodeIdentity(node);
     const lease = summarizeLease(node, vmid);
+    const hostName = hostNameForNode(node);
     try {
-      res.json({ ...(await getVMStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'qemu', lease });
+      res.json({ ...(await getVMStatus(node, vmid)), ...nodeIdentity, hostName, vmid: parseInt(vmid, 10), type: 'qemu', lease });
     } catch {
-      res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10), type: 'lxc', lease });
+      res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, hostName, vmid: parseInt(vmid, 10), type: 'lxc', lease });
     }
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
@@ -458,6 +468,23 @@ router.delete('/:node/:vmid', async (req, res) => {
   // Deliberately NOT userCanAccessVm — see_all_vms must not grant deletion.
   if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
     return res.status(403).json({ error: 'You can only delete VMs assigned to you' });
+  }
+
+  // Never destroy the kept-behind source copy of a shared-storage migration —
+  // its disks are the SAME volumes the migrated VM uses on the other host.
+  // (PVE's protection flag also blocks this; this check gives a clear message
+  // instead of a raw upstream error.)
+  const latestMigration = db.prepare(
+    "SELECT source_node, target_node, kept_source FROM vm_migrations WHERE vmid = ? AND status = 'ok' ORDER BY id DESC LIMIT 1"
+  ).get(parseInt(vmid, 10));
+  if (latestMigration?.kept_source === 1) {
+    const requestCandidates = nodeLookupCandidates(node);
+    const sourceCandidates = nodeLookupCandidates(latestMigration.source_node);
+    if (sourceCandidates.some((c) => requestCandidates.includes(c))) {
+      return res.status(400).json({
+        error: `This is the migrated-away source copy — its disks belong to the live VM on the other host. Remove only its config from the source host shell: rm /etc/pve/qemu-server/${parseInt(vmid, 10)}.conf`,
+      });
+    }
   }
 
   try {

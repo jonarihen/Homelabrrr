@@ -181,11 +181,16 @@ router.get('/images', (req, res) => {
   // Only ready images stored as import content can be used as an import-from
   // disk source; iso-content rows (downloaded before the import switch) can't.
   const rows = db.prepare(
-    "SELECT id, name, node, storage, default_storage, volid, size FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' ORDER BY name"
+    "SELECT id, name, url, node, storage, default_storage, volid, size FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' ORDER BY name"
   ).all();
+  const hostNames = new Map(db.prepare('SELECT id, name FROM pve_hosts').all().map((h) => [h.id, h.name]));
   res.json(rows.map((r) => {
-    const { nodeName, nodeRef } = decodeNodeRef(r.node);
-    return { id: r.id, name: r.name, storage: r.storage, default_storage: r.default_storage || '', size: r.size, node: nodeName || r.node, nodeRef: nodeRef || r.node };
+    const { hostId, nodeName, nodeRef } = decodeNodeRef(r.node);
+    return {
+      id: r.id, name: r.name, url: r.url, storage: r.storage, default_storage: r.default_storage || '', size: r.size,
+      node: nodeName || r.node, nodeRef: nodeRef || r.node,
+      hostName: (hostId && hostNames.get(hostId)) || '',
+    };
   }));
 });
 
@@ -373,6 +378,52 @@ router.post('/clone', async (req, res) => {
   }
 });
 
+// ─── Automatic placement for non-admin cloud-image deploys ───────────────────
+// The same image (same download URL) may be present on several hosts. Rank
+// candidate hosts by guest count (fewest first) and take the first one that
+// actually has room: reachable, an images-capable storage with the most free
+// space, enough free RAM and disk (assertNodeCapacity). A nearly-full host is
+// skipped even when it has fewer VMs — count never beats capacity.
+async function autoPlaceImage(image, { memoryMb, diskGb }) {
+  const candidates = db.prepare(
+    "SELECT * FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' AND url = ?"
+  ).all(image.url);
+  if (candidates.length === 0) candidates.push(image);
+
+  const vms = await getAllVMs();
+  const countByHost = new Map();
+  for (const vm of vms) countByHost.set(vm.hostId, (countByHost.get(vm.hostId) || 0) + 1);
+  const ranked = candidates
+    .map((row) => ({ row, hostId: decodeNodeRef(row.node).hostId }))
+    .sort((a, b) => (countByHost.get(a.hostId) || 0) - (countByHost.get(b.hostId) || 0));
+
+  for (const { row } of ranked) {
+    try {
+      // Nodes drained for maintenance never receive auto-placed VMs
+      assertNodeAvailable(row.node);
+      // getStorages doubles as the reachability gate — an offline host throws.
+      // Users are placed only on storage pools an admin has exposed.
+      const all = (await getStorages(row.node)).filter((s) => s.content?.includes('images'));
+      const exposed = await filterExposedStorages(row.node, all, { isAdmin: false });
+      exposed.sort((a, b) => (b.avail || 0) - (a.avail || 0));
+      // The image's admin-set default storage wins when it's exposed here
+      const preferred = exposed.find((s) => s.storage === row.default_storage);
+      const pick = preferred || exposed[0];
+      if (!pick) continue;
+      await assertNodeCapacity(row.node, { memoryMb, diskGb, storage: pick.storage });
+      return { image: row, storage: pick.storage };
+    } catch (err) {
+      console.warn(`[placement] skipping ${row.node}: ${err.message}`);
+    }
+  }
+  return {
+    error: {
+      status: 503,
+      message: 'No Proxmox host has enough free memory or storage for this VM right now — contact your admin on Discord so they can make room.',
+    },
+  };
+}
+
 // ─── Create a VM directly from a cloud image (no static template) ────────────
 //
 // Builds a new VM whose boot disk is imported straight from a downloaded cloud
@@ -416,15 +467,19 @@ router.post('/from-image', async (req, res) => {
     return res.status(400).json({ error: 'This image cannot be used as a disk source — remove it and add it again to re-download it as import content' });
   }
 
-  // Resolve the disk target: an explicit choice wins, else the image's
-  // admin-set default. Validate here (the value is concatenated into Proxmox
-  // property strings) now that the image — and thus its default — is known.
-  const targetStorage = String(storage || image.default_storage || '').trim();
-  if (!targetStorage) {
-    return res.status(400).json({ error: 'Storage is required (this image has no default storage set)' });
-  }
-  if (!/^[a-zA-Z0-9._-]+$/.test(targetStorage)) {
-    return res.status(400).json({ error: 'Invalid storage' });
+  // Resolve the disk target for admins: an explicit choice wins, else the
+  // image's admin-set default. Validate here (the value is concatenated into
+  // Proxmox property strings) now that the image — and thus its default — is
+  // known. Non-admins get host AND storage from automatic placement below.
+  let targetImage = image;
+  let targetStorage = String(storage || image.default_storage || '').trim();
+  if (user.is_admin) {
+    if (!targetStorage) {
+      return res.status(400).json({ error: 'Storage is required (this image has no default storage set)' });
+    }
+    if (!/^[a-zA-Z0-9._-]+$/.test(targetStorage)) {
+      return res.status(400).json({ error: 'Invalid storage' });
+    }
   }
 
   // PVE VM names must be DNS-like — sanitize so the deploy doesn't fail late.
@@ -439,6 +494,16 @@ router.post('/from-image', async (req, res) => {
   }
   const memoryMb = Math.round(parseFloat(memoryGb) * 1024);
 
+  // Placement: admins deploy onto the host that holds the image row they
+  // picked (import-from requires image and VM on the same host); non-admins
+  // land on the least-loaded host that has room for the request.
+  if (!user.is_admin) {
+    const placed = await autoPlaceImage(image, { memoryMb, diskGb: baseDiskGb });
+    if (placed.error) return res.status(placed.error.status).json({ error: placed.error.message });
+    targetImage = placed.image;
+    targetStorage = placed.storage;
+  }
+
   // Cloud images are always cloud-init capable, so guest settings are honored.
   const parsed = parseCloudInitOptions(req.body, req.session.userId);
   if (parsed.error) return res.status(parsed.error.status).json({ error: parsed.error.message });
@@ -452,7 +517,7 @@ router.post('/from-image', async (req, res) => {
   // Enforce storage exposure — never trust the dropdown. Non-admins can't
   // deploy onto a pool an admin has hidden, even by naming it directly.
   try {
-    await assertStorageExposed(image.node, targetStorage, user);
+    await assertStorageExposed(targetImage.node, targetStorage, user);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     throw err;
@@ -460,16 +525,16 @@ router.post('/from-image', async (req, res) => {
 
   // Refuse deployment to a node the admin has drained for maintenance
   try {
-    assertNodeAvailable(image.node);
+    assertNodeAvailable(targetImage.node);
   } catch (err) {
     return res.status(err.status || 423).json({ error: err.message });
   }
 
-  // CPU topology + node capacity checks run on the image's node (import-from
+  // CPU topology + node capacity checks run on the placed node (import-from
   // requires the disk source and target to share a host).
   let cpuLayout;
   try {
-    cpuLayout = await computeCpuTopology(image.node, cores);
+    cpuLayout = await computeCpuTopology(targetImage.node, cores);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     // Non-validation error — fall back to a plain socket/core split
@@ -477,7 +542,7 @@ router.post('/from-image', async (req, res) => {
   }
 
   try {
-    await assertNodeCapacity(image.node, { memoryMb, diskGb: baseDiskGb, storage: targetStorage });
+    await assertNodeCapacity(targetImage.node, { memoryMb, diskGb: baseDiskGb, storage: targetStorage });
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
       addCores: parseInt(cores, 10) || 0,
@@ -493,7 +558,7 @@ router.post('/from-image', async (req, res) => {
     const vmid = await getNextVmid();
     const tag = vlanTag ? parseInt(vlanTag) : null;
 
-    const upid = await createVM(image.node, vmid, {
+    const upid = await createVM(targetImage.node, vmid, {
       name: vmName,
       cpu: 'host',
       sockets: cpuLayout.sockets,
@@ -501,7 +566,7 @@ router.post('/from-image', async (req, res) => {
       memory: memoryMb,
       ostype: 'l26',
       scsihw: 'virtio-scsi-single',
-      scsi0: `${targetStorage}:0,import-from=${image.volid}`,
+      scsi0: `${targetStorage}:0,import-from=${targetImage.volid}`,
       ide2: `${targetStorage}:cloudinit`,
       boot: 'order=scsi0',
       serial0: 'socket',
@@ -522,30 +587,30 @@ router.post('/from-image', async (req, res) => {
     ]);
     const row = db.prepare(
       "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, cloud_image_id, steps, status, upid) VALUES (?, ?, ?, ?, 'cloudimage', ?, ?, 'creating', ?)"
-    ).run(req.session.userId, image.node, vmid, vmName, image.id, steps, upid || '');
+    ).run(req.session.userId, targetImage.node, vmid, vmName, targetImage.id, steps, upid || '');
 
     const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
     if (targetUser) {
       try {
         db.prepare('INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)')
-          .run(targetUser, image.node, vmid);
+          .run(targetUser, targetImage.node, vmid);
       } catch { /* may already be assigned */ }
     }
 
     // Start the VM's lease clock at provisioning (default duration from settings)
-    createLeaseForVm(image.node, vmid, { createdBy: req.session.username });
+    createLeaseForVm(targetImage.node, vmid, { createdBy: req.session.username });
 
-    finishImageProvision(row.lastInsertRowid, image.node, vmid, upid, {
+    finishImageProvision(row.lastInsertRowid, targetImage.node, vmid, upid, {
       diskGb: baseDiskGb,
       ...cloudInitOpts,
       start: startNow,
     }).catch((err) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message));
 
-    logAudit(req, 'vm_from_image', `${image.node}/${vmid}`, `image:${image.name}`);
+    logAudit(req, 'vm_from_image', `${targetImage.node}/${vmid}`, `image:${targetImage.name}${user.is_admin ? '' : ' (auto-placed)'}`);
     res.json({
       id: row.lastInsertRowid,
       vmid,
-      ...serializeNodeIdentity(image.node),
+      ...serializeNodeIdentity(targetImage.node),
       status: 'creating',
       upid,
     });

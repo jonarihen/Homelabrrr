@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-07-25 — Shared-storage migrations, smarter VM placement, host visibility
+
+- **Migrations now understand shared storage** (admin): when both hosts mount the same NFS/CIFS share (e.g. `vdisks-nfs` from a TrueNAS box), disks on it are **never copied** — the migration dialog shows a per-disk plan where those disks are *remounted* on the target and only local disks (like an SSD boot disk) actually move. Boot disks travel via the shared storage and can land on the target's local SSD storage afterwards. Runs offline (stop the VM first); a "force full copy" escape hatch remains
+- Proxmox cannot forget a VM without destroying its disks, so after a shared-storage migration the **source config stays behind, stopped and protected** — the portal shows the one-line cleanup command (`rm /etc/pve/qemu-server/<vmid>.conf`) and refuses to delete that leftover through the UI, so the shared disks can never be destroyed by accident
+- **Cloud-image deploys pick the host per deploy**: admins choose the host via the image card (one card per host that has the image, labeled); **non-admin deploys are placed automatically** on the least-busy host that actually has room — a host at 96% storage / 98% memory is skipped even if it has fewer VMs. When no host has capacity, the deploy is refused with a clear "contact your admin on Discord" message
+- **Everyone can now see which Proxmox host a VM runs on** — on the dashboard cards and the VM detail page. Moving VMs stays admin-only
+
+## 2026-07-25 — Migrate VMs between separate Proxmox hosts
+
+- Admins can now **move a VM or container to a different Proxmox host** — even hosts that are not clustered together (uses Proxmox `remote_migrate`, PVE 7.3+). Find the new **Migrate** button on each row of the Assignments page (shown when 2+ hosts are registered)
+- Pick the target host, storage and network bridge in the dialog; the NIC's **VLAN tag is kept**, only the bridge is remapped. Running VMs can **live-migrate** (needs reasonably similar CPUs on both hosts — uncheck it and stop the VM first when moving between very different hardware); running containers are stopped, moved and restarted
+- By default the source VM is **deleted after a successful migration**; untick "Delete source" to keep a stopped copy on the old host
+- The portal follows the move automatically: user assignment, SSH settings and template registrations all point at the new host when the migration finishes. The VMID never changes
+- Migrations run in the background — a progress banner on the Assignments page keeps tracking them even if you close the dialog or restart the portal, and every migration is audit-logged
+- Pre-flight checks refuse migrations that clearly don't fit the target (free RAM / storage space), same as VM provisioning
+
 ## 2026-07-21 — Fix: port forwards for VMs with long names
 
 - **Creating a port forward for a VM with a long name no longer fails** with `string value name is too long ... the limit is 35`. FortiGate caps object names at 35 characters, and the rule name derived from the VM name plus its service/port label (e.g. `minecraft-fi-lille-ven - Custom 25565/tcp`) routinely exceeded that

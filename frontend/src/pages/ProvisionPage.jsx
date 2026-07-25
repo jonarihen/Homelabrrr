@@ -434,21 +434,25 @@ function CloudImageForm({ onStarted }) {
     }
   }, [user?.isAdmin]);
 
-  // When an image is picked, load storages (images-capable) on its node.
+  // When an image is picked, load storages (images-capable) on its node —
+  // admins only: non-admin deploys are placed automatically by the backend
+  // (least-busy host with room), so they pick neither host nor storage.
   // Bridges are admin-only (networks route is admin-gated); others default to vmbr0.
   useEffect(() => {
     if (!selected) return;
-    api.get(`/provision/nodes/${selected.nodeRef}/storages`)
-      .then(r => {
-        const imgCapable = r.data.filter(s => s.content?.includes('images'));
-        setStorages(imgCapable);
-        // Prefer the image's admin-set default target, then local-lvm, then first.
-        setForm(f => ({ ...f, storage:
-          imgCapable.find(s => s.storage === selected.default_storage)?.storage
-          || imgCapable.find(s => s.storage === 'local-lvm')?.storage
-          || imgCapable[0]?.storage || '' }));
-      })
-      .catch(() => setStorages([]));
+    if (user?.isAdmin) {
+      api.get(`/provision/nodes/${selected.nodeRef}/storages`)
+        .then(r => {
+          const imgCapable = r.data.filter(s => s.content?.includes('images'));
+          setStorages(imgCapable);
+          // Prefer the image's admin-set default target, then local-lvm, then first.
+          setForm(f => ({ ...f, storage:
+            imgCapable.find(s => s.storage === selected.default_storage)?.storage
+            || imgCapable.find(s => s.storage === 'local-lvm')?.storage
+            || imgCapable[0]?.storage || '' }));
+        })
+        .catch(() => setStorages([]));
+    }
     if (user?.isAdmin) {
       api.get(`/provision/nodes/${selected.nodeRef}/networks`)
         .then(r => {
@@ -477,7 +481,7 @@ function CloudImageForm({ onStarted }) {
         cores: parseInt(form.cores),
         memoryGb: parseFloat(form.memory),
         diskGb: parseInt(form.diskGb),
-        storage: form.storage,
+        storage: user?.isAdmin ? form.storage : undefined,
         bridge: form.bridge,
         description: form.description,
         assignTo: form.assignTo || undefined,
@@ -514,12 +518,18 @@ function CloudImageForm({ onStarted }) {
     );
   }
 
+  // Admins see one card per host holding the image (picking the card picks the
+  // deploy host); users see each image once — placement is automatic.
+  const visibleImages = user?.isAdmin
+    ? images
+    : [...new Map(images.map(img => [img.url || img.id, img])).values()];
+
   if (!selected) {
     return (
       <div className="space-y-3">
         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Choose a cloud image</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {images.map(img => (
+          {visibleImages.map(img => (
             <button
               key={img.id}
               onClick={() => selectImage(img)}
@@ -533,7 +543,11 @@ function CloudImageForm({ onStarted }) {
                 </div>
                 <div>
                   <h3 className="text-white font-semibold group-hover:text-cyan-400 transition-colors">{img.name}</h3>
-                  <p className="text-xs text-gray-500 font-mono">{displayNode(img.node)} / {img.storage}</p>
+                  <p className="text-xs text-gray-500 font-mono">
+                    {user?.isAdmin
+                      ? `${img.hostName ? `${img.hostName} — ` : ''}${displayNode(img.node)} / ${img.storage}`
+                      : 'Auto-placed on the least-busy host'}
+                  </p>
                 </div>
               </div>
               <div className="flex items-center gap-3 text-xs text-gray-500">
@@ -571,7 +585,11 @@ function CloudImageForm({ onStarted }) {
           </div>
           <div>
             <h3 className="text-white font-semibold">Deploy from: {selected.name}</h3>
-            <p className="text-xs text-gray-500 font-mono">{displayNode(selected.node)} / {selected.storage}</p>
+            <p className="text-xs text-gray-500 font-mono">
+              {user?.isAdmin
+                ? `Deploys to host: ${selected.hostName ? `${selected.hostName} — ` : ''}${displayNode(selected.node)}`
+                : 'Host is picked automatically — least-busy host with free capacity'}
+            </p>
           </div>
         </div>
 
@@ -605,19 +623,19 @@ function CloudImageForm({ onStarted }) {
             </div>
           </div>
 
-          <div className={`grid ${user?.isAdmin ? 'grid-cols-2' : 'grid-cols-1'} gap-4`}>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Storage</label>
-              {storages.length > 0 ? (
-                <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
-                  <option value="">Select...</option>
-                  {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
-                </select>
-              ) : (
-                <input type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" required />
-              )}
-            </div>
-            {user?.isAdmin && (
+          {user?.isAdmin ? (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Storage</label>
+                {storages.length > 0 ? (
+                  <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
+                    <option value="">Select...</option>
+                    {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
+                  </select>
+                ) : (
+                  <input type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" required />
+                )}
+              </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">Network Bridge</label>
                 <select value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className={inputCls}>
@@ -625,8 +643,13 @@ function CloudImageForm({ onStarted }) {
                   {bridges.length === 0 && <option value="vmbr0">vmbr0</option>}
                 </select>
               </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-xl p-3">
+              Host and storage are picked automatically — your VM lands on the least-busy Proxmox host
+              that has enough free memory and disk space.
+            </p>
+          )}
 
           {vlans.length > 0 && (
             <div>
@@ -672,7 +695,7 @@ function CloudImageForm({ onStarted }) {
 
           <button
             type="submit"
-            disabled={saving || !form.storage}
+            disabled={saving || (user?.isAdmin && !form.storage)}
             className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
           >
             {saving ? 'Starting deployment...' : 'Deploy VM'}

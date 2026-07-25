@@ -1,4 +1,5 @@
 import https from 'https';
+import tls from 'tls';
 import db from './db.js';
 import { decryptSecret } from './utils/secrets.js';
 import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.js';
@@ -554,6 +555,108 @@ export async function deleteVM(node, vmid) {
   clearCachedVmConfig(node, vmid, vmtype);
   _vmCache = { data: null, expires: 0 };
   return { vmtype };
+}
+
+// ── Cross-host (remote) migration ────────────────────────────────────────────
+
+// Cluster-wide storage definitions (/storage — storage.cfg entries, including
+// nfs server/export and cifs server/share). Used to detect storage that is
+// mounted by more than one registered host.
+export function getStorageDefs(host) {
+  return makeRequest(host, 'GET', '/storage');
+}
+
+// Move (or reassign) one disk of a stopped/running VM. `POST move_disk`.
+// opts: { storage, delete, format }. Returns task UPID.
+export async function moveVmDisk(node, vmid, disk, opts = {}) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  const body = { disk, ...(opts.storage && { storage: opts.storage }) };
+  if (opts.delete) body.delete = 1;
+  if (opts.format) body.format = opts.format;
+  clearCachedVmConfig(node, vmid, 'qemu');
+  return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/move_disk`, body);
+}
+
+// Public task-wait helper for multi-step orchestration (migration adopt flow).
+// Throws on task failure or timeout.
+export async function waitForTask(node, upid, { timeoutMs = 4 * 60 * 60 * 1000, intervalMs = 4000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let task = null;
+    try {
+      task = await getTaskStatus(node, upid);
+    } catch { /* transient — keep waiting */ }
+    if (task && task.status === 'stopped') {
+      if (task.exitstatus !== 'OK') throw new Error(`Proxmox task failed: ${task.exitstatus}`);
+      return;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error('Timed out waiting for Proxmox task to complete');
+}
+
+// SHA-256 fingerprint of the TLS certificate a host actually serves, in the
+// colon-separated form `remote_migrate` expects. The source PVE host pins the
+// target's certificate by this fingerprint, so it must come from a live
+// connection. The connection follows the same TLS policy as every other call
+// to the host (assertSecureTls + per-host verify_tls).
+export function getHostCertFingerprint(host) {
+  assertSecureTls(host);
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({
+      host: host.host,
+      port: host.port,
+      rejectUnauthorized: host.verify_tls !== 0,
+    }, () => {
+      const cert = socket.getPeerCertificate();
+      socket.end();
+      if (!cert?.fingerprint256) {
+        reject(new Error(`Could not read the TLS certificate fingerprint of ${host.name || host.host}`));
+        return;
+      }
+      resolve(cert.fingerprint256);
+    });
+    socket.setTimeout(10000, () => socket.destroy(new Error(`Timed out reading the TLS certificate of ${host.name || host.host}`)));
+    socket.on('error', reject);
+  });
+}
+
+// Start a cross-cluster migration (PVE `remote_migrate`, 7.3+ / experimental —
+// the API behind `qm remote-migrate` / `pct remote-migrate`). The source host
+// drives the task and connects to the target by API token + certificate
+// fingerprint; the guest lands on the node behind the target host's API
+// address. The VMID is kept (the portal allocates VMIDs globally unique across
+// hosts). Returns the UPID of the migration task on the source node.
+export async function remoteMigrateVm(sourceNode, vmid, vmtype, targetHost, opts = {}) {
+  const { host, nodeName } = await resolveNode(sourceNode, { vmid });
+  if (host.id === targetHost.id) {
+    throw new Error('Source and target are the same Proxmox host');
+  }
+  assertSecureTls(targetHost, 'Target Proxmox host');
+
+  const fingerprint = await getHostCertFingerprint(targetHost);
+  const endpoint = [
+    `host=${targetHost.host}`,
+    `port=${targetHost.port}`,
+    `apitoken=PVEAPIToken=${targetHost.token_id}=${decryptSecret(targetHost.token_secret)}`,
+    `fingerprint=${fingerprint}`,
+  ].join(',');
+
+  const body = {
+    'target-endpoint': endpoint,
+    'target-storage': opts.targetStorage,
+    'target-bridge': opts.targetBridge,
+    'target-vmid': Number.parseInt(vmid, 10),
+    delete: opts.deleteSource ? 1 : 0,
+  };
+  // QEMU supports live migration (`online`); LXC only offline or restart mode.
+  if (vmtype === 'qemu') body.online = opts.online ? 1 : 0;
+  else body.restart = opts.restart ? 1 : 0;
+
+  const upid = await makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/remote_migrate`, body);
+  clearCachedVmConfig(sourceNode, vmid, vmtype);
+  _vmCache = { data: null, expires: 0 };
+  return upid;
 }
 
 // ── Snapshot helpers ─────────────────────────────────────────────────────────

@@ -241,6 +241,46 @@ try {
   ).run();
 } catch { /* table may not exist yet on a brand-new DB */ }
 
+// Cross-host VM migrations (admin moves a guest between separate PVE hosts).
+// Rows deliberately stay 'running' across backend restarts: the migration task
+// keeps running on the source host regardless, and the /api/migrate status
+// endpoints re-check the task lazily and finalize (re-point DB node refs) then.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS vm_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    vmid INTEGER NOT NULL,
+    name TEXT DEFAULT '',
+    vmtype TEXT DEFAULT 'qemu',
+    source_node TEXT NOT NULL,
+    target_node TEXT NOT NULL,
+    target_storage TEXT DEFAULT '',
+    target_bridge TEXT DEFAULT '',
+    online INTEGER DEFAULT 0,
+    delete_source INTEGER DEFAULT 1,
+    status TEXT DEFAULT 'running',
+    status_detail TEXT DEFAULT '',
+    upid TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    finished_at TEXT DEFAULT NULL
+  )
+`); } catch { /* exists */ }
+// Shared-storage aware migration: 'adopt' mode re-references disks that live on
+// storage both hosts mount (NFS/CIFS) instead of copying them. kept_source
+// marks migrations whose source VM config had to stay behind (PVE cannot
+// forget a VM without destroying its disks) — deletion of those is guarded.
+try { db.exec("ALTER TABLE vm_migrations ADD COLUMN mode TEXT DEFAULT 'remote_migrate'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE vm_migrations ADD COLUMN steps TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE vm_migrations ADD COLUMN kept_source INTEGER DEFAULT 0'); } catch { /* exists */ }
+// remote_migrate rows survive restarts (the PVE task keeps running and the
+// status endpoints finalize lazily), but adopt-mode rows are orchestrated
+// in-process — a restart mid-flight orphans them.
+try {
+  db.prepare(
+    "UPDATE vm_migrations SET status = 'error', status_detail = 'Migration was interrupted by a server restart — verify the VM state in Proxmox before retrying', finished_at = datetime('now') WHERE status = 'running' AND mode = 'adopt'"
+  ).run();
+} catch { /* table may not exist yet on a brand-new DB */ }
+
 // Allow users to provision VMs (per-user permission)
 try { db.exec('ALTER TABLE users ADD COLUMN can_provision INTEGER DEFAULT 0'); } catch { /* exists */ }
 

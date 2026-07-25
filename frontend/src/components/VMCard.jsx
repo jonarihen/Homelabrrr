@@ -54,7 +54,10 @@ export default function VMCard({ vm, selected, onSelect }) {
               </span>
             )}
           </h3>
-          <p className="text-[10px] text-gray-500 mt-1 font-mono uppercase tracking-[0.1em]">ID {vm.vmid} / {displayNode(vm.node)}</p>
+          <p className="text-[10px] text-gray-500 mt-1 font-mono uppercase tracking-[0.1em]">
+            ID {vm.vmid} / {displayNode(vm.node)}
+            {vm.hostName && <span className="text-blue-400/70"> @ {vm.hostName}</span>}
+          </p>
           {vm.lease && <LeaseBadge lease={vm.lease} className="mt-1.5" />}
           {vm.schedule?.enabled && (
             <span

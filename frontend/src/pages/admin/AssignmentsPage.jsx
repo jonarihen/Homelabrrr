@@ -1,6 +1,7 @@
 import { Fragment, useState, useEffect, useRef } from 'react';
 import api from '../../api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import MigrateVMModal from '../../components/MigrateVMModal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode, vmIdentityKey } from '../../utils/nodeRef.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
@@ -274,6 +275,9 @@ export default function AssignmentsPage() {
   const [error, setError]   = useState('');
   const [claiming, setClaiming] = useState(false);
   const [claimMsg, setClaimMsg] = useState('');
+  const [migrateVm, setMigrateVm] = useState(null);
+  const [migrations, setMigrations] = useState([]);
+  const migrationPollRef = useRef(null);
 
   const load = async () => {
     try {
@@ -286,7 +290,35 @@ export default function AssignmentsPage() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  // Cross-host migrations run in the background — keep a banner alive while
+  // any are running, even after the modal is closed. Admin-only endpoint.
+  const loadMigrations = async () => {
+    if (!user?.isAdmin) return;
+    try {
+      const { data } = await api.get('/migrate');
+      setMigrations(data);
+      const anyRunning = data.some((m) => m.status === 'running');
+      if (anyRunning && !migrationPollRef.current) {
+        migrationPollRef.current = setInterval(async () => {
+          try {
+            const r = await api.get('/migrate');
+            setMigrations(r.data);
+            if (!r.data.some((m) => m.status === 'running')) {
+              clearInterval(migrationPollRef.current);
+              migrationPollRef.current = null;
+              load();
+            }
+          } catch { /* keep polling */ }
+        }, 5000);
+      }
+    } catch { /* non-admin or endpoint unavailable */ }
+  };
+
+  useEffect(() => {
+    load();
+    loadMigrations();
+    return () => clearInterval(migrationPollRef.current);
+  }, []);
 
   const unassign = async (assignment) => {
     if (!confirm('Remove this VM assignment?')) return;
@@ -334,6 +366,11 @@ export default function AssignmentsPage() {
 
   const assigned   = vms.filter(v => v.assignment);
   const unassigned = vms.filter(v => !v.assignment);
+  // Migration only makes sense with 2+ registered hosts reachable
+  const multiHost = new Set(vms.map(v => v.hostId).filter(Boolean)).size > 1;
+  const visibleMigrations = migrations.filter(m =>
+    m.status === 'running' || (m.finished_at && Date.now() - new Date(m.finished_at.replace(' ', 'T') + 'Z').getTime() < 60 * 60 * 1000)
+  );
 
   // Unassigned first, then one group per user (alphabetical), VMs by VMID
   const byVmid = (a, b) => (a.vmid ?? 0) - (b.vmid ?? 0);
@@ -388,6 +425,28 @@ export default function AssignmentsPage() {
 
       {error && <p className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
 
+      {visibleMigrations.length > 0 && (
+        <div className="mb-4 bg-gray-900 border border-gray-800 rounded-xl divide-y divide-gray-800">
+          {visibleMigrations.map(m => (
+            <div key={m.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+              {m.status === 'running'
+                ? <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse shrink-0" />
+                : <span className={`w-2 h-2 rounded-full shrink-0 ${m.status === 'ok' ? 'bg-green-500' : 'bg-red-500'}`} />}
+              <span className="text-gray-200 font-medium">{m.name || `VM ${m.vmid}`}</span>
+              <span className="text-xs font-mono text-gray-500">
+                {m.sourceHostName || m.sourceNodeName} → {m.targetHostName || m.targetNodeName}
+              </span>
+              <span className={`ml-auto text-xs font-mono ${m.status === 'running' ? 'text-blue-400' : m.status === 'ok' ? 'text-green-500' : 'text-red-400'}`}>
+                {m.status === 'running' ? 'migrating…' : m.status === 'ok' ? 'done' : 'failed'}
+              </span>
+              {m.status === 'error' && m.status_detail && (
+                <span className="text-xs text-gray-500 truncate max-w-[24rem]" title={m.status_detail}>{m.status_detail}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {loading ? (
         <div className="space-y-3">
           {[1,2,3,4].map(i => <div key={i} className="h-14 bg-gray-900 rounded-xl animate-pulse" />)}
@@ -426,7 +485,17 @@ export default function AssignmentsPage() {
                           : <span className="text-gray-600 italic">Unassigned</span>
                         }
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        {user?.isAdmin && multiHost && (
+                          <button
+                            onClick={() => setMigrateVm(vm)}
+                            disabled={migrations.some(m => m.status === 'running' && m.vmid === vm.vmid)}
+                            title="Move this VM to a different Proxmox host"
+                            className="text-xs text-gray-400 hover:text-white disabled:opacity-40 px-2 py-1 rounded hover:bg-gray-700 transition-colors mr-1"
+                          >
+                            Migrate
+                          </button>
+                        )}
                         {vm.assignment ? (
                           <button
                             onClick={() => unassign(vm.assignment)}
@@ -452,6 +521,14 @@ export default function AssignmentsPage() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {migrateVm && (
+        <MigrateVMModal
+          vm={migrateVm}
+          onClose={() => { setMigrateVm(null); loadMigrations(); load(); }}
+          onDone={() => { loadMigrations(); load(); }}
+        />
       )}
     </div>
   );

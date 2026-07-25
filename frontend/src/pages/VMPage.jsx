@@ -294,7 +294,11 @@ export default function VMPage() {
             </button>
             <div>
               <h1 className="aaris-display text-xl text-gray-100">{vm.name || `VM ${vm.vmid}`}</h1>
-              <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mt-1.5">VMID {vm.vmid} / {displayNode(vm.node)}</p>
+              <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mt-1.5">
+                VMID {vm.vmid} / {displayNode(vm.node)}
+                {vm.hostName && <span className="text-gray-600"> · host </span>}
+                {vm.hostName && <span className="text-blue-400/80">{vm.hostName}</span>}
+              </p>
               {vm.lease && <LeaseBadge lease={vm.lease} className="mt-2" />}
             </div>
           </div>
