@@ -211,6 +211,24 @@ function rewriteBridge(netValue, targetBridge) {
   return netValue.replace(/(^|,)bridge=[^,]*/, `$1bridge=${targetBridge}`);
 }
 
+// A VM's boot order can list devices that no longer exist — e.g. a disk was
+// removed or moved to a different bus (sata0 → scsi0) but the boot list kept
+// the stale key. A running source node tolerates the dangling entry (it just
+// boots the next valid device), but applying the config on the target host
+// validates the boot order strictly and aborts with "invalid bootorder:
+// device 'X' does not exist". Drop boot entries whose device key is absent
+// from the config. Returns the corrected `order=...` string, or null when
+// nothing needs changing (or no valid device would be left to boot from).
+function sanitizeBootOrder(config) {
+  if (typeof config.boot !== 'string') return null;
+  const m = config.boot.match(/^order=(.*)$/);
+  if (!m) return null; // legacy (c/d/n) format — Proxmox handles it on its own
+  const tokens = m[1].split(';').filter(Boolean);
+  const kept = tokens.filter((dev) => Object.prototype.hasOwnProperty.call(config, dev));
+  if (kept.length === 0 || kept.length === tokens.length) return null;
+  return `order=${kept.join(';')}`;
+}
+
 // Remove the leftover source config over SSH after a successful adopt
 // migration. Never touches volumes: the .conf is archived under /root/ on the
 // node — the only way PVE can forget a VM while its disks live on (qm destroy
@@ -292,6 +310,13 @@ async function runAdoptMigration(ctx) {
       } else {
         targetCfg[key] = value;
       }
+    }
+    // Drop boot-order entries for devices that don't exist — the target host
+    // validates the boot order on create and would otherwise abort.
+    const fixedBoot = sanitizeBootOrder(targetCfg);
+    if (fixedBoot) {
+      setStep(id, 'create', 'active', `fixed boot order (was "${targetCfg.boot}")`);
+      targetCfg.boot = fixedBoot;
     }
     const createUpid = await createVM(targetNode, vmid, targetCfg);
     if (createUpid) await waitForTask(targetNode, createUpid);
@@ -580,7 +605,22 @@ router.post('/:node/:vmid', async (req, res) => {
     }
 
     let upid = '';
+    let bootFix = '';
     if (mode === 'remote_migrate') {
+      // Proxmox reads the source config itself for a cross-host migration, so a
+      // stale boot-order entry (device removed/rebused but still listed) makes
+      // the target reject the config. Correct it on the source first — this is
+      // a genuine fix to a broken boot list, so it stands even if the source
+      // is kept. Only qemu has an `order=` boot list; LXC has none.
+      if (vmtype === 'qemu') {
+        const srcConfig = await getVMConfig(sourceRef, vmid);
+        const fixedBoot = sanitizeBootOrder(srcConfig);
+        if (fixedBoot) {
+          await updateVMConfig(sourceRef, vmid, { boot: fixedBoot });
+          bootFix = ` (corrected stale boot order "${srcConfig.boot}" → "${fixedBoot}")`;
+          console.log(`[migrate] VM ${vmid}: ${bootFix.trim()}`);
+        }
+      }
       upid = await remoteMigrateVm(sourceRef, vmid, vmtype, targetHost, {
         targetStorage,
         targetBridge,
@@ -625,8 +665,8 @@ router.post('/:node/:vmid', async (req, res) => {
     }
 
     logAudit(req, 'vm_remote_migrate', `${vm.node}/${vmid}`,
-      `mode=${mode} → ${targetHost.name}/${target.nodeName}${targetStorage ? ` storage=${targetStorage}` : ''} bridge=${targetBridge}${online ? ' online' : ''}${mode === 'adopt' || !deleteSource ? ' keep-source' : ''}`);
-    res.json({ id: row.lastInsertRowid, vmid, upid, mode, status: 'running' });
+      `mode=${mode} → ${targetHost.name}/${target.nodeName}${targetStorage ? ` storage=${targetStorage}` : ''} bridge=${targetBridge}${online ? ' online' : ''}${mode === 'adopt' || !deleteSource ? ' keep-source' : ''}${bootFix}`);
+    res.json({ id: row.lastInsertRowid, vmid, upid, mode, status: 'running', bootFix: bootFix.trim() || undefined });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     res.status(500).json({ error: sanitizeError(err.message) });
