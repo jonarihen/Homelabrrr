@@ -1,6 +1,10 @@
 # Changelog
 
-## 2026-07-25 — Patch cloud images for a clean Proxmox console (systemd OSC 3008)
+## 2026-07-25 — One-click resolution for the stale-boot-order migration block
+
+- When a **running** VM can't be migrated because its boot order names a device that no longer exists, the migrate dialog no longer just explains and stops — it offers two **one-click** choices: **Reboot to apply the fix** (a short blip, then start a live migration) or **Stop & migrate offline now** (down during the copy, but no reboot)
+- Stop & migrate handles the whole sequence: it stops the VM, waits for it, and starts the migration — the backend corrects the boot order automatically once the VM is off, then moves it
+- The dialog shows the exact bad boot order and the correction, so it's clear what's happening. Nothing changes for VMs with a valid boot order
 
 - **Fixes the raw `machineid=…;hostname=…;exit=success;type=shell` spam in the noVNC console.** systemd v257+ images (e.g. Ubuntu 26.04) ship an OSC 3008 "terminal context" shell drop-in that prints control sequences around every command. SSH terminals parse them silently, but the Proxmox VT console can't, so it shows them raw
 - New **Patch console** button on each cloud image (Admin → Templates → Cloud Images). It runs `virt-customize` on the image's host to disable that drop-in (via a `dpkg` diversion, so a package update can't reinstate it) — **every VM deployed from the image afterward has a clean console**; already-deployed VMs are unaffected. The image is badged **✓ console patched**
