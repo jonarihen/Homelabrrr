@@ -1818,6 +1818,17 @@ router.post('/policies', pPolicies, async (req, res) => {
     });
     const policyIds = [outputs.forward?.policyId, outputs.reverse?.policyId].filter((v) => v !== undefined && v !== null);
 
+    // Keep every policy inside its source VLAN's sequence group — the workflow
+    // appends new policies at the bottom, which fragments the GUI grouping
+    const parkInGroup = async (policyId, ifaceName) => {
+      if (!policyId) return;
+      const groupMate = existing.find(p => (p.srcintf || []).some(i => i.name === ifaceName));
+      if (!groupMate) return;
+      try { await client.movePolicy(policyId, 'after', groupMate.policyid); } catch { /* best effort */ }
+    };
+    await parkInGroup(outputs.forward?.policyId, srcVlan.interface_name);
+    await parkInGroup(outputs.reverse?.policyId, dstVlan.interface_name);
+
     logAudit(req, 'admin_create_policy', `${srcVlan.interface_name} → ${dstVlan.interface_name}`, `services: ${services.join(',')} action: ${action}${bidirectional ? ' (bidirectional)' : ''}`);
     res.json({ policyIds });
   } catch (err) {
@@ -2044,6 +2055,34 @@ function managedVipAddressMatches(address, mappedIp) {
   return String(address?.type || 'ipmask') === 'ipmask' && subnet === `${mappedIp} 255.255.255.255`;
 }
 
+// Sequence-group label for a port forward's root-VDOM policy: one group per
+// owning user, so it's obvious who has what open. FortiGate's GUI shows one
+// group only when same-label policies are also adjacent — creation and the
+// regroup endpoint both keep them contiguous.
+function portForwardOwnerUsername(vmid, mappedIp) {
+  if (vmid) {
+    const byVmid = db.prepare(
+      'SELECT u.username FROM vm_assignments va JOIN users u ON u.id = va.user_id WHERE va.vmid = ? LIMIT 1'
+    ).get(parseInt(vmid, 10));
+    if (byVmid) return byVmid.username;
+  }
+  if (mappedIp) {
+    const byIp = db.prepare(`
+      SELECT u.username FROM vm_ssh_configs c
+      JOIN vm_assignments va ON va.vmid = c.vmid
+      JOIN users u ON u.id = va.user_id
+      WHERE c.host = ? LIMIT 1
+    `).get(mappedIp);
+    if (byIp) return byIp.username;
+  }
+  return '';
+}
+
+function portForwardGroupLabel(vmid, mappedIp) {
+  const username = portForwardOwnerUsername(vmid, mappedIp);
+  return username ? `Port Forwarding - ${username}` : 'Port Forwarding (VM Manager)';
+}
+
 function normalizePortForwardProtocol(protocol) {
   const normalized = String(protocol || 'tcp').toLowerCase();
   return ['tcp', 'udp'].includes(normalized) ? normalized : null;
@@ -2063,6 +2102,112 @@ function buildPortSpecificCustomVipName(vipName, protocol, port) {
   if (/\bcustom$/i.test(trimmedName)) return `${trimmedName} ${port}/${protocol}`;
   return trimmedName;
 }
+
+// Walk the policy list top-to-bottom; the first policy of each label is the
+// group anchor and keeps its position. Every later policy with the same label
+// is moved directly after the group's current tail, so each label ends up as
+// one contiguous block (FortiGate's GUI shows a single sequence group only
+// when members are adjacent). Policies without a portal label never move.
+async function regroupAdjacent(client, vdom, labelFor, warnings) {
+  let moved = 0;
+  const policies = await client.getPolicies(vdom);
+  const tails = new Map(); // label → policyid of the group's current bottom
+  for (const p of policies) {
+    const label = labelFor(p);
+    if (!label) continue;
+    const tail = tails.get(label);
+    if (tail !== undefined) {
+      try {
+        await client.movePolicy(p.policyid, 'after', tail, vdom);
+        moved += 1;
+      } catch (err) {
+        warnings.push(`${vdom} policy ${p.policyid} move: ${err.message}`);
+      }
+    }
+    tails.set(label, p.policyid);
+  }
+  return moved;
+}
+
+// One-shot cleanup to the current grouping scheme, then make each group
+// contiguous. Root VDOM: only portal-managed port-forward policies, grouped
+// per owning user. Lab VDOM: EVERY policy whose source is a synced VLAN
+// interface joins that VLAN's group (manual ones included — grouping by
+// source interface is the whole point); port-forward legs (srcintf = the
+// inter-VDOM link) group per destination VLAN. Relative order WITHIN a group
+// is preserved; a policy outside any group can end up crossed by group
+// members consolidating past it — review custom deny rules after running.
+router.post('/firewalls/:id/regroup-policies', pFirewalls, async (req, res) => {
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+
+  try {
+    const client = createClient(fw);
+    const rootVdom = fw.root_vdom || 'root';
+    const labVdom = fw.vdom || 'lab';
+    const summary = { rootRelabeled: 0, rootMoved: 0, labRelabeled: 0, labMoved: 0, warnings: [] };
+
+    // ── Root VDOM: port forwards grouped per owning user ─────────────────────
+    const managed = db.prepare('SELECT * FROM managed_vips WHERE firewall_id = ?').all(fw.id);
+    const desiredRootLabels = new Map(); // policyid → label
+    for (const vip of managed) {
+      if (!vip.policy_id) continue;
+      desiredRootLabels.set(String(vip.policy_id), portForwardGroupLabel(null, vip.mapped_ip));
+    }
+    const rootLabelFor = (p) => desiredRootLabels.get(String(p.policyid)) || null;
+
+    const rootPolicies = await client.getPolicies(rootVdom);
+    for (const p of rootPolicies) {
+      const want = rootLabelFor(p);
+      if (want && (p['global-label'] || '') !== want) {
+        try {
+          await client.updatePolicy(p.policyid, { 'global-label': want }, rootVdom);
+          summary.rootRelabeled += 1;
+        } catch (err) {
+          summary.warnings.push(`root policy ${p.policyid} label: ${err.message}`);
+        }
+      }
+    }
+    summary.rootMoved = await regroupAdjacent(client, rootVdom, rootLabelFor, summary.warnings);
+
+    // ── Lab VDOM: VLAN policies grouped per source interface ─────────────────
+    const syncs = db.prepare(`
+      SELECT fvs.interface_name, v.name AS vlan_name
+      FROM firewall_vlan_sync fvs
+      JOIN vlans v ON v.id = fvs.vlan_id
+      WHERE fvs.firewall_id = ?
+    `).all(fw.id);
+    const ifaceLabels = new Map(syncs.map((s) => [s.interface_name, `${s.vlan_name} (${s.interface_name})`]));
+    const labLabelFor = (p) => {
+      const src = (p.srcintf || [])[0]?.name || '';
+      const dst = (p.dstintf || [])[0]?.name || '';
+      if (ifaceLabels.has(src)) return ifaceLabels.get(src);
+      // Port-forward legs enter through the inter-VDOM link — group per target VLAN
+      if (ifaceLabels.has(dst) && String(p.name || '').startsWith('PF: ')) return `Port Forwarding (${dst})`;
+      return null;
+    };
+
+    const labPolicies = await client.getPolicies(labVdom);
+    for (const p of labPolicies) {
+      const want = labLabelFor(p);
+      if (want && (p['global-label'] || '') !== want) {
+        try {
+          await client.updatePolicy(p.policyid, { 'global-label': want }, labVdom);
+          summary.labRelabeled += 1;
+        } catch (err) {
+          summary.warnings.push(`lab policy ${p.policyid} label: ${err.message}`);
+        }
+      }
+    }
+    summary.labMoved = await regroupAdjacent(client, labVdom, labLabelFor, summary.warnings);
+
+    logAudit(req, 'admin_regroup_policies', fw.name,
+      `root: ${summary.rootRelabeled} relabeled/${summary.rootMoved} moved; lab: ${summary.labRelabeled} relabeled/${summary.labMoved} moved${summary.warnings.length ? `; ${summary.warnings.length} warnings` : ''}`);
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
 
 // Update WAN config (external IP + WAN zone) from the port forwarding page
 router.put('/firewalls/:id/wan-config', pFirewalls, (req, res) => {
@@ -2321,6 +2466,32 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
     });
     policyId = outputs.policy_root?.policyId ?? null;
     labPolicyId = outputs.policy_lab?.policyId ?? null;
+
+    // Grouping: one sequence group per owning user in the root VDOM, and the
+    // target VLAN's port-forward group in the lab VDOM. The workflow engine
+    // appends policies at the bottom with the default label, so relabel and
+    // park them afterwards — cosmetic, never fails the port forward.
+    if (policyId) {
+      const rootGroupLabel = portForwardGroupLabel(vmid, mappedIp);
+      try {
+        await client.updatePolicy(policyId, { 'global-label': rootGroupLabel }, rootVdom);
+        const rootPolicies = await client.getPolicies(rootVdom);
+        const groupMate = rootPolicies.find(p =>
+          (p['global-label'] || '') === rootGroupLabel && String(p.policyid) !== String(policyId)
+        );
+        if (groupMate) await client.movePolicy(policyId, 'after', groupMate.policyid, rootVdom);
+      } catch { /* best effort */ }
+    }
+    if (labPolicyId && vlanInterface) {
+      const vlanGroupLabel = `Port Forwarding (${vlanInterface})`;
+      try {
+        const labPolicies = await client.getPolicies(labVdom);
+        const labMate = labPolicies.find(p =>
+          (p['global-label'] || '') === vlanGroupLabel && String(p.policyid) !== String(labPolicyId)
+        );
+        if (labMate) await client.movePolicy(labPolicyId, 'after', labMate.policyid, labVdom);
+      } catch { /* best effort */ }
+    }
 
     // Track in DB (with recorded artifacts for artifact-based teardown on delete)
     db.prepare(

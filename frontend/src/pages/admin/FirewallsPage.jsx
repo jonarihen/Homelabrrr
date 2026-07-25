@@ -14,6 +14,20 @@ export default function FirewallsPage() {
   const [saving, setSaving] = useState(false);
   const [switches, setSwitches] = useState([]);
   const [switchesLoading, setSwitchesLoading] = useState(false);
+  const [regroup, setRegroup] = useState({}); // fwId → { running, msg, err }
+
+  const regroupPolicies = async (fw) => {
+    if (!confirm(`Regroup policy sequence labels on ${fw.name}?\n\nPort forwards get one group per user, lab policies one group per source VLAN, and each group is made contiguous. Portal-managed order inside a group is kept — review custom deny rules afterwards if you hand-ordered any.`)) return;
+    setRegroup(prev => ({ ...prev, [fw.id]: { running: true, msg: '' } }));
+    try {
+      const { data } = await api.post(`/admin/firewalls/${fw.id}/regroup-policies`);
+      const msg = `root: ${data.rootRelabeled} relabeled, ${data.rootMoved} moved · lab: ${data.labRelabeled} relabeled, ${data.labMoved} moved${data.warnings?.length ? ` · ${data.warnings.length} warning(s)` : ''}`;
+      setRegroup(prev => ({ ...prev, [fw.id]: { running: false, msg } }));
+      if (data.warnings?.length) console.warn('[regroup] warnings:', data.warnings);
+    } catch (e) {
+      setRegroup(prev => ({ ...prev, [fw.id]: { running: false, msg: '', err: e.response?.data?.error || 'Regroup failed' } }));
+    }
+  };
 
   function defaultForm() {
     return { name: '', host: '', port: 443, apiKey: '', vdom: 'lab', parentInterface: 'fortilink', wanInterface: 'wan1', vlanRangeStart: 1001, vlanRangeEnd: 1999, labVdomLink: 'lab-root0', rootVdom: 'root', rootVdomLink: 'lab-root1', routeGateway: '10.255.254.2', trunkSwitchSerial: '', trunkSwitchPort: '', verifyTls: true };
@@ -147,6 +161,14 @@ export default function FirewallsPage() {
                           Offline
                         </span>
                       )}
+                      <button
+                        onClick={() => regroupPolicies(fw)}
+                        disabled={regroup[fw.id]?.running || !s.online}
+                        title="Rewrite sequence-group labels (port forwards per user, lab policies per source VLAN) and make each group contiguous"
+                        className="text-xs text-gray-400 hover:text-white disabled:opacity-40 bg-gray-800 hover:bg-gray-700 px-2.5 py-1.5 rounded-lg transition-colors"
+                      >
+                        {regroup[fw.id]?.running ? 'Regrouping…' : 'Regroup policies'}
+                      </button>
                       <button onClick={() => openEdit(fw)} className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-800 transition-colors">
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
                       </button>
@@ -172,6 +194,13 @@ export default function FirewallsPage() {
 
                   {!s.online && !s.loading && s.error && (
                     <p className="text-xs text-red-400/70 bg-red-900/10 rounded-lg px-3 py-2 mt-1">{s.error}</p>
+                  )}
+
+                  {regroup[fw.id]?.msg && (
+                    <p className="text-xs text-green-400/80 bg-green-900/10 rounded-lg px-3 py-2 mt-2 font-mono">Regrouped — {regroup[fw.id].msg}</p>
+                  )}
+                  {regroup[fw.id]?.err && (
+                    <p className="text-xs text-red-400/70 bg-red-900/10 rounded-lg px-3 py-2 mt-2">{regroup[fw.id].err}</p>
                   )}
                 </div>
               </div>

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-25 — Firewall policy sequence grouping that actually groups
+
+- **Port forwards are now grouped per user** on the FortiGate: each root-VDOM policy gets a `Port Forwarding - <username>` sequence label (owner resolved from the target VM's assignment), so you can see at a glance who has what open — instead of one long "Port Forwarding (VM Manager)" list
+- **Lab VDOM policies group by their source VLAN**: every policy coming from `vlanX` sits in that VLAN's sequence group; port-forward legs group per destination VLAN
+- New policies are **inserted next to their group** instead of appended at the bottom — that append behavior is what caused the endless `(#2) (#3) (#4)` fragments in the FortiGate GUI (same label but not adjacent = new visual group)
+- New **"Regroup policies"** button on each firewall (Admin → Firewalls) fixes the current mess in one click: rewrites the labels to the new scheme and moves every group together. Order inside a group is preserved; if you hand-placed custom deny rules between portal policies, review them after running
+- Regroup runs are audit-logged with a change summary
+
 ## 2026-07-25 — Shared-storage migrations, smarter VM placement, host visibility
 
 - **Migrations now understand shared storage** (admin): when both hosts mount the same NFS/CIFS share (e.g. `vdisks-nfs` from a TrueNAS box), disks on it are **never copied** — the migration dialog shows a per-disk plan where those disks are *remounted* on the target and only local disks (like an SSD boot disk) actually move. Boot disks travel via the shared storage and can land on the target's local SSD storage afterwards. Runs offline (stop the VM first); a "force full copy" escape hatch remains
