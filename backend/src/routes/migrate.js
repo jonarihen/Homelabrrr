@@ -2,7 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import {
   getAllVMs, getHost, getHosts, remoteMigrateVm, getTaskStatus,
-  getVMConfig, getLXCConfig, updateVMConfig, createVM, getSnapshots,
+  getVMConfig, getVMConfigCurrent, getLXCConfig, updateVMConfig, createVM, getSnapshots,
   getStorageDefs, getStorageContent, moveVmDisk, waitForTask, getVMStatus,
 } from '../proxmox.js';
 import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.js';
@@ -607,17 +607,28 @@ router.post('/:node/:vmid', async (req, res) => {
     let upid = '';
     let bootFix = '';
     if (mode === 'remote_migrate') {
-      // Proxmox reads the source config itself for a cross-host migration, so a
-      // stale boot-order entry (device removed/rebused but still listed) makes
-      // the target reject the config. Correct it on the source first — this is
-      // a genuine fix to a broken boot list, so it stands even if the source
-      // is kept. Only qemu has an `order=` boot list; LXC has none.
+      // Proxmox ships the ACTIVE (on-disk) source config for a cross-host
+      // migration, so a stale boot-order entry (device removed/rebused but
+      // still listed) makes the target reject the config. Validate against the
+      // active config — NOT the default endpoint, which merges pending changes
+      // and would hide a fix that has only been staged. Only qemu has an
+      // `order=` boot list; LXC has none.
       if (vmtype === 'qemu') {
-        const srcConfig = await getVMConfig(sourceRef, vmid);
-        const fixedBoot = sanitizeBootOrder(srcConfig);
+        const activeCfg = await getVMConfigCurrent(sourceRef, vmid);
+        const fixedBoot = sanitizeBootOrder(activeCfg);
         if (fixedBoot) {
+          // A boot-order change on a RUNNING VM is deferred to pending by
+          // Proxmox — it never reaches the active config the migration ships,
+          // so the migration would still fail. Refuse early with guidance
+          // instead of letting Proxmox abort three seconds in.
+          if (running) {
+            return res.status(409).json({
+              error: `VM ${vmid} has a stale boot-order entry (${activeCfg.boot}) naming a device that no longer exists, which the target host rejects. It can't be corrected while the VM is running — Proxmox defers boot-order changes until the next start. Reboot the VM once to apply the fix, then migrate live; or stop it and migrate offline.`,
+            });
+          }
+          // Stopped: the change lands in the active config immediately.
           await updateVMConfig(sourceRef, vmid, { boot: fixedBoot });
-          bootFix = ` (corrected stale boot order "${srcConfig.boot}" → "${fixedBoot}")`;
+          bootFix = ` (corrected stale boot order "${activeCfg.boot}" → "${fixedBoot}")`;
           console.log(`[migrate] VM ${vmid}: ${bootFix.trim()}`);
         }
       }

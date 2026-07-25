@@ -224,6 +224,16 @@ export async function getVMConfig(node, vmid) {
   return config;
 }
 
+// The ACTIVE (on-disk) config, ignoring pending changes. The default config
+// endpoint returns pending values merged in — for a running VM that hides the
+// fact that a change (e.g. boot order) has only been staged, not applied. This
+// is what Proxmox ships for a cross-host migration, so it's the source of
+// truth for pre-migration validation. Never cached.
+export async function getVMConfigCurrent(node, vmid) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config?current=1`);
+}
+
 export async function updateVMConfig(node, vmid, config) {
   const { host, nodeName } = await resolveNode(node, { vmid });
   clearCachedVmConfig(node, vmid, 'qemu');
