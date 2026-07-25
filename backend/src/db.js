@@ -184,6 +184,12 @@ try { db.exec("ALTER TABLE cloud_images ADD COLUMN default_storage TEXT DEFAULT 
 // deploy to. JSON object keyed by pve_hosts.id → storage id, e.g.
 // {"1":"bank-ssd","3":"ssdpool"}. `default_storage` remains the fallback.
 try { db.exec("ALTER TABLE cloud_images ADD COLUMN default_storage_map TEXT DEFAULT ''"); } catch { /* exists */ }
+// Console OSC patch: systemd v257+ images ship an OSC 3008 shell drop-in that
+// spams the Proxmox VT console (which can't parse the sequences). An admin can
+// patch the stored image (virt-customize over host SSH) to disable it. Tracks
+// the patch state so the UI can badge it. Status: ''|'patching'|'patched'|'error'.
+try { db.exec("ALTER TABLE cloud_images ADD COLUMN console_patch_status TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE cloud_images ADD COLUMN console_patch_detail TEXT DEFAULT ''"); } catch { /* exists */ }
 
 // ISO catalog (installer ISOs downloaded onto a PVE storage as `iso` content)
 try { db.exec(`
