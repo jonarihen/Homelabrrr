@@ -2,8 +2,10 @@
 
 ## 2026-07-25 — Fix: cross-host migration no longer aborts on a stale boot order
 
-- **A VM whose boot order lists a device that no longer exists now migrates cleanly.** Proxmox aborted the migration in phase 1 with `invalid bootorder: device 'sata0' does not exist` — the VM's boot list still named a disk that had been removed or moved to another bus (e.g. `sata0` after the disk became `scsi0`). The running source node tolerates the dangling entry; the target host validates the boot order strictly and refuses the config
-- Migrations now **drop boot-order entries for devices absent from the config** before handing it over: on the source VM for a full-copy migration (Proxmox reads that config directly — the correction is a genuine fix and stands even if you keep the source), and in the rebuilt target config for a shared-storage migration. The correction is logged and, for full-copy, recorded in the audit entry
+- **A VM whose boot order lists a device that no longer exists no longer breaks migration.** Proxmox aborted in phase 1 with `invalid bootorder: device 'sata0' does not exist` — the VM's boot list still named a disk that had been removed or moved to another bus (e.g. `sata0` after the disk became `scsi0`). The running source node tolerates the dangling entry; the target host validates the boot order strictly and refuses the config
+- The check runs against the **active** (on-disk) config — the exact config Proxmox ships to the target — not the pending-merged view, so a change that has only been *staged* on a running VM no longer masks the problem
+- **Stopped VM (offline / shared-storage migration):** the stale boot entry is dropped automatically before the config is handed over — a genuine fix that stands even if you keep the source, and it's recorded in the audit entry
+- **Running VM (live migration):** Proxmox defers boot-order edits to the next start, so they can't be corrected live. The migration is now **refused up-front with a clear message** — *reboot the VM once to apply the fix then migrate live, or stop it and migrate offline* — instead of letting Proxmox abort a few seconds in
 - No effect on VMs with a valid boot order
 
 ## 2026-07-25 — Shared-storage migrations can now clean up after themselves
