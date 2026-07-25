@@ -277,6 +277,7 @@ export default function AssignmentsPage() {
   const [claimMsg, setClaimMsg] = useState('');
   const [migrateVm, setMigrateVm] = useState(null);
   const [migrations, setMigrations] = useState([]);
+  const [hostCount, setHostCount] = useState(0);
   const migrationPollRef = useRef(null);
 
   const load = async () => {
@@ -317,6 +318,11 @@ export default function AssignmentsPage() {
   useEffect(() => {
     load();
     loadMigrations();
+    // Migration needs a second REGISTERED host — counting hosts that have VMs
+    // would hide the button exactly when the target host is still empty.
+    if (user?.isAdmin) {
+      api.get('/admin/pve-hosts').then((r) => setHostCount(r.data.length)).catch(() => {});
+    }
     return () => clearInterval(migrationPollRef.current);
   }, []);
 
@@ -366,8 +372,8 @@ export default function AssignmentsPage() {
 
   const assigned   = vms.filter(v => v.assignment);
   const unassigned = vms.filter(v => !v.assignment);
-  // Migration only makes sense with 2+ registered hosts reachable
-  const multiHost = new Set(vms.map(v => v.hostId).filter(Boolean)).size > 1;
+  // Migration only makes sense with 2+ registered hosts
+  const multiHost = hostCount > 1 || new Set(vms.map(v => v.hostId).filter(Boolean)).size > 1;
   const visibleMigrations = migrations.filter(m =>
     m.status === 'running' || (m.finished_at && Date.now() - new Date(m.finished_at.replace(' ', 'T') + 'Z').getTime() < 60 * 60 * 1000)
   );
