@@ -257,7 +257,11 @@ function CloudImagesSection({ onTemplatesChanged }) {
                   </td>
                   <td className="px-4 py-3 text-gray-500 font-mono text-xs">
                     <div>{displayNode(img.node)} / {img.storage}</div>
-                    <div className="text-[11px] text-gray-600">deploy target: {img.default_storage || 'auto'}</div>
+                    <div className="text-[11px] text-gray-600">
+                      {img.deployTargets?.length > 1
+                        ? `targets: ${img.deployTargets.map(t => `${t.hostName || displayNode(t.node)}:${img.defaultStorageMap?.[t.hostId] || 'auto'}`).join(', ')}`
+                        : `deploy target: ${img.default_storage || 'auto'}`}
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-gray-400 text-xs">{fmtSize(img.size)}</td>
                   <td className="px-4 py-3">
@@ -318,25 +322,46 @@ function CloudImagesSection({ onTemplatesChanged }) {
   );
 }
 
-// Edit an existing image's default *target* storage (the disk pool pre-selected
-// when deploying a VM directly from it). Empty = auto-pick at deploy time.
+// Edit an image's default *target* storage per host. An image on shared storage
+// can deploy from several hosts whose pool names differ, so the default is set
+// per host; the chosen pool is pre-selected when deploying on that host. Empty =
+// auto-pick at deploy time. Local-storage images have a single host.
 function CloudImageDefaultStorageModal({ image, onClose, onSaved }) {
-  const [storages, setStorages] = useState([]);
-  const [value, setValue] = useState(image.default_storage || '');
+  const targets = image.deployTargets?.length
+    ? image.deployTargets
+    : [{ hostId: null, nodeRef: image.nodeRef || image.node, node: image.node, hostName: image.hostName || '' }];
+  const [storagesByHost, setStoragesByHost] = useState({});
+  const [values, setValues] = useState(() => {
+    const init = {};
+    for (const t of targets) init[t.hostId] = image.defaultStorageMap?.[t.hostId] || (t.hostId === null ? image.default_storage : '') || '';
+    return init;
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api.get(`/provision/nodes/${image.nodeRef || image.node}/storages`)
-      .then(r => setStorages(r.data.filter(s => s.content?.includes('images'))))
-      .catch(() => setStorages([]));
-  }, [image]);
+    let cancelled = false;
+    Promise.all(targets.map(t =>
+      api.get(`/provision/nodes/${t.nodeRef}/storages`)
+        .then(r => [t.hostId, r.data.filter(s => s.content?.includes('images'))])
+        .catch(() => [t.hostId, []])
+    )).then(pairs => { if (!cancelled) setStoragesByHost(Object.fromEntries(pairs)); });
+    return () => { cancelled = true; };
+  }, [image.id]);
 
   const save = async (e) => {
     e.preventDefault();
     setSaving(true); setError('');
     try {
-      await api.put(`/cloud-images/${image.id}`, { defaultStorage: value || undefined });
+      const hasHostIds = targets.every(t => t.hostId !== null && t.hostId !== undefined);
+      if (hasHostIds) {
+        const map = {};
+        for (const t of targets) if (values[t.hostId]) map[t.hostId] = values[t.hostId];
+        await api.put(`/cloud-images/${image.id}`, { defaultStorageMap: map });
+      } else {
+        // No resolved host ids (e.g. image not ready) — legacy single default.
+        await api.put(`/cloud-images/${image.id}`, { defaultStorage: values[targets[0].hostId] || undefined });
+      }
       onSaved();
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to save');
@@ -346,17 +371,26 @@ function CloudImageDefaultStorageModal({ image, onClose, onSaved }) {
   return (
     <Modal title={`Default VM storage — ${image.name}`} onClose={onClose} size="sm">
       <form onSubmit={save} className="p-5 space-y-4">
-        <div>
-          <label className="block text-xs text-gray-400 mb-1.5">Default target storage</label>
-          <select value={value} onChange={e => setValue(e.target.value)} className={inputCls}>
-            <option value="">Auto (choose when deploying)</option>
-            {!storages.find(s => s.storage === value) && value && (
-              <option value={value}>{value}</option>
-            )}
-            {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
-          </select>
-          <p className="text-[11px] text-gray-600 mt-1">Pre-selected as the disk target when someone deploys a VM directly from this image.</p>
-        </div>
+        {targets.length > 1 && (
+          <p className="text-[11px] text-gray-500">On shared storage — set the disk pool used when deploying on each host (pool names differ per host).</p>
+        )}
+        {targets.map(t => {
+          const sts = storagesByHost[t.hostId] || [];
+          const val = values[t.hostId] || '';
+          return (
+            <div key={String(t.hostId)}>
+              <label className="block text-xs text-gray-400 mb-1.5">
+                {t.hostName ? `${t.hostName} — ` : ''}{displayNode(t.node)}
+              </label>
+              <select value={val} onChange={e => setValues(v => ({ ...v, [t.hostId]: e.target.value }))} className={inputCls}>
+                <option value="">Auto (choose when deploying)</option>
+                {!sts.find(s => s.storage === val) && val && <option value={val}>{val}</option>}
+                {sts.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
+              </select>
+            </div>
+          );
+        })}
+        <p className="text-[11px] text-gray-600">Pre-selected as the disk target when someone deploys a VM directly from this image.</p>
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
         <button type="submit" disabled={saving} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
           {saving ? 'Saving...' : 'Save'}
@@ -464,7 +498,7 @@ function CloudImageFormModal({ onClose, onSaved }) {
             <option value="">Auto (choose when deploying)</option>
             {imageStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
           </select>
-          <p className="text-[11px] text-gray-600 mt-1">Pre-selected as the disk target when someone deploys a VM directly from this image.</p>
+          <p className="text-[11px] text-gray-600 mt-1">Default disk target for <span className="text-gray-500">{form.node ? displayNode(form.node) : 'this node'}</span>. If it's on shared storage, set the other hosts' defaults from the <span className="text-gray-500">Default storage</span> button after it downloads.</p>
         </div>
 
         {form.node && importStorages.length === 0 && (
