@@ -1249,7 +1249,10 @@ router.get('/pve-hosts', pHosts, (req, res) => {
   const hosts = getHosts().map(h => ({
     id: h.id, name: h.name, host: h.host, port: h.port,
     token_id: h.token_id, verify_tls: h.verify_tls, created_at: h.created_at,
-    // Don't send token_secret to frontend
+    // Don't send token_secret / ssh_secret to frontend
+    ssh_host: h.ssh_host || '', ssh_port: h.ssh_port || 22,
+    ssh_user: h.ssh_user || 'root', ssh_auth_type: h.ssh_auth_type || 'key',
+    has_ssh: !!(h.ssh_host && h.ssh_secret),
   }));
   res.json(hosts);
 });
@@ -1283,6 +1286,15 @@ router.post('/pve-hosts', pHosts, (req, res) => {
     const r = db.prepare(
       'INSERT INTO pve_hosts (name, host, port, token_id, token_secret, verify_tls) VALUES (?, ?, ?, ?, ?, ?)'
     ).run(name, host, port, tokenId, encryptSecret(tokenSecret), verifyTls ? 1 : 0);
+    const { sshHost, sshPort, sshUser, sshAuthType, sshSecret } = req.body;
+    if (String(sshHost || '').trim() && sshSecret) {
+      db.prepare(
+        'UPDATE pve_hosts SET ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_auth_type = ?, ssh_secret = ? WHERE id = ?'
+      ).run(
+        String(sshHost).trim(), parseInt(sshPort, 10) || 22, String(sshUser || 'root').trim() || 'root',
+        sshAuthType === 'password' ? 'password' : 'key', encryptSecret(sshSecret), r.lastInsertRowid
+      );
+    }
     res.json({ id: r.lastInsertRowid, name, host, port });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -1290,7 +1302,7 @@ router.post('/pve-hosts', pHosts, (req, res) => {
 });
 
 router.put('/pve-hosts/:id', pHosts, (req, res) => {
-  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls } = req.body;
+  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls, sshHost, sshPort, sshUser, sshAuthType, sshSecret } = req.body;
   if (!name || !host || !tokenId) {
     return res.status(400).json({ error: 'Name, host and tokenId are required' });
   }
@@ -1306,6 +1318,25 @@ router.put('/pve-hosts/:id', pHosts, (req, res) => {
   db.prepare(
     'UPDATE pve_hosts SET name = ?, host = ?, port = ?, token_id = ?, token_secret = ?, verify_tls = ? WHERE id = ?'
   ).run(name, host, port, tokenId, secret, verifyTlsEnabled ? 1 : 0, req.params.id);
+
+  // Optional root SSH (used only for post-migration source-config cleanup).
+  // Empty sshHost clears the whole SSH config; an empty sshSecret keeps the
+  // stored one. Changing the SSH host re-pins the host key on next connect.
+  if (sshHost !== undefined) {
+    const newSshHost = String(sshHost || '').trim();
+    if (!newSshHost) {
+      db.prepare("UPDATE pve_hosts SET ssh_host = '', ssh_secret = '', ssh_host_key = '' WHERE id = ?").run(req.params.id);
+    } else {
+      const sshSecretStored = sshSecret ? encryptSecret(sshSecret) : (existing.ssh_secret || '');
+      const hostKey = newSshHost === (existing.ssh_host || '') ? (existing.ssh_host_key || '') : '';
+      db.prepare(
+        'UPDATE pve_hosts SET ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_auth_type = ?, ssh_secret = ?, ssh_host_key = ? WHERE id = ?'
+      ).run(
+        newSshHost, parseInt(sshPort, 10) || 22, String(sshUser || 'root').trim() || 'root',
+        sshAuthType === 'password' ? 'password' : 'key', sshSecretStored, hostKey, req.params.id
+      );
+    }
+  }
   res.json({ ok: true });
 });
 

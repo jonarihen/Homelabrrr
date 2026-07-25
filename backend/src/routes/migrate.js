@@ -3,8 +3,9 @@ import db from '../db.js';
 import {
   getAllVMs, getHost, getHosts, remoteMigrateVm, getTaskStatus,
   getVMConfig, getLXCConfig, updateVMConfig, createVM, getSnapshots,
-  getStorageDefs, getStorageContent, moveVmDisk, waitForTask,
+  getStorageDefs, getStorageContent, moveVmDisk, waitForTask, getVMStatus,
 } from '../proxmox.js';
+import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
@@ -21,9 +22,11 @@ import { assertNodeCapacity } from '../utils/capacity.js';
 //    boot disks are first moved onto the shared storage, then a VM with the
 //    same VMID is created on the target referencing the same volumes, then the
 //    boot disks optionally move onto the target's local storage. Offline only.
-//    PVE has no way to make the source cluster forget a VM without destroying
-//    its disks, so the source config is kept behind (protection=1) and its
-//    removal is a one-line manual step shown after the migration.
+//    PVE has no API to make the source cluster forget a VM without destroying
+//    its disks. When the source host has SSH configured, the leftover config
+//    file is archived off /etc/pve automatically (forgetSourceConfig);
+//    otherwise it is kept behind (protection=1) and its removal is a one-line
+//    manual step shown after the migration.
 //
 // Admin-only — this rewrites which host the portal considers authoritative.
 const router = Router();
@@ -208,6 +211,43 @@ function rewriteBridge(netValue, targetBridge) {
   return netValue.replace(/(^|,)bridge=[^,]*/, `$1bridge=${targetBridge}`);
 }
 
+// Remove the leftover source config over SSH after a successful adopt
+// migration. Never touches volumes: the .conf is archived under /root/ on the
+// node — the only way PVE can forget a VM while its disks live on (qm destroy
+// would erase the shared volumes the migrated VM now uses). Every failure is
+// non-fatal; the caller falls back to showing the manual one-liner.
+async function forgetSourceConfig({ id, vmid, sourceNode }) {
+  const { hostId, nodeName } = decodeNodeRef(sourceNode);
+  const host = hostId != null ? getHost(hostId) : null;
+  if (!hostHasSsh(host)) {
+    setStep(id, 'cleanup', 'skipped', 'no SSH configured for the source host');
+    return { ok: false, reason: 'Configure SSH on the source host (Admin → PVE Hosts) to remove it automatically next time.' };
+  }
+  setStep(id, 'cleanup', 'active');
+  try {
+    if (!isValidNodeName(nodeName)) throw new Error(`invalid source node name "${nodeName}"`);
+    const status = await getVMStatus(sourceNode, vmid);
+    if (status?.status !== 'stopped') throw new Error(`source VM is ${status?.status || 'unknown'}, expected stopped`);
+    const confPath = `/etc/pve/nodes/${nodeName}/qemu-server/${Number(vmid)}.conf`;
+    const backupPath = `/root/homelabrrr-migrated-${Number(vmid)}-${Date.now()}.conf`;
+    const results = await runNodeCommands(host, [
+      `test -f '${confPath}'`,
+      `mv '${confPath}' '${backupPath}'`,
+    ]);
+    const failed = results.find((r) => r.code !== 0);
+    if (failed) {
+      throw new Error(results[0].code !== 0
+        ? `${confPath} not found on the node`
+        : (failed.output || `mv exited with code ${failed.code}`));
+    }
+    setStep(id, 'cleanup', 'done', `archived at ${backupPath}`);
+    return { ok: true, backupPath };
+  } catch (err) {
+    setStep(id, 'cleanup', 'error', err.message);
+    return { ok: false, reason: `Automatic removal failed: ${err.message}.` };
+  }
+}
+
 async function runAdoptMigration(ctx) {
   const {
     id, vmid, sourceNode, targetNode, targetBridge, targetStorage,
@@ -304,8 +344,21 @@ async function runAdoptMigration(ctx) {
       setStep(id, 'protect', 'error', err.message);
     }
 
+    // 6. If the source host has SSH configured, remove the leftover config for
+    // real. The API cannot do this (qm destroy erases the referenced disks —
+    // which the migrated VM now uses), but moving the .conf out of /etc/pve
+    // makes the node forget the VM without touching a single volume. The file
+    // is archived under /root/ rather than deleted, so it stays recoverable.
+    const removed = await forgetSourceConfig(ctx);
+    if (removed.ok) {
+      finalizeMigration(id, true,
+        `Source config removed from ${sourceHostName} automatically (archived at ${removed.backupPath})${protectWarning}`,
+        { keptSource: false });
+      return;
+    }
+
     finalizeMigration(id, true,
-      `Source VM config kept on ${sourceHostName} — its disks moved with the VM. Remove the leftover with: rm /etc/pve/qemu-server/${vmid}.conf${protectWarning}`,
+      `Source VM config kept on ${sourceHostName} — its disks moved with the VM. ${removed.reason} Remove the leftover with: rm /etc/pve/qemu-server/${vmid}.conf${protectWarning}`,
       { keptSource: true });
   } catch (err) {
     console.error(`[migrate] adopt migration ${id} failed:`, err.message);
@@ -422,6 +475,32 @@ router.get('/:id', async (req, res) => {
   res.json(serializeMigration(row, hostNameMap()));
 });
 
+// Retroactive leftover removal: a finished adopt migration whose source config
+// was kept (no SSH configured at the time, or the cleanup failed) can be
+// cleaned up later, once the source host has SSH set up.
+router.post('/:id/cleanup-source', async (req, res) => {
+  const row = db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Migration not found' });
+  if (row.status !== 'ok' || row.mode !== 'adopt' || !row.kept_source) {
+    return res.status(400).json({ error: 'This migration has no leftover source config to remove' });
+  }
+  const { hostId } = decodeNodeRef(row.source_node);
+  const host = hostId != null ? getHost(hostId) : null;
+  if (!hostHasSsh(host)) {
+    return res.status(400).json({ error: 'Configure SSH for the source host first (Admin → PVE Hosts)' });
+  }
+  try {
+    const removed = await forgetSourceConfig({ id: row.id, vmid: row.vmid, sourceNode: row.source_node });
+    if (!removed.ok) return res.status(500).json({ error: sanitizeError(removed.reason) });
+    db.prepare('UPDATE vm_migrations SET kept_source = 0, status_detail = ? WHERE id = ?')
+      .run(`Source config removed (archived at ${removed.backupPath})`, row.id);
+    logAudit(req, 'vm_migrate_cleanup_source', `${row.source_node}/${row.vmid}`, `archived at ${removed.backupPath}`);
+    res.json({ ok: true, backupPath: removed.backupPath });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
 // ─── Start a migration ───────────────────────────────────────────────────────
 
 router.post('/:node/:vmid', async (req, res) => {
@@ -528,6 +607,7 @@ router.post('/:node/:vmid', async (req, res) => {
         { key: 'verify', label: 'Verifying volumes on target' },
         { key: 'move-back', label: 'Moving boot disks to target storage' },
         { key: 'protect', label: 'Protecting leftover source config' },
+        { key: 'cleanup', label: 'Removing leftover source config' },
       ]);
       runAdoptMigration({
         id: row.lastInsertRowid, vmid,

@@ -9,7 +9,7 @@ export default function PVEHostsPage() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState(null);
-  const [form, setForm] = useState({ name: '', host: '', port: 8006, tokenId: '', tokenSecret: '', verifyTls: true });
+  const [form, setForm] = useState({ name: '', host: '', port: 8006, tokenId: '', tokenSecret: '', verifyTls: true, sshHost: '', sshPort: 22, sshUser: 'root', sshAuthType: 'key', sshSecret: '', hasSsh: false });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   // Node maintenance drain form: { hostId, nodeRef, nodeName } | null
@@ -38,14 +38,18 @@ export default function PVEHostsPage() {
 
   const openAdd = () => {
     setEditId(null);
-    setForm({ name: '', host: '', port: 8006, tokenId: '', tokenSecret: '', verifyTls: true });
+    setForm({ name: '', host: '', port: 8006, tokenId: '', tokenSecret: '', verifyTls: true, sshHost: '', sshPort: 22, sshUser: 'root', sshAuthType: 'key', sshSecret: '', hasSsh: false });
     setError('');
     setShowForm(true);
   };
 
   const openEdit = (h) => {
     setEditId(h.id);
-    setForm({ name: h.name, host: h.host, port: h.port, tokenId: h.token_id, tokenSecret: '', verifyTls: !!h.verify_tls });
+    setForm({
+      name: h.name, host: h.host, port: h.port, tokenId: h.token_id, tokenSecret: '', verifyTls: !!h.verify_tls,
+      sshHost: h.ssh_host || '', sshPort: h.ssh_port || 22, sshUser: h.ssh_user || 'root',
+      sshAuthType: h.ssh_auth_type || 'key', sshSecret: '', hasSsh: !!h.has_ssh,
+    });
     setError('');
     setShowForm(true);
   };
@@ -375,6 +379,74 @@ export default function PVEHostsPage() {
                   <p className="text-xs text-gray-500 mt-0.5">Enable this if the Proxmox host uses a trusted certificate. Disable only for self-signed/internal lab certs.</p>
                 </div>
               </label>
+              <div className="rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3 space-y-3">
+                <div>
+                  <p className="text-sm text-white">Root SSH <span className="text-gray-600">(optional)</span></p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Used for the one thing the API can't do: removing the leftover source config after a shared-storage
+                    migration without touching its disks. Leave the SSH host empty to disable.
+                  </p>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="col-span-2">
+                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">SSH host</label>
+                    <input
+                      type="text" value={form.sshHost}
+                      onChange={e => setForm(f => ({ ...f, sshHost: e.target.value }))}
+                      className={inputCls} placeholder={form.host || 'same as Host / IP'}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">Port</label>
+                    <input
+                      type="number" value={form.sshPort}
+                      onChange={e => setForm(f => ({ ...f, sshPort: parseInt(e.target.value) || 22 }))}
+                      className={inputCls}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">User</label>
+                    <input
+                      type="text" value={form.sshUser}
+                      onChange={e => setForm(f => ({ ...f, sshUser: e.target.value }))}
+                      className={inputCls} placeholder="root"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">Auth</label>
+                    <select
+                      value={form.sshAuthType}
+                      onChange={e => setForm(f => ({ ...f, sshAuthType: e.target.value }))}
+                      className={inputCls}
+                    >
+                      <option value="key">Private key</option>
+                      <option value="password">Password</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">
+                    {form.sshAuthType === 'password' ? 'Password' : 'Private key'}
+                    {form.hasSsh && <span className="text-gray-600"> (leave empty to keep current)</span>}
+                  </label>
+                  {form.sshAuthType === 'password' ? (
+                    <input
+                      type="password" value={form.sshSecret}
+                      onChange={e => setForm(f => ({ ...f, sshSecret: e.target.value }))}
+                      className={inputCls}
+                    />
+                  ) : (
+                    <textarea
+                      value={form.sshSecret} rows={3}
+                      onChange={e => setForm(f => ({ ...f, sshSecret: e.target.value }))}
+                      className={`${inputCls} font-mono text-xs`}
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    />
+                  )}
+                </div>
+              </div>
               {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
               <div className="flex gap-3 pt-1">
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">
