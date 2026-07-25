@@ -3,14 +3,14 @@ import db from '../db.js';
 import {
   getNextVmid, cloneVM, createVM, updateVMConfig, resizeVMDisk, startVM,
   getStorages, getISOImages, getNetworks, getNodes, getTaskStatus,
-  getAllVMs, getVMConfig, getStorageDefs, getHost, getHosts,
+  getAllVMs, getVMConfig,
 } from '../proxmox.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
-import { decodeNodeRef, encodeNodeRef } from '../utils/nodeRef.js';
-import { sharedStorageKey } from '../utils/sharedStorage.js';
+import { decodeNodeRef } from '../utils/nodeRef.js';
+import { imageDeployTargets, defaultStorageForHost } from '../utils/cloudImageTargets.js';
 import { checkVlanAssignment } from '../utils/vlanAccess.js';
 import { assertStorageExposed, filterExposedStorages } from '../utils/storageVisibility.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
@@ -182,17 +182,18 @@ router.get('/images', async (req, res) => {
   // Only ready images stored as import content can be used as an import-from
   // disk source; iso-content rows (downloaded before the import switch) can't.
   const rows = db.prepare(
-    "SELECT id, name, url, node, storage, default_storage, volid, size FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' ORDER BY name"
+    "SELECT id, name, url, node, storage, default_storage, default_storage_map, volid, size FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' ORDER BY name"
   ).all();
   const hostNames = new Map(db.prepare('SELECT id, name FROM pve_hosts').all().map((h) => [h.id, h.name]));
   const out = [];
   for (const r of rows) {
     const { hostId, nodeName, nodeRef } = decodeNodeRef(r.node);
     // Every host this image can be deployed from — its own host plus any peer
-    // sharing its storage. Lets the deploy form offer a host per image instead
-    // of pinning it to the download host.
+    // sharing its storage. Each target carries the per-host default target pool
+    // so the deploy form can pre-select it as the host is switched.
     const targets = (await imageDeployTargets(r)).map((t) => ({
       nodeRef: t.nodeRef, node: t.node, hostId: t.hostId, hostName: hostNames.get(t.hostId) || '',
+      defaultStorage: defaultStorageForHost(r, t.hostId) || '',
     }));
     out.push({
       id: r.id, name: r.name, url: r.url, storage: r.storage, default_storage: r.default_storage || '', size: r.size,
@@ -388,46 +389,6 @@ router.post('/clone', async (req, res) => {
   }
 });
 
-// ─── Cloud-image deploy targets (shared-storage aware) ───────────────────────
-// A cloud image row lives on one host, but if its storage is a shared backend
-// (same NFS/CIFS mounted on other registered hosts) the exact same import-from
-// volume is reachable from those hosts too — so the image can be deployed from
-// any of them, not just the one it was downloaded on. Returns every usable
-// host: always the image's own host, plus shared-storage peers. Each target
-// carries the storage id and volid as addressed on THAT host (identical when
-// the shared storage shares its id, remapped otherwise). Best effort — an
-// unreachable peer is simply skipped.
-async function imageDeployTargets(image) {
-  const { hostId: ownHostId, nodeName: ownNode } = decodeNodeRef(image.node);
-  const storageId = image.volid.split(':')[0];
-  const volPath = image.volid.slice(storageId.length + 1);
-  const targets = [{ hostId: ownHostId, node: ownNode, nodeRef: image.node, storage: storageId, volid: image.volid }];
-  try {
-    const ownHost = getHost(ownHostId);
-    if (!ownHost) return targets;
-    const ownDefs = await getStorageDefs(ownHost);
-    const key = sharedStorageKey((ownDefs || []).find((d) => d.storage === storageId));
-    if (!key) return targets; // local storage — only usable on its own host
-
-    const nodeByHost = new Map();
-    for (const n of await getNodes()) if (!nodeByHost.has(n.hostId)) nodeByHost.set(n.hostId, n.node);
-
-    for (const h of getHosts()) {
-      if (h.id === ownHostId) continue;
-      const nodeName = nodeByHost.get(h.id);
-      if (!nodeName) continue;
-      try {
-        const defs = await getStorageDefs(h);
-        const match = (defs || []).find((d) => sharedStorageKey(d) === key && String(d.content || '').includes('import'));
-        if (!match) continue;
-        const volid = match.storage === storageId ? image.volid : `${match.storage}:${volPath}`;
-        targets.push({ hostId: h.id, node: nodeName, nodeRef: encodeNodeRef(h.id, nodeName), storage: match.storage, volid });
-      } catch { /* peer unreachable — skip */ }
-    }
-  } catch { /* best effort — fall back to own host only */ }
-  return targets;
-}
-
 // ─── Automatic placement for non-admin cloud-image deploys ───────────────────
 // The same image (same download URL) may be present on several hosts. Rank
 // candidate hosts by guest count (fewest first) and take the first one that
@@ -442,12 +403,12 @@ async function autoPlaceImage(image, { memoryMb, diskGb }) {
 
   // A host can be reachable via a per-host image row OR because it shares the
   // storage of a row's disk. Fold both into one candidate per host (first win),
-  // carrying the volid as addressed on that host and the row's default storage.
+  // carrying the volid as addressed on that host and that host's default pool.
   const byHost = new Map();
   for (const row of rows) {
     for (const t of await imageDeployTargets(row)) {
       if (!byHost.has(t.hostId)) {
-        byHost.set(t.hostId, { node: t.nodeRef, volid: t.volid, default_storage: row.default_storage });
+        byHost.set(t.hostId, { node: t.nodeRef, volid: t.volid, default_storage: defaultStorageForHost(row, t.hostId) });
       }
     }
   }

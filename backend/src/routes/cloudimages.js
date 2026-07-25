@@ -9,6 +9,7 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { assertPublicDownloadUrl } from '../utils/urlGuard.js';
+import { imageDeployTargets } from '../utils/cloudImageTargets.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -16,7 +17,9 @@ router.use(requirePermission('can_manage_templates'));
 
 function serializeImage(row) {
   const { nodeName, nodeRef } = decodeNodeRef(row.node);
-  return { ...row, node: nodeName || row.node, nodeRef: nodeRef || row.node };
+  let defaultStorageMap = {};
+  try { defaultStorageMap = row.default_storage_map ? JSON.parse(row.default_storage_map) : {}; } catch { defaultStorageMap = {}; }
+  return { ...row, node: nodeName || row.node, nodeRef: nodeRef || row.node, defaultStorageMap };
 }
 
 function setImageStatus(id, status, detail = '') {
@@ -38,9 +41,24 @@ async function waitForTask(node, upid, { attempts = 240, intervalMs = 5000 } = {
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const rows = db.prepare('SELECT * FROM cloud_images ORDER BY name').all();
-  res.json(rows.map(serializeImage));
+  const hostNames = new Map(db.prepare('SELECT id, name FROM pve_hosts').all().map((h) => [h.id, h.name]));
+  const out = [];
+  for (const row of rows) {
+    const img = serializeImage(row);
+    // Deploy targets (own host + shared-storage peers) power the per-host
+    // default-storage editor. Only meaningful for ready, disk-usable images.
+    if (row.status === 'ready' && row.volid && !row.volid.includes(':iso/')) {
+      img.deployTargets = (await imageDeployTargets(row)).map((t) => ({
+        hostId: t.hostId, nodeRef: t.nodeRef, node: t.node, hostName: hostNames.get(t.hostId) || '',
+      }));
+    } else {
+      img.deployTargets = [];
+    }
+    out.push(img);
+  }
+  res.json(out);
 });
 
 // Start downloading a cloud image onto a PVE storage
@@ -57,6 +75,10 @@ router.post('/', async (req, res) => {
   if (defStore && !/^[a-zA-Z0-9._-]+$/.test(defStore)) {
     return res.status(400).json({ error: 'Invalid default storage' });
   }
+  // Seed the per-host default map with the download host's choice. Other hosts
+  // (for shared-storage images) are set later from the Default storage editor.
+  const { hostId: dlHostId } = decodeNodeRef(node);
+  const defStoreMap = defStore && dlHostId != null ? JSON.stringify({ [dlHostId]: defStore }) : '';
   // The PVE host fetches this URL server-side — refuse internal targets (SSRF)
   try {
     await assertPublicDownloadUrl(url);
@@ -67,8 +89,8 @@ router.post('/', async (req, res) => {
   const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'cloud-image';
 
   const row = db.prepare(
-    'INSERT INTO cloud_images (name, url, node, storage, default_storage, status) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(name, url, node, storage, defStore, 'downloading');
+    'INSERT INTO cloud_images (name, url, node, storage, default_storage, default_storage_map, status) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(name, url, node, storage, defStore, defStoreMap, 'downloading');
   const id = row.lastInsertRowid;
   // Stored as `import` content; the unique suffix avoids clobbering an
   // existing file. PVE derives the disk format from the extension, and
@@ -118,11 +140,44 @@ router.post('/', async (req, res) => {
 router.put('/:id', (req, res) => {
   const image = db.prepare('SELECT * FROM cloud_images WHERE id = ?').get(req.params.id);
   if (!image) return res.status(404).json({ error: 'Image not found' });
+
+  // Per-host default map: { hostId: storageId }. Validate ids and pool names;
+  // empty values drop that host's entry. The image's own download host also
+  // populates the legacy `default_storage` column so older callers still work.
+  if (req.body?.defaultStorageMap !== undefined) {
+    const incoming = req.body.defaultStorageMap || {};
+    if (typeof incoming !== 'object' || Array.isArray(incoming)) {
+      return res.status(400).json({ error: 'defaultStorageMap must be an object' });
+    }
+    const clean = {};
+    for (const [hostId, store] of Object.entries(incoming)) {
+      if (!/^\d+$/.test(String(hostId))) return res.status(400).json({ error: 'Invalid host id' });
+      const s = String(store || '').trim();
+      if (!s) continue;
+      if (!/^[a-zA-Z0-9._-]+$/.test(s)) return res.status(400).json({ error: `Invalid storage for host ${hostId}` });
+      clean[hostId] = s;
+    }
+    const { hostId: ownHostId } = decodeNodeRef(image.node);
+    const legacy = (ownHostId != null && clean[ownHostId]) || '';
+    db.prepare('UPDATE cloud_images SET default_storage_map = ?, default_storage = ? WHERE id = ?')
+      .run(Object.keys(clean).length ? JSON.stringify(clean) : '', legacy, req.params.id);
+    logAudit(req, 'cloud_image_update', image.name, `default_storage_map=${JSON.stringify(clean)}`);
+    return res.json({ ok: true });
+  }
+
+  // Legacy single-value update (own-host default only).
   const defStore = String(req.body?.defaultStorage ?? '').trim();
   if (defStore && !/^[a-zA-Z0-9._-]+$/.test(defStore)) {
     return res.status(400).json({ error: 'Invalid default storage' });
   }
-  db.prepare('UPDATE cloud_images SET default_storage = ? WHERE id = ?').run(defStore, req.params.id);
+  const { hostId: ownHostId } = decodeNodeRef(image.node);
+  let map = {};
+  try { map = image.default_storage_map ? JSON.parse(image.default_storage_map) : {}; } catch { map = {}; }
+  if (ownHostId != null) {
+    if (defStore) map[ownHostId] = defStore; else delete map[ownHostId];
+  }
+  db.prepare('UPDATE cloud_images SET default_storage = ?, default_storage_map = ? WHERE id = ?')
+    .run(defStore, Object.keys(map).length ? JSON.stringify(map) : '', req.params.id);
   logAudit(req, 'cloud_image_update', image.name, `default_storage=${defStore || '(none)'}`);
   res.json({ ok: true });
 });

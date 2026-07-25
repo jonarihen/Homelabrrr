@@ -179,6 +179,11 @@ try { db.exec(`
 // image (distinct from `storage`, which is where the image file downloaded).
 // Empty ⇒ no default; the provisioning form auto-picks as before.
 try { db.exec("ALTER TABLE cloud_images ADD COLUMN default_storage TEXT DEFAULT ''"); } catch { /* exists */ }
+// Per-host default *target* storage for images on shared storage: pool names
+// differ per host, so a single default can't serve every host the image can
+// deploy to. JSON object keyed by pve_hosts.id → storage id, e.g.
+// {"1":"bank-ssd","3":"ssdpool"}. `default_storage` remains the fallback.
+try { db.exec("ALTER TABLE cloud_images ADD COLUMN default_storage_map TEXT DEFAULT ''"); } catch { /* exists */ }
 
 // ISO catalog (installer ISOs downloaded onto a PVE storage as `iso` content)
 try { db.exec(`

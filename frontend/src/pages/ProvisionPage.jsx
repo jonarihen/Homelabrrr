@@ -451,9 +451,12 @@ function CloudImageForm({ onStarted }) {
         .then(r => {
           const imgCapable = r.data.filter(s => s.content?.includes('images'));
           setStorages(imgCapable);
-          // Prefer the image's admin-set default target, then local-lvm, then first.
+          // Prefer this host's per-host default target (pool names differ per
+          // host), then the legacy single default, then local-lvm, then first.
+          const hostDefault = selected.deployTargets?.find(t => t.nodeRef === node)?.defaultStorage;
           setForm(f => ({ ...f, storage:
-            imgCapable.find(s => s.storage === selected.default_storage)?.storage
+            imgCapable.find(s => s.storage === hostDefault)?.storage
+            || imgCapable.find(s => s.storage === selected.default_storage)?.storage
             || imgCapable.find(s => s.storage === 'local-lvm')?.storage
             || imgCapable[0]?.storage || '' }));
         })

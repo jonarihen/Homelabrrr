@@ -1,6 +1,11 @@
 # Changelog
 
-## 2026-07-25 — Cloud images on shared storage deploy from every host that mounts it
+## 2026-07-25 — Per-host default storage for cloud images
+
+- **A cloud image's default VM storage can now be set per host.** A shared-storage image deploys from several hosts whose local pool names differ (e.g. `bank-ssd` on one, `ssdpool` on another), so a single default couldn't fit them all — the disk just fell back to auto-pick on the other hosts
+- The image's **Default storage** button (Admin → Templates → Cloud Images) now shows **one pool selector per host** the image can deploy to, each listing that host's own storages. The download host's pick is set on the add-image form; the rest are set here
+- When deploying, the disk target is pre-selected from the **chosen host's** default (then the legacy single default, then auto); non-admin auto-placement uses each host's default too
+- Images on local storage are unchanged — a single host, a single default
 
 - **A cloud image on shared storage (NFS/CIFS) can now be deployed from any host that mounts that storage — not just the one it was downloaded on.** The image is downloaded once, but because the same disk is reachable by the same path from every host on that share, the portal now treats all of them as valid deploy targets
 - **Admins** get a **Deploy host** selector on the Create VM → Cloud Image form whenever the image sits on shared storage; storage and network options follow the chosen host. Images on local storage still deploy only where they live
