@@ -6,6 +6,7 @@ import {
   getStorageDefs, getStorageContent, moveVmDisk, waitForTask, getVMStatus,
 } from '../proxmox.js';
 import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.js';
+import { sharedStorageKey } from '../utils/sharedStorage.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
@@ -87,16 +88,6 @@ function setStep(id, key, status, note) {
 }
 
 // ─── Shared storage detection ────────────────────────────────────────────────
-
-// A storage is "shared" between two hosts when both mount the same remote
-// filesystem: NFS (server + export) or CIFS (server + share). Storage IDs may
-// differ per host — the map goes source id → target id.
-function sharedStorageKey(def) {
-  if (def.disable) return null;
-  if (def.type === 'nfs' && def.server && def.export) return `nfs:${def.server}:${def.export}`;
-  if (def.type === 'cifs' && def.server && def.share) return `cifs:${def.server}:${def.share}`;
-  return null;
-}
 
 async function findSharedStorages(sourceHost, targetHost) {
   const [srcDefs, tgtDefs] = await Promise.all([getStorageDefs(sourceHost), getStorageDefs(targetHost)]);

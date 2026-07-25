@@ -3,13 +3,14 @@ import db from '../db.js';
 import {
   getNextVmid, cloneVM, createVM, updateVMConfig, resizeVMDisk, startVM,
   getStorages, getISOImages, getNetworks, getNodes, getTaskStatus,
-  getAllVMs, getVMConfig,
+  getAllVMs, getVMConfig, getStorageDefs, getHost, getHosts,
 } from '../proxmox.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
-import { decodeNodeRef } from '../utils/nodeRef.js';
+import { decodeNodeRef, encodeNodeRef } from '../utils/nodeRef.js';
+import { sharedStorageKey } from '../utils/sharedStorage.js';
 import { checkVlanAssignment } from '../utils/vlanAccess.js';
 import { assertStorageExposed, filterExposedStorages } from '../utils/storageVisibility.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
@@ -173,7 +174,7 @@ router.get('/templates', (req, res) => {
 
 // ─── Cloud images available to provision directly (read-only, provisioners) ──
 
-router.get('/images', (req, res) => {
+router.get('/images', async (req, res) => {
   const user = loadProvisioner(req);
   if (!user?.is_admin && !user?.can_provision) {
     return res.status(403).json({ error: 'You do not have permission to provision VMs' });
@@ -184,14 +185,23 @@ router.get('/images', (req, res) => {
     "SELECT id, name, url, node, storage, default_storage, volid, size FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' ORDER BY name"
   ).all();
   const hostNames = new Map(db.prepare('SELECT id, name FROM pve_hosts').all().map((h) => [h.id, h.name]));
-  res.json(rows.map((r) => {
+  const out = [];
+  for (const r of rows) {
     const { hostId, nodeName, nodeRef } = decodeNodeRef(r.node);
-    return {
+    // Every host this image can be deployed from — its own host plus any peer
+    // sharing its storage. Lets the deploy form offer a host per image instead
+    // of pinning it to the download host.
+    const targets = (await imageDeployTargets(r)).map((t) => ({
+      nodeRef: t.nodeRef, node: t.node, hostId: t.hostId, hostName: hostNames.get(t.hostId) || '',
+    }));
+    out.push({
       id: r.id, name: r.name, url: r.url, storage: r.storage, default_storage: r.default_storage || '', size: r.size,
       node: nodeName || r.node, nodeRef: nodeRef || r.node,
       hostName: (hostId && hostNames.get(hostId)) || '',
-    };
-  }));
+      deployTargets: targets,
+    });
+  }
+  res.json(out);
 });
 
 // ─── Proxmox resources (for form dropdowns) ─────────────────────────────────
@@ -378,6 +388,46 @@ router.post('/clone', async (req, res) => {
   }
 });
 
+// ─── Cloud-image deploy targets (shared-storage aware) ───────────────────────
+// A cloud image row lives on one host, but if its storage is a shared backend
+// (same NFS/CIFS mounted on other registered hosts) the exact same import-from
+// volume is reachable from those hosts too — so the image can be deployed from
+// any of them, not just the one it was downloaded on. Returns every usable
+// host: always the image's own host, plus shared-storage peers. Each target
+// carries the storage id and volid as addressed on THAT host (identical when
+// the shared storage shares its id, remapped otherwise). Best effort — an
+// unreachable peer is simply skipped.
+async function imageDeployTargets(image) {
+  const { hostId: ownHostId, nodeName: ownNode } = decodeNodeRef(image.node);
+  const storageId = image.volid.split(':')[0];
+  const volPath = image.volid.slice(storageId.length + 1);
+  const targets = [{ hostId: ownHostId, node: ownNode, nodeRef: image.node, storage: storageId, volid: image.volid }];
+  try {
+    const ownHost = getHost(ownHostId);
+    if (!ownHost) return targets;
+    const ownDefs = await getStorageDefs(ownHost);
+    const key = sharedStorageKey((ownDefs || []).find((d) => d.storage === storageId));
+    if (!key) return targets; // local storage — only usable on its own host
+
+    const nodeByHost = new Map();
+    for (const n of await getNodes()) if (!nodeByHost.has(n.hostId)) nodeByHost.set(n.hostId, n.node);
+
+    for (const h of getHosts()) {
+      if (h.id === ownHostId) continue;
+      const nodeName = nodeByHost.get(h.id);
+      if (!nodeName) continue;
+      try {
+        const defs = await getStorageDefs(h);
+        const match = (defs || []).find((d) => sharedStorageKey(d) === key && String(d.content || '').includes('import'));
+        if (!match) continue;
+        const volid = match.storage === storageId ? image.volid : `${match.storage}:${volPath}`;
+        targets.push({ hostId: h.id, node: nodeName, nodeRef: encodeNodeRef(h.id, nodeName), storage: match.storage, volid });
+      } catch { /* peer unreachable — skip */ }
+    }
+  } catch { /* best effort — fall back to own host only */ }
+  return targets;
+}
+
 // ─── Automatic placement for non-admin cloud-image deploys ───────────────────
 // The same image (same download URL) may be present on several hosts. Rank
 // candidate hosts by guest count (fewest first) and take the first one that
@@ -385,35 +435,47 @@ router.post('/clone', async (req, res) => {
 // space, enough free RAM and disk (assertNodeCapacity). A nearly-full host is
 // skipped even when it has fewer VMs — count never beats capacity.
 async function autoPlaceImage(image, { memoryMb, diskGb }) {
-  const candidates = db.prepare(
+  const rows = db.prepare(
     "SELECT * FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' AND url = ?"
   ).all(image.url);
-  if (candidates.length === 0) candidates.push(image);
+  if (rows.length === 0) rows.push(image);
+
+  // A host can be reachable via a per-host image row OR because it shares the
+  // storage of a row's disk. Fold both into one candidate per host (first win),
+  // carrying the volid as addressed on that host and the row's default storage.
+  const byHost = new Map();
+  for (const row of rows) {
+    for (const t of await imageDeployTargets(row)) {
+      if (!byHost.has(t.hostId)) {
+        byHost.set(t.hostId, { node: t.nodeRef, volid: t.volid, default_storage: row.default_storage });
+      }
+    }
+  }
 
   const vms = await getAllVMs();
   const countByHost = new Map();
   for (const vm of vms) countByHost.set(vm.hostId, (countByHost.get(vm.hostId) || 0) + 1);
-  const ranked = candidates
-    .map((row) => ({ row, hostId: decodeNodeRef(row.node).hostId }))
+  const ranked = [...byHost.entries()]
+    .map(([hostId, info]) => ({ hostId, ...info }))
     .sort((a, b) => (countByHost.get(a.hostId) || 0) - (countByHost.get(b.hostId) || 0));
 
-  for (const { row } of ranked) {
+  for (const cand of ranked) {
     try {
       // Nodes drained for maintenance never receive auto-placed VMs
-      assertNodeAvailable(row.node);
+      assertNodeAvailable(cand.node);
       // getStorages doubles as the reachability gate — an offline host throws.
       // Users are placed only on storage pools an admin has exposed.
-      const all = (await getStorages(row.node)).filter((s) => s.content?.includes('images'));
-      const exposed = await filterExposedStorages(row.node, all, { isAdmin: false });
+      const all = (await getStorages(cand.node)).filter((s) => s.content?.includes('images'));
+      const exposed = await filterExposedStorages(cand.node, all, { isAdmin: false });
       exposed.sort((a, b) => (b.avail || 0) - (a.avail || 0));
       // The image's admin-set default storage wins when it's exposed here
-      const preferred = exposed.find((s) => s.storage === row.default_storage);
+      const preferred = exposed.find((s) => s.storage === cand.default_storage);
       const pick = preferred || exposed[0];
       if (!pick) continue;
-      await assertNodeCapacity(row.node, { memoryMb, diskGb, storage: pick.storage });
-      return { image: row, storage: pick.storage };
+      await assertNodeCapacity(cand.node, { memoryMb, diskGb, storage: pick.storage });
+      return { image: { ...image, node: cand.node, volid: cand.volid }, storage: pick.storage };
     } catch (err) {
-      console.warn(`[placement] skipping ${row.node}: ${err.message}`);
+      console.warn(`[placement] skipping ${cand.node}: ${err.message}`);
     }
   }
   return {
@@ -440,7 +502,7 @@ router.post('/from-image', async (req, res) => {
 
   const {
     imageId, name, cores = 2, memoryGb = 2, diskGb = 20,
-    storage, bridge = 'vmbr0', description = '', assignTo, vlanTag, start = false,
+    storage, bridge = 'vmbr0', description = '', assignTo, vlanTag, start = false, targetNode,
   } = req.body;
 
   if (!imageId || !name) {
@@ -480,6 +542,17 @@ router.post('/from-image', async (req, res) => {
     if (!/^[a-zA-Z0-9._-]+$/.test(targetStorage)) {
       return res.status(400).json({ error: 'Invalid storage' });
     }
+    // Admins may deploy onto any host the image is reachable from (its own
+    // host, or a peer sharing its storage). Resolve the volid as addressed on
+    // the chosen host; a target the image can't reach is rejected.
+    if (targetNode && targetNode !== image.node) {
+      const targets = await imageDeployTargets(image);
+      const chosen = targets.find((t) => t.nodeRef === targetNode);
+      if (!chosen) {
+        return res.status(400).json({ error: 'The selected host cannot reach this image — it is not on storage shared with that host' });
+      }
+      targetImage = { ...image, node: chosen.nodeRef, volid: chosen.volid };
+    }
   }
 
   // PVE VM names must be DNS-like — sanitize so the deploy doesn't fail late.
@@ -494,9 +567,9 @@ router.post('/from-image', async (req, res) => {
   }
   const memoryMb = Math.round(parseFloat(memoryGb) * 1024);
 
-  // Placement: admins deploy onto the host that holds the image row they
-  // picked (import-from requires image and VM on the same host); non-admins
-  // land on the least-loaded host that has room for the request.
+  // Placement: admins deploy onto the image's own host, or a shared-storage
+  // peer they selected via targetNode (resolved above); non-admins land on the
+  // least-loaded host that has room for the request.
   if (!user.is_admin) {
     const placed = await autoPlaceImage(image, { memoryMb, diskGb: baseDiskGb });
     if (placed.error) return res.status(placed.error.status).json({ error: placed.error.message });
