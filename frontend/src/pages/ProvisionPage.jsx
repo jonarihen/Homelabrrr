@@ -418,6 +418,9 @@ function CloudImageForm({ onStarted }) {
   const [sshKeys, setSshKeys] = useState([]);
   const [form, setForm] = useState({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: false });
   const [ci, setCi] = useState({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
+  // Chosen deploy host (admins). Defaults to the image's own host; can be any
+  // host the image is reachable from (shared storage), from image.deployTargets.
+  const [targetNode, setTargetNode] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -440,8 +443,11 @@ function CloudImageForm({ onStarted }) {
   // Bridges are admin-only (networks route is admin-gated); others default to vmbr0.
   useEffect(() => {
     if (!selected) return;
+    // Storage + networks belong to the CHOSEN host, which for a shared-storage
+    // image can differ from the host it was downloaded on.
+    const node = targetNode || selected.nodeRef;
     if (user?.isAdmin) {
-      api.get(`/provision/nodes/${selected.nodeRef}/storages`)
+      api.get(`/provision/nodes/${node}/storages`)
         .then(r => {
           const imgCapable = r.data.filter(s => s.content?.includes('images'));
           setStorages(imgCapable);
@@ -454,7 +460,7 @@ function CloudImageForm({ onStarted }) {
         .catch(() => setStorages([]));
     }
     if (user?.isAdmin) {
-      api.get(`/provision/nodes/${selected.nodeRef}/networks`)
+      api.get(`/provision/nodes/${node}/networks`)
         .then(r => {
           setBridges(r.data);
           if (r.data.length > 0 && !r.data.find(b => b.iface === 'vmbr0')) {
@@ -463,10 +469,11 @@ function CloudImageForm({ onStarted }) {
         })
         .catch(() => setBridges([]));
     }
-  }, [selected, user?.isAdmin]);
+  }, [selected, targetNode, user?.isAdmin]);
 
   const selectImage = (img) => {
     setSelected(img);
+    setTargetNode(img.nodeRef);
     setForm({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: false });
     setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   };
@@ -482,6 +489,7 @@ function CloudImageForm({ onStarted }) {
         memoryGb: parseFloat(form.memory),
         diskGb: parseInt(form.diskGb),
         storage: user?.isAdmin ? form.storage : undefined,
+        targetNode: user?.isAdmin ? targetNode : undefined,
         bridge: form.bridge,
         description: form.description,
         assignTo: form.assignTo || undefined,
@@ -587,7 +595,9 @@ function CloudImageForm({ onStarted }) {
             <h3 className="text-white font-semibold">Deploy from: {selected.name}</h3>
             <p className="text-xs text-gray-500 font-mono">
               {user?.isAdmin
-                ? `Deploys to host: ${selected.hostName ? `${selected.hostName} — ` : ''}${displayNode(selected.node)}`
+                ? (selected.deployTargets?.length > 1
+                    ? 'On shared storage — choose the deploy host below'
+                    : `Deploys to host: ${selected.hostName ? `${selected.hostName} — ` : ''}${displayNode(selected.node)}`)
                 : 'Host is picked automatically — least-busy host with free capacity'}
             </p>
           </div>
@@ -622,6 +632,20 @@ function CloudImageForm({ onStarted }) {
               <input type="number" min="5" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className={inputCls} />
             </div>
           </div>
+
+          {user?.isAdmin && selected.deployTargets?.length > 1 && (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Deploy host</label>
+              <select value={targetNode} onChange={e => setTargetNode(e.target.value)} className={inputCls}>
+                {selected.deployTargets.map(t => (
+                  <option key={t.nodeRef} value={t.nodeRef}>
+                    {t.hostName ? `${t.hostName} — ` : ''}{displayNode(t.node)}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-600 mt-1">This image is on shared storage, so it can be deployed from any of these hosts.</p>
+            </div>
+          )}
 
           {user?.isAdmin ? (
             <div className="grid grid-cols-2 gap-4">

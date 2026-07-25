@@ -1,6 +1,11 @@
 # Changelog
 
-## 2026-07-25 — Fix: cross-host migration no longer aborts on a stale boot order
+## 2026-07-25 — Cloud images on shared storage deploy from every host that mounts it
+
+- **A cloud image on shared storage (NFS/CIFS) can now be deployed from any host that mounts that storage — not just the one it was downloaded on.** The image is downloaded once, but because the same disk is reachable by the same path from every host on that share, the portal now treats all of them as valid deploy targets
+- **Admins** get a **Deploy host** selector on the Create VM → Cloud Image form whenever the image sits on shared storage; storage and network options follow the chosen host. Images on local storage still deploy only where they live
+- **Non-admin auto-placement** now considers those shared-storage hosts too, so a deploy lands on whichever mounts-the-share host is least busy and has room — previously it could only pick the download host
+- Host reachability is decided by the storage's real backend (NFS server+export / CIFS server+share), and the disk volume is addressed with the storage id as named on the target host, so it works even if the shared storage has a different id there
 
 - **A VM whose boot order lists a device that no longer exists no longer breaks migration.** Proxmox aborted in phase 1 with `invalid bootorder: device 'sata0' does not exist` — the VM's boot list still named a disk that had been removed or moved to another bus (e.g. `sata0` after the disk became `scsi0`). The running source node tolerates the dangling entry; the target host validates the boot order strictly and refuses the config
 - The check runs against the **active** (on-disk) config — the exact config Proxmox ships to the target — not the pending-merged view, so a change that has only been *staged* on a running VM no longer masks the problem
