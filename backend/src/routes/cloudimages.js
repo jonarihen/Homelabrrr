@@ -2,7 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import {
   downloadUrlToStorage, deleteVolume, convertToTemplate,
-  getTaskStatus, getStorageContent, getNextVmid, createVM, resizeVMDisk,
+  getTaskStatus, getStorageContent, getNextVmid, createVM, resizeVMDisk, getHost,
 } from '../proxmox.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
@@ -10,6 +10,7 @@ import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { assertPublicDownloadUrl } from '../utils/urlGuard.js';
 import { imageDeployTargets } from '../utils/cloudImageTargets.js';
+import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -180,6 +181,80 @@ router.put('/:id', (req, res) => {
     .run(defStore, Object.keys(map).length ? JSON.stringify(map) : '', req.params.id);
   logAudit(req, 'cloud_image_update', image.name, `default_storage=${defStore || '(none)'}`);
   res.json({ ok: true });
+});
+
+// Single-quote a string for safe embedding in a POSIX shell command.
+function shq(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+// Runs inside the guest image via `virt-customize --run-command`. Disables the
+// systemd v257+ OSC 3008 shell drop-in (which spams the Proxmox VT console)
+// using a dpkg diversion so a package update can't reinstate it. No-op and safe
+// on images without the file (older systemd) or without dpkg (non-Debian).
+const OSC_GUEST_CMD = 'f=/usr/lib/systemd/profile.d/80-systemd-osc-context.sh; '
+  + 'if [ ! -e "$f" ]; then echo HL_NOT_NEEDED; '
+  + 'elif command -v dpkg-divert >/dev/null 2>&1 && dpkg-divert --list "$f" | grep -q .; then echo HL_ALREADY; '
+  + 'elif command -v dpkg-divert >/dev/null 2>&1; then dpkg-divert --local --rename --add "$f" && echo HL_PATCHED; '
+  + 'else rm -f "$f" && echo HL_PATCHED; fi';
+
+// Patch a downloaded image so VMs deployed from it have a clean Proxmox console.
+// Runs virt-customize on the image's host over SSH (host SSH must be configured;
+// libguestfs-tools must be installed on the host). Background — the UI polls the
+// image's console_patch_status.
+router.post('/:id/patch-console', async (req, res) => {
+  const image = db.prepare('SELECT * FROM cloud_images WHERE id = ?').get(req.params.id);
+  if (!image) return res.status(404).json({ error: 'Image not found' });
+  if (image.status !== 'ready' || !image.volid || image.volid.includes(':iso/')) {
+    return res.status(400).json({ error: 'Image is not a ready disk image' });
+  }
+  if (image.console_patch_status === 'patching') {
+    return res.status(409).json({ error: 'Already patching this image' });
+  }
+  const { hostId } = decodeNodeRef(image.node);
+  const host = hostId != null ? getHost(hostId) : null;
+  if (!hostHasSsh(host)) {
+    return res.status(400).json({ error: "Configure SSH for this image's host (Admin → PVE Hosts) — patching runs virt-customize on the host" });
+  }
+
+  const storageId = image.volid.split(':')[0];
+  const rel = image.volid.slice(storageId.length + 1);
+  // Both come from our own download flow (identifier storage id, slugged
+  // filename), but guard anyway since the value is interpolated into a shell path.
+  if (!/^[a-zA-Z0-9._-]+$/.test(storageId) || !/^[a-zA-Z0-9._/-]+$/.test(rel) || rel.includes('..')) {
+    return res.status(400).json({ error: 'Image volume path is not patchable' });
+  }
+  const imgPath = `/mnt/pve/${storageId}/${rel}`;
+
+  db.prepare("UPDATE cloud_images SET console_patch_status = 'patching', console_patch_detail = '' WHERE id = ?").run(image.id);
+  logAudit(req, 'cloud_image_patch_console', image.name, imgPath);
+
+  (async () => {
+    const script = [
+      'export LIBGUESTFS_BACKEND=direct',
+      'command -v virt-customize >/dev/null 2>&1 || { echo HL_NO_LIBGUESTFS; exit 0; }',
+      `test -f ${shq(imgPath)} || { echo HL_NO_IMAGE; exit 0; }`,
+      `virt-customize -a ${shq(imgPath)} --run-command ${shq(OSC_GUEST_CMD)} 2>&1`,
+    ].join('\n');
+    let status = 'error';
+    let detail = '';
+    try {
+      const [result] = await runNodeCommands(host, [script]);
+      const out = result?.output || '';
+      if (out.includes('HL_NO_LIBGUESTFS')) detail = 'libguestfs-tools is not installed on the host';
+      else if (out.includes('HL_NO_IMAGE')) detail = `image file not found at ${imgPath}`;
+      else if (out.includes('HL_PATCHED')) { status = 'patched'; detail = 'console OSC drop-in disabled'; }
+      else if (out.includes('HL_ALREADY')) { status = 'patched'; detail = 'already patched'; }
+      else if (out.includes('HL_NOT_NEEDED')) { status = 'patched'; detail = 'not needed — image has no systemd OSC drop-in'; }
+      else detail = (out.trim().split('\n').pop() || `virt-customize exited with ${result?.code}`).slice(0, 300);
+    } catch (err) {
+      detail = String(err.message || 'patch failed').slice(0, 300);
+    }
+    db.prepare('UPDATE cloud_images SET console_patch_status = ?, console_patch_detail = ? WHERE id = ?')
+      .run(status, detail, image.id);
+  })();
+
+  res.json({ ok: true, status: 'patching' });
 });
 
 router.delete('/:id', async (req, res) => {

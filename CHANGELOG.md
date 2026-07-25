@@ -1,6 +1,12 @@
 # Changelog
 
-## 2026-07-25 — Per-host default storage for cloud images
+## 2026-07-25 — Patch cloud images for a clean Proxmox console (systemd OSC 3008)
+
+- **Fixes the raw `machineid=…;hostname=…;exit=success;type=shell` spam in the noVNC console.** systemd v257+ images (e.g. Ubuntu 26.04) ship an OSC 3008 "terminal context" shell drop-in that prints control sequences around every command. SSH terminals parse them silently, but the Proxmox VT console can't, so it shows them raw
+- New **Patch console** button on each cloud image (Admin → Templates → Cloud Images). It runs `virt-customize` on the image's host to disable that drop-in (via a `dpkg` diversion, so a package update can't reinstate it) — **every VM deployed from the image afterward has a clean console**; already-deployed VMs are unaffected. The image is badged **✓ console patched**
+- Safe on any image: it's a no-op on images without the drop-in (older systemd) or without `dpkg` (non-Debian) — so patching Debian/Rocky just reports "not needed"
+- Requires the image's host to have **SSH configured** (Admin → PVE Hosts — the same SSH used for migration cleanup) and **libguestfs-tools** installed on that host; the button explains if either is missing
+- Existing VMs can still be fixed in place: `sudo dpkg-divert --local --rename --add /usr/lib/systemd/profile.d/80-systemd-osc-context.sh` then re-login
 
 - **A cloud image's default VM storage can now be set per host.** A shared-storage image deploys from several hosts whose local pool names differ (e.g. `bank-ssd` on one, `ssdpool` on another), so a single default couldn't fit them all — the disk just fell back to auto-pick on the other hosts
 - The image's **Default storage** button (Admin → Templates → Cloud Images) now shows **one pool selector per host** the image can deploy to, each listing that host's own storages. The download host's pick is set on the add-image form; the rest are set here

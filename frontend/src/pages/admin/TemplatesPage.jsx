@@ -197,7 +197,7 @@ function CloudImagesSection({ onTemplatesChanged }) {
 
   // Poll while anything is in flight
   useEffect(() => {
-    if (!images.some(i => i.status === 'downloading' || i.status === 'templating')) return undefined;
+    if (!images.some(i => i.status === 'downloading' || i.status === 'templating' || i.console_patch_status === 'patching')) return undefined;
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, [images]);
@@ -209,6 +209,18 @@ function CloudImagesSection({ onTemplatesChanged }) {
       load();
     } catch (e) {
       alert(e.response?.data?.error || 'Failed to delete');
+    }
+  };
+
+  // Patch the stored image so VMs deployed from it get a clean Proxmox console
+  // (disables the systemd v257+ OSC 3008 shell drop-in via virt-customize).
+  const patchConsole = async (img) => {
+    if (!confirm(`Patch "${img.name}" so its console output is clean?\n\nRuns virt-customize on ${displayNode(img.node)} (needs host SSH configured and libguestfs-tools installed). Edits the stored image — future deploys inherit the fix; existing VMs are unaffected.`)) return;
+    try {
+      await api.post(`/cloud-images/${img.id}/patch-console`);
+      load();
+    } catch (e) {
+      alert(e.response?.data?.error || 'Failed to start patching');
     }
   };
 
@@ -254,6 +266,17 @@ function CloudImagesSection({ onTemplatesChanged }) {
                     {img.status_detail && (
                       <p className={`text-xs mt-1 ${img.status === 'error' ? 'text-red-400' : 'text-gray-500'}`}>{img.status_detail}</p>
                     )}
+                    {img.console_patch_status === 'patched' && (
+                      <p className="text-[11px] mt-1 text-emerald-400" title={img.console_patch_detail}>✓ console patched</p>
+                    )}
+                    {img.console_patch_status === 'patching' && (
+                      <p className="text-[11px] mt-1 text-cyan-400 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" /> patching console…
+                      </p>
+                    )}
+                    {img.console_patch_status === 'error' && (
+                      <p className="text-[11px] mt-1 text-red-400" title={img.console_patch_detail}>console patch failed — {img.console_patch_detail}</p>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-gray-500 font-mono text-xs">
                     <div>{displayNode(img.node)} / {img.storage}</div>
@@ -280,6 +303,14 @@ function CloudImagesSection({ onTemplatesChanged }) {
                       className="text-xs text-gray-400 hover:text-gray-200 px-3 py-1.5 rounded-lg border border-gray-600/30 hover:border-gray-500/50 transition-colors mr-2"
                     >
                       Default storage
+                    </button>
+                    <button
+                      onClick={() => patchConsole(img)}
+                      disabled={img.status !== 'ready' || img.console_patch_status === 'patching'}
+                      title="Disable the systemd OSC 3008 shell drop-in in the image so VMs deployed from it have a clean Proxmox console"
+                      className="text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 rounded-lg border border-amber-500/20 hover:border-amber-500/40 transition-colors mr-2"
+                    >
+                      {img.console_patch_status === 'patching' ? 'Patching…' : 'Patch console'}
                     </button>
                     <button
                       onClick={() => setTemplateImage(img)}
