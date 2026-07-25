@@ -44,6 +44,11 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
   const [loadingTarget, setLoadingTarget] = useState(false);
   const [starting, setStarting] = useState(false);
   const [migration, setMigration] = useState(null);
+  // Set when the backend refuses because the running VM has a stale boot order
+  // that can't be corrected live; drives the one-click resolution panel.
+  const [bootIssue, setBootIssue] = useState(null);
+  const [preparing, setPreparing] = useState('');
+  const [info, setInfo] = useState('');
   const pollRef = useRef(null);
 
   useEffect(() => {
@@ -106,24 +111,83 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
   const adopt = effectiveMode === 'adopt';
   const blockedByRunning = adopt && running;
 
+  const submitMigration = async (onlineOverride) => {
+    const { data } = await api.post(`/migrate/${encodeURIComponent(routeNode(vm))}/${vm.vmid}`, {
+      targetNode,
+      targetStorage: storage || undefined,
+      targetBridge: bridge,
+      online: onlineOverride === undefined ? online : onlineOverride,
+      deleteSource,
+      fullCopy,
+    });
+    setMigration({ id: data.id, mode: data.mode, status: 'running', status_detail: '', steps: [] });
+    poll(data.id);
+  };
+
   const start = async () => {
     setStarting(true);
     setError('');
+    setBootIssue(null);
     try {
-      const { data } = await api.post(`/migrate/${encodeURIComponent(routeNode(vm))}/${vm.vmid}`, {
-        targetNode,
-        targetStorage: storage || undefined,
-        targetBridge: bridge,
-        online,
-        deleteSource,
-        fullCopy,
-      });
-      setMigration({ id: data.id, mode: data.mode, status: 'running', status_detail: '', steps: [] });
-      poll(data.id);
+      await submitMigration();
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to start migration');
+      const d = e.response?.data;
+      if (d?.code === 'stale_boot_order') setBootIssue(d);
+      else setError(d?.error || 'Failed to start migration');
     } finally {
       setStarting(false);
+    }
+  };
+
+  const waitForStatus = async (want, tries) => {
+    for (let i = 0; i < tries; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const { data } = await api.get(`/vms/${encodeURIComponent(routeNode(vm))}/${vm.vmid}/status`);
+        if (data.status === want) return true;
+      } catch { /* keep polling */ }
+    }
+    return false;
+  };
+
+  const powerAction = (action) =>
+    api.post(`/vms/${encodeURIComponent(routeNode(vm))}/${vm.vmid}/action`, { action });
+
+  // Stop the VM, then migrate offline — the backend corrects the stale boot
+  // order automatically once the VM isn't running.
+  const stopAndMigrate = async () => {
+    setPreparing('stop');
+    setError('');
+    try {
+      await powerAction('stop');
+      if (!(await waitForStatus('stopped', 40))) {
+        setError('VM did not stop in time — check it and try again.');
+        return;
+      }
+      setBootIssue(null);
+      await submitMigration(false);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to stop the VM');
+    } finally {
+      setPreparing('');
+    }
+  };
+
+  // Reboot to apply the pending boot-order fix to the active config; the user
+  // then starts a live migration once the VM is back up.
+  const rebootToFix = async () => {
+    setPreparing('reboot');
+    setError('');
+    try {
+      await powerAction('reboot');
+      setBootIssue(null);
+      setError('');
+      // A soft heads-up rather than blocking — the VM reboots in the background.
+      setInfo('Rebooting the VM to apply the boot-order fix. Once it is running again, click Start migration for a live move.');
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to reboot the VM');
+    } finally {
+      setPreparing('');
     }
   };
 
@@ -298,15 +362,45 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
               </label>
             )}
 
+            {info && <p className="text-sm text-cyan-300 bg-cyan-900/15 border border-cyan-800/30 rounded-lg p-3 break-words">{info}</p>}
             {error && <p className="text-sm text-red-400 bg-red-900/20 rounded-lg p-3 break-words">{error}</p>}
 
-            <button
-              onClick={start}
-              disabled={starting || loadingTarget || !targetNode || !bridge || blockedByRunning || (!adopt && !storage)}
-              className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
-            >
-              {starting ? 'Starting…' : adopt ? 'Start shared-storage migration' : 'Start migration'}
-            </button>
+            {bootIssue ? (
+              <div className="space-y-3 bg-amber-900/10 border border-amber-800/30 rounded-lg p-3">
+                <p className="text-sm text-amber-300">
+                  This VM's boot order lists a device that no longer exists (<span className="font-mono">{bootIssue.boot}</span>),
+                  which the target host rejects. Proxmox only applies the correction (<span className="font-mono">{bootIssue.fixedBoot}</span>)
+                  on the next start, so it can't be fixed while the VM runs. Pick one:
+                </p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    onClick={rebootToFix}
+                    disabled={!!preparing}
+                    className="flex-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-lg py-2 text-sm font-medium transition-colors"
+                  >
+                    {preparing === 'reboot' ? 'Rebooting…' : 'Reboot to apply fix (then migrate live)'}
+                  </button>
+                  <button
+                    onClick={stopAndMigrate}
+                    disabled={!!preparing}
+                    className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white rounded-lg py-2 text-sm font-medium transition-colors"
+                  >
+                    {preparing === 'stop' ? 'Stopping…' : 'Stop & migrate offline now'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500">
+                  Reboot = one short blip, then a live migration keeps it up during the copy. Stop &amp; migrate = down for the whole copy but no reboot.
+                </p>
+              </div>
+            ) : (
+              <button
+                onClick={start}
+                disabled={starting || loadingTarget || !targetNode || !bridge || blockedByRunning || (!adopt && !storage)}
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+              >
+                {starting ? 'Starting…' : adopt ? 'Start shared-storage migration' : 'Start migration'}
+              </button>
+            )}
             <p className="text-xs text-gray-600">
               Assignments, SSH settings and templates for this VM follow it to the new host automatically.
             </p>

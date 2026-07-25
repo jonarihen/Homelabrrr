@@ -614,6 +614,9 @@ router.post('/:node/:vmid', async (req, res) => {
           // instead of letting Proxmox abort three seconds in.
           if (running) {
             return res.status(409).json({
+              code: 'stale_boot_order',
+              boot: activeCfg.boot,
+              fixedBoot,
               error: `VM ${vmid} has a stale boot-order entry (${activeCfg.boot}) naming a device that no longer exists, which the target host rejects. It can't be corrected while the VM is running — Proxmox defers boot-order changes until the next start. Reboot the VM once to apply the fix, then migrate live; or stop it and migrate offline.`,
             });
           }
