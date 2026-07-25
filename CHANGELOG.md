@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-25 — Fix: policy grouping now renders as real FortiGate sections
+
+- **The sequence groups from this morning's grouping feature now actually merge in the FortiGate GUI.** The first pass stamped the group's `global-label` on *every* policy — but FortiGate treats a non-empty label as the *start of a new section* (a section is one labeled anchor policy followed by unlabeled ones), so each policy rendered as its own `(#2) (#3)` fragment even though the ordering was perfectly contiguous
+- Grouping now follows FortiGate's real section semantics: **only the first policy of a group carries the label**, members below it have theirs cleared. **Run "Regroup policies" once** (Admin → Firewalls) to repair the fragments from the first pass
+- New policies joining an existing group are parked at the section's true tail (including any unlabeled manual policies inside it) with their label cleared; the first policy of a brand-new group becomes the labeled anchor
+- Heads-up: if the *anchor* policy of a group is deleted, the group's name disappears and its remaining members visually merge into the section above — the Regroup button repairs that too (the next member becomes the anchor)
+
 ## 2026-07-25 — Firewall policy sequence grouping that actually groups
 
 - **Port forwards are now grouped per user** on the FortiGate: each root-VDOM policy gets a `Port Forwarding - <username>` sequence label (owner resolved from the target VM's assignment), so you can see at a glance who has what open — instead of one long "Port Forwarding (VM Manager)" list
