@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import db from '../db.js';
 import {
-  getAllVMs, getHost, getHosts, remoteMigrateVm, getTaskStatus,
+  getAllVMs, getHost, getHosts, remoteMigrateVm, getTaskStatus, getTaskLog,
   getVMConfig, getVMConfigCurrent, getLXCConfig, updateVMConfig, createVM, getSnapshots,
   getStorageDefs, getStorageContent, moveVmDisk, waitForTask, getVMStatus,
 } from '../proxmox.js';
+import { readTaskProgress } from '../utils/taskProgress.js';
 import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.js';
 import { sharedStorageKey } from '../utils/sharedStorage.js';
 import { requireAdmin } from '../middleware/auth.js';
@@ -63,8 +64,12 @@ function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
   const claimed = db.prepare(
     "UPDATE vm_migrations SET status = ?, status_detail = ?, kept_source = ?, finished_at = datetime('now') WHERE id = ? AND status = 'running'"
   ).run(ok ? 'ok' : 'error', detail, keptSource ? 1 : 0, id);
-  if (claimed.changes === 0 || !ok) return;
+  if (claimed.changes === 0) return;
   const row = db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(id);
+  // Adopt drives its own steps as it goes; remote_migrate only learns the
+  // outcome here, so its seeded steps are resolved from the final status.
+  if (row.mode !== 'adopt') closeSteps(id, ok, detail);
+  if (!ok) return;
   repointVmRows(row.source_node, row.vmid, row.target_node);
   console.log(`[migrate] VM ${row.vmid} migrated ${row.source_node} → ${row.target_node} (${row.mode})`);
 }
@@ -76,15 +81,78 @@ function seedSteps(id, steps) {
     .run(JSON.stringify(steps.map((s) => ({ key: s.key, label: s.label, status: s.status || 'pending', note: s.note || '' }))), id);
 }
 
-function setStep(id, key, status, note) {
+function readSteps(id) {
   const row = db.prepare('SELECT steps FROM vm_migrations WHERE id = ?').get(id);
-  let steps = [];
-  try { steps = row?.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
+  try { return row?.steps ? JSON.parse(row.steps) : []; } catch { return []; }
+}
+
+function setStep(id, key, status, note) {
+  const steps = readSteps(id);
   const step = steps.find((s) => s.key === key);
   if (!step) return;
   step.status = status;
   if (note !== undefined) step.note = note;
   db.prepare('UPDATE vm_migrations SET steps = ? WHERE id = ?').run(JSON.stringify(steps), id);
+}
+
+// Resolve every unfinished step when a migration ends: all done on success, the
+// step that was running marked failed otherwise.
+function closeSteps(id, ok, detail) {
+  const steps = readSteps(id);
+  if (steps.length === 0) return;
+  for (const step of steps) {
+    if (step.status === 'done' || step.status === 'skipped' || step.status === 'error') continue;
+    if (ok) { step.status = 'done'; continue; }
+    if (step.status === 'active') {
+      step.status = 'error';
+      if (detail) step.note = detail;
+    }
+  }
+  db.prepare('UPDATE vm_migrations SET steps = ? WHERE id = ?').run(JSON.stringify(steps), id);
+}
+
+// ─── Transfer progress ───────────────────────────────────────────────────────
+
+// PVE only exposes the disk-copy percentage in the task log, so progress is
+// scraped from it: read the lines added since last time, keep the newest
+// percentage, and store it on the row. Persisting it (rather than holding it in
+// memory) is what makes the bar survive a page reload and a backend restart —
+// refreshRunningMigrations resumes reading at the stored offset.
+const LOG_BATCH = 512;
+const LOG_MAX_BATCHES = 20; // bounds the catch-up read of a long-running task
+
+function clearProgress(id) {
+  db.prepare("UPDATE vm_migrations SET progress = NULL, progress_detail = '' WHERE id = ?").run(id);
+}
+
+// Returns a function that pulls the task log once and updates the row. Set
+// `persistOffset` for the single task of a remote_migrate; adopt's per-disk
+// moves are separate tasks whose line numbers each start over, so they keep
+// their offset in the closure instead.
+function progressReader(id, node, upid, { persistOffset = false, step = null, note = '' } = {}) {
+  let offset = persistOffset
+    ? Number(db.prepare('SELECT log_offset FROM vm_migrations WHERE id = ?').get(id)?.log_offset) || 0
+    : 0;
+
+  return async function readProgress() {
+    if (!upid) return;
+    const read = await readTaskProgress(
+      (opts) => getTaskLog(node, upid, opts),
+      { start: offset, batch: LOG_BATCH, maxBatches: LOG_MAX_BATCHES },
+    );
+    offset = read.offset;
+    const latest = read.progress;
+    // The migration can finish while this read is in flight — writing then
+    // would resurrect a finished step as "active".
+    if (!db.prepare("SELECT 1 FROM vm_migrations WHERE id = ? AND status = 'running'").get(id)) return;
+    if (persistOffset) {
+      db.prepare('UPDATE vm_migrations SET log_offset = ? WHERE id = ?').run(offset, id);
+    }
+    if (!latest) return;
+    db.prepare('UPDATE vm_migrations SET progress = ?, progress_detail = ? WHERE id = ?')
+      .run(latest.percent, latest.detail, id);
+    if (step) setStep(id, step, 'active', note ? `${note} · ${latest.detail}` : latest.detail);
+  };
 }
 
 // ─── Shared storage detection ────────────────────────────────────────────────
@@ -268,9 +336,13 @@ async function runAdoptMigration(ctx) {
     const movedKeys = [];
     setStep(id, 'move-local', 'active');
     for (const disk of plan.filter((d) => d.action === 'copy')) {
-      setStep(id, 'move-local', 'active', `${disk.key} → ${transferStorage}`);
+      const note = `${disk.key} → ${transferStorage}`;
+      setStep(id, 'move-local', 'active', note);
       const upid = await moveVmDisk(sourceNode, vmid, disk.key, { storage: transferStorage, delete: 1 });
-      await waitForTask(sourceNode, upid);
+      await waitForTask(sourceNode, upid, {
+        onPoll: progressReader(id, sourceNode, upid, { step: 'move-local', note }),
+      });
+      clearProgress(id);
       movedKeys.push(disk.key);
     }
     setStep(id, 'move-local', movedKeys.length ? 'done' : 'skipped', movedKeys.length ? `${movedKeys.length} disk(s) moved` : 'all disks already on shared storage');
@@ -335,9 +407,13 @@ async function runAdoptMigration(ctx) {
     if (targetStorage && !sharedTargetIds.has(targetStorage) && movedKeys.length > 0) {
       setStep(id, 'move-back', 'active');
       for (const key of movedKeys) {
-        setStep(id, 'move-back', 'active', `${key} → ${targetStorage}`);
+        const note = `${key} → ${targetStorage}`;
+        setStep(id, 'move-back', 'active', note);
         const upid = await moveVmDisk(targetNode, vmid, key, { storage: targetStorage, delete: 1 });
-        await waitForTask(targetNode, upid);
+        await waitForTask(targetNode, upid, {
+          onPoll: progressReader(id, targetNode, upid, { step: 'move-back', note }),
+        });
+        clearProgress(id);
       }
       setStep(id, 'move-back', 'done', `${movedKeys.length} disk(s) moved to ${targetStorage}`);
     } else {
@@ -384,21 +460,32 @@ async function runAdoptMigration(ctx) {
 
 // ─── remote_migrate background polling ───────────────────────────────────────
 
+// Migrations with a live in-process poller. Status requests skip their own task
+// log read for these — the poller already keeps the row's progress current.
+const polledInProcess = new Set();
+
 // Long-running: cross-host disk copies can take hours. Interval 5s, capped at
 // ~6h; after that the lazy status check still finalizes whenever it sees the
 // task finished.
 async function pollMigration(id, sourceNode, upid, { maxAttempts = 4320 } = {}) {
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise((r) => setTimeout(r, 5000));
-    const row = db.prepare('SELECT status FROM vm_migrations WHERE id = ?').get(id);
-    if (!row || row.status !== 'running') return;
-    try {
-      const task = await getTaskStatus(sourceNode, upid);
-      if (task.status === 'stopped') {
-        finalizeMigration(id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
-        return;
-      }
-    } catch { /* source unreachable — keep polling */ }
+  const readProgress = progressReader(id, sourceNode, upid, { persistOffset: true, step: 'transfer' });
+  polledInProcess.add(id);
+  try {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      const row = db.prepare('SELECT status FROM vm_migrations WHERE id = ?').get(id);
+      if (!row || row.status !== 'running') return;
+      try {
+        const task = await getTaskStatus(sourceNode, upid);
+        if (task.status === 'stopped') {
+          finalizeMigration(id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
+          return;
+        }
+        await readProgress();
+      } catch { /* source unreachable — keep polling */ }
+    }
+  } finally {
+    polledInProcess.delete(id);
   }
   finalizeMigration(id, false, 'Timed out while waiting for the migration task — check the task log in Proxmox');
 }
@@ -415,6 +502,13 @@ async function refreshRunningMigrations(rows) {
       if (task.status === 'stopped') {
         finalizeMigration(row.id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
         Object.assign(row, db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(row.id));
+        continue;
+      }
+      // Nothing polls in-process after a restart — re-derive the bar from the
+      // task log so a reopened modal picks it back up mid-transfer.
+      if (!polledInProcess.has(row.id)) {
+        await progressReader(row.id, row.source_node, row.upid, { persistOffset: true, step: 'transfer' })();
+        Object.assign(row, db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(row.id));
       }
     } catch { /* source unreachable — leave as running */ }
   }
@@ -425,9 +519,14 @@ function serializeMigration(row, hostNames) {
   const tgt = decodeNodeRef(row.target_node);
   let steps = [];
   try { steps = row.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
+  const { log_offset, ...rest } = row; // internal bookkeeping, not for the UI
   return {
-    ...row,
+    ...rest,
     steps,
+    // null whenever the task log carries no percentage yet (LXC rsync, early
+    // phase) — the UI falls back to the plain running indicator.
+    progress: Number.isFinite(row.progress) ? row.progress : null,
+    progress_detail: row.progress_detail || '',
     sourceNodeName: src.nodeName || row.source_node,
     targetNodeName: tgt.nodeName || row.target_node,
     sourceHostName: (src.hostId && hostNames.get(src.hostId)) || '',
@@ -665,6 +764,14 @@ router.post('/:node/:vmid', async (req, res) => {
         finalizeMigration(row.lastInsertRowid, false, err.message || 'Migration failed');
       });
     } else {
+      // The API call already returned a UPID, so the source-side preparation is
+      // behind us — seeding gives the transfer a step to hang its progress bar
+      // on instead of leaving this path a blank panel.
+      seedSteps(row.lastInsertRowid, [
+        { key: 'prepare', label: 'Preparing migration on the source host', status: 'done' },
+        { key: 'transfer', label: `Transferring ${vmtype === 'lxc' ? 'the container' : 'disks'} to ${targetHost.name}`, status: 'active' },
+        { key: 'finalize', label: 'Finalizing on the target host' },
+      ]);
       pollMigration(row.lastInsertRowid, sourceRef, upid)
         .catch((err) => console.error(`[migrate] polling failed for VM ${vmid}:`, err.message));
     }

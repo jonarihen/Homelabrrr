@@ -21,6 +21,24 @@ const STEP_ICON = {
   skipped: 'text-gray-600',
 };
 
+// Disk-transfer progress scraped from the Proxmox task log. Only rendered when
+// the backend actually parsed a percentage — LXC copies (rsync) and the early
+// phase of a migration report none, and those keep the pulsing dot instead.
+function TransferProgress({ percent, detail }) {
+  const pct = Math.min(100, Math.max(0, percent));
+  return (
+    <div className="mt-1.5 mb-1">
+      <div className="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+        <div className="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="flex items-center justify-between mt-1 text-[11px] font-mono text-gray-500">
+        <span className="truncate">{detail || 'transferring…'}</span>
+        <span className="text-gray-400 shrink-0 ml-2">{pct.toFixed(pct < 10 ? 1 : 0)}%</span>
+      </div>
+    </div>
+  );
+}
+
 // Admin: move a guest to a different (non-clustered) Proxmox host. When both
 // hosts mount the same NFS/CIFS storage the backend plans an "adopt" migration
 // that re-references those disks instead of copying them. Started migrations
@@ -192,6 +210,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
   };
 
   const targetHostName = nodes.find((n) => n.nodeRef === targetNode)?.hostName || '';
+  const showProgress = migration?.status === 'running' && typeof migration.progress === 'number';
 
   return (
     <Modal title={`Migrate ${vm.name || `VM ${vm.vmid}`}`} onClose={onClose} size="lg">
@@ -218,14 +237,24 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
             {(migration.steps || []).length > 0 && (
               <div className="bg-gray-950/60 border border-gray-800 rounded-lg px-4 py-3 space-y-1.5">
                 {migration.steps.map((s) => (
-                  <div key={s.key} className="flex items-center gap-2 text-xs">
-                    <span className={`font-mono ${STEP_ICON[s.status] || 'text-gray-600'}`}>
-                      {s.status === 'done' ? '✓' : s.status === 'error' ? '✕' : s.status === 'active' ? '▸' : s.status === 'skipped' ? '–' : '·'}
-                    </span>
-                    <span className={s.status === 'active' ? 'text-gray-200' : 'text-gray-500'}>{s.label}</span>
-                    {s.note && <span className="text-gray-600 font-mono truncate">{s.note}</span>}
+                  <div key={s.key}>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className={`font-mono ${STEP_ICON[s.status] || 'text-gray-600'}`}>
+                        {s.status === 'done' ? '✓' : s.status === 'error' ? '✕' : s.status === 'active' ? '▸' : s.status === 'skipped' ? '–' : '·'}
+                      </span>
+                      <span className={s.status === 'active' ? 'text-gray-200' : 'text-gray-500'}>{s.label}</span>
+                      {s.note && <span className="text-gray-600 font-mono truncate">{s.note}</span>}
+                    </div>
+                    {showProgress && s.status === 'active' && (
+                      <TransferProgress percent={migration.progress} detail={migration.progress_detail} />
+                    )}
                   </div>
                 ))}
+              </div>
+            )}
+            {showProgress && (migration.steps || []).length === 0 && (
+              <div className="bg-gray-950/60 border border-gray-800 rounded-lg px-4 py-3">
+                <TransferProgress percent={migration.progress} detail={migration.progress_detail} />
               </div>
             )}
             {migration.status === 'ok' && (
