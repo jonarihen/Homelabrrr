@@ -7,6 +7,7 @@ import {
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM,
   getLXCStatus, lxcAction, getLXCConfig, updateLXCConfig, getLXCRRD, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
+  getStorages,
 } from '../proxmox.js';
 import { createClient } from '../fortigate.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
@@ -20,6 +21,8 @@ import { summarizeLease, renewLease } from '../utils/leases.js';
 import { assertUserQuota, sizeToGb } from '../utils/quota.js';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
+import { assertStorageExposed, filterExposedStorages, withStorageNotes } from '../utils/storageVisibility.js';
+import { assertNodeCapacity } from '../utils/capacity.js';
 import {
   isValidTime, isValidDaysMask, isValidTimezone, timeToMinutes,
   serializeSchedule, scheduleBadge, nextTimeOccurrence, ALL_DAYS,
@@ -1111,9 +1114,8 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
 
 // NOTE (storage exposure, issue #19): this endpoint grows an *existing* disk in
 // place (e.g. scsi0) — it never names a storage pool, so there is no exposed/
-// hidden pool to enforce here. There is currently no "add a disk on a chosen
-// storage" path in hardware edit; if one is added, call assertStorageExposed()
-// on the named pool the same way the /provision create paths do.
+// hidden pool to enforce here. The add-disk route below does name one, and
+// calls assertStorageExposed() the same way the /provision create paths do.
 router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
   const { node, vmid } = req.params;
   const { disk, size } = req.body;
@@ -1157,6 +1159,98 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
     await resizeVMDisk(node, vmid, disk, size);
     logAudit(req, 'vm_disk_resize', `${node}/${vmid}`, `${disk}=${size}`);
     res.json({ ok: true });
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ error: err.status ? err.message : sanitizeError(err.message) });
+  }
+});
+
+// ─── Add a disk ──────────────────────────────────────────────────────────────
+//
+// The pools this VM's owner may put a new disk on: images-capable, active, and
+// exposed by an admin (admins see every pool). Each carries free space and the
+// admin's note so the picker isn't a list of opaque pool ids. Same permission
+// as the rest of hardware editing.
+
+router.get('/:node/:vmid/storages', pHardware, async (req, res) => {
+  const { node, vmid } = req.params;
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  try {
+    const pools = (await getStorages(node)).filter((s) => s.content?.includes('images'));
+    const visible = await filterExposedStorages(node, pools, { isAdmin: req.session.isAdmin });
+    const annotated = await withStorageNotes(node, visible);
+    res.json(annotated.map((s) => ({
+      storage: s.storage, type: s.type || '',
+      avail: s.avail ?? null, total: s.total ?? null, note: s.note || '',
+    })));
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Attach a brand-new empty disk. The slot is chosen server-side (first free
+// scsiN) so a caller can never overwrite an existing disk by naming its slot —
+// the config key is what decides which volume PVE replaces. Storage exposure,
+// per-user quota and node capacity are all enforced before the write.
+const MAX_ADD_DISK_GB = 8192;
+const SCSI_SLOTS = 31;   // PVE: scsi0 … scsi30
+
+router.post('/:node/:vmid/disk', pHardware, async (req, res) => {
+  const { node, vmid } = req.params;
+  const { storage, sizeGb } = req.body;
+
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  const pool = String(storage || '').trim();
+  // The pool id is concatenated into a Proxmox property string — keep it a
+  // strict identifier so it can't smuggle extra disk options.
+  if (!pool || !/^[a-zA-Z0-9._-]+$/.test(pool)) {
+    return res.status(400).json({ error: 'Pick a storage pool for the new disk' });
+  }
+  const gb = parseInt(sizeGb, 10);
+  if (!Number.isInteger(gb) || gb < 1 || gb > MAX_ADD_DISK_GB) {
+    return res.status(400).json({ error: `Disk size must be between 1 and ${MAX_ADD_DISK_GB} GB` });
+  }
+
+  try {
+    // Never trust the dropdown: the pool must be one an admin exposed, and it
+    // must actually be able to hold VM disks on this node.
+    await assertStorageExposed(node, pool, { isAdmin: req.session.isAdmin });
+    const pools = await getStorages(node);
+    const match = pools.find((s) => s.storage === pool);
+    if (!match || !match.content?.includes('images')) {
+      return res.status(400).json({ error: `Storage "${pool}" can't hold VM disks on this node` });
+    }
+
+    if (!req.session.isAdmin) {
+      await assertUserQuota(req.session.userId, { addDiskGb: gb });
+    }
+    await assertNodeCapacity(node, { diskGb: gb, storage: pool });
+
+    // Uncached: the free-slot scan below decides which config key gets written,
+    // so a stale read could hand out a slot another request just filled.
+    const config = await getVMConfig(node, vmid, { fresh: true });
+    let slot = null;
+    for (let i = 0; i < SCSI_SLOTS; i++) {
+      if (config[`scsi${i}`] === undefined) { slot = `scsi${i}`; break; }
+    }
+    if (!slot) {
+      return res.status(400).json({ error: 'This VM already has the maximum number of SCSI disks' });
+    }
+
+    // Pass the config digest we picked the slot from: two add-disk calls racing
+    // would otherwise both choose the same free slot and the second would
+    // silently replace the first's volume. PVE rejects a stale digest instead.
+    await updateVMConfig(node, vmid, {
+      [slot]: `${pool}:${gb}`,
+      ...(config.digest && { digest: config.digest }),
+    });
+    logAudit(req, 'vm_disk_add', `${node}/${vmid}`, `${slot}=${pool}:${gb}G`);
+    res.json({ ok: true, disk: slot, storage: pool, sizeGb: gb });
   } catch (err) {
     const status = err.status || 500;
     res.status(status).json({ error: err.status ? err.message : sanitizeError(err.message) });

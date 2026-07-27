@@ -516,6 +516,11 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// Admin-written blurb explaining what a pool actually is ("NVMe — fast, for
+// databases", "spinning rust — bulk media"). Shown next to every storage the
+// user picks from, so they aren't choosing between opaque pool ids.
+try { db.exec("ALTER TABLE storage_visibility ADD COLUMN notes TEXT DEFAULT ''"); } catch { /* exists */ }
+
 // Marks notices auto-published by a subsystem (e.g. node maintenance) so they
 // can be found and closed automatically — '' means an admin-authored notice.
 try { db.exec("ALTER TABLE portal_notices ADD COLUMN source TEXT DEFAULT ''"); } catch { /* exists */ }

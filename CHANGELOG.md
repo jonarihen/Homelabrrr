@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-27 — Pick your own storage, and add disks to a VM you own
+
+- **You can choose which storage your VM's disk goes on.** The deploy form only offered a storage picker to admins — everyone else had the host *and* the pool decided for them, with no way to say "put this on the fast one". Deploying from a cloud image now shows a **Disk Storage** picker listing every pool you're allowed to use, grouped by host, with free space
+- **Automatic is still the default.** Leave the picker alone and placement works exactly as before — least-busy host with enough free memory and disk. Pick a pool and your VM lands there instead
+- **Storage pools can carry a note.** Admins write a short description per pool under **Admin → PVE Hosts** (e.g. "NVMe — fast, keep it small", "bulk media, slow"), and it shows next to that pool in every storage picker, so nobody has to guess what `local-lvm` means. Notes are separate from the exposed/hidden switch — writing one doesn't un-hide a pool
+- **Add a disk to a VM you own.** *Hardware → Add Disk* attaches a new disk on the pool and size you choose; it takes the next free SCSI slot, and the same quota, storage-permission and free-space checks as deployment apply. Existing disks are untouched. You still partition and format it inside the guest
+- Disk resize is unchanged and still lives in *Hardware → Disk Resize*
+
 ## 2026-07-27 — Invite links no longer bounce to the sign-in page
 
 - **Following an invite link works again.** The invite page dropped straight to the sign-in form instead of the "Claim Invite" panel — an invitee has no account yet, so there was nothing they could do from there

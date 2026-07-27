@@ -405,6 +405,25 @@ function fmtSize(bytes) {
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 }
 
+// One line for a storage <option>: pool id, backend type, free space, and the
+// admin's note. <option> can't hold markup, so the note is appended as text and
+// repeated in full under the select by <StorageNote> (it may be truncated here).
+function storageOptionLabel(s) {
+  const bits = [s.storage];
+  if (s.type) bits.push(`(${s.type})`);
+  if (s.avail) bits.push(`— ${fmtSize(s.avail)} free`);
+  if (s.note) bits.push(`· ${s.note}`);
+  return bits.join(' ');
+}
+
+// The admin's description of the selected pool, so users aren't choosing
+// between opaque names. Falls back to `fallback` when the pool has no note.
+function StorageNote({ note, fallback = '' }) {
+  const text = note || fallback;
+  if (!text) return null;
+  return <p className="text-xs text-gray-500 mt-1.5 leading-relaxed">{text}</p>;
+}
+
 // ── Create from Cloud Image (direct, no template) ───────────────────────────
 
 function CloudImageForm({ onStarted }) {
@@ -421,6 +440,10 @@ function CloudImageForm({ onStarted }) {
   // Chosen deploy host (admins). Defaults to the image's own host; can be any
   // host the image is reachable from (shared storage), from image.deployTargets.
   const [targetNode, setTargetNode] = useState('');
+  // Every (host, pool) a regular user may deploy onto, with free space and the
+  // admin's note. '' keeps the old behaviour: the backend places the VM.
+  const [userTargets, setUserTargets] = useState([]);
+  const [userPick, setUserPick] = useState('');   // '' | '<nodeRef>|<storage>'
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -437,10 +460,22 @@ function CloudImageForm({ onStarted }) {
     }
   }, [user?.isAdmin]);
 
+  // Regular users pick a pool from the (host, storage) pairs the backend says
+  // this image can actually land on — or leave it on Automatic and keep the
+  // least-busy-host placement. Admins use the host + storage selects instead.
+  useEffect(() => {
+    if (!selected || user?.isAdmin) { setUserTargets([]); return; }
+    let cancelled = false;
+    api.get(`/provision/images/${selected.id}/storage-targets`)
+      .then(r => { if (!cancelled) setUserTargets(r.data || []); })
+      .catch(() => { if (!cancelled) setUserTargets([]); });
+    return () => { cancelled = true; };
+  }, [selected, user?.isAdmin]);
+
   // When an image is picked, load storages (images-capable) on its node —
-  // admins only: non-admin deploys are placed automatically by the backend
-  // (least-busy host with room), so they pick neither host nor storage.
-  // Bridges are admin-only (networks route is admin-gated); others default to vmbr0.
+  // admins only: they also choose the deploy host, so the pool list has to
+  // follow that choice. Bridges are admin-only (networks route is admin-gated);
+  // others default to vmbr0.
   useEffect(() => {
     if (!selected) return;
     // Storage + networks belong to the CHOSEN host, which for a shared-storage
@@ -477,9 +512,13 @@ function CloudImageForm({ onStarted }) {
   const selectImage = (img) => {
     setSelected(img);
     setTargetNode(img.nodeRef);
+    setUserPick('');
     setForm({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: false });
     setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   };
+
+  // '<nodeRef>|<storage>' — empty when the user left the picker on Automatic.
+  const [pickedNode, pickedStorage] = userPick ? userPick.split('|') : ['', ''];
 
   const submit = async (e) => {
     e.preventDefault();
@@ -491,8 +530,8 @@ function CloudImageForm({ onStarted }) {
         cores: parseInt(form.cores),
         memoryGb: parseFloat(form.memory),
         diskGb: parseInt(form.diskGb),
-        storage: user?.isAdmin ? form.storage : undefined,
-        targetNode: user?.isAdmin ? targetNode : undefined,
+        storage: user?.isAdmin ? form.storage : (pickedStorage || undefined),
+        targetNode: user?.isAdmin ? targetNode : (pickedNode || undefined),
         bridge: form.bridge,
         description: form.description,
         assignTo: form.assignTo || undefined,
@@ -657,11 +696,12 @@ function CloudImageForm({ onStarted }) {
                 {storages.length > 0 ? (
                   <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
                     <option value="">Select...</option>
-                    {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
+                    {storages.map(s => <option key={s.storage} value={s.storage}>{storageOptionLabel(s)}</option>)}
                   </select>
                 ) : (
                   <input type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" required />
                 )}
+                <StorageNote note={storages.find(s => s.storage === form.storage)?.note} />
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">Network Bridge</label>
@@ -670,6 +710,32 @@ function CloudImageForm({ onStarted }) {
                   {bridges.length === 0 && <option value="vmbr0">vmbr0</option>}
                 </select>
               </div>
+            </div>
+          ) : userTargets.length > 0 ? (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Storage</label>
+              <select value={userPick} onChange={e => setUserPick(e.target.value)} className={inputCls}>
+                <option value="">Automatic — least-busy host with room</option>
+                {userTargets.map(t => (
+                  <optgroup key={t.nodeRef} label={t.hostName ? `${t.hostName} — ${displayNode(t.node)}` : displayNode(t.node)}>
+                    {t.storages.map(s => (
+                      <option key={`${t.nodeRef}|${s.storage}`} value={`${t.nodeRef}|${s.storage}`}>
+                        {storageOptionLabel(s)}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              {userPick ? (
+                <StorageNote
+                  note={userTargets.find(t => t.nodeRef === pickedNode)?.storages.find(s => s.storage === pickedStorage)?.note}
+                  fallback={`Your VM's disk goes on ${pickedStorage}.`}
+                />
+              ) : (
+                <p className="text-xs text-gray-600 mt-1">
+                  Leave this on Automatic and your VM lands on the least-busy Proxmox host with enough free memory and disk.
+                </p>
+              )}
             </div>
           ) : (
             <p className="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-xl p-3">
@@ -936,12 +1002,13 @@ function CloneForm({ onStarted }) {
                   <option value={form.storage}>{form.storage}</option>
                 )}
                 {storages.filter(s => s.content?.includes('images')).map(s => (
-                  <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                  <option key={s.storage} value={s.storage}>{storageOptionLabel(s)}</option>
                 ))}
               </select>
             ) : (
               <input type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" />
             )}
+            <StorageNote note={storages.find(s => s.storage === form.storage)?.note} />
           </div>
 
           {vlans.length > 0 && (
@@ -1134,9 +1201,10 @@ function CreateForm({ onStarted }) {
             <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls}>
               <option value="">Select...</option>
               {storages.filter(s => s.content?.includes('images')).map(s => (
-                <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                <option key={s.storage} value={s.storage}>{storageOptionLabel(s)}</option>
               ))}
             </select>
+            <StorageNote note={storages.find(s => s.storage === form.storage)?.note} />
           </div>
           {/* Network bridge is admin-only — non-admins are pinned to the default
               (vmbr0) on the backend to prevent VLAN-injection via bridge=...,tag=N. */}

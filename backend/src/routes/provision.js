@@ -12,7 +12,7 @@ import { notify, portalLink } from '../utils/notify.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { imageDeployTargets, defaultStorageForHost } from '../utils/cloudImageTargets.js';
 import { checkVlanAssignment } from '../utils/vlanAccess.js';
-import { assertStorageExposed, filterExposedStorages } from '../utils/storageVisibility.js';
+import { assertStorageExposed, filterExposedStorages, withStorageNotes } from '../utils/storageVisibility.js';
 import { computeCpuTopology } from '../utils/cpuTopology.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
 import { assertNodeAvailable } from '../utils/nodeMaintenance.js';
@@ -222,7 +222,56 @@ router.get('/nodes/:node/storages', requirePermission('can_provision', 'can_mana
     const storages = await getStorages(req.params.node);
     // Non-admins only see storage pools an admin has exposed. Admins see all.
     const visible = await filterExposedStorages(req.params.node, storages, { isAdmin: req.session.isAdmin });
-    res.json(visible);
+    // Each pool carries the admin's note so the picker can say what it's for.
+    res.json(await withStorageNotes(req.params.node, visible));
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// ─── Where a cloud image can actually put a disk ─────────────────────────────
+// Every (host, storage) pair this image can be deployed onto, already filtered
+// to pools the caller is allowed to use, annotated with free space and the
+// admin's note. Feeds the deploy form's storage picker for regular users, who
+// otherwise had host and storage chosen for them with no say and no visibility.
+// Unreachable hosts are skipped rather than failing the whole listing.
+router.get('/images/:id/storage-targets', async (req, res) => {
+  const user = loadProvisioner(req);
+  if (!user?.is_admin && !user?.can_provision) {
+    return res.status(403).json({ error: 'You do not have permission to provision VMs' });
+  }
+  const image = db.prepare("SELECT * FROM cloud_images WHERE id = ?").get(req.params.id);
+  if (!image) return res.status(404).json({ error: 'Cloud image not found' });
+
+  try {
+    const hostNames = new Map(db.prepare('SELECT id, name FROM pve_hosts').all().map((h) => [h.id, h.name]));
+    const out = [];
+    for (const cand of await imagePlacementCandidates(image)) {
+      // A drained node is not offerable — auto-placement skips it too.
+      try { assertNodeAvailable(cand.node); } catch { continue; }
+      let pools;
+      try {
+        pools = (await getStorages(cand.node)).filter((s) => s.content?.includes('images'));
+      } catch { continue; } // host offline — leave it out of the picker
+      const visible = await filterExposedStorages(cand.node, pools, user);
+      if (visible.length === 0) continue;
+      const annotated = await withStorageNotes(cand.node, visible);
+      const { hostId, nodeName } = decodeNodeRef(cand.node);
+      out.push({
+        nodeRef: cand.node,
+        node: nodeName || cand.node,
+        hostId,
+        hostName: hostNames.get(hostId) || '',
+        storages: annotated
+          .map((s) => ({
+            storage: s.storage, type: s.type || '',
+            avail: s.avail ?? null, total: s.total ?? null,
+            note: s.note || '',
+          }))
+          .sort((a, b) => (b.avail || 0) - (a.avail || 0)),
+      });
+    }
+    res.json(out);
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
@@ -389,35 +438,41 @@ router.post('/clone', async (req, res) => {
   }
 });
 
-// ─── Automatic placement for non-admin cloud-image deploys ───────────────────
-// The same image (same download URL) may be present on several hosts. Rank
-// candidate hosts by guest count (fewest first) and take the first one that
-// actually has room: reachable, an images-capable storage with the most free
-// space, enough free RAM and disk (assertNodeCapacity). A nearly-full host is
-// skipped even when it has fewer VMs — count never beats capacity.
-async function autoPlaceImage(image, { memoryMb, diskGb }) {
+// ─── Where a cloud image can be deployed ─────────────────────────────────────
+// The same image (same download URL) may be present on several hosts, and a
+// host can also reach it by sharing the storage its disk lives on. Fold both
+// into one candidate per host (first win), carrying the volid as addressed on
+// that host and that host's default pool. Shared by automatic placement and by
+// the storage picker, so both offer exactly the same set of hosts.
+async function imagePlacementCandidates(image) {
   const rows = db.prepare(
     "SELECT * FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' AND url = ?"
   ).all(image.url);
   if (rows.length === 0) rows.push(image);
 
-  // A host can be reachable via a per-host image row OR because it shares the
-  // storage of a row's disk. Fold both into one candidate per host (first win),
-  // carrying the volid as addressed on that host and that host's default pool.
   const byHost = new Map();
   for (const row of rows) {
     for (const t of await imageDeployTargets(row)) {
       if (!byHost.has(t.hostId)) {
-        byHost.set(t.hostId, { node: t.nodeRef, volid: t.volid, default_storage: defaultStorageForHost(row, t.hostId) });
+        byHost.set(t.hostId, { hostId: t.hostId, node: t.nodeRef, volid: t.volid, default_storage: defaultStorageForHost(row, t.hostId) });
       }
     }
   }
+  return [...byHost.values()];
+}
+
+// ─── Automatic placement for non-admin cloud-image deploys ───────────────────
+// Rank candidate hosts by guest count (fewest first) and take the first one that
+// actually has room: reachable, an images-capable storage with the most free
+// space, enough free RAM and disk (assertNodeCapacity). A nearly-full host is
+// skipped even when it has fewer VMs — count never beats capacity.
+async function autoPlaceImage(image, { memoryMb, diskGb }) {
+  const candidates = await imagePlacementCandidates(image);
 
   const vms = await getAllVMs();
   const countByHost = new Map();
   for (const vm of vms) countByHost.set(vm.hostId, (countByHost.get(vm.hostId) || 0) + 1);
-  const ranked = [...byHost.entries()]
-    .map(([hostId, info]) => ({ hostId, ...info }))
+  const ranked = [...candidates]
     .sort((a, b) => (countByHost.get(a.hostId) || 0) - (countByHost.get(b.hostId) || 0));
 
   for (const cand of ranked) {
@@ -443,6 +498,38 @@ async function autoPlaceImage(image, { memoryMb, diskGb }) {
     error: {
       status: 503,
       message: 'No Proxmox host has enough free memory or storage for this VM right now — contact your admin on Discord so they can make room.',
+    },
+  };
+}
+
+// ─── A user's explicit storage pick, resolved to a host ──────────────────────
+// The deploy form offers (host, storage) pairs from /images/:id/storage-targets;
+// this re-derives that same set server-side and confirms the pick is really on
+// it — never trust the dropdown. `targetNode` narrows to one host when the same
+// pool id exists on several; without it the first host offering the pool wins.
+// Capacity and exposure are checked by the shared guards after this returns.
+async function resolveUserStorageChoice(image, { storage, targetNode, user }) {
+  const candidates = await imagePlacementCandidates(image);
+  const hosts = targetNode ? candidates.filter((c) => c.node === targetNode) : candidates;
+  if (hosts.length === 0) {
+    return { error: { status: 400, message: 'The selected host cannot deploy this image' } };
+  }
+
+  for (const cand of hosts) {
+    try {
+      assertNodeAvailable(cand.node);
+      // getStorages doubles as the reachability gate — an offline host throws.
+      const imagePools = (await getStorages(cand.node)).filter((s) => s.content?.includes('images'));
+      const visible = await filterExposedStorages(cand.node, imagePools, user);
+      if (visible.some((s) => s.storage === storage)) return { candidate: cand };
+    } catch (err) {
+      console.warn(`[placement] "${storage}" unusable on ${cand.node}: ${err.message}`);
+    }
+  }
+  return {
+    error: {
+      status: 400,
+      message: `Storage "${storage}" isn't available for this image right now — pick another pool or leave the storage on Automatic.`,
     },
   };
 }
@@ -490,12 +577,16 @@ router.post('/from-image', async (req, res) => {
     return res.status(400).json({ error: 'This image cannot be used as a disk source — remove it and add it again to re-download it as import content' });
   }
 
-  // Resolve the disk target for admins: an explicit choice wins, else the
-  // image's admin-set default. Validate here (the value is concatenated into
-  // Proxmox property strings) now that the image — and thus its default — is
-  // known. Non-admins get host AND storage from automatic placement below.
+  // Resolve the disk target: an explicit choice wins, else the image's
+  // admin-set default. Validate here (the value is concatenated into Proxmox
+  // property strings) now that the image — and thus its default — is known.
+  // A non-admin who names no storage is placed automatically further down.
+  const requestedStorage = String(storage || '').trim();
   let targetImage = image;
-  let targetStorage = String(storage || image.default_storage || '').trim();
+  let targetStorage = requestedStorage || String(image.default_storage || '').trim();
+  if (requestedStorage && !/^[a-zA-Z0-9._-]+$/.test(requestedStorage)) {
+    return res.status(400).json({ error: 'Invalid storage' });
+  }
   if (user.is_admin) {
     if (!targetStorage) {
       return res.status(400).json({ error: 'Storage is required (this image has no default storage set)' });
@@ -529,13 +620,23 @@ router.post('/from-image', async (req, res) => {
   const memoryMb = Math.round(parseFloat(memoryGb) * 1024);
 
   // Placement: admins deploy onto the image's own host, or a shared-storage
-  // peer they selected via targetNode (resolved above); non-admins land on the
-  // least-loaded host that has room for the request.
+  // peer they selected via targetNode (resolved above). A non-admin who picked
+  // a pool in the deploy form gets that pool on the host offering it; one who
+  // left the picker on "Automatic" lands on the least-loaded host with room.
   if (!user.is_admin) {
-    const placed = await autoPlaceImage(image, { memoryMb, diskGb: baseDiskGb });
-    if (placed.error) return res.status(placed.error.status).json({ error: placed.error.message });
-    targetImage = placed.image;
-    targetStorage = placed.storage;
+    if (requestedStorage) {
+      const resolved = await resolveUserStorageChoice(image, {
+        storage: requestedStorage, targetNode, user,
+      });
+      if (resolved.error) return res.status(resolved.error.status).json({ error: resolved.error.message });
+      targetImage = { ...image, node: resolved.candidate.node, volid: resolved.candidate.volid };
+      targetStorage = requestedStorage;
+    } else {
+      const placed = await autoPlaceImage(image, { memoryMb, diskGb: baseDiskGb });
+      if (placed.error) return res.status(placed.error.status).json({ error: placed.error.message });
+      targetImage = placed.image;
+      targetStorage = placed.storage;
+    }
   }
 
   // Cloud images are always cloud-init capable, so guest settings are honored.
@@ -640,7 +741,10 @@ router.post('/from-image', async (req, res) => {
       start: startNow,
     }).catch((err) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message));
 
-    logAudit(req, 'vm_from_image', `${targetImage.node}/${vmid}`, `image:${targetImage.name}${user.is_admin ? '' : ' (auto-placed)'}`);
+    logAudit(
+      req, 'vm_from_image', `${targetImage.node}/${vmid}`,
+      `image:${targetImage.name} storage:${targetStorage}${user.is_admin || requestedStorage ? '' : ' (auto-placed)'}`,
+    );
     res.json({
       id: row.lastInsertRowid,
       vmid,

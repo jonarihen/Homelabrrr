@@ -9,7 +9,14 @@ import { getHostIdForNode } from '../proxmox.js';
 // the default-open behavior that keeps existing deployments unchanged until an
 // admin explicitly hides a pool.
 //
+// The same rows carry an admin-written note per pool ("NVMe — fast, small") that
+// every user-facing storage picker renders, so a pool id isn't the only thing a
+// user has to choose by.
+//
 // Admins always see and can use every pool; the guards below no-op for them.
+
+// Notes are rendered inline in dropdowns — keep them to a caption, not an essay.
+export const MAX_NOTE_LENGTH = 280;
 
 function isAdminUser(user) {
   // Accept either a users row (is_admin) or a session-shaped flag (isAdmin),
@@ -37,6 +44,16 @@ export function setStorageExposed(hostId, storage, exposed) {
   `).run(hostId, storage, exposed ? 1 : 0);
 }
 
+// Upsert a storage's admin note. Inserting a row must not change exposure —
+// a note on a never-touched pool leaves it at the default-open exposed = 1.
+export function setStorageNotes(hostId, storage, notes) {
+  db.prepare(`
+    INSERT INTO storage_visibility (pve_host_id, storage, exposed, notes)
+    VALUES (?, ?, 1, ?)
+    ON CONFLICT(pve_host_id, storage) DO UPDATE SET notes = excluded.notes
+  `).run(hostId, storage, String(notes || '').slice(0, MAX_NOTE_LENGTH));
+}
+
 // Map of storage → exposed(bool) for a host (only rows that exist).
 export function storageVisibilityMap(hostId) {
   const rows = db.prepare(
@@ -45,6 +62,27 @@ export function storageVisibilityMap(hostId) {
   const map = new Map();
   for (const r of rows) map.set(r.storage, r.exposed !== 0);
   return map;
+}
+
+// Map of storage → note for a host (only rows with a non-empty note).
+export function storageNotesMap(hostId) {
+  const rows = db.prepare(
+    'SELECT storage, notes FROM storage_visibility WHERE pve_host_id = ?'
+  ).all(hostId);
+  const map = new Map();
+  for (const r of rows) if (r.notes) map.set(r.storage, r.notes);
+  return map;
+}
+
+// Stamp the admin note onto each storage object from getStorages(), so every
+// picker in the UI can explain what a pool is for. Best effort: an unresolvable
+// node just yields notes-free entries rather than failing the listing.
+export async function withStorageNotes(node, storages) {
+  let notes = new Map();
+  try {
+    notes = storageNotesMap(await getHostIdForNode(node));
+  } catch { /* host unresolvable — fall through with no notes */ }
+  return storages.map((s) => ({ ...s, note: notes.get(s.storage) || '' }));
 }
 
 // Filter a list of storage objects (from getStorages) down to those exposed to

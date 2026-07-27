@@ -512,15 +512,20 @@ export default function PVEHostsPage() {
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 
-// Per-host storage pool exposure. Admins flip a pool "exposed to users" off to
-// hide it from the provisioning dropdowns (and reject it server-side). Pools are
-// exposed by default, so a fresh install shows everything until an admin trims it.
+// Per-host storage pool exposure and notes. Admins flip a pool "exposed to
+// users" off to hide it from the provisioning dropdowns (and reject it
+// server-side). Pools are exposed by default, so a fresh install shows
+// everything until an admin trims it. The note next to each pool is what users
+// see in every storage picker, so "local-lvm" can read as what it actually is.
+const MAX_NOTE_LENGTH = 280;
+
 function StoragePoolsSection({ hostId, online, loading }) {
   const [pools, setPools] = useState(null);
   const [busy, setBusy] = useState({});      // storage -> saving
   const [error, setError] = useState('');    // blocking load error
   const [saveError, setSaveError] = useState('');
   const [loadingPools, setLoadingPools] = useState(false);
+  const [noteDrafts, setNoteDrafts] = useState({});   // storage -> unsaved text
 
   useEffect(() => {
     // Discovering pools needs a reachable host, so only fetch once it's online.
@@ -552,13 +557,30 @@ function StoragePoolsSection({ hostId, online, loading }) {
     }
   };
 
+  // Notes save on blur (and on Enter) rather than per keystroke.
+  const saveNote = async (pool) => {
+    const draft = noteDrafts[pool.storage];
+    if (draft === undefined || draft === (pool.notes || '')) return;
+    setBusy((b) => ({ ...b, [pool.storage]: true }));
+    setSaveError('');
+    try {
+      await api.put(`/admin/pve-hosts/${hostId}/storages/${encodeURIComponent(pool.storage)}`, { notes: draft });
+      setPools((ps) => ps.map((p) => (p.storage === pool.storage ? { ...p, notes: draft.trim() } : p)));
+      setNoteDrafts((d) => { const next = { ...d }; delete next[pool.storage]; return next; });
+    } catch (e) {
+      setSaveError(e.response?.data?.error || `Failed to save the note for ${pool.storage}`);
+    } finally {
+      setBusy((b) => ({ ...b, [pool.storage]: false }));
+    }
+  };
+
   if (!online) return null;
 
   return (
     <div className="mt-4 pt-4 border-t border-gray-800">
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-[11px] font-mono uppercase tracking-[0.1em] text-gray-500">Storage pools</h4>
-        <span className="text-[10px] text-gray-600">exposed to users</span>
+        <span className="text-[10px] text-gray-600">exposed to users · note saves on blur</span>
       </div>
       {loadingPools ? (
         <div className="h-10 bg-gray-800/40 rounded-xl animate-pulse" />
@@ -572,24 +594,38 @@ function StoragePoolsSection({ hostId, online, loading }) {
             <p role="alert" className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">{saveError}</p>
           )}
           {pools.map((p) => (
-            <div key={p.storage} className="bg-gray-800/50 border border-gray-700/30 rounded-xl px-3 py-2 flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <span className="text-sm text-white font-mono">{p.storage}</span>
-                <span className="text-[10px] text-gray-500 ml-2 uppercase tracking-wide">{p.type}{p.content ? ` · ${p.content}` : ''}</span>
+            <div key={p.storage} className="bg-gray-800/50 border border-gray-700/30 rounded-xl px-3 py-2 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <span className="text-sm text-white font-mono">{p.storage}</span>
+                  <span className="text-[10px] text-gray-500 ml-2 uppercase tracking-wide">{p.type}{p.content ? ` · ${p.content}` : ''}</span>
+                </div>
+                <label className="flex items-center gap-2 shrink-0 cursor-pointer select-none">
+                  <span className={`text-[10px] font-mono uppercase tracking-wide ${p.exposed ? 'text-green-400' : 'text-gray-500'}`}>
+                    {p.exposed ? 'Exposed' : 'Hidden'}
+                  </span>
+                  <input
+                    type="checkbox"
+                    className="accent-blue-500 w-4 h-4"
+                    checked={!!p.exposed}
+                    disabled={!!busy[p.storage]}
+                    onChange={() => toggle(p)}
+                    aria-label={`Expose storage pool ${p.storage} to users`}
+                  />
+                </label>
               </div>
-              <label className="flex items-center gap-2 shrink-0 cursor-pointer select-none">
-                <span className={`text-[10px] font-mono uppercase tracking-wide ${p.exposed ? 'text-green-400' : 'text-gray-500'}`}>
-                  {p.exposed ? 'Exposed' : 'Hidden'}
-                </span>
-                <input
-                  type="checkbox"
-                  className="accent-blue-500 w-4 h-4"
-                  checked={!!p.exposed}
-                  disabled={!!busy[p.storage]}
-                  onChange={() => toggle(p)}
-                  aria-label={`Expose storage pool ${p.storage} to users`}
-                />
-              </label>
+              <input
+                type="text"
+                maxLength={MAX_NOTE_LENGTH}
+                value={noteDrafts[p.storage] ?? p.notes ?? ''}
+                onChange={(e) => setNoteDrafts((d) => ({ ...d, [p.storage]: e.target.value }))}
+                onBlur={() => saveNote(p)}
+                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                disabled={!!busy[p.storage]}
+                placeholder="Note shown to users — e.g. NVMe, fast, keep it small"
+                aria-label={`Note for storage pool ${p.storage}`}
+                className="w-full bg-gray-900/60 border border-gray-700/40 rounded-lg px-2.5 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-colors"
+              />
             </div>
           ))}
         </div>

@@ -215,8 +215,11 @@ export async function getVNCTicket(node, vmid) {
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/vncproxy`, { websocket: 1 });
 }
 
-export async function getVMConfig(node, vmid) {
-  const cached = getCachedVmConfig(node, vmid, 'qemu');
+// Reads are served from a short-lived cache. Pass { fresh: true } when the
+// result decides a write — a stale config (and stale digest) can make a caller
+// pick a disk slot that is no longer free.
+export async function getVMConfig(node, vmid, { fresh = false } = {}) {
+  const cached = fresh ? null : getCachedVmConfig(node, vmid, 'qemu');
   if (cached) return cached;
   const { host, nodeName } = await resolveNode(node, { vmid });
   const config = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config`);

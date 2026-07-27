@@ -1,8 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
+
+function fmtSize(bytes) {
+  if (!bytes) return '';
+  const gb = bytes / 1024 ** 3;
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
+}
 
 export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
   const vmNode = routeNode(vm);
@@ -18,7 +24,37 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
   const [diskAddGb, setDiskAddGb] = useState(10);
   const [diskSaving, setDiskSaving] = useState(false);
 
+  // Add-disk state. Pools are fetched lazily — the list is a live Proxmox call,
+  // so it only happens once the user actually opens the tab.
+  const [pools, setPools] = useState(null);
+  const [poolsError, setPoolsError] = useState('');
+  const [newDiskStorage, setNewDiskStorage] = useState('');
+  const [newDiskGb, setNewDiskGb] = useState(20);
+  const [addSaving, setAddSaving] = useState(false);
+
   const isRunning = vm.status === 'running';
+
+  useEffect(() => {
+    if (tab !== 'add-disk' || pools !== null) return;
+    let cancelled = false;
+    api.get(`/vms/${vmNode}/${vm.vmid}/storages`)
+      .then((r) => {
+        if (cancelled) return;
+        setPools(r.data || []);
+        // Default to the pool the boot disk already lives on when it's offered,
+        // else the one with the most room. A disk's `storage` is the full volid
+        // ("local-lvm:vm-101-disk-0"), so take the pool id off the front.
+        const current = disks[0]?.storage?.split(':')[0];
+        const byRoom = [...(r.data || [])].sort((a, b) => (b.avail || 0) - (a.avail || 0));
+        setNewDiskStorage(
+          (r.data || []).find((p) => p.storage === current)?.storage || byRoom[0]?.storage || '',
+        );
+      })
+      .catch((e) => {
+        if (!cancelled) { setPools([]); setPoolsError(e.response?.data?.error || 'Failed to load storage pools'); }
+      });
+    return () => { cancelled = true; };
+  }, [tab, pools, vmNode, vm.vmid, disks]);
 
   const saveCpuMem = async () => {
     setSaving(true);
@@ -70,6 +106,31 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
     }
   };
 
+  const addDisk = async () => {
+    if (!newDiskStorage || !newDiskGb || newDiskGb < 1) {
+      setError('Pick a storage pool and a size of at least 1 GB');
+      return;
+    }
+    setAddSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      const r = await api.post(`/vms/${vmNode}/${vm.vmid}/disk`, {
+        storage: newDiskStorage,
+        sizeGb: parseInt(newDiskGb),
+      });
+      setSuccess(
+        `Added ${r.data.disk} — ${r.data.sizeGb} GB on ${r.data.storage}. `
+        + 'Partition and format it inside the guest before you can use it.',
+      );
+      onSaved?.();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to add disk');
+    } finally {
+      setAddSaving(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div
@@ -100,6 +161,12 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
               tab === 'disk' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'
             }`}
           >Disk Resize</button>
+          <button
+            onClick={() => setTab('add-disk')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              tab === 'add-disk' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'
+            }`}
+          >Add Disk</button>
         </div>
 
         {/* Body */}
@@ -211,6 +278,64 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                     className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
                   >
                     {diskSaving ? 'Resizing...' : `Expand ${selectedDisk} by +${diskAddGb}G`}
+                  </button>
+                </>
+              )}
+            </>
+          )}
+
+          {tab === 'add-disk' && (
+            <>
+              {pools === null ? (
+                <div className="h-20 bg-gray-800/40 rounded-lg animate-pulse" />
+              ) : pools.length === 0 ? (
+                <p className="text-gray-500 text-sm text-center py-4">
+                  {poolsError || 'No storage pool on this host is available for new disks.'}
+                </p>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1.5">Storage</label>
+                    <select
+                      value={newDiskStorage}
+                      onChange={(e) => setNewDiskStorage(e.target.value)}
+                      className={inputCls}
+                    >
+                      {pools.map((p) => (
+                        <option key={p.storage} value={p.storage}>
+                          {p.storage}{p.type ? ` (${p.type})` : ''}{p.avail ? ` — ${fmtSize(p.avail)} free` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {pools.find((p) => p.storage === newDiskStorage)?.note && (
+                      <p className="text-[11px] text-gray-500 mt-1.5 leading-relaxed">
+                        {pools.find((p) => p.storage === newDiskStorage).note}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1.5">Size (GB)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={newDiskGb}
+                      onChange={(e) => setNewDiskGb(e.target.value)}
+                      className={inputCls}
+                    />
+                    <p className="text-[11px] text-gray-500 mt-1">
+                      Attached to the next free SCSI slot. {isRunning
+                        ? 'The running guest may need a rescan or a reboot to see it.'
+                        : 'It appears once the VM starts.'} Partition and format it inside the guest before use.
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={addDisk}
+                    disabled={addSaving || !newDiskStorage}
+                    className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+                  >
+                    {addSaving ? 'Adding...' : `Add a ${newDiskGb} GB disk on ${newDiskStorage || '—'}`}
                   </button>
                 </>
               )}

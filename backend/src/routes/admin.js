@@ -2,7 +2,10 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import db from '../db.js';
 import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools } from '../proxmox.js';
-import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibility.js';
+import {
+  setStorageExposed, storageVisibilityMap,
+  setStorageNotes, storageNotesMap, MAX_NOTE_LENGTH,
+} from '../utils/storageVisibility.js';
 import { createClient, vlanTagToSubnet } from '../fortigate.js';
 import { requireAuth, requireAdmin, requirePermission, requireInteractiveSession } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
@@ -1349,10 +1352,11 @@ router.delete('/pve-hosts/:id', pHosts, (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── Storage pool exposure ───────────────────────────────────────────────────
+// ─── Storage pool exposure + notes ───────────────────────────────────────────
 // Admins choose which Proxmox storage pools regular users may pick when creating
 // VMs / editing disks. A pool with no stored row is exposed by default, so there
-// is zero behavior change until an admin hides a pool.
+// is zero behavior change until an admin hides a pool. The same row carries the
+// admin's note describing the pool, which every user-facing picker renders.
 
 router.get('/pve-hosts/:id/storages', pHosts, async (req, res) => {
   const hostId = parseInt(req.params.id, 10);
@@ -1361,6 +1365,7 @@ router.get('/pve-hosts/:id/storages', pHosts, async (req, res) => {
   try {
     const pools = await getHostStoragePools(host);
     const visibility = storageVisibilityMap(hostId);
+    const notes = storageNotesMap(hostId);
     const rows = pools
       .map((p) => ({
         storage: p.storage,
@@ -1368,6 +1373,7 @@ router.get('/pve-hosts/:id/storages', pHosts, async (req, res) => {
         content: p.content || '',
         // Missing row ⇒ exposed by default.
         exposed: visibility.has(p.storage) ? visibility.get(p.storage) : true,
+        notes: notes.get(p.storage) || '',
       }))
       .sort((a, b) => a.storage.localeCompare(b.storage));
     res.json(rows);
@@ -1384,10 +1390,35 @@ router.put('/pve-hosts/:id/storages/:storage', pHosts, (req, res) => {
   if (!storage || !/^[a-zA-Z0-9._-]+$/.test(storage)) {
     return res.status(400).json({ error: 'Invalid storage identifier' });
   }
-  const exposed = req.body?.exposed !== false && req.body?.exposed !== 0;
-  setStorageExposed(hostId, storage, exposed);
-  logAudit(req, 'storage_visibility_change', `${host.name}/${storage}`, exposed ? 'exposed' : 'hidden');
-  res.json({ ok: true, storage, exposed });
+  // Exposure and the note are edited by separate controls, so each field is
+  // only written when the caller actually sent it — a note edit must not flip
+  // a hidden pool back to exposed.
+  const details = [];
+  if (req.body && 'exposed' in req.body) {
+    const exposed = req.body.exposed !== false && req.body.exposed !== 0;
+    setStorageExposed(hostId, storage, exposed);
+    details.push(exposed ? 'exposed' : 'hidden');
+  }
+  if (req.body && 'notes' in req.body) {
+    const notes = String(req.body.notes ?? '').trim();
+    if (notes.length > MAX_NOTE_LENGTH) {
+      return res.status(400).json({ error: `Note must be ${MAX_NOTE_LENGTH} characters or fewer` });
+    }
+    setStorageNotes(hostId, storage, notes);
+    details.push(notes ? `note:"${notes.slice(0, 60)}"` : 'note cleared');
+  }
+  if (details.length === 0) {
+    return res.status(400).json({ error: 'Nothing to update — send exposed and/or notes' });
+  }
+  logAudit(req, 'storage_visibility_change', `${host.name}/${storage}`, details.join(', '));
+
+  const visibility = storageVisibilityMap(hostId);
+  res.json({
+    ok: true,
+    storage,
+    exposed: visibility.has(storage) ? visibility.get(storage) : true,
+    notes: storageNotesMap(hostId).get(storage) || '',
+  });
 });
 
 // ─── Node maintenance (soft drain) ───────────────────────────────────────────
