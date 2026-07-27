@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-27 — Invite links no longer bounce to the sign-in page
+
+- **Following an invite link works again.** The invite page dropped straight to the sign-in form instead of the "Claim Invite" panel — an invitee has no account yet, so there was nothing they could do from there
+- The app checks who you are on every page load; on the invite page that check correctly says "not signed in", but the response handler treated it as an expired session and redirected. Public pages (invite redemption, sign-in) now stay put, while a real session timeout anywhere else still returns you to sign-in as before
+
 ## 2026-07-25 — One-click resolution for the stale-boot-order migration block
 
 - When a **running** VM can't be migrated because its boot order names a device that no longer exists, the migrate dialog no longer just explains and stops — it offers two **one-click** choices: **Reboot to apply the fix** (a short blip, then start a live migration) or **Stop & migrate offline now** (down during the copy, but no reboot)
