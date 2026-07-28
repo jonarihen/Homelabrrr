@@ -33,6 +33,14 @@ export default function SSHSessionPanel({ vm, visible = true }) {
 
     setReconnecting(true);
     setReconnectError('');
+    // Whatever dropped the shell almost certainly dropped the SFTP channel with
+    // it, and its token is single-use too. Drop it so `openFiles` mints a fresh
+    // one instead of short-circuiting onto a dead browser, and leave the Files
+    // tab if that is where the user is standing — it renders nothing without a
+    // token.
+    setSftpToken(null);
+    setSftpError('');
+    setActiveTab('terminal');
     try {
       // A new token remounts the SSH channel: SSHTerminal keys its effect on it.
       setSshToken(await mintTokenRef.current());
