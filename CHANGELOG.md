@@ -11,6 +11,15 @@
 - **Following an invite link works again.** The invite page dropped straight to the sign-in form instead of the "Claim Invite" panel — an invitee has no account yet, so there was nothing they could do from there
 - The app checks who you are on every page load; on the invite page that check correctly says "not signed in", but the response handler treated it as an expired session and redirected. Public pages (invite redemption, sign-in) now stay put, while a real session timeout anywhere else still returns you to sign-in as before
 
+## 2026-07-26 — Migration shows real transfer progress
+
+- **Cross-host migration now has a progress bar.** A long disk copy used to look identical at minute 1 and minute 90 — a pulsing dot and "Migration running…". The portal now reads the Proxmox task log and shows the actual percentage plus the current *transferred X of Y* line, so it's obvious whether the transfer is moving and roughly how much is left
+- **Full-copy (`remote_migrate`) migrations get a step list too** — prepare / transfer / finalize — instead of a blank panel; the bar sits on the transfer step
+- **Shared-storage (adopt) migrations** show the same bar on the two long steps ("Moving local disks to shared storage" and "Moving boot disks to target storage"), which previously sat on "active" for the whole copy
+- Progress is stored with the migration, so **closing the tab, reloading the page or restarting the backend picks the bar back up mid-transfer**
+- The Assignments banner shows the percentage next to *migrating…*
+- Containers copy with rsync, which reports no percentage — those keep the running indicator, as does the early phase of any migration before the first progress line appears
+
 ## 2026-07-25 — One-click resolution for the stale-boot-order migration block
 
 - When a **running** VM can't be migrated because its boot order names a device that no longer exists, the migrate dialog no longer just explains and stops — it offers two **one-click** choices: **Reboot to apply the fix** (a short blip, then start a live migration) or **Stop & migrate offline now** (down during the copy, but no reboot)

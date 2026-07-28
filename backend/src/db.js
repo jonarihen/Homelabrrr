@@ -283,6 +283,12 @@ try { db.exec(`
 try { db.exec("ALTER TABLE vm_migrations ADD COLUMN mode TEXT DEFAULT 'remote_migrate'"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE vm_migrations ADD COLUMN steps TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE vm_migrations ADD COLUMN kept_source INTEGER DEFAULT 0'); } catch { /* exists */ }
+// Disk-transfer progress scraped from the PVE task log (percent + the current
+// "X of Y" line). log_offset is the last task-log line already read, so the
+// poller resumes forward-only reading after a backend restart.
+try { db.exec('ALTER TABLE vm_migrations ADD COLUMN progress REAL'); } catch { /* exists */ }
+try { db.exec("ALTER TABLE vm_migrations ADD COLUMN progress_detail TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE vm_migrations ADD COLUMN log_offset INTEGER DEFAULT 0'); } catch { /* exists */ }
 // remote_migrate rows survive restarts (the PVE task keeps running and the
 // status endpoints finalize lazily), but adopt-mode rows are orchestrated
 // in-process — a restart mid-flight orphans them.

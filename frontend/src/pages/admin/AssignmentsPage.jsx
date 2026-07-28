@@ -457,7 +457,9 @@ export default function AssignmentsPage() {
                 {m.sourceHostName || m.sourceNodeName} → {m.targetHostName || m.targetNodeName}
               </span>
               <span className={`ml-auto text-xs font-mono ${m.status === 'running' ? 'text-blue-400' : m.status === 'ok' ? 'text-green-500' : 'text-red-400'}`}>
-                {m.status === 'running' ? 'migrating…' : m.status === 'ok' ? 'done' : 'failed'}
+                {m.status === 'running'
+                  ? (typeof m.progress === 'number' ? `migrating… ${Math.round(m.progress)}%` : 'migrating…')
+                  : m.status === 'ok' ? 'done' : 'failed'}
               </span>
               {m.status === 'error' && m.status_detail && (
                 <span className="text-xs text-gray-500 truncate max-w-[24rem]" title={m.status_detail}>{m.status_detail}</span>

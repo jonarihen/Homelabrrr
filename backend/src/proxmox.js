@@ -467,6 +467,15 @@ export async function getTaskStatus(node, upid) {
   return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/tasks/${encodeURIComponent(upid)}/status`);
 }
 
+// Task log lines as `[{ n, t }]`, `n` being the 1-based line number. Reading is
+// forward-only (PVE has no tail parameter), so callers keep the last `n` they
+// saw and pass it back as `start` to pick up where they left off.
+export async function getTaskLog(node, upid, { start = 0, limit = 50 } = {}) {
+  const { host, nodeName } = await resolveNode(node);
+  const query = `?start=${Number(start) || 0}&limit=${Number(limit) || 50}`;
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/tasks/${encodeURIComponent(upid)}/log${query}`);
+}
+
 // ── VM deletion ──────────────────────────────────────────────────────────────
 
 function sleep(ms) {
@@ -588,14 +597,18 @@ export async function moveVmDisk(node, vmid, disk, opts = {}) {
 }
 
 // Public task-wait helper for multi-step orchestration (migration adopt flow).
-// Throws on task failure or timeout.
-export async function waitForTask(node, upid, { timeoutMs = 4 * 60 * 60 * 1000, intervalMs = 4000 } = {}) {
+// Throws on task failure or timeout. `onPoll` runs once per tick while the task
+// is still going (progress reporting) — its failures never abort the wait.
+export async function waitForTask(node, upid, { timeoutMs = 4 * 60 * 60 * 1000, intervalMs = 4000, onPoll = null } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     let task = null;
     try {
       task = await getTaskStatus(node, upid);
     } catch { /* transient — keep waiting */ }
+    if (onPoll && !(task && task.status === 'stopped')) {
+      try { await onPoll(); } catch { /* progress is best-effort */ }
+    }
     if (task && task.status === 'stopped') {
       if (task.exitstatus !== 'OK') throw new Error(`Proxmox task failed: ${task.exitstatus}`);
       return;
