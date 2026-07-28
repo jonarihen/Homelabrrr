@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 
@@ -8,7 +9,10 @@ const selectCls = inputCls;
 const IN_FLIGHT = ['validating', 'pushing', 'issuing', 'inspecting', 'pending'];
 
 function defaultForm() {
-  return { name: '', apiUrl: '', authType: 'none', authSecret: '', serverName: '', verifyTls: true, wanIp: '', fortigateId: '', inspectionProfile: '' };
+  return {
+    name: '', apiUrl: '', authType: 'none', authSecret: '', serverName: '', verifyTls: true, wanIp: '', fortigateId: '', inspectionProfile: '',
+    sshHost: '', sshPort: 22, sshUser: '', sshAuthType: 'key', sshSecret: '', snippetPath: '/etc/caddy/homelabrrr.caddy', caddyfilePath: '/etc/caddy/Caddyfile',
+  };
 }
 
 export default function AdminWebsitesPage() {
@@ -63,7 +67,10 @@ export default function AdminWebsitesPage() {
 
   const openEdit = (s) => {
     setEditId(s.id);
-    setForm({ name: s.name, apiUrl: s.apiUrl, authType: s.authType || 'none', authSecret: '', serverName: s.serverName || '', verifyTls: !!s.verifyTls, wanIp: s.wanIpManual || '', fortigateId: s.fortigateId || '', inspectionProfile: s.inspectionProfile || '' });
+    setForm({
+      name: s.name, apiUrl: s.apiUrl, authType: s.authType || 'none', authSecret: '', serverName: s.serverName || '', verifyTls: !!s.verifyTls, wanIp: s.wanIpManual || '', fortigateId: s.fortigateId || '', inspectionProfile: s.inspectionProfile || '',
+      sshHost: s.sshHost || '', sshPort: s.sshPort || 22, sshUser: s.sshUser || '', sshAuthType: s.sshAuthType || 'key', sshSecret: '', snippetPath: s.snippetPath || '/etc/caddy/homelabrrr.caddy', caddyfilePath: s.caddyfilePath || '/etc/caddy/Caddyfile',
+    });
     setError('');
     setShowForm(true);
     loadProfiles(s.id);
@@ -73,10 +80,19 @@ export default function AdminWebsitesPage() {
     e.preventDefault();
     setSaving(true); setError('');
     try {
-      if (editId) await api.put(`/websites/servers/${editId}`, form);
-      else await api.post('/websites/servers', form);
-      setShowForm(false);
-      load();
+      if (editId) {
+        const r = await api.put(`/websites/servers/${editId}`, form);
+        if (r.data.syncWarning) setBanner(r.data.syncWarning);
+        setShowForm(false);
+        load();
+      } else {
+        const r = await api.post('/websites/servers', form);
+        if (r.data.syncWarning) setBanner(r.data.syncWarning);
+        setShowForm(false);
+        load();
+        // Pull what's already configured on the Caddy right away.
+        openImport({ id: r.data.id, name: form.name });
+      }
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to save');
     } finally { setSaving(false); }
@@ -86,6 +102,18 @@ export default function AdminWebsitesPage() {
     setError('');
     try { await api.delete(`/websites/servers/${id}`); load(); }
     catch (e) { setError(e.response?.data?.error || 'Failed to delete'); }
+  };
+
+  const [syncingId, setSyncingId] = useState(null);
+  const syncServer = async (s) => {
+    setBanner(''); setError(''); setSyncingId(s.id);
+    try {
+      const r = await api.post(`/websites/servers/${s.id}/sync`);
+      if (r.data.mode === 'caddyfile') setBanner(`Caddyfile synced on ${s.name}: ${r.data.sites} site(s) written, Caddy reloaded`);
+      else setBanner(r.data.repaired.length ? `Re-pushed ${r.data.repaired.length} missing route(s) on ${s.name}: ${r.data.repaired.join(', ')}` : `No drift on ${s.name} — every managed route is present`);
+      load();
+    } catch (e) { setError(e.response?.data?.error || 'Sync failed'); }
+    finally { setSyncingId(null); }
   };
 
   const detectWanIp = async () => {
@@ -109,6 +137,47 @@ export default function AdminWebsitesPage() {
     catch (e) { setError(e.response?.data?.error || 'Failed to delete'); }
   };
 
+  // ── Import of pre-existing Caddy sites ──
+  const [importSrv, setImportSrv] = useState(null); // { id, name }
+  const [importData, setImportData] = useState({ loading: false, sites: [], managedCount: 0, error: '' });
+  const [importSel, setImportSel] = useState(new Set());
+  const [importing, setImporting] = useState(false);
+
+  const openImport = (server) => {
+    setImportSrv(server);
+    setImportData({ loading: true, sites: [], managedCount: 0, error: '' });
+    setImportSel(new Set());
+    api.get(`/websites/servers/${server.id}/discover`)
+      .then((r) => {
+        const sites = r.data.sites || [];
+        setImportData({ loading: false, sites, managedCount: r.data.managedCount || 0, error: '' });
+        setImportSel(new Set(sites.filter((s) => s.importable).map((s) => s.domain)));
+      })
+      .catch((e) => setImportData({ loading: false, sites: [], managedCount: 0, error: e.response?.data?.error || 'Failed to read the Caddy config' }));
+  };
+
+  const toggleImport = (domain) => {
+    setImportSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(domain)) next.delete(domain); else next.add(domain);
+      return next;
+    });
+  };
+
+  const runImport = async () => {
+    if (!importSrv || importSel.size === 0) return;
+    setImporting(true);
+    try {
+      const r = await api.post(`/websites/servers/${importSrv.id}/import`, { domains: [...importSel] });
+      const skipped = r.data.skipped?.length ? `, ${r.data.skipped.length} skipped` : '';
+      setBanner(`Imported ${r.data.imported.length} site(s) from ${importSrv.name}${skipped}`);
+      setImportSrv(null);
+      load();
+    } catch (e) {
+      setImportData((d) => ({ ...d, error: e.response?.data?.error || 'Import failed' }));
+    } finally { setImporting(false); }
+  };
+
   return (
     <div className="p-6 lg:p-8 max-w-5xl mx-auto space-y-8">
       <div className="flex items-center justify-between">
@@ -116,10 +185,16 @@ export default function AdminWebsitesPage() {
           <h1 className="aaris-display text-xl text-gray-100">Websites</h1>
           <p className="text-sm text-gray-500 mt-1">Register the external Caddy reverse proxy and manage all published sites</p>
         </div>
-        <button onClick={openAdd} className="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-          Add Caddy Server
-        </button>
+        <div className="flex items-center gap-2">
+          <Link to="/websites" className="flex items-center gap-2 text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 px-4 py-2.5 rounded-xl font-medium transition-colors" title="Publishing lives on the Websites page — open it to add a site">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
+            Publish site
+          </Link>
+          <button onClick={openAdd} className="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+            Add Caddy Server
+          </button>
+        </div>
       </div>
 
       <div className="text-xs text-amber-300/90 bg-amber-900/15 border border-amber-800/30 rounded-xl p-3">
@@ -148,6 +223,9 @@ export default function AdminWebsitesPage() {
                     {st.loading ? <span className="text-[10px] text-gray-500 bg-gray-800 px-2 py-0.5 rounded-full">Checking…</span>
                       : st.online ? <span className="text-[10px] text-green-400 bg-green-500/10 ring-1 ring-green-500/20 px-2 py-0.5 rounded-full">Online</span>
                       : <span className="text-[10px] text-red-400 bg-red-500/10 ring-1 ring-red-500/20 px-2 py-0.5 rounded-full">Offline</span>}
+                    {s.mode === 'caddyfile'
+                      ? <span className="text-[10px] text-emerald-300 bg-emerald-500/10 ring-1 ring-emerald-500/20 px-2 py-0.5 rounded-full" title={`Sites are written to ${s.snippetPath} over SSH and survive every reload`}>Caddyfile sync</span>
+                      : <span className="text-[10px] text-gray-400 bg-gray-800 ring-1 ring-gray-700 px-2 py-0.5 rounded-full" title="Routes are pushed through the admin API only — a Caddyfile reload drops them; Homelabrrr re-pushes missing routes every 5 minutes">API only</span>}
                   </div>
                   <p className="text-xs text-gray-500 font-mono mt-0.5">{s.apiUrl}</p>
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-500 mt-2">
@@ -160,8 +238,19 @@ export default function AdminWebsitesPage() {
                     {typeof st.managedRoutes === 'number' && <span>{st.managedRoutes} managed route{st.managedRoutes !== 1 ? 's' : ''}</span>}
                   </div>
                   {!st.online && !st.loading && st.error && <p className="text-xs text-red-400/70 bg-red-900/10 rounded-lg px-3 py-2 mt-2">{st.error}</p>}
+                  {st.missingRoutes?.length > 0 && (
+                    <p className="text-xs text-amber-400/90 bg-amber-900/10 border border-amber-800/30 rounded-lg px-3 py-2 mt-2">
+                      {st.missingRoutes.length} published route(s) missing from Caddy (dropped by a config reload): <span className="font-mono">{st.missingRoutes.join(', ')}</span>. Auto-repair runs every 5 minutes — or hit Sync now. Configure Caddyfile sync on this server to make sites survive reloads.
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => syncServer(s)} disabled={syncingId === s.id} className="text-xs text-gray-400 hover:text-white px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-50 transition-colors" title={s.mode === 'caddyfile' ? 'Regenerate the Caddyfile snippet and reload Caddy' : 'Re-push any managed routes missing from the live config'}>
+                    {syncingId === s.id ? 'Syncing…' : 'Sync now'}
+                  </button>
+                  <button onClick={() => openImport(s)} className="text-xs text-gray-400 hover:text-white px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors" title="Read the Caddy config and import pre-existing sites">
+                    Import sites
+                  </button>
                   <button onClick={() => openEdit(s)} className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-800 transition-colors" aria-label="Edit">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
                   </button>
@@ -195,9 +284,15 @@ export default function AdminWebsitesPage() {
               ) : sites.map((site) => (
                 <tr key={site.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
                   <td className="px-4 py-3">
-                    <a href={site.url} target="_blank" rel="noreferrer" className="text-white hover:text-orange-400 transition-colors">{site.domain}</a>
+                    <div className="flex items-center gap-2">
+                      <a href={site.url} target="_blank" rel="noreferrer" className="text-white hover:text-orange-400 transition-colors">{site.domain}</a>
+                      {site.managed === false && <span className="text-[9px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-1.5 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
+                      {site.wildcard && <span className="text-[9px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
+                    </div>
                   </td>
-                  <td className="px-4 py-3 text-gray-400 font-mono text-xs">{site.upstreamHost}:{site.upstreamPort}</td>
+                  <td className="px-4 py-3 text-gray-400 font-mono text-xs">
+                    {site.kind && site.kind !== 'reverse_proxy' ? <span className="text-gray-500">{site.kind}</span> : `${site.upstreamHost}:${site.upstreamPort}`}
+                  </td>
                   <td className="px-4 py-3"><SiteStatus status={site.status} /></td>
                   <td className="px-4 py-3">
                     <select value={site.ownerUserId || ''} onChange={(e) => assign(site, e.target.value)} className="bg-gray-800 border border-gray-700/50 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500">
@@ -221,6 +316,58 @@ export default function AdminWebsitesPage() {
           </table>
         </div>
       </section>
+
+      {/* ── Import modal ── */}
+      {importSrv && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={(e) => { if (e.target === e.currentTarget && !importing) setImportSrv(null); }}>
+          <div className="w-full max-w-2xl bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700 shrink-0">
+              <div>
+                <h2 className="text-white font-semibold">Import sites from {importSrv.name}</h2>
+                <p className="text-xs text-gray-500 mt-0.5">Sites found in the running Caddy config. Imported sites are tracked read-only — Homelabrrr never changes routes it didn't create.</p>
+              </div>
+              <button type="button" onClick={() => setImportSrv(null)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors" aria-label="Close">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto space-y-1.5">
+              {importData.loading ? (
+                <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="bg-gray-800 rounded-xl h-11 animate-pulse" />)}</div>
+              ) : importData.error ? (
+                <p className="text-sm text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{importData.error}</p>
+              ) : importData.sites.length === 0 ? (
+                <p className="text-sm text-gray-500 text-center py-6">No pre-existing sites found in the Caddy config.</p>
+              ) : importData.sites.map((s) => (
+                <label key={s.domain} className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 ${s.importable ? 'cursor-pointer border-gray-700/50 bg-gray-800/40 hover:border-gray-600' : 'border-gray-800 bg-gray-900 opacity-60'}`}>
+                  <input type="checkbox" disabled={!s.importable} checked={importSel.has(s.domain)} onChange={() => toggleImport(s.domain)} className="accent-blue-500 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm text-white font-mono truncate">{s.domain}</span>
+                      {s.wildcard && <span className="text-[9px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title="Covered by this wildcard certificate">{s.wildcard}</span>}
+                      {s.guarded && <span className="text-[9px] uppercase tracking-wider text-amber-300 bg-amber-500/10 ring-1 ring-amber-500/20 px-1.5 py-0.5 rounded-full" title="Access-restricted in Caddy (IP allowlist / basic auth)">restricted</span>}
+                    </div>
+                    <p className="text-[11px] text-gray-500 font-mono mt-0.5">
+                      {s.kind === 'reverse_proxy' ? `→ ${s.upstreamTls ? 'https://' : ''}${s.upstreamHost}:${s.upstreamPort}` : s.kind}
+                      {s.blockedReason && <span className="text-amber-400/80 font-sans ml-2">{s.blockedReason}</span>}
+                    </p>
+                  </div>
+                </label>
+              ))}
+            </div>
+            <div className="px-5 py-4 border-t border-gray-700 shrink-0 flex items-center justify-between gap-3">
+              <p className="text-xs text-gray-500">
+                {importData.loading ? 'Reading Caddy config…' : `${importSel.size} of ${importData.sites.filter((s) => s.importable).length} selectable site(s) chosen${importData.managedCount ? ` · ${importData.managedCount} Homelabrrr route(s) skipped` : ''}`}
+              </p>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setImportSrv(null)} className="text-sm bg-gray-700 hover:bg-gray-600 text-white rounded-xl px-4 py-2 transition-colors">Close</button>
+                <button type="button" onClick={runImport} disabled={importing || importSel.size === 0} className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl px-4 py-2 font-semibold transition-colors shadow-lg shadow-blue-600/20">
+                  {importing ? 'Importing…' : `Import ${importSel.size || ''}`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Server form modal ── */}
       {showForm && (
@@ -300,6 +447,64 @@ export default function AdminWebsitesPage() {
                   )}
                   <p className="text-xs text-gray-600 mt-1">Synced Let’s Encrypt certs are attached here so inbound inspection presents the real cert.</p>
                 </div>
+              </div>
+
+              <div className="pt-2 border-t border-gray-700/50 space-y-4">
+                <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Caddyfile sync <span className="normal-case text-gray-600">(recommended — sites survive reloads)</span></p>
+                <p className="text-xs text-gray-600 -mt-2">
+                  Without this, sites are pushed through the admin API only and any <span className="font-mono">caddy reload</span> from the Caddyfile drops them (Homelabrrr re-pushes every 5 min).
+                  With SSH configured, Homelabrrr writes published sites to a snippet file on the Caddy host and reloads Caddy — add
+                  <span className="font-mono text-gray-400"> import {form.snippetPath || '/etc/caddy/homelabrrr.caddy'}</span> once at the end (top level) of your Caddyfile.
+                  Leave the SSH host blank to stay API-only.
+                </p>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="col-span-2">
+                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">SSH host</label>
+                    <input type="text" value={form.sshHost} onChange={(e) => setForm((f) => ({ ...f, sshHost: e.target.value }))} className={inputCls} placeholder="172.21.12.10 (blank = API only)" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1.5 font-medium">SSH port</label>
+                    <input type="number" min="1" max="65535" value={form.sshPort} onChange={(e) => setForm((f) => ({ ...f, sshPort: e.target.value }))} className={inputCls} />
+                  </div>
+                </div>
+                {form.sshHost && (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1.5 font-medium">SSH user</label>
+                        <input type="text" value={form.sshUser} onChange={(e) => setForm((f) => ({ ...f, sshUser: e.target.value }))} className={inputCls} placeholder="root" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1.5 font-medium">Auth</label>
+                        <select value={form.sshAuthType} onChange={(e) => setForm((f) => ({ ...f, sshAuthType: e.target.value }))} className={selectCls}>
+                          <option value="key">Private key</option>
+                          <option value="password">Password</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1.5 font-medium">
+                        {form.sshAuthType === 'key' ? 'Private key (OpenSSH format, unencrypted)' : 'Password'} {editId && <span className="text-gray-600">(blank = keep current)</span>}
+                      </label>
+                      {form.sshAuthType === 'key' ? (
+                        <textarea rows={3} value={form.sshSecret} onChange={(e) => setForm((f) => ({ ...f, sshSecret: e.target.value }))} className={`${inputCls} font-mono text-xs`} placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----'} />
+                      ) : (
+                        <input type="password" value={form.sshSecret} onChange={(e) => setForm((f) => ({ ...f, sshSecret: e.target.value }))} className={inputCls} placeholder="••••••••" />
+                      )}
+                      <p className="text-xs text-gray-600 mt-1">Stored encrypted. The user needs write access to the snippet path and must be able to run <span className="font-mono">caddy validate</span> / <span className="font-mono">caddy reload</span>. The host key is pinned on first connect.</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1.5 font-medium">Snippet path</label>
+                        <input type="text" value={form.snippetPath} onChange={(e) => setForm((f) => ({ ...f, snippetPath: e.target.value }))} className={`${inputCls} font-mono text-xs`} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1.5 font-medium">Caddyfile path</label>
+                        <input type="text" value={form.caddyfilePath} onChange={(e) => setForm((f) => ({ ...f, caddyfilePath: e.target.value }))} className={`${inputCls} font-mono text-xs`} />
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
 
               {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}

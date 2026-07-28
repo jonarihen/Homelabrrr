@@ -164,6 +164,7 @@ function PublishForm({ servers, upstream, isAdmin, onClose, onPublished }) {
         {dns && (
           <p className={`text-xs mt-2 rounded-xl p-2.5 border ${dns.ok ? 'text-green-400 bg-green-900/20 border-green-800/30' : 'text-amber-400 bg-amber-900/20 border-amber-800/30'}`}>
             {dns.ok ? '✓ ' : ''}{dns.message}
+            {!dns.ok && isAdmin && <span className="block mt-1 text-gray-400">As an admin you can publish anyway (wildcard DNS, Cloudflare proxying, or a record you'll create later) — the DNS step will be recorded as skipped.</span>}
           </p>
         )}
       </div>
@@ -271,8 +272,12 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
             <div className="flex items-center gap-2">
               <a href={site.url} target="_blank" rel="noreferrer" className="text-white font-semibold hover:text-orange-400 transition-colors truncate">{site.domain}</a>
               <StatusPill status={site.status} />
+              {site.managed === false && <span className="text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-2 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
+              {site.wildcard && <span className="text-[10px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-2 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
             </div>
-            <p className="text-xs text-gray-500 font-mono mt-0.5">→ {site.upstreamHost}:{site.upstreamPort}</p>
+            <p className="text-xs text-gray-500 font-mono mt-0.5">
+              {site.kind && site.kind !== 'reverse_proxy' ? site.kind : `→ ${site.upstreamHost}:${site.upstreamPort}`}
+            </p>
             {site.ownerUsername && <p className="text-[10px] text-gray-600 font-mono mt-0.5">owner: {site.ownerUsername}</p>}
           </div>
           <div className="flex items-center gap-2 shrink-0">

@@ -712,6 +712,30 @@ try { db.exec(`
   )
 `); } catch { /* exists */ }
 
+// Caddyfile sync (optional per server): when an SSH target is configured,
+// Homelabrrr maintains a snippet file on the Caddy host (imported by the main
+// Caddyfile) instead of pushing ephemeral admin-API routes — so `caddy reload`
+// / restarts never drop portal-published sites. ssh_secret is encrypted at
+// rest; ssh_host_key pins the host fingerprint on first use.
+try { db.exec("ALTER TABLE caddy_servers ADD COLUMN ssh_host TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE caddy_servers ADD COLUMN ssh_port INTEGER DEFAULT 22'); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_servers ADD COLUMN ssh_user TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_servers ADD COLUMN ssh_auth_type TEXT DEFAULT 'key'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_servers ADD COLUMN ssh_secret TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_servers ADD COLUMN ssh_host_key TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_servers ADD COLUMN snippet_path TEXT DEFAULT '/etc/caddy/homelabrrr.caddy'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_servers ADD COLUMN caddyfile_path TEXT DEFAULT '/etc/caddy/Caddyfile'"); } catch { /* exists */ }
+
+// Imported sites (pulled from an existing Caddyfile via the admin API):
+// managed=0 rows mirror routes that live in the Caddyfile — Homelabrrr never
+// pushes, edits, or deletes those routes in Caddy, only tracks them. `kind`
+// records the route type (reverse_proxy / file_server / static) and `wildcard`
+// the covering wildcard site block (e.g. *.example.com), which is also set on
+// managed sites published underneath a wildcard block.
+try { db.exec("ALTER TABLE caddy_sites ADD COLUMN managed INTEGER DEFAULT 1"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_sites ADD COLUMN kind TEXT DEFAULT 'reverse_proxy'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_sites ADD COLUMN wildcard TEXT DEFAULT ''"); } catch { /* exists */ }
+
 // A publishing job left mid-flight at startup was orphaned by a crash/restart —
 // mark it so the UI stops spinning (same reasoning as provisioned_vms above).
 try {

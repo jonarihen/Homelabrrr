@@ -121,6 +121,30 @@
 - The **Create VM → Cloud Image** form pre-selects that default when you pick an image (falling back to `local-lvm`, then the first exposed pool, as before). The backend also falls back to it when no storage is submitted, so the default is authoritative — storage-exposure and identifier checks still apply
 - Images with no default set keep the previous auto-pick behavior; existing images are unaffected (the column defaults to empty). Note: `default_storage` is the *target* pool for new VM disks, distinct from the image's download pool
 
+## 2026-07-10 — Admins can publish ahead of DNS + publish shortcut on the admin page
+
+- **Admins are no longer hard-blocked by the DNS pre-check** when publishing a site. Setups that legitimately fail it — a brand-new subdomain whose record isn't created yet, Cloudflare-proxied records (they resolve to CF edge IPs, never the homelab WAN IP), split-horizon DNS — now publish anyway for admins; the DNS step is recorded as *skipped* with the check's result attached. Non-admins still need the domain to point at the WAN IP first
+- The DNS check hint in the publish form tells admins the failing check won't block them
+- The admin **Websites** page now has a **Publish site** button — publishing has always lived on the user-facing Websites page, which was easy to miss when working from the admin section. Domains already imported from the Caddyfile still refuse re-publishing (edit those in the Caddyfile instead)
+
+## 2026-07-10 — Published sites survive Caddy reloads: Caddyfile sync + auto re-push
+
+- **The reload problem is fixed.** Until now, sites published from the portal lived only in Caddy's admin API — any `caddy reload` from the Caddyfile (or a service restart) silently dropped them. Two complementary fixes:
+- **Caddyfile sync (recommended):** configure an SSH target on the Caddy server (host, user, key or password) and Homelabrrr maintains a **snippet file on the Caddy host** (default `/etc/caddy/homelabrrr.caddy`). Every publish/update/delete regenerates the file over SFTP, runs `caddy validate`, and reloads — a failed validation **rolls the snippet back and never touches the running config**. One-time setup: add `import /etc/caddy/homelabrrr.caddy` at the end (top level) of your Caddyfile — Homelabrrr creates the file (even empty) the moment you save the SSH settings, so the import line never breaks a reload. From then on **your own reloads and restarts include the portal's sites by construction**
+- Snippet sites under a wildcard block (e.g. `new.aaris.tech` with `*.aaris.tech {}` present) are written as plain site blocks: Caddy sorts exact hosts above wildcards and **reuses the managed wildcard certificate** instead of attempting per-domain issuance
+- SSH host keys are **pinned on first use** (mismatch aborts the sync); the SSH credential is encrypted at rest like every other secret
+- **API-only mode self-heals:** servers without SSH keep the admin-API push, but a background reconcile now **re-pushes any managed route missing from the live config every 5 minutes**, and the server card shows dropped routes with a **Sync now** button for an immediate repair
+- Server cards show the active mode (**Caddyfile sync** / **API only**); syncs and repairs are audit-logged
+
+## 2026-07-10 — Import existing Caddy sites + wildcard certificate support
+
+- Registering a Caddy server now lets you **pull in the sites that already exist in its Caddyfile**: an **Import sites** button on each server card (and automatically right after adding a new server) reads the running config through the admin API, lists every discovered site with its upstream, and imports the ones you select
+- **Wildcard site blocks are fully understood**: hostnames handled inside a block like `*.aaris.tech { @app host app.aaris.tech; handle @app { ... } }` are discovered individually and tagged with the covering wildcard. Access-restricted sites (IP allowlists / basic auth) get a **restricted** badge; `file_server`/static sites are recognized too
+- Imported sites are **tracked read-only** (badged *imported*): they occupy their domain so nobody can publish over them, but Homelabrrr **never edits or deletes routes it didn't create** — the Caddyfile stays the source of truth. Deleting an imported site only removes it from the portal
+- **Publishing new sites under a wildcard now works with wildcard certs**: when the domain is covered by an existing wildcard block (e.g. `new.aaris.tech` under `*.aaris.tech`), the route is nested **inside that block** before its catch-all — so the existing DNS-challenge wildcard certificate serves the site and no doomed per-domain issuance is attempted
+- FortiGate SSL-inspection cert matching is now **wildcard-aware**: for sites under a wildcard it also looks for the synced wildcard certificate (e.g. `wildcard_aaris_tech` as created by caddy-forticertsync), not just per-domain names
+- Custom Caddy plugins and global `events` handlers (like the forticertsync cert-sync hook) are ignored safely during import — only `apps.http` is inspected
+
 ## 2026-07-10 — Fix: VLAN deletion through the workflow engine
 
 - Deleting a VLAN synced by the new workflow engine no longer fails with a partial-cleanup error. The artifact teardown now removes the **switch-controller VLAN registration last** (FortiLink ties it to the VLAN interface, so it can only go once the interface is gone — the same order the pre-engine code used) and treats a refusal there as a warning, not a blocker
