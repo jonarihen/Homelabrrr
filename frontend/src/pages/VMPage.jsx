@@ -1174,6 +1174,10 @@ function BackupsSection({ node, vmid }) {
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState({});
+  // Backup tasks tracked by the backend. Proxmox lists the archive it is still
+  // writing, so without these a half-written dump looks like a finished backup.
+  const [tasks, setTasks] = useState([]);
+  const [dismissedTaskId, setDismissedTaskId] = useState(null);
 
   const loadBackups = useCallback(async () => {
     try {
@@ -1183,7 +1187,35 @@ function BackupsSection({ node, vmid }) {
     finally { setLoading(false); }
   }, [node, vmid]);
 
+  const loadTasks = useCallback(async () => {
+    try {
+      const r = await api.get(`/vms/${node}/${vmid}/backup-tasks`);
+      setTasks(r.data || []);
+      return r.data || [];
+    } catch { return []; }
+  }, [node, vmid]);
+
   useEffect(() => { loadBackups(); }, [loadBackups]);
+
+  // Picked up on mount too, so a dump that outlived the tab is still reported.
+  useEffect(() => { loadTasks(); }, [loadTasks]);
+
+  const latestTask = tasks[0] || null;
+  const runningTask = tasks.find(t => t.status === 'running') || null;
+  const runningTaskId = runningTask?.id ?? null;
+
+  // Poll only while something is running; the row id is stable across polls, so
+  // the interval isn't torn down and rebuilt on every tick.
+  useEffect(() => {
+    if (runningTaskId == null) return undefined;
+    const timer = setInterval(async () => {
+      const next = await loadTasks();
+      // Finished: refresh the list so the archive loses its in-progress flag
+      // and its real size and verification state show up.
+      if (!next.some(t => t.status === 'running')) loadBackups();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [runningTaskId, loadTasks, loadBackups]);
 
   useEffect(() => {
     api.get(`/vms/${node}/${vmid}/backup-storages`)
@@ -1221,9 +1253,12 @@ function BackupsSection({ node, vmid }) {
     setCreating(true); setError(''); setSuccess('');
     try {
       await api.post(`/vms/${node}/${vmid}/backup`, form);
-      setSuccess('Backup started — this may take a few minutes');
       setShowForm(false);
-      setTimeout(() => { setSuccess(''); loadBackups(); }, 5000);
+      setDismissedTaskId(null);
+      // No optimistic reload: the progress panel takes it from here and the
+      // list is refreshed once the task actually finishes. Reloading at a fixed
+      // delay is what used to render a half-written archive as a finished one.
+      await Promise.all([loadTasks(), loadBackups()]);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to create backup');
     } finally { setCreating(false); }
@@ -1340,6 +1375,65 @@ function BackupsSection({ node, vmid }) {
 
       {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
       {success && <p className="text-xs text-green-400 bg-green-900/20 rounded-lg p-2.5">{success}</p>}
+
+      {/* Running dump — survives a reload because the task is tracked server-side */}
+      {runningTask && (
+        <div className="bg-gray-900 border border-blue-800/40 rounded-2xl p-4">
+          <div className="flex items-center gap-2.5">
+            <span className="w-1.5 h-1.5 bg-blue-400 animate-pulse shrink-0" />
+            <span className="aaris-display text-xs text-gray-100 uppercase tracking-wider">Backing up…</span>
+            <span className="text-xs text-gray-500 font-mono truncate">
+              {runningTask.storage ? `→ ${runningTask.storage}` : ''}
+            </span>
+            <div className="flex-1" />
+            {runningTask.progress != null && (
+              <span className="text-xs text-blue-300 font-mono shrink-0">{Math.round(runningTask.progress)}%</span>
+            )}
+          </div>
+
+          {runningTask.progress != null ? (
+            <div className="mt-2.5 h-1 bg-gray-800 overflow-hidden">
+              <div className="h-full bg-blue-500 transition-[width] duration-500" style={{ width: `${runningTask.progress}%` }} />
+            </div>
+          ) : (
+            // vzdump prints no percentage for LXC (rsync) or before the first
+            // progress line — an indeterminate bar is honest, a 0% one is not.
+            <div className="mt-2.5 h-1 bg-gray-800 overflow-hidden">
+              <div className="h-full w-1/3 bg-blue-500/60 animate-pulse" />
+            </div>
+          )}
+
+          <p className="text-xs text-gray-500 font-mono mt-2">
+            {runningTask.progress_detail || 'Waiting for the first progress line from Proxmox…'}
+          </p>
+          <p className="text-[11px] text-gray-600 mt-1.5">
+            Leave this VM alone until it finishes — powering it off, deleting it or migrating it now would leave the archive incomplete.
+          </p>
+        </div>
+      )}
+
+      {/* A dump that failed after it was submitted — previously this left a
+          partial archive in the list with nothing to explain it */}
+      {!runningTask && latestTask?.status === 'failed' && latestTask.id !== dismissedTaskId && (
+        <div className="flex items-start gap-3 bg-red-900/20 border border-red-800/40 rounded-2xl p-4">
+          <span className="w-1.5 h-1.5 bg-red-400 shrink-0 mt-1.5" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs text-red-300">
+              The last backup failed{latestTask.storage ? ` on ${latestTask.storage}` : ''}. Any archive it left behind is incomplete — delete it before relying on this VM's backups.
+            </p>
+            {latestTask.status_detail && (
+              <p className="text-xs text-red-400/70 font-mono mt-1 break-all">{latestTask.status_detail}</p>
+            )}
+          </div>
+          <button
+            onClick={() => setDismissedTaskId(latestTask.id)}
+            className="text-red-400/60 hover:text-red-300 transition-colors shrink-0"
+            title="Dismiss"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+      )}
 
       {/* Create form */}
       {showForm && (
@@ -1569,47 +1663,66 @@ function BackupsSection({ node, vmid }) {
                         (typeof b.encrypted === 'string' && b.encrypted !== '' && b.encrypted !== '0' && b.encrypted !== 'none' && b.encrypted !== 'sign-only');
                       const isProtected = b.protected === 1 || b.protected === '1' || b.protected === true;
                       const verifyState = b.verification?.state;
+                      // Flagged by the backend while a vzdump task is writing
+                      // this archive. Its size, encryption and verification
+                      // state are all meaningless until the dump finishes.
+                      const isWriting = b.inProgress === true;
                       return (
                       <div key={b.volid} className="px-5 py-3.5 hover:bg-gray-800/30 transition-colors">
                         <div className="flex items-center justify-between">
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2 flex-wrap">
                               <svg className="w-4 h-4 text-blue-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
-                              <span className="text-sm text-white font-mono truncate" title={b.volid}>{b.volid?.split('/').pop() || b.volid}</span>
-                              {isPbs && (isEncrypted
+                              <span className={`text-sm font-mono truncate ${isWriting ? 'text-gray-400' : 'text-white'}`} title={b.volid}>{b.volid?.split('/').pop() || b.volid}</span>
+                              {isWriting && (
+                                <span title="Proxmox is still writing this archive — it is not a usable backup yet"
+                                  className="inline-flex items-center gap-1.5 px-1.5 py-0.5 border border-blue-800/50 font-mono text-[10px] uppercase tracking-wider text-blue-300 whitespace-nowrap shrink-0">
+                                  <span className="w-1.5 h-1.5 shrink-0 bg-blue-400 animate-pulse" />
+                                  Backing up
+                                </span>
+                              )}
+                              {/* Every tag below describes the finished archive, so they stay
+                                  hidden until there is a finished archive to describe. */}
+                              {!isWriting && isPbs && (isEncrypted
                                 ? <BackupTag led="ok" title="This backup is encrypted on the backup server">Encrypted</BackupTag>
                                 : <BackupTag led="off" title="This backup is stored unencrypted">Not encrypted</BackupTag>
                               )}
-                              {isPbs && (verifyState === 'ok'
+                              {!isWriting && isPbs && (verifyState === 'ok'
                                 ? <BackupTag led="ok" title="Last PBS verification passed">Verified</BackupTag>
                                 : verifyState === 'failed'
                                   ? <BackupTag led="error" title="Last PBS verification FAILED — this backup may be corrupt">Verify failed</BackupTag>
                                   : <BackupTag led="off" title="This backup has not been verified yet">Not verified</BackupTag>
                               )}
-                              {isProtected && <BackupTag led="warning" title="Protected — cannot be pruned or deleted until protection is removed">Protected</BackupTag>}
+                              {!isWriting && isProtected && <BackupTag led="warning" title="Protected — cannot be pruned or deleted until protection is removed">Protected</BackupTag>}
                             </div>
                             <div className="flex items-center gap-4 mt-1 ml-[24px]">
                               <span className="text-xs text-gray-500">{fmtDate(b.ctime)}</span>
-                              <span className="text-xs text-gray-500">{fmtSize(b.size)}</span>
+                              {isWriting
+                                ? <span className="text-xs text-gray-600 italic">size not final</span>
+                                : <span className="text-xs text-gray-500">{fmtSize(b.size)}</span>}
                               {b.format && <span className="text-xs text-gray-600 font-mono">{b.format}</span>}
                               {b.notes && <span className="text-xs text-gray-500 italic truncate" title={b.notes}>{b.notes}</span>}
                             </div>
                           </div>
+                          {/* Nothing destructive or read-through is offered while the
+                              archive is being written: it is incomplete, and on a
+                              failed dump it is about to be garbage. */}
                           <div className="flex items-center gap-1 shrink-0 ml-3">
                             {/* Browse files */}
                             <button
                               onClick={() => openFileBrowser(b)}
-                              className="text-gray-600 hover:text-cyan-400 transition-colors p-2 rounded-lg hover:bg-cyan-900/20"
-                              title="Browse files (file-level restore)"
+                              disabled={isWriting}
+                              className="text-gray-600 hover:text-cyan-400 transition-colors p-2 rounded-lg hover:bg-cyan-900/20 disabled:opacity-30 disabled:hover:text-gray-600 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                              title={isWriting ? 'Available once the backup finishes' : 'Browse files (file-level restore)'}
                             >
                               <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg>
                             </button>
                             {/* Restore */}
                             <button
                               onClick={() => setRestoreConfirm(b)}
-                              disabled={restoring === b.volid}
-                              className="text-gray-600 hover:text-yellow-400 transition-colors p-2 rounded-lg hover:bg-yellow-900/20 disabled:opacity-40"
-                              title="Full VM restore"
+                              disabled={restoring === b.volid || isWriting}
+                              className="text-gray-600 hover:text-yellow-400 transition-colors p-2 rounded-lg hover:bg-yellow-900/20 disabled:opacity-30 disabled:hover:text-gray-600 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                              title={isWriting ? 'Available once the backup finishes' : 'Full VM restore'}
                             >
                               {restoring === b.volid ? (
                                 <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
@@ -1620,9 +1733,9 @@ function BackupsSection({ node, vmid }) {
                             {/* Delete */}
                             <button
                               onClick={() => deleteBackup(b.storage, b.volid)}
-                              disabled={deleting === b.volid}
-                              className="text-gray-600 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-900/20 disabled:opacity-40"
-                              title="Delete backup"
+                              disabled={deleting === b.volid || isWriting}
+                              className="text-gray-600 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-900/20 disabled:opacity-30 disabled:hover:text-gray-600 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                              title={isWriting ? 'Cancel the backup in Proxmox first — deleting the archive under a running dump leaves the task writing to nothing' : 'Delete backup'}
                             >
                               {deleting === b.volid ? (
                                 <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
