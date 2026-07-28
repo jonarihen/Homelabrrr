@@ -7,6 +7,7 @@ import {
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM,
   getLXCStatus, lxcAction, getLXCConfig, updateLXCConfig, getLXCRRD, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
+  getTaskStatus, getTaskLog,
 } from '../proxmox.js';
 import { createClient } from '../fortigate.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
@@ -26,6 +27,8 @@ import {
 } from '../utils/schedule.js';
 import { derivePublicKey } from '../utils/sshPublicKey.js';
 import { decryptSecret } from '../utils/secrets.js';
+import { readTaskProgress } from '../utils/taskProgress.js';
+import { parseUpid, inProgressVolids } from '../utils/backupTask.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -515,7 +518,7 @@ router.delete('/:node/:vmid', async (req, res) => {
     const parsedVmid = parseInt(vmid, 10);
     const candidates = nodeLookupCandidates(node);
     const placeholders = candidates.map(() => '?').join(', ');
-    for (const table of ['vm_assignments', 'vm_ssh_configs', 'vm_ssh_user_configs', 'provisioned_vms', 'vm_leases', 'vm_schedules']) {
+    for (const table of ['vm_assignments', 'vm_ssh_configs', 'vm_ssh_user_configs', 'provisioned_vms', 'vm_leases', 'vm_schedules', 'backup_tasks']) {
       db.prepare(`DELETE FROM ${table} WHERE vmid = ? AND node IN (${placeholders})`).run(parsedVmid, ...candidates);
     }
 
@@ -1165,13 +1168,138 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
 
 // ─── VM Backups ──────────────────────────────────────────────────────────────
 
+// Manual vzdump runs are tracked so the UI can tell a finished archive from one
+// Proxmox is still writing — the storage listing shows both the moment the file
+// exists. Like vm_migrations, rows are refreshed lazily rather than by a
+// background timer: the vzdump task keeps running on the node whatever the
+// portal is doing, so re-checking it when someone asks is enough and survives a
+// backend restart for free.
+const BACKUP_LOG_BATCH = 512;
+const BACKUP_LOG_MAX_BATCHES = 20; // bounds the catch-up read of a long dump
+
+function backupTaskRows(node, vmid, { limit = 10 } = {}) {
+  const candidates = nodeLookupCandidates(node);
+  const placeholders = candidates.map(() => '?').join(', ');
+  return db.prepare(
+    `SELECT * FROM backup_tasks WHERE vmid = ? AND node IN (${placeholders}) ORDER BY id DESC LIMIT ?`
+  ).all(parseInt(vmid, 10), ...candidates, limit);
+}
+
+function finalizeBackupTask(row, ok, detail) {
+  const changed = db.prepare(
+    "UPDATE backup_tasks SET status = ?, status_detail = ?, finished_at = datetime('now') WHERE id = ? AND status = 'running'"
+  ).run(ok ? 'ok' : 'failed', detail || '', row.id).changes;
+  // Two pollers can land on the same finished task; only the one that actually
+  // flipped the row gets to notify.
+  if (changed === 0) return;
+
+  const { nodeName } = decodeNodeRef(row.node);
+  const vmLabel = `#${row.vmid}${nodeName ? ` on ${nodeName}` : ''}`;
+  const owner = row.user_id
+    ? db.prepare('SELECT username FROM users WHERE id = ?').get(row.user_id)?.username || ''
+    : '';
+  // Until now `backup.failed` only ever fired when the *submission* failed, so
+  // a dump that died halfway through notified nobody.
+  notify(ok ? 'backup.created' : 'backup.failed', {
+    vm: vmLabel,
+    owner,
+    ownerUserId: row.user_id || null,
+    status: ok ? 'completed' : 'failed',
+    detail: ok
+      ? (row.storage ? `Backup to ${row.storage} finished` : 'Backup finished')
+      : `Backup failed: ${detail || 'the vzdump task did not finish successfully'}`,
+    url: portalLink(`/vm/${row.node}/${row.vmid}`),
+  });
+}
+
+// Re-check still-'running' rows against their PVE task and scrape the percentage
+// out of the task log. Mutates the rows in place so the caller can serialize
+// them straight away.
+// A row whose node stays unreachable would otherwise sit at 'running' forever,
+// and a permanent "Backing up…" banner holds Restore and Delete hostage. No
+// manual vzdump runs for a day, so past this point the row is written off.
+const BACKUP_TASK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+async function refreshBackupTasks(rows) {
+  for (const row of rows) {
+    if (row.status !== 'running' || !row.upid) continue;
+    // SQLite's datetime('now') is UTC, space-separated — spell out the offset.
+    const startedMs = Date.parse(`${String(row.created_at || '').replace(' ', 'T')}Z`);
+    if (Number.isFinite(startedMs) && Date.now() - startedMs > BACKUP_TASK_MAX_AGE_MS) {
+      finalizeBackupTask(row, false, 'Gave up tracking this backup after 24 hours — check the task log in Proxmox');
+      Object.assign(row, db.prepare('SELECT * FROM backup_tasks WHERE id = ?').get(row.id));
+      continue;
+    }
+    // Read the log before the status, so a task that finishes between the two
+    // still gets its final progress line recorded. The read has its own catch:
+    // a log endpoint that errors (PVE briefly 400s a task it has only just
+    // accepted) must not stop the status check below from finalizing the row.
+    try {
+      const read = await readTaskProgress(
+        (opts) => getTaskLog(row.node, row.upid, opts),
+        { start: Number(row.log_offset) || 0, batch: BACKUP_LOG_BATCH, maxBatches: BACKUP_LOG_MAX_BATCHES },
+      );
+      if (read.progress) {
+        db.prepare('UPDATE backup_tasks SET progress = ?, progress_detail = ?, log_offset = ? WHERE id = ?')
+          .run(read.progress.percent, read.progress.detail, read.offset, row.id);
+      } else {
+        db.prepare('UPDATE backup_tasks SET log_offset = ? WHERE id = ?').run(read.offset, row.id);
+      }
+    } catch { /* no readable log yet — the status check still decides the row */ }
+
+    try {
+      const task = await getTaskStatus(row.node, row.upid);
+      if (task.status === 'stopped') {
+        const ok = task.exitstatus === 'OK';
+        finalizeBackupTask(row, ok, ok ? '' : task.exitstatus || 'The backup task failed');
+      }
+    } catch { /* node unreachable — leave it running and try again next poll */ }
+
+    Object.assign(row, db.prepare('SELECT * FROM backup_tasks WHERE id = ?').get(row.id));
+  }
+}
+
+function serializeBackupTask(row) {
+  const { log_offset, user_id, ...rest } = row; // internal bookkeeping, not for the UI
+  return {
+    ...rest,
+    nodeName: decodeNodeRef(row.node).nodeName || row.node,
+    // null until the log carries a percentage — the UI falls back to a plain
+    // running indicator for the early phase and for rsync-based LXC dumps.
+    progress: Number.isFinite(row.progress) ? row.progress : null,
+    progress_detail: row.progress_detail || '',
+  };
+}
+
 router.get('/:node/:vmid/backups', async (req, res) => {
   const { node, vmid } = req.params;
   if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
-    res.json(await getVMBackups(node, vmid));
+    const backups = await getVMBackups(node, vmid);
+    // Flag the archive a running dump is writing, so the UI can hold back
+    // Restore/Delete/Browse and its misleading size and verification tags.
+    const tasks = backupTaskRows(node, vmid);
+    await refreshBackupTasks(tasks);
+    const inProgress = new Set(inProgressVolids(backups, tasks));
+    res.json(backups.map((b) => (inProgress.has(b.volid) ? { ...b, inProgress: true } : b)));
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Backup tasks for this VM, newest first. Polled by the VM page while a dump is
+// running; also the reason progress survives a page reload or a backend restart.
+router.get('/:node/:vmid/backup-tasks', async (req, res) => {
+  const { node, vmid } = req.params;
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  try {
+    const rows = backupTaskRows(node, vmid, { limit: 5 });
+    await refreshBackupTasks(rows);
+    res.json(rows.map(serializeBackupTask));
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
@@ -1200,17 +1328,16 @@ router.post('/:node/:vmid/backup', async (req, res) => {
   try {
     const upid = await createVMBackup(node, vmid, { mode, compress, storage, notes });
     logAudit(req, 'backup_create', `${node}/${vmid}`, storage || '');
-    // The backup task runs on Proxmox after this returns; notify that it was
-    // submitted (fire-and-forget — a webhook failure must not fail the request).
-    notify('backup.created', {
-      vm: vmLabel,
-      owner: req.session.username,
-      ownerUserId: req.session.userId,
-      status: 'started',
-      detail: storage ? `Backup to ${storage} started` : 'Backup started',
-      url: portalLink(`/vm/${node}/${vmid}`),
-    });
-    res.json({ ok: true, upid });
+    // Track the task so the UI can mark the archive as in progress instead of
+    // showing a half-written dump as a finished backup. The completion
+    // notification is fired from finalizeBackupTask once the task actually ends.
+    const info = db.prepare(
+      'INSERT INTO backup_tasks (user_id, node, vmid, upid, storage, started_epoch) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(
+      req.session.userId, node, parseInt(vmid, 10), upid, storage || '',
+      parseUpid(upid)?.startTime || 0,
+    );
+    res.json({ ok: true, upid, taskId: info.lastInsertRowid });
   } catch (err) {
     notify('backup.failed', {
       vm: vmLabel,

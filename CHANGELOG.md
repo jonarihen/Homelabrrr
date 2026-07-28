@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-28 — A backup in progress no longer looks like a finished one
+
+- **Manual backups now show that they are still running.** Proxmox lists the archive it is writing the moment it creates the file, so a fresh backup appeared in the list within seconds — complete with a size, and with Restore and Delete live on it — while vzdump was still filling it in. There was nothing to tell a finished backup from a half-written one
+- The Backups section now shows a **progress panel** with the real percentage scraped from the Proxmox task log, and the archive being written is badged **Backing up** with Restore, Delete and Browse held back until it finishes. Its size, encryption and verification tags stay hidden while they would be meaningless
+- **Progress survives a page reload and a backend restart**, because the task is tracked in the portal database rather than in the open tab — backups routinely outlive the tab that started them
+- **A dump that fails after it was submitted now says so.** Previously the failure was silent: the leftover partial archive just sat in the list looking like a normal backup. The section now reports the failure and warns that the archive it left behind is incomplete
+- The **Backup failed** notification fires when the dump itself fails, not only when submitting it fails. **Backup created** now fires on completion instead of at submission, so it means the backup actually exists
+- Containers back up with rsync, which reports no percentage — those show a running indicator instead of a bar, as does the first moment of any backup before Proxmox prints its first progress line
+
 ## 2026-07-28 — Reconnect a dropped SSH or VNC console without closing it
 
 - **A console that loses its connection can now be reconnected in place.** Previously a dropped SSH shell or VNC session was a dead panel — the only way back was to close the console and open a new one from the VM page

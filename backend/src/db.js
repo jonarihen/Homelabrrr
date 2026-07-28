@@ -298,6 +298,33 @@ try {
   ).run();
 } catch { /* table may not exist yet on a brand-new DB */ }
 
+// Manual vzdump backups. Proxmox lists the archive it is writing as soon as it
+// creates the file, so without this the portal shows a half-written backup as a
+// finished one. Rows deliberately stay 'running' across backend restarts — the
+// vzdump task keeps going on the node regardless, and /api/vms/.../backup-tasks
+// re-checks it lazily and finalizes then, exactly like vm_migrations.
+// started_epoch is the task's start time in unix seconds off the *PVE node's*
+// clock (parsed from the UPID), which is what archive ctimes are compared with.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS backup_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    node TEXT NOT NULL,
+    vmid INTEGER NOT NULL,
+    upid TEXT NOT NULL,
+    storage TEXT DEFAULT '',
+    status TEXT DEFAULT 'running',
+    status_detail TEXT DEFAULT '',
+    progress REAL,
+    progress_detail TEXT DEFAULT '',
+    log_offset INTEGER DEFAULT 0,
+    started_epoch INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    finished_at TEXT DEFAULT NULL
+  )
+`); } catch { /* exists */ }
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_backup_tasks_vm ON backup_tasks (node, vmid)'); } catch { /* exists */ }
+
 // Allow users to provision VMs (per-user permission)
 try { db.exec('ALTER TABLE users ADD COLUMN can_provision INTEGER DEFAULT 0'); } catch { /* exists */ }
 
