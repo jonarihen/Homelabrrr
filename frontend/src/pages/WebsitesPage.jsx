@@ -255,6 +255,12 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
   const isLive = site.status === 'live';
   const isError = site.status === 'error';
   const isWarning = site.status === 'warning';
+  // Only a route Homelabrrr owns and actually reverse-proxies has an upstream to
+  // edit: sites imported from the Caddyfile are managed there (the backend
+  // rejects a PUT for them), and a file_server/static block has no upstream at
+  // all. Both fields are absent on servers that predate them, which reads as
+  // "an ordinary managed reverse proxy".
+  const canEdit = site.managed !== false && (!site.kind || site.kind === 'reverse_proxy');
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
@@ -273,7 +279,7 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
             {(isError || isWarning) && (
               <button onClick={retry} disabled={busy} className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40 px-2 py-1 rounded hover:bg-gray-800 transition-colors">Retry</button>
             )}
-            {!inFlight && !confirmDelete && (
+            {canEdit && !inFlight && !confirmDelete && (
               <button onClick={() => { setError(''); setEditing((v) => !v); }} disabled={busy} className={`p-1.5 rounded-lg transition-colors ${editing ? 'text-orange-400 bg-gray-800' : 'text-gray-500 hover:text-white hover:bg-gray-800'} disabled:opacity-40`} aria-label="Edit website" title="Change the upstream target">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
               </button>
@@ -291,7 +297,7 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
           </div>
         </div>
 
-        {editing && (
+        {editing && canEdit && (
           <EditUpstreamForm
             site={site}
             upstream={upstream}
