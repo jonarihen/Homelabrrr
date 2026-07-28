@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-28 — Edit a published website instead of deleting and republishing it
+
+- **Published websites now have an Edit button.** Pointing a site at a different VM or port meant deleting it and publishing it again from scratch; the card now opens an inline form for the upstream host and port and re-pushes the route to Caddy when you save
+- Your assigned VMs are one click away in the form, same as when publishing, and Save stays disabled until something actually changes — so a live site is never sent back through the publish steps for nothing
+- The domain itself is still fixed (it is the certificate's subject), and the button is hidden while a site is mid-publish
+
 ## 2026-07-27 — Invite links no longer bounce to the sign-in page
 
 - **Following an invite link works again.** The invite page dropped straight to the sign-in form instead of the "Claim Invite" panel — an invitee has no account yet, so there was nothing they could do from there
