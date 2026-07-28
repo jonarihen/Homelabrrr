@@ -5,6 +5,10 @@ import useVmName from '../hooks/useVmName.js';
 import api from '../api.js';
 import { displayNode } from '../utils/nodeRef.js';
 import { readClipboardText, typeIntoVnc } from '../utils/vncPaste.js';
+import {
+  CONNECTING, CONNECTED, DISCONNECTED, CONNECTION_LOST,
+  canReconnect, isConnected,
+} from '../utils/consoleStatus.js';
 
 // Preload noVNC — Proxmox VNC proxies time out quickly
 const rfbModulePromise = import('@novnc/novnc/lib/rfb.js');
@@ -26,10 +30,14 @@ export default function VNCPage() {
   const navigate        = useNavigate();
   const containerRef    = useRef(null);
   const rfbRef          = useRef(null);
-  const [status, setStatus] = useState('Connecting...');
+  const [status, setStatus] = useState(CONNECTING);
   const [error, setError]   = useState('');
   const [pasting, setPasting] = useState(false);
   const pasteStopRef = useRef(false);
+  // Bumping this re-runs the connect effect for a fresh (single-use) ticket.
+  const [attempt, setAttempt] = useState(0);
+  const reconnect = () => setAttempt((n) => n + 1);
+  const showReconnect = canReconnect(status);
 
   const pasteClipboard = async () => {
     const rfb = rfbRef.current;
@@ -48,6 +56,8 @@ export default function VNCPage() {
   useEffect(() => {
     let cancelled = false;
     pasteStopRef.current = false;
+    setStatus(CONNECTING);
+    setError('');
 
     async function connect() {
       try {
@@ -69,16 +79,19 @@ export default function VNCPage() {
         rfb.resizeSession  = true;
 
         rfb.addEventListener('connect', () => {
-          setStatus('Connected');
+          setStatus(CONNECTED);
           setTimeout(() => forceFullRefresh(rfb), 500);
         });
         rfb.addEventListener('disconnect', (e) => {
-          setStatus(e.detail.clean ? 'Disconnected' : 'Connection lost');
+          setStatus(e.detail.clean ? DISCONNECTED : CONNECTION_LOST);
         });
 
         rfbRef.current = rfb;
       } catch (e) {
-        if (!cancelled) setError(e.response?.data?.error || e.message || 'Failed to connect');
+        if (!cancelled) {
+          setStatus(CONNECTION_LOST);
+          setError(e.response?.data?.error || e.message || 'Failed to connect');
+        }
       }
     }
 
@@ -87,8 +100,9 @@ export default function VNCPage() {
       cancelled = true;
       pasteStopRef.current = true;
       rfbRef.current?.disconnect();
+      rfbRef.current = null;
     };
-  }, [node, vmid]);
+  }, [node, vmid, attempt]);
 
   return (
     <div className="flex flex-col h-screen bg-black">
@@ -109,14 +123,24 @@ export default function VNCPage() {
         </span>
 
         <span className={`text-xs px-2 py-0.5 rounded ml-1 ${
-          status === 'Connected' ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'
+          isConnected(status) ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'
         }`}>{status}</span>
+
+        {showReconnect && (
+          <button
+            onClick={reconnect}
+            className="text-xs px-3 py-1 rounded bg-orange-600 hover:bg-orange-500 text-white font-medium transition-colors"
+            title="Request a new console ticket and reconnect"
+          >
+            Reconnect
+          </button>
+        )}
 
         <div className="flex-1" />
 
         <button
           onClick={pasteClipboard}
-          disabled={pasting || status !== 'Connected'}
+          disabled={pasting || !isConnected(status)}
           className="text-xs px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           title="Type clipboard text into the VM as keystrokes"
         >
@@ -152,22 +176,21 @@ export default function VNCPage() {
 
       {/* VNC canvas */}
       <div className="flex-1 relative">
-        {error ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-red-400 gap-3">
-            <p>{error}</p>
-            <button
-              onClick={() => window.location.reload()}
-              className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300"
-            >
-              Retry
-            </button>
-          </div>
-        ) : (
-          <div ref={containerRef} className="w-full h-full" />
-        )}
-        {!error && status !== 'Connected' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/60 text-gray-400 text-sm pointer-events-none">
-            {status}
+        {/* Always mounted: a reconnect attaches the new RFB to this element, so
+            it must not be swapped out for the error state. */}
+        <div ref={containerRef} className="w-full h-full" />
+
+        {!isConnected(status) && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/60 text-sm">
+            <p className={error ? 'text-red-400' : 'text-gray-400'}>{error || status}</p>
+            {showReconnect && (
+              <button
+                onClick={reconnect}
+                className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300 hover:text-white transition-colors"
+              >
+                Reconnect
+              </button>
+            )}
           </div>
         )}
       </div>
