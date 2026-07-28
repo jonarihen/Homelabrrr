@@ -3,6 +3,7 @@ import Layout from '../components/Layout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { normalizeUpstreamPort, isUpstreamDraftValid, hasUpstreamChanged } from '../utils/siteEdit.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const selectCls = inputCls;
@@ -86,7 +87,7 @@ export default function WebsitesPage() {
                 </div>
               )}
               {sites.map((site) => (
-                <SiteCard key={site.id} site={site} onChanged={load} />
+                <SiteCard key={site.id} site={site} upstream={upstream} isAdmin={!!user?.isAdmin} onChanged={load} />
               ))}
             </div>
           </>
@@ -211,9 +212,10 @@ function PublishForm({ servers, upstream, isAdmin, onClose, onPublished }) {
 
 // ─── Site card (with live stepper) ─────────────────────────────────────────────
 
-function SiteCard({ site: initial, onChanged }) {
+function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
   const [site, setSite] = useState(initial);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const timerRef = useRef(null);
@@ -253,6 +255,12 @@ function SiteCard({ site: initial, onChanged }) {
   const isLive = site.status === 'live';
   const isError = site.status === 'error';
   const isWarning = site.status === 'warning';
+  // Only a route Homelabrrr owns and actually reverse-proxies has an upstream to
+  // edit: sites imported from the Caddyfile are managed there (the backend
+  // rejects a PUT for them), and a file_server/static block has no upstream at
+  // all. Both fields are absent on servers that predate them, which reads as
+  // "an ordinary managed reverse proxy".
+  const canEdit = site.managed !== false && (!site.kind || site.kind === 'reverse_proxy');
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
@@ -271,6 +279,11 @@ function SiteCard({ site: initial, onChanged }) {
             {(isError || isWarning) && (
               <button onClick={retry} disabled={busy} className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40 px-2 py-1 rounded hover:bg-gray-800 transition-colors">Retry</button>
             )}
+            {canEdit && !inFlight && !confirmDelete && (
+              <button onClick={() => { setError(''); setEditing((v) => !v); }} disabled={busy} className={`p-1.5 rounded-lg transition-colors ${editing ? 'text-orange-400 bg-gray-800' : 'text-gray-500 hover:text-white hover:bg-gray-800'} disabled:opacity-40`} aria-label="Edit website" title="Change the upstream target">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+              </button>
+            )}
             {confirmDelete ? (
               <>
                 <button onClick={remove} disabled={busy} className="text-xs text-red-400 hover:text-red-300 disabled:opacity-40 px-2 py-1 rounded hover:bg-red-500/10 transition-colors">Confirm</button>
@@ -283,6 +296,16 @@ function SiteCard({ site: initial, onChanged }) {
             )}
           </div>
         </div>
+
+        {editing && canEdit && (
+          <EditUpstreamForm
+            site={site}
+            upstream={upstream}
+            isAdmin={isAdmin}
+            onCancel={() => setEditing(false)}
+            onSaved={(updated) => { setEditing(false); setSite(updated); onChanged?.(); }}
+          />
+        )}
 
         {/* Stepper (shown until fully live) */}
         {!isLive && (
@@ -310,6 +333,75 @@ function SiteCard({ site: initial, onChanged }) {
         {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
       </div>
     </div>
+  );
+}
+
+// ─── Edit a published site (upstream target only) ──────────────────────────────
+
+function EditUpstreamForm({ site, upstream, isAdmin, onCancel, onSaved }) {
+  const [host, setHost] = useState(site.upstreamHost);
+  const [port, setPort] = useState(String(site.upstreamPort));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const draft = { upstreamHost: host, upstreamPort: port };
+  const canSave = isUpstreamDraftValid(draft) && hasUpstreamChanged(site, draft);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true); setError('');
+    try {
+      const r = await api.put(`/websites/sites/${site.id}`, {
+        upstreamHost: host.trim(),
+        upstreamPort: normalizeUpstreamPort(port),
+      });
+      onSaved(r.data);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to save');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="mt-4 rounded-xl border border-gray-800 bg-gray-950/40 p-4 space-y-3">
+      <p className="text-xs text-gray-500">
+        Editing <span className="font-mono text-gray-300">{site.domain}</span>. The domain itself is fixed — it is the certificate’s subject — so publishing under a different name still means deleting this site and publishing the new one.
+      </p>
+      <div className="grid grid-cols-3 gap-3">
+        <div className="col-span-2">
+          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Upstream host</label>
+          <input type="text" required value={host} onChange={(e) => setHost(e.target.value)} className={inputCls} placeholder="10.11.26.5" />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Port</label>
+          <input type="number" min="1" max="65535" required value={port} onChange={(e) => setPort(e.target.value)} className={inputCls} />
+        </div>
+      </div>
+
+      {!isAdmin && upstream?.vms?.length > 0 && (
+        <div className="text-xs text-gray-500">
+          <span className="text-gray-400">Your VMs:</span>
+          <div className="flex flex-wrap gap-1.5 mt-1">
+            {upstream.vms.map((vm) => (
+              <button type="button" key={`${vm.node}-${vm.vmid}`} onClick={() => setHost(vm.ip)}
+                className="font-mono text-[11px] px-2 py-1 rounded border border-gray-700 bg-gray-800 hover:border-orange-500 hover:text-orange-400 transition-colors">
+                VM {vm.vmid} · {vm.ip}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <p className="text-xs text-gray-600">Saving re-pushes the route to Caddy — the site goes back through the publish steps for a moment.</p>
+      {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+
+      <div className="flex gap-3">
+        <button type="button" onClick={onCancel} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2 text-sm transition-colors">Cancel</button>
+        <button type="submit" disabled={saving || !canSave} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2 text-sm font-semibold transition-colors">
+          {saving ? 'Saving…' : 'Save changes'}
+        </button>
+      </div>
+    </form>
   );
 }
 
