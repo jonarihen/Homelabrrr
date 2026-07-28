@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-28 — A dropped console no longer takes the whole backend down with it
+
+- **Fixes a crash that logged everyone out.** When a Proxmox VNC console ended without a clean close — the guest rebooting, the node dropping the connection, a network blip — the backend forwarded that closure to the browser verbatim and the websocket library rejected it, killing the entire Node process. Every other user's session went down with it, and Docker restarted the container
+- The close codes involved (`1005`, `1006`) are ones a websocket only ever *reports* locally; the spec forbids sending them on the wire. They are now filtered to a plain no-status close, and no close frame can take the process down regardless
+
 ## 2026-07-28 — A backup in progress no longer looks like a finished one
 
 - **Manual backups now show that they are still running.** Proxmox lists the archive it is writing the moment it creates the file, so a fresh backup appeared in the list within seconds — complete with a size, and with Restore and Delete live on it — while vzdump was still filling it in. There was nothing to tell a finished backup from a half-written one

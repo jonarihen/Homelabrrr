@@ -30,6 +30,7 @@ import workflowRoutes from './routes/workflows.js';
 import { seedAllFirewalls } from './workflows/store.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
+import { sendableCloseCode } from './utils/wsClose.js';
 import { decodeNodeRef } from './utils/nodeRef.js';
 import { sweepExpiredMaintenance } from './utils/nodeMaintenance.js';
 import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.js';
@@ -304,6 +305,20 @@ server.on('upgrade', async (request, socket, head) => {
 
 import { getHostForNode } from './proxmox.js';
 
+// Mirror a peer's close onto the other side, degrading an unsendable code to a
+// plain no-status close instead of throwing.
+function relayClose(ws, code, reason) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const safe = sendableCloseCode(code);
+  try {
+    if (safe === null) ws.close();
+    else ws.close(safe, reason);
+  } catch {
+    // Last resort: never let a close frame take the process down.
+    try { ws.close(); } catch { /* already gone */ }
+  }
+}
+
 vncWss.on('connection', async (clientWs, vncSession) => {
   const { node, vmid, ticket, port, vmtype = 'qemu', createdAt } = vncSession;
   const { nodeName } = decodeNodeRef(node);
@@ -345,7 +360,7 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   });
 
   proxmoxWs.on('close', (code, reason) => {
-    if (clientWs.readyState === WebSocket.OPEN) clientWs.close(code, reason);
+    relayClose(clientWs, code, reason);
   });
 
   proxmoxWs.on('error', (err) => {
