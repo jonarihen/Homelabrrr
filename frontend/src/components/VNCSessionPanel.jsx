@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 import { readClipboardText, typeIntoVnc } from '../utils/vncPaste.js';
+import {
+  CONNECTING, CONNECTED, DISCONNECTED, CONNECTION_LOST,
+  canReconnect, isConnected,
+} from '../utils/consoleStatus.js';
 
 // Preload noVNC RFB module so it's cached before we request a VNC ticket.
 // Proxmox VNC proxies time out quickly (~10s), so the import must not delay
@@ -27,14 +31,19 @@ export default function VNCSessionPanel({ vm, visible = true }) {
   const rfbRef = useRef(null);
   const resizeObserverRef = useRef(null);
   const refreshTimerRef = useRef(null);
-  const [status, setStatus] = useState('Connecting...');
+  const [status, setStatus] = useState(CONNECTING);
   const [error, setError] = useState('');
   const [pasting, setPasting] = useState(false);
   const pasteStopRef = useRef(false);
+  // Bumping this re-runs the connect effect, which mints a fresh VNC ticket —
+  // the old one is single-use and already consumed by the dead connection.
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     pasteStopRef.current = false;
+    setStatus(CONNECTING);
+    setError('');
 
     async function connect() {
       try {
@@ -63,12 +72,12 @@ export default function VNCSessionPanel({ vm, visible = true }) {
 
         rfb.addEventListener('connect', () => {
           console.log('[VNC] RFB connected');
-          setStatus('Connected');
+          setStatus(CONNECTED);
           refreshTimerRef.current = window.setTimeout(() => forceFullRefresh(rfb), 500);
         });
         rfb.addEventListener('disconnect', (e) => {
           console.warn('[VNC] RFB disconnect, clean:', e.detail.clean);
-          setStatus(e.detail.clean ? 'Disconnected' : 'Connection lost');
+          setStatus(e.detail.clean ? DISCONNECTED : CONNECTION_LOST);
         });
 
         rfbRef.current = rfb;
@@ -81,6 +90,7 @@ export default function VNCSessionPanel({ vm, visible = true }) {
         resizeObserverRef.current = resizeObserver;
       } catch (e) {
         if (!cancelled) {
+          setStatus(CONNECTION_LOST);
           setError(e.response?.data?.error || e.message || 'Failed to connect');
         }
       }
@@ -94,8 +104,9 @@ export default function VNCSessionPanel({ vm, visible = true }) {
       window.clearTimeout(refreshTimerRef.current);
       resizeObserverRef.current?.disconnect();
       rfbRef.current?.disconnect();
+      rfbRef.current = null;
     };
-  }, [vmNode, vm.vmid]);
+  }, [vmNode, vm.vmid, attempt]);
 
   useEffect(() => {
     if (!visible || !rfbRef.current) return undefined;
@@ -106,6 +117,11 @@ export default function VNCSessionPanel({ vm, visible = true }) {
 
   const sendCtrlAltDel = () => rfbRef.current?.sendCtrlAltDel();
   const refresh = () => forceFullRefresh(rfbRef.current);
+  const reconnect = () => setAttempt((n) => n + 1);
+
+  // A failed ticket request leaves `status` dead too, so this covers both the
+  // "socket dropped" and "never got off the ground" cases.
+  const showReconnect = canReconnect(status);
 
   const pasteClipboard = async () => {
     const rfb = rfbRef.current;
@@ -125,13 +141,24 @@ export default function VNCSessionPanel({ vm, visible = true }) {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-700 bg-gray-900 shrink-0">
         <span className={`text-xs px-2 py-0.5 rounded ${
-          status === 'Connected' ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'
+          isConnected(status) ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'
         }`}>{status}</span>
+
+        {showReconnect && (
+          <button
+            type="button"
+            onClick={reconnect}
+            className="text-xs px-3 py-1 rounded bg-orange-600 hover:bg-orange-500 text-white font-medium transition-colors"
+            title="Request a new console ticket and reconnect"
+          >
+            Reconnect
+          </button>
+        )}
 
         <button
           type="button"
           onClick={pasteClipboard}
-          disabled={pasting || status !== 'Connected'}
+          disabled={pasting || !isConnected(status)}
           className="text-xs px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           title="Type clipboard text into the VM as keystrokes"
         >
@@ -157,17 +184,23 @@ export default function VNCSessionPanel({ vm, visible = true }) {
       </div>
 
       <div className="relative flex-1 min-h-0 bg-black overflow-hidden">
-        {error ? (
-          <div className="absolute inset-0 flex items-center justify-center text-red-400 text-sm">
-            {error}
-          </div>
-        ) : (
-          <div ref={containerRef} className="w-full h-full" />
-        )}
+        {/* Always mounted: a reconnect needs this element to attach the new RFB
+            to, and it is gone by the time the effect runs if we swap it out for
+            the error state. */}
+        <div ref={containerRef} className="w-full h-full" />
 
-        {!error && status !== 'Connected' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/60 text-gray-400 text-sm pointer-events-none">
-            {status}
+        {!isConnected(status) && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/60 text-sm">
+            <span className={error ? 'text-red-400' : 'text-gray-400'}>{error || status}</span>
+            {showReconnect && (
+              <button
+                type="button"
+                onClick={reconnect}
+                className="text-xs px-4 py-2 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors"
+              >
+                Reconnect
+              </button>
+            )}
           </div>
         )}
       </div>

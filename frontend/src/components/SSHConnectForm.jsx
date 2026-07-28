@@ -10,7 +10,12 @@ const btnCls = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-wh
  *
  * @param {object} props
  * @param {object} props.vm                  VM object with node/vmid/nodeRef
- * @param {function} props.onConnect         Called with the token on successful connect
+ * @param {function} props.onConnect         Called with (token, mintToken) on successful connect.
+ *                                           `mintToken` re-runs just the connect POST with the
+ *                                           same key and passphrase and resolves to a fresh
+ *                                           token, so a dropped session can reconnect without
+ *                                           sending the user back through this form. The
+ *                                           passphrase stays captive in this closure.
  * @param {string}  [props.connectEndpoint]  REST endpoint (default '/ssh/connect')
  * @param {string}  [props.submitLabel]      Button label (default 'Connect')
  */
@@ -85,14 +90,19 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         hostFingerprint: form.hostFingerprint,
       });
 
-      const { data } = await api.post(connectEndpoint, {
-        node: vmNode,
-        vmid: vm.vmid,
-        keyId: form.keyId,
-        passphrase: form.passphrase,
-      });
+      // The host config is already persisted above, so a reconnect only needs
+      // to re-mint the single-use session token.
+      const mintToken = async () => {
+        const { data } = await api.post(connectEndpoint, {
+          node: vmNode,
+          vmid: vm.vmid,
+          keyId: form.keyId,
+          passphrase: form.passphrase,
+        });
+        return data.token;
+      };
 
-      onConnect(data.token);
+      onConnect(await mintToken(), mintToken);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to connect');
     } finally {

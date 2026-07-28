@@ -1,6 +1,12 @@
 # Changelog
 
-## 2026-07-27 — Invite links no longer bounce to the sign-in page
+## 2026-07-28 — Reconnect a dropped SSH or VNC console without closing it
+
+- **A console that loses its connection can now be reconnected in place.** Previously a dropped SSH shell or VNC session was a dead panel — the only way back was to close the console and open a new one from the VM page
+- A **Reconnect** button appears in the console toolbar as soon as the connection drops, errors out, or fails to come up at all. It's hidden while connected and while a connection is still being attempted
+- **SSH** reconnects with the key, host and passphrase you originally connected with, so you don't go back through the connect form. Scrollback from the dead session is not carried over — it's a new shell
+- **VNC** requests a fresh console ticket and re-attaches. The connection-lost overlay now carries its own Reconnect button, and the popped-out VNC window no longer has to reload the whole page to retry
+- Applies to both the docked consoles and the popped-out `/ssh` and `/vnc` windows
 
 - **Following an invite link works again.** The invite page dropped straight to the sign-in form instead of the "Claim Invite" panel — an invitee has no account yet, so there was nothing they could do from there
 - The app checks who you are on every page load; on the invite page that check correctly says "not signed in", but the response handler treated it as an expired session and redirected. Public pages (invite redemption, sign-in) now stay put, while a real session timeout anywhere else still returns you to sign-in as before

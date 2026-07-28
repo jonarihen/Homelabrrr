@@ -4,6 +4,10 @@ import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 import SSHConnectForm from './SSHConnectForm.jsx';
 import SFTPBrowser from './SFTPBrowser.jsx';
+import {
+  CONNECTING, CONNECTED, DISCONNECTED, CONNECTION_ERROR,
+  canReconnect, isConnected,
+} from '../utils/consoleStatus.js';
 
 export default function SSHSessionPanel({ vm, visible = true }) {
   const [step, setStep] = useState('config');
@@ -12,10 +16,31 @@ export default function SSHSessionPanel({ vm, visible = true }) {
   const [activeTab, setActiveTab] = useState('terminal');
   const [sftpConnecting, setSftpConnecting] = useState(false);
   const [sftpError, setSftpError] = useState('');
+  // Re-mints an SSH session token with the settings the user connected with,
+  // so a dropped shell doesn't send them back through the form.
+  const mintTokenRef = useRef(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectError, setReconnectError] = useState('');
 
-  const handleSshConnect = (token) => {
+  const handleSshConnect = (token, mintToken) => {
     setSshToken(token);
+    mintTokenRef.current = mintToken;
     setStep('connected');
+  };
+
+  const reconnectSsh = async () => {
+    if (!mintTokenRef.current || reconnecting) return;
+
+    setReconnecting(true);
+    setReconnectError('');
+    try {
+      // A new token remounts the SSH channel: SSHTerminal keys its effect on it.
+      setSshToken(await mintTokenRef.current());
+    } catch (e) {
+      setReconnectError(e.response?.data?.error || 'Failed to reconnect');
+    } finally {
+      setReconnecting(false);
+    }
   };
 
   const openFiles = async () => {
@@ -86,7 +111,13 @@ export default function SSHSessionPanel({ vm, visible = true }) {
 
       {/* Panels */}
       <div className={`min-h-0 flex-1 ${activeTab === 'terminal' ? '' : 'hidden'}`}>
-        <SSHTerminal token={sshToken} visible={visible && activeTab === 'terminal'} />
+        <SSHTerminal
+          token={sshToken}
+          visible={visible && activeTab === 'terminal'}
+          onReconnect={reconnectSsh}
+          reconnecting={reconnecting}
+          reconnectError={reconnectError}
+        />
       </div>
 
       {activeTab === 'files' && sftpToken && (
@@ -116,16 +147,17 @@ function TabButton({ active, onClick, icon, children, loading = false }) {
   );
 }
 
-function SSHTerminal({ token, visible }) {
+function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconnectError = '' }) {
   const containerRef = useRef(null);
   const termRef = useRef(null);
   const wsRef = useRef(null);
   const fitAddonRef = useRef(null);
   const resizeObserverRef = useRef(null);
-  const [status, setStatus] = useState('Connecting...');
+  const [status, setStatus] = useState(CONNECTING);
 
   useEffect(() => {
     let disposed = false;
+    setStatus(CONNECTING);
 
     async function init() {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -194,10 +226,10 @@ function SSHTerminal({ token, visible }) {
             for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
             term.write(bytes);
           } else if (msg.type === 'status') {
-            setStatus(msg.status === 'connected' ? 'Connected' : 'Disconnected');
+            setStatus(msg.status === 'connected' ? CONNECTED : DISCONNECTED);
           } else if (msg.type === 'error') {
             term.write(`\r\n\x1b[31mError: ${msg.error}\x1b[0m\r\n`);
-            setStatus('Error');
+            setStatus(CONNECTION_ERROR);
           }
         } catch {
           // Ignore malformed websocket payloads
@@ -206,13 +238,13 @@ function SSHTerminal({ token, visible }) {
 
       ws.onclose = (e) => {
         console.warn('[SSH] WebSocket closed, code:', e.code, 'reason:', e.reason);
-        term.write('\r\n\x1b[33mConnection closed.\x1b[0m\r\n');
-        setStatus('Disconnected');
+        term.write('\r\n\x1b[33mConnection closed — use Reconnect to start a new session.\x1b[0m\r\n');
+        setStatus(DISCONNECTED);
       };
 
       ws.onerror = (e) => {
         console.error('[SSH] WebSocket error', e);
-        setStatus('Error');
+        setStatus(CONNECTION_ERROR);
       };
 
       term.onData((data) => {
@@ -274,8 +306,22 @@ function SSHTerminal({ token, visible }) {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-700 bg-gray-900 shrink-0">
         <span className={`text-xs px-2 py-0.5 rounded ${
-          status === 'Connected' ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'
-        }`}>{status}</span>
+          isConnected(status) ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'
+        }`}>{reconnecting ? 'Reconnecting…' : status}</span>
+
+        {onReconnect && canReconnect(status) && (
+          <button
+            type="button"
+            onClick={onReconnect}
+            disabled={reconnecting}
+            className="text-xs px-3 py-1 rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium transition-colors"
+            title="Open a new SSH session with the same key and host settings"
+          >
+            {reconnecting ? 'Reconnecting…' : 'Reconnect'}
+          </button>
+        )}
+
+        {reconnectError && <span className="text-xs text-red-400">{reconnectError}</span>}
       </div>
 
       <div ref={containerRef} className="flex-1 min-h-0 bg-[#0b0d11] p-1" />
