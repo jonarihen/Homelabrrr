@@ -1,6 +1,13 @@
 # Changelog
 
-## 2026-07-28 — A dropped console no longer takes the whole backend down with it
+## 2026-07-30 — The file browser's 100 MB upload limit is gone
+
+- **Uploads are no longer capped.** The file browser refused anything over 100 MB, and a file past that was rejected by the web server before the portal ever saw it — so the browser could only show a bare "Upload failed" with no hint that a limit existed at all. The limit is removed; free space on the target VM is now the only thing that bounds an upload
+- The cap was really a memory ceiling in disguise: every upload was held in the backend's RAM in full before a single byte was written to the VM. Uploads now **stream straight through** to the VM's disk, so the backend's memory use is flat whether the file is 1 MB or 100 GB, and several people can upload large files at once without starving each other
+- **Uploads show progress** — the file name, a percentage, and a position in the batch when several files are selected at once. Previously a multi-gigabyte transfer was an indefinite "Uploading..." with nothing behind it
+- **A transfer that dies part-way no longer leaves a corrupt file behind.** If the connection drops or the tab is closed mid-upload, the half-written file is removed from the VM rather than left sitting there at the right name with the wrong contents
+- Long uploads no longer expire out from under themselves. A file browser session times out after 30 minutes idle, which a large transfer could outlast — the session is now kept alive while the transfer runs, so the next file in a batch isn't rejected
+
 
 - **Fixes a crash that logged everyone out.** When a Proxmox VNC console ended without a clean close — the guest rebooting, the node dropping the connection, a network blip — the backend forwarded that closure to the browser verbatim and the websocket library rejected it, killing the entire Node process. Every other user's session went down with it, and Docker restarted the container
 - The close codes involved (`1005`, `1006`) are ones a websocket only ever *reports* locally; the spec forbids sending them on the wire. They are now filtered to a plain no-status close, and no close frame can take the process down regardless
