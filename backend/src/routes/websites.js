@@ -6,6 +6,7 @@ import { logAudit } from '../utils/audit.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { encryptSecret } from '../utils/secrets.js';
 import { createClient } from '../fortigate.js';
+import { certNameToSubject, certWildcardCovers, stripCertDateSuffix, SERVER_CERT_MAX } from '../utils/certSlots.js';
 import { createCaddyClient, managedRouteId, hostCoveredByWildcard } from '../utils/caddy.js';
 import { sshConfigured, deploySnippet, isSafeRemotePath } from '../utils/caddySnippet.js';
 import {
@@ -180,21 +181,51 @@ function deriveCertCandidates(domain, wildcard = '') {
 }
 
 // Find the local certificate `caddy-forticertsync` synced for this domain (or
-// the wildcard covering it). Matching is best-effort (name equality against
-// common derivations, then a normalized-substring fallback) since the sync
-// tool's exact naming can vary.
+// the wildcard covering it). Matching is ranked rather than first-hit, because
+// which cert we pick decides which inspection-profile slot gets written:
+//
+//   1. the cert whose derived subject IS the domain (a renewal differs from its
+//      predecessor only by the `_DDMMYYYY` stamp, so subject equality is what
+//      identifies "this site's cert" across renewals);
+//   2. a wildcard cert that covers the domain — one slot serving every host
+//      under it;
+//   3. exact name equality against the older hand-rolled derivations, kept for
+//      certs synced by other tooling;
+//   4. the legacy normalized-substring fallback, last because it is loose
+//      enough to return an apex cert for a subdomain.
+//
+// Within a tier the newest date stamp wins, so a freshly renewed cert is
+// preferred over the predecessor still sitting in the store.
 async function findSyncedCert(fwClient, rootVdom, domain, wildcard = '') {
   const certs = await fwClient.getLocalCertificates(rootVdom);
   const candidates = deriveCertCandidates(domain, wildcard);
-  const byName = certs.find((c) => candidates.includes(String(c.name || '').toLowerCase()));
-  if (byName) return byName.name;
-  // Fallback: normalize separators so `wildcard_example_com` reads as
-  // `wildcard.example.com` and substring-matches the domain / wildcard base.
   const normalize = (s) => String(s || '').toLowerCase().replace(/[_-]/g, '.');
   const targets = [domain.toLowerCase()];
   if (wildcard) targets.push(wildcard.replace(/^\*\./, '').toLowerCase());
-  const bySubstring = certs.find((c) => targets.some((t) => normalize(c.name).includes(t)));
-  return bySubstring ? bySubstring.name : null;
+
+  const tierOf = (name) => {
+    const subject = certNameToSubject(name);
+    if (subject && subject === domain.toLowerCase()) return 1;
+    if (certWildcardCovers(name, domain)) return 2;
+    if (candidates.includes(String(name || '').toLowerCase())) return 3;
+    if (targets.some((t) => normalize(name).includes(t))) return 4;
+    return 99;
+  };
+
+  let best = null;
+  for (const cert of certs) {
+    const name = String(cert.name || '');
+    if (!name) continue;
+    const tier = tierOf(name);
+    if (tier === 99) continue;
+    // The stamp is DDMMYYYY, so compare it as YYYYMMDD to order correctly.
+    const stamp = name.slice(stripCertDateSuffix(name).length).replace(/^[_-]/, '');
+    const sortable = stamp.length === 8 ? stamp.slice(4) + stamp.slice(2, 4) + stamp.slice(0, 2) : '';
+    if (!best || tier < best.tier || (tier === best.tier && sortable > best.sortable)) {
+      best = { name, tier, sortable };
+    }
+  }
+  return best ? best.name : null;
 }
 
 // ─── Caddyfile snippet sync + API-route reconciliation ─────────────────────────
@@ -235,7 +266,7 @@ async function detectWildcard(caddy, serverId, domain) {
 // `caddy reload` from the Caddyfile wipes admin-API routes).
 async function reconcileManagedRoutes(server) {
   const sites = db.prepare(
-    "SELECT * FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning')"
+    "SELECT * FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning', 'blocked')"
   ).all(server.id);
   if (sites.length === 0) return { repaired: [] };
   const caddy = createCaddyClient(server);
@@ -350,13 +381,40 @@ async function runSiteFlow(siteId) {
     // ── Attach the cert to the SSL/SSH inspection profile ─────────────────────
     setSiteStep(siteId, 'inspect', 'active');
     setSiteStatus(siteId, 'inspecting', '');
-    await client.setInspectionServerCert(profileName, certName, rootVdom);
-    setSiteStep(siteId, 'inspect', 'done');
+    const result = await client.setInspectionServerCert(profileName, certName, rootVdom, site.domain);
+    setSiteStep(siteId, 'inspect', 'done', inspectNote(result, profileName));
     setSiteStep(siteId, 'live', 'done');
     setSiteStatus(siteId, 'live', '');
   } catch (err) {
+    // A full profile is terminal, not transient: FortiOS caps the inbound
+    // server-cert list at SERVER_CERT_MAX and retrying the same PUT will fail
+    // identically until a slot is freed on the firewall. Say so instead of
+    // offering a Retry that cannot succeed.
+    if (err.code === 'server_cert_limit') {
+      setSiteStep(siteId, 'inspect', 'blocked', err.message);
+      setSiteStep(siteId, 'live', 'done');
+      setSiteStatus(siteId, 'blocked', `Route is live in Caddy, but SSL inspection could not be wired up: ${err.message}`);
+      console.warn(`[websites] site ${siteId} (${site.domain}) blocked — inspection profile "${profileName}" is at its ${SERVER_CERT_MAX}-certificate limit`);
+      return;
+    }
     setSiteStep(siteId, 'inspect', 'error', err.message);
     setSiteStatus(siteId, 'warning', `Route is live in Caddy, but attaching the certificate to SSL inspection failed: ${err.message}. You can retry.`);
+  }
+}
+
+// What actually happened on the inspection profile, phrased for the stepper.
+function inspectNote(result, profileName) {
+  switch (result?.action) {
+    case 'covered':
+      return `Already covered by the ${result.coveredBy} certificate on "${profileName}" — no slot used`;
+    case 'replace':
+      return `Replaced the superseded ${result.replaced} on "${profileName}"`;
+    case 'already-attached':
+      return `Already attached to "${profileName}"`;
+    case 'append':
+      return `Attached to "${profileName}" (${result.occupied.length} of ${SERVER_CERT_MAX} certificate slots used)`;
+    default:
+      return '';
   }
 }
 
@@ -517,7 +575,7 @@ router.get('/servers/:id/status', pWebsites, async (req, res) => {
       // Surface drift: managed sites whose admin-API route a reload wiped.
       const liveIds = new Set(await caddy.listManagedRouteIds().catch(() => []));
       info.missingRoutes = db.prepare(
-        "SELECT id, domain FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning')"
+        "SELECT id, domain FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning', 'blocked')"
       ).all(server.id).filter((s) => !liveIds.has(managedRouteId(s.id))).map((s) => s.domain);
     }
     res.json(info);
@@ -710,7 +768,7 @@ router.post('/admin/sites/:id/assign', pWebsites, (req, res) => {
 router.delete('/admin/sites/:id', pWebsites, async (req, res) => {
   const site = db.prepare('SELECT * FROM caddy_sites WHERE id = ?').get(req.params.id);
   if (!site) return res.status(404).json({ error: 'Site not found' });
-  await removeSite(site);
+  await removeSite(site, req);
   logAudit(req, 'website_delete_site', site.domain, 'admin');
   res.json({ ok: true });
 });
@@ -913,7 +971,7 @@ router.delete('/sites/:id', async (req, res) => {
   if (!row) return res.status(404).json({ error: 'Site not found' });
   if (!owns) return res.status(403).json({ error: 'Forbidden' });
   try {
-    await removeSite(row);
+    await removeSite(row, req);
   } catch (e) {
     return res.status(500).json({ error: sanitizeError(e.message) });
   }
@@ -921,12 +979,60 @@ router.delete('/sites/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Remove the Caddy route for a site (best-effort) and drop the DB row. The
-// synced FortiGate cert is left in place — it may be shared, and stale certs are
-// harmless — but we only ever touch our own @id-tagged Caddy route. Imported
-// (managed=0) sites have no route of ours in Caddy: only the DB row is dropped,
-// the Caddyfile-owned route stays untouched.
-async function removeSite(site) {
+// Whether any *other* site still depends on this site's cert being attached to
+// its inspection profile. Compared on slot identity rather than literal name so
+// a sibling whose row still records last renewal's `<domain>_<old date>` counts
+// as a user of the same slot.
+function certStillInUse(site) {
+  const key = certNameToSubject(site.cert_name) || String(site.cert_name || '').toLowerCase();
+  return db.prepare(
+    "SELECT cert_name FROM caddy_sites WHERE id != ? AND fortigate_id = ? AND inspection_profile = ? AND cert_name != ''"
+  ).all(site.id, site.fortigate_id, site.inspection_profile)
+    .some((r) => (certNameToSubject(r.cert_name) || String(r.cert_name || '').toLowerCase()) === key);
+}
+
+// Free the site's slot on the SSL/SSH inspection profile, unless another site
+// still relies on the same certificate. The cert itself is left in
+// `vpn.certificate/local` — `caddy-forticertsync` owns that store, and it can
+// only delete a cert once nothing references it, which is exactly what
+// detaching here enables. Best-effort: a firewall that's unreachable at delete
+// time must not block removing the site.
+async function releaseInspectionSlot(site, req) {
+  if (!site.fortigate_id || !site.inspection_profile || !site.cert_name) return;
+  if (certStillInUse(site)) return;
+  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(site.fortigate_id);
+  if (!fw) return;
+  try {
+    const client = createClient(fw);
+    const { removed, remaining, skipped } = await client.detachInspectionServerCert(
+      site.inspection_profile, site.cert_name, fw.root_vdom || 'root',
+    );
+    if (skipped) {
+      console.log(`[websites] left "${site.cert_name}" on inspection profile "${site.inspection_profile}" — detaching ${skipped}`);
+      return;
+    }
+    if (removed.length === 0) return;
+    if (req) {
+      logAudit(req, 'website_detach_inspection_cert', site.domain,
+        `${removed.join(', ')} removed from "${site.inspection_profile}" — ${remaining.length}/${SERVER_CERT_MAX} slots used`);
+    }
+    console.log(`[websites] detached ${removed.join(', ')} from inspection profile "${site.inspection_profile}" (${remaining.length}/${SERVER_CERT_MAX} slots used)`);
+  } catch (err) {
+    console.warn(`[websites] could not detach cert "${site.cert_name}" from inspection profile "${site.inspection_profile}": ${err.message}`);
+  }
+}
+
+// Remove the Caddy route for a site (best-effort) and drop the DB row. We only
+// ever touch our own @id-tagged Caddy route. Imported (managed=0) sites have no
+// route of ours in Caddy: only the DB row is dropped, the Caddyfile-owned route
+// stays untouched.
+//
+// The site's certificate is also detached from its SSL/SSH inspection profile
+// when nothing else uses it. Leaving it attached is not harmless: FortiOS only
+// allows SERVER_CERT_MAX certificates per profile, so an abandoned reference
+// permanently costs a slot that the next publish needs.
+async function removeSite(site, req = null) {
+  await releaseInspectionSlot(site, req);
   const server = getServerRow(site.server_id);
   if (server && site.managed !== 0 && sshConfigured(server)) {
     // Caddyfile mode: drop the row, then regenerate the snippet without it.

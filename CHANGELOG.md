@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-30 — Renewed certificates stop filling up the SSL inspection profile
+
+- **A renewed certificate now replaces the one it supersedes.** `caddy-forticertsync` names every synced certificate `<domain>_<DDMMYYYY>`, so each renewal arrives under a new name — and Homelabrrr appended it next to last year's, which stayed attached. FortiOS allows only **10 server certificates per inspection profile**, and it refuses to delete a certificate that a profile still references, so the profile silently filled up until publishing any new site failed. Attaching a certificate now matches on the domain in the name and swaps the predecessor out in place, so a renewal costs no slot
+- **A full profile is now reported as blocked, not as something to retry.** The failure used to surface as *"…attaching the certificate to SSL inspection failed. You can retry."* — advice that could never work, since the cap does not clear on its own. Publishing now checks the slot count *before* calling the firewall and reports which profile is full and exactly which certificates hold its 10 slots, so it's clear what to free
+- **A site covered by a wildcard certificate no longer takes a slot of its own.** If a wildcard already attached to the profile covers the hostname, the step completes without touching the firewall at all
+- **Deleting a site frees its slot.** The certificate is detached from the inspection profile when no other site uses it — which is also what finally lets `caddy-forticertsync` delete the superseded certificate. It is never removed from the firewall's certificate store; that store belongs to the sync tool
+- **FortiGate error messages read as text again.** FortiOS HTML-escapes its CLI errors, so they arrived showing `&#40;` and `&#41;` instead of brackets
+
 ## 2026-07-28 — A dropped console no longer takes the whole backend down with it
 
 - **Fixes a crash that logged everyone out.** When a Proxmox VNC console ended without a clean close — the guest rebooting, the node dropping the connection, a network blip — the backend forwarded that closure to the browser verbatim and the websocket library rejected it, killing the entire Node process. Every other user's session went down with it, and Docker restarted the container
