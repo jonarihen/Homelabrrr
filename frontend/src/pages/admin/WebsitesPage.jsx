@@ -10,7 +10,7 @@ const IN_FLIGHT = ['validating', 'pushing', 'issuing', 'inspecting', 'pending'];
 
 function defaultForm() {
   return {
-    name: '', apiUrl: '', authType: 'none', authSecret: '', serverName: '', verifyTls: true, wanIp: '', fortigateId: '', inspectionProfile: '',
+    name: '', apiUrl: '', authType: 'none', authSecret: '', serverName: '', verifyTls: true, wanIp: '', fortigateId: '', inspectionProfile: '', inspectionBundleCert: '',
     sshHost: '', sshPort: 22, sshUser: '', sshAuthType: 'key', sshSecret: '', snippetPath: '/etc/caddy/homelabrrr.caddy', caddyfilePath: '/etc/caddy/Caddyfile',
   };
 }
@@ -68,7 +68,7 @@ export default function AdminWebsitesPage() {
   const openEdit = (s) => {
     setEditId(s.id);
     setForm({
-      name: s.name, apiUrl: s.apiUrl, authType: s.authType || 'none', authSecret: '', serverName: s.serverName || '', verifyTls: !!s.verifyTls, wanIp: s.wanIpManual || '', fortigateId: s.fortigateId || '', inspectionProfile: s.inspectionProfile || '',
+      name: s.name, apiUrl: s.apiUrl, authType: s.authType || 'none', authSecret: '', serverName: s.serverName || '', verifyTls: !!s.verifyTls, wanIp: s.wanIpManual || '', fortigateId: s.fortigateId || '', inspectionProfile: s.inspectionProfile || '', inspectionBundleCert: s.inspectionBundleCert || '',
       sshHost: s.sshHost || '', sshPort: s.sshPort || 22, sshUser: s.sshUser || '', sshAuthType: s.sshAuthType || 'key', sshSecret: '', snippetPath: s.snippetPath || '/etc/caddy/homelabrrr.caddy', caddyfilePath: s.caddyfilePath || '/etc/caddy/Caddyfile',
     });
     setError('');
@@ -446,6 +446,14 @@ export default function AdminWebsitesPage() {
                     <input type="text" value={form.inspectionProfile} onChange={(e) => setForm((f) => ({ ...f, inspectionProfile: e.target.value }))} className={inputCls} placeholder={editId ? 'e.g. custom-deep-inspection' : 'Save + link a FortiGate to pick from a list'} />
                   )}
                   <p className="text-xs text-gray-600 mt-1">Synced Let’s Encrypt certs are attached here so inbound inspection presents the real cert.</p>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Inspection bundle certificate <span className="text-gray-600 font-normal">(optional)</span></label>
+                  <input type="text" value={form.inspectionBundleCert} onChange={(e) => setForm((f) => ({ ...f, inspectionBundleCert: e.target.value }))} className={inputCls} placeholder="e.g. homelabrrr_inspection" />
+                  <p className="text-xs text-gray-600 mt-1">
+                    Base name of the single multi-SAN certificate <span className="font-mono text-gray-400">caddy-forticertsync</span> maintains in <span className="font-mono text-gray-400">inspection_bundle</span> mode (without the <span className="font-mono text-gray-400">_DDMMYYYY</span> date).
+                    Set it and publishing stops waiting for a per-site certificate and stops writing to the profile — the bundle’s wildcard SANs already cover new hostnames, so a new site uses none of the profile’s 10 certificate slots.
+                  </p>
                 </div>
               </div>
 

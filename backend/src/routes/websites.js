@@ -105,6 +105,7 @@ function serializeServer(row) {
     fortigateId: row.fortigate_id || null,
     fortigateName: fw?.name || null,
     inspectionProfile: row.inspection_profile || '',
+    inspectionBundleCert: row.inspection_bundle_cert || '',
     mode: sshConfigured(row) ? 'caddyfile' : 'api',
     sshHost: row.ssh_host || '',
     sshPort: row.ssh_port || 22,
@@ -224,6 +225,26 @@ async function findSyncedCert(fwClient, rootVdom, domain, wildcard = '') {
     if (!best || tier < best.tier || (tier === best.tier && sortable > best.sortable)) {
       best = { name, tier, sortable };
     }
+  }
+  return best ? best.name : null;
+}
+
+// Find the live object for `caddy-forticertsync`'s inspection bundle: one
+// multi-SAN certificate covering every published domain, stored under
+// `<baseName>_<DDMMYYYY>`. Returns the newest generation, or null if the plugin
+// has not pushed one yet.
+async function findBundleCert(fwClient, rootVdom, baseName) {
+  const base = String(baseName || '').trim().toLowerCase();
+  if (!base) return null;
+  const certs = await fwClient.getLocalCertificates(rootVdom);
+  let best = null;
+  for (const cert of certs) {
+    const name = String(cert.name || '');
+    if (stripCertDateSuffix(name).toLowerCase() !== base) continue;
+    // DDMMYYYY compared as YYYYMMDD so generations order correctly.
+    const stamp = name.slice(stripCertDateSuffix(name).length).replace(/^[_-]/, '');
+    const sortable = stamp.length === 8 ? stamp.slice(4) + stamp.slice(2, 4) + stamp.slice(0, 2) : '';
+    if (!best || sortable > best.sortable) best = { name, sortable };
   }
   return best ? best.name : null;
 }
@@ -361,6 +382,27 @@ async function runSiteFlow(siteId) {
   let certName = null;
   try {
     const client = createClient(fw);
+
+    // Inspection-bundle mode: caddy-forticertsync maintains a single multi-SAN
+    // certificate covering every published domain, so a new site needs no
+    // certificate of its own and no profile write — its hostname is already
+    // inside the bundle's `*.<parent>` SAN. This is the whole point of the
+    // mode: publishing costs zero of the profile's 10 slots.
+    if (server.inspection_bundle_cert) {
+      const bundleCert = await findBundleCert(client, rootVdom, server.inspection_bundle_cert).catch(() => null);
+      if (bundleCert) {
+        db.prepare('UPDATE caddy_sites SET cert_name = ? WHERE id = ?').run(bundleCert, siteId);
+        setSiteStep(siteId, 'cert', 'done', `Covered by the ${bundleCert} inspection bundle`);
+        setSiteStep(siteId, 'inspect', 'done', `Bundle already attached to "${profileName}" — no slot used`);
+        setSiteStep(siteId, 'live', 'done');
+        setSiteStatus(siteId, 'live', '');
+        return;
+      }
+      // Configured but not on the firewall yet: fall through to per-domain
+      // discovery rather than blocking, so a half-migrated setup still works.
+      console.warn(`[websites] inspection bundle "${server.inspection_bundle_cert}" not found on ${fw.name} — falling back to per-domain certificate discovery`);
+    }
+
     for (let i = 0; i < CERT_POLL_ATTEMPTS; i++) {
       certName = await findSyncedCert(client, rootVdom, site.domain, wildcard).catch(() => null);
       if (certName) break;
@@ -464,20 +506,20 @@ router.post('/servers', pWebsites, async (req, res) => {
   const err = validateServerBody(req.body);
   if (err) return res.status(400).json({ error: err });
   const {
-    name, apiUrl, authType = 'none', authSecret = '', serverName = '', verifyTls = true, wanIp = '', fortigateId = null, inspectionProfile = '',
+    name, apiUrl, authType = 'none', authSecret = '', serverName = '', verifyTls = true, wanIp = '', fortigateId = null, inspectionProfile = '', inspectionBundleCert = '',
     sshHost = '', sshPort = 22, sshUser = '', sshAuthType = 'key', sshSecret = '',
     snippetPath = '/etc/caddy/homelabrrr.caddy', caddyfilePath = '/etc/caddy/Caddyfile',
   } = req.body;
   try {
     const r = db.prepare(`
-      INSERT INTO caddy_servers (name, api_url, auth_type, auth_secret, server_name, verify_tls, wan_ip, fortigate_id, inspection_profile,
+      INSERT INTO caddy_servers (name, api_url, auth_type, auth_secret, server_name, verify_tls, wan_ip, fortigate_id, inspection_profile, inspection_bundle_cert,
                                  ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_secret, snippet_path, caddyfile_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       name, apiUrl, authType,
       authSecret ? encryptSecret(authSecret) : '',
       serverName, verifyTls ? 1 : 0, wanIp,
-      fortigateId || null, inspectionProfile,
+      fortigateId || null, inspectionProfile, String(inspectionBundleCert || '').trim(),
       String(sshHost).trim(), parseInt(sshPort, 10) || 22, String(sshUser).trim(), sshAuthType,
       sshSecret ? encryptSecret(sshSecret) : '',
       snippetPath || '/etc/caddy/homelabrrr.caddy', caddyfilePath || '/etc/caddy/Caddyfile',
@@ -525,6 +567,7 @@ router.put('/servers/:id', pWebsites, async (req, res) => {
   const wanIp = req.body.wanIp ?? existing.wan_ip;
   const fortigateId = req.body.fortigateId === undefined ? existing.fortigate_id : (req.body.fortigateId || null);
   const inspectionProfile = req.body.inspectionProfile ?? existing.inspection_profile;
+  const inspectionBundleCert = String(req.body.inspectionBundleCert ?? existing.inspection_bundle_cert ?? '').trim();
   const sshHost = String(merged.sshHost || '').trim();
   const sshPort = parseInt(merged.sshPort, 10) || 22;
   const sshUser = String(merged.sshUser || '').trim();
@@ -536,9 +579,9 @@ router.put('/servers/:id', pWebsites, async (req, res) => {
   const caddyfilePath = merged.caddyfilePath || '/etc/caddy/Caddyfile';
 
   db.prepare(`
-    UPDATE caddy_servers SET name = ?, api_url = ?, auth_type = ?, auth_secret = ?, server_name = ?, verify_tls = ?, wan_ip = ?, fortigate_id = ?, inspection_profile = ?,
+    UPDATE caddy_servers SET name = ?, api_url = ?, auth_type = ?, auth_secret = ?, server_name = ?, verify_tls = ?, wan_ip = ?, fortigate_id = ?, inspection_profile = ?, inspection_bundle_cert = ?,
                              ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_auth_type = ?, ssh_secret = ?, ssh_host_key = ?, snippet_path = ?, caddyfile_path = ? WHERE id = ?
-  `).run(name, apiUrl, authType, authSecret, serverName, verifyTls ? 1 : 0, wanIp, fortigateId, inspectionProfile,
+  `).run(name, apiUrl, authType, authSecret, serverName, verifyTls ? 1 : 0, wanIp, fortigateId, inspectionProfile, inspectionBundleCert,
     sshHost, sshPort, sshUser, sshAuthType, sshSecret, sshHostKey, snippetPath, caddyfilePath, req.params.id);
   logAudit(req, 'website_update_caddy_server', name, apiUrl);
 
@@ -999,6 +1042,11 @@ function certStillInUse(site) {
 // time must not block removing the site.
 async function releaseInspectionSlot(site, req) {
   if (!site.fortigate_id || !site.inspection_profile || !site.cert_name) return;
+  // Never detach the shared inspection bundle: it covers every published
+  // domain, so removing it because one site went away would break all of them.
+  const server = getServerRow(site.server_id);
+  const bundleBase = String(server?.inspection_bundle_cert || '').trim().toLowerCase();
+  if (bundleBase && stripCertDateSuffix(site.cert_name).toLowerCase() === bundleBase) return;
   if (certStillInUse(site)) return;
   const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(site.fortigate_id);
   if (!fw) return;

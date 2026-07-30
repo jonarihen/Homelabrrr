@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
+
+- **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
+- **With a bundle configured, publishing a site touches the FortiGate not at all.** The pipeline stops waiting for a per-site certificate to sync and stops writing to the inspection profile — the new hostname is already inside the bundle's `*.parent-domain` SAN, so the certificate and inspection steps complete immediately. A new site costs **zero** of the ten slots
+- If the bundle name is set but the certificate is not on the firewall yet, publishing falls back to the old per-domain discovery instead of failing, so a half-finished migration still works
+- **Deleting a site never detaches the bundle.** The shared certificate serves every site, so the slot-freeing cleanup added below correctly leaves it alone
+
 ## 2026-07-30 — Renewed certificates stop filling up the SSL inspection profile
 
 - **A renewed certificate now replaces the one it supersedes.** `caddy-forticertsync` names every synced certificate `<domain>_<DDMMYYYY>`, so each renewal arrives under a new name — and Homelabrrr appended it next to last year's, which stayed attached. FortiOS allows only **10 server certificates per inspection profile**, and it refuses to delete a certificate that a profile still references, so the profile silently filled up until publishing any new site failed. Attaching a certificate now matches on the domain in the name and swaps the predecessor out in place, so a renewal costs no slot
