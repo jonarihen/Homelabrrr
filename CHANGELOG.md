@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
+
+- **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
+- **With a bundle configured, publishing a site touches the FortiGate not at all.** The pipeline stops waiting for a per-site certificate to sync and stops writing to the inspection profile — the new hostname is already inside the bundle's `*.parent-domain` SAN, so the certificate and inspection steps complete immediately. A new site costs **zero** of the ten slots
+- If the bundle name is set but the certificate is not on the firewall yet, publishing falls back to the old per-domain discovery instead of failing, so a half-finished migration still works
+- **Deleting a site never detaches the bundle.** The shared certificate serves every site, so the slot-freeing cleanup added below correctly leaves it alone
+
+## 2026-07-30 — Renewed certificates stop filling up the SSL inspection profile
+
+- **A renewed certificate now replaces the one it supersedes.** `caddy-forticertsync` names every synced certificate `<domain>_<DDMMYYYY>`, so each renewal arrives under a new name — and Homelabrrr appended it next to last year's, which stayed attached. FortiOS allows only **10 server certificates per inspection profile**, and it refuses to delete a certificate that a profile still references, so the profile silently filled up until publishing any new site failed. Attaching a certificate now matches on the domain in the name and swaps the predecessor out in place, so a renewal costs no slot
+- **A full profile is now reported as blocked, not as something to retry.** The failure used to surface as *"…attaching the certificate to SSL inspection failed. You can retry."* — advice that could never work, since the cap does not clear on its own. Publishing now checks the slot count *before* calling the firewall and reports which profile is full and exactly which certificates hold its 10 slots, so it's clear what to free
+- **A site covered by a wildcard certificate no longer takes a slot of its own.** If a wildcard already attached to the profile covers the hostname, the step completes without touching the firewall at all
+- **Deleting a site frees its slot.** The certificate is detached from the inspection profile when no other site uses it — which is also what finally lets `caddy-forticertsync` delete the superseded certificate. It is never removed from the firewall's certificate store; that store belongs to the sync tool
+- **FortiGate error messages read as text again.** FortiOS HTML-escapes its CLI errors, so they arrived showing `&#40;` and `&#41;` instead of brackets
+
 ## 2026-07-30 — The file browser's 100 MB upload limit is gone
 
 - **Uploads are no longer capped.** The file browser refused anything over 100 MB, and a file past that was rejected by the web server before the portal ever saw it — so the browser could only show a bare "Upload failed" with no hint that a limit existed at all. The limit is removed; free space on the target VM is now the only thing that bounds an upload
@@ -8,6 +23,7 @@
 - **A transfer that dies part-way no longer leaves a corrupt file behind.** If the connection drops or the tab is closed mid-upload, the half-written file is removed from the VM rather than left sitting there at the right name with the wrong contents
 - Long uploads no longer expire out from under themselves. A file browser session times out after 30 minutes idle, which a large transfer could outlast — the session is now kept alive while the transfer runs, so the next file in a batch isn't rejected
 
+## 2026-07-28 — A dropped console no longer takes the whole backend down with it
 
 - **Fixes a crash that logged everyone out.** When a Proxmox VNC console ended without a clean close — the guest rebooting, the node dropping the connection, a network blip — the backend forwarded that closure to the browser verbatim and the websocket library rejected it, killing the entire Node process. Every other user's session went down with it, and Docker restarted the container
 - The close codes involved (`1005`, `1006`) are ones a websocket only ever *reports* locally; the spec forbids sending them on the wire. They are now filtered to a plain no-status close, and no close frame can take the process down regardless

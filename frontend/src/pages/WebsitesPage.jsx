@@ -256,6 +256,11 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
   const isLive = site.status === 'live';
   const isError = site.status === 'error';
   const isWarning = site.status === 'warning';
+  // `blocked` means the route is serving, but a step needs something changed on
+  // the firewall before it can ever complete (today: the SSL inspection profile
+  // is at its 10-certificate limit). Retry stays available — it's the right
+  // action *after* freeing a slot — but the copy never implies it's the fix.
+  const isBlocked = site.status === 'blocked';
   // Only a route Homelabrrr owns and actually reverse-proxies has an upstream to
   // edit: sites imported from the Caddyfile are managed there (the backend
   // rejects a PUT for them), and a file_server/static block has no upstream at
@@ -265,7 +270,7 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-      <div className={`h-0.5 ${isLive ? 'bg-green-500' : isError ? 'bg-red-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500 animate-pulse'}`} />
+      <div className={`h-0.5 ${isLive ? 'bg-green-500' : isError ? 'bg-red-500' : isBlocked ? 'bg-orange-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500 animate-pulse'}`} />
       <div className="p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -281,8 +286,8 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
             {site.ownerUsername && <p className="text-[10px] text-gray-600 font-mono mt-0.5">owner: {site.ownerUsername}</p>}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {(isError || isWarning) && (
-              <button onClick={retry} disabled={busy} className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40 px-2 py-1 rounded hover:bg-gray-800 transition-colors">Retry</button>
+            {(isError || isWarning || isBlocked) && (
+              <button onClick={retry} disabled={busy} className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40 px-2 py-1 rounded hover:bg-gray-800 transition-colors" title={isBlocked ? 'Re-run the pipeline once the blocker described below is cleared' : undefined}>Retry</button>
             )}
             {canEdit && !inFlight && !confirmDelete && (
               <button onClick={() => { setError(''); setEditing((v) => !v); }} disabled={busy} className={`p-1.5 rounded-lg transition-colors ${editing ? 'text-orange-400 bg-gray-800' : 'text-gray-500 hover:text-white hover:bg-gray-800'} disabled:opacity-40`} aria-label="Edit website" title="Change the upstream target">
@@ -316,15 +321,15 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
         {!isLive && (
           <div className="mt-4">
             <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden mb-3">
-              <div className={`h-full transition-all duration-500 ${isError ? 'bg-red-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
+              <div className={`h-full transition-all duration-500 ${isError ? 'bg-red-500' : isBlocked ? 'bg-orange-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
             </div>
             <ol className="space-y-1">
               {site.steps.map((s) => (
                 <li key={s.key} className="flex items-start gap-3 py-1">
                   <StepIcon status={s.status} />
                   <div className="min-w-0">
-                    <p className={`text-sm ${s.status === 'active' ? 'text-white font-medium' : s.status === 'done' ? 'text-gray-300' : s.status === 'error' ? 'text-red-400' : 'text-gray-500'}`}>{s.label}</p>
-                    {s.note && <p className="text-xs text-amber-400/80 mt-0.5">{s.note}</p>}
+                    <p className={`text-sm ${s.status === 'active' ? 'text-white font-medium' : s.status === 'done' ? 'text-gray-300' : s.status === 'error' ? 'text-red-400' : s.status === 'blocked' ? 'text-orange-400' : 'text-gray-500'}`}>{s.label}</p>
+                    {s.note && <p className={`text-xs mt-0.5 ${s.status === 'blocked' ? 'text-orange-300/90' : 'text-amber-400/80'}`}>{s.note}</p>}
                   </div>
                 </li>
               ))}
@@ -332,8 +337,8 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
           </div>
         )}
 
-        {(isWarning || isError) && site.statusDetail && (
-          <p className={`text-xs mt-4 rounded-xl p-3 border ${isError ? 'text-red-400 bg-red-900/20 border-red-800/30' : 'text-amber-400 bg-amber-900/20 border-amber-800/30'}`}>{site.statusDetail}</p>
+        {(isWarning || isError || isBlocked) && site.statusDetail && (
+          <p className={`text-xs mt-4 rounded-xl p-3 border ${isError ? 'text-red-400 bg-red-900/20 border-red-800/30' : isBlocked ? 'text-orange-300 bg-orange-900/20 border-orange-800/30' : 'text-amber-400 bg-amber-900/20 border-amber-800/30'}`}>{site.statusDetail}</p>
         )}
         {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
       </div>
@@ -414,6 +419,7 @@ function StatusPill({ status }) {
   const cls = {
     live: 'bg-green-500/10 text-green-400 ring-green-500/20',
     warning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
+    blocked: 'bg-orange-500/10 text-orange-400 ring-orange-500/20',
     error: 'bg-red-500/10 text-red-400 ring-red-500/20',
   }[status] || 'bg-blue-500/10 text-blue-400 ring-blue-500/20';
   const inFlight = IN_FLIGHT.includes(status);
@@ -428,6 +434,8 @@ function StepIcon({ status }) {
   if (status === 'done') return <span className="mt-0.5 w-5 h-5 rounded-full bg-green-500/15 flex items-center justify-center shrink-0"><svg className="w-3 h-3 text-green-400" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg></span>;
   if (status === 'active') return <span className="mt-0.5 w-5 h-5 flex items-center justify-center shrink-0"><span className="w-4 h-4 border-2 border-blue-400/30 border-t-blue-400 rounded-full animate-spin" /></span>;
   if (status === 'error') return <span className="mt-0.5 w-5 h-5 rounded-full bg-red-500/15 flex items-center justify-center shrink-0"><svg className="w-3 h-3 text-red-400" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></span>;
+  // Blocked reads as "waiting on the operator", not as a failure to retry.
+  if (status === 'blocked') return <span className="mt-0.5 w-5 h-5 rounded-full bg-orange-500/15 flex items-center justify-center shrink-0"><svg className="w-3 h-3 text-orange-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75M3.75 21.75h16.5a.75.75 0 00.75-.75v-8.25a.75.75 0 00-.75-.75H3.75a.75.75 0 00-.75.75V21a.75.75 0 00.75.75z" /></svg></span>;
   if (status === 'skipped') return <span className="mt-0.5 w-5 h-5 rounded-full bg-gray-700/40 flex items-center justify-center shrink-0"><svg className="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14" /></svg></span>;
   return <span className="mt-0.5 w-5 h-5 flex items-center justify-center shrink-0"><span className="w-2 h-2 rounded-full bg-gray-700" /></span>;
 }

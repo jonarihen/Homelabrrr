@@ -1,6 +1,10 @@
 import https from 'https';
 import http from 'http';
 import { decryptSecret } from './utils/secrets.js';
+import { decodeHtmlEntities } from './utils/sanitize.js';
+import {
+  SERVER_CERT_MAX, ServerCertLimitError, planServerCertList, certSlotKey,
+} from './utils/certSlots.js';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
@@ -92,7 +96,9 @@ export class FortiGateAPI {
             // swallow the real status. Join arrays and let empty fall through.
             const cliError = Array.isArray(parsed?.cli_error) ? parsed.cli_error.join('; ') : parsed?.cli_error;
             const errMsg = parsed?.results?.[0]?.error || cliError || parsed?.http_status || `HTTP ${res.statusCode}`;
-            const err = new Error(`FortiGate API error: ${errMsg}`);
+            // FortiOS HTML-escapes its CLI errors — decode here so `&#40;`
+            // doesn't reach the UI literally.
+            const err = new Error(`FortiGate API error: ${decodeHtmlEntities(String(errMsg))}`);
             err.statusCode = res.statusCode;
             reject(err);
           }
@@ -360,23 +366,87 @@ export class FortiGateAPI {
    * inbound inspection ("Protecting SSL Server") presents the real Let's
    * Encrypt cert instead of the FortiGate's default. FortiOS keeps the inbound
    * server certificate list under `server-cert` with `server-cert-mode` set to
-   * `replace`. The existing list is read first so we append rather than clobber
-   * any certs an admin already attached by hand.
+   * `replace`, capped at `SERVER_CERT_MAX` entries.
+   *
+   * The existing list is read first so we never clobber certs an admin attached
+   * by hand, and `planServerCertList` decides what actually changes:
+   *
+   *   - a renewed cert (same subject, newer `_DDMMYYYY` stamp) REPLACES its
+   *     predecessor in place instead of being appended next to it — appending
+   *     was what filled profiles up, since FortiOS won't delete a cert that a
+   *     profile still references;
+   *   - a hostname already covered by a wildcard cert in the profile is left
+   *     alone — no PUT at all;
+   *   - a genuinely new subject with no free slot raises `ServerCertLimitError`
+   *     *before* the PUT, so the caller gets the occupied slot list instead of
+   *     FortiOS's "Return code -4".
+   *
+   * @param {string} domain the site hostname, for the wildcard-coverage check
+   * @returns {Promise<{action: string, replaced?: string, coveredBy?: string, occupied: string[]}>}
    */
-  async setInspectionServerCert(profileName, certName, vdomOverride = null) {
+  async setInspectionServerCert(profileName, certName, vdomOverride = null, domain = '') {
     const profile = await this.getSslSshProfile(profileName, vdomOverride);
     if (!profile) throw new Error(`SSL/SSH inspection profile "${profileName}" not found`);
 
     const existing = Array.isArray(profile['server-cert']) ? profile['server-cert'] : [];
-    const already = existing.some((c) => (c.name || c) === certName);
-    const serverCert = already
-      ? existing.map((c) => ({ name: c.name || c }))
-      : [...existing.map((c) => ({ name: c.name || c })), { name: certName }];
+    const plan = planServerCertList(existing, certName, domain, SERVER_CERT_MAX);
 
-    return this.request('PUT', `cmdb/firewall/ssl-ssh-profile/${encodeURIComponent(profileName)}`, {
+    if (plan.action === 'limit') {
+      throw new ServerCertLimitError(profileName, plan.occupied, SERVER_CERT_MAX);
+    }
+    // Already attached, or a wildcard in the profile covers this host: the
+    // desired state is the live state, so skip the API call entirely.
+    if (!plan.list) {
+      return { action: plan.action, coveredBy: plan.coveredBy, occupied: plan.occupied };
+    }
+
+    await this.request('PUT', `cmdb/firewall/ssl-ssh-profile/${encodeURIComponent(profileName)}`, {
       'server-cert-mode': 'replace',
-      'server-cert': serverCert,
+      'server-cert': plan.list.map((name) => ({ name })),
     }, vdomOverride);
+
+    return { action: plan.action, replaced: plan.replaced, occupied: plan.list };
+  }
+
+  /**
+   * Drop a certificate from an SSL/SSH inspection profile's inbound list,
+   * freeing its slot. Used when the last site relying on a cert is removed —
+   * with only 10 slots per profile, a leaked reference is not harmless, and
+   * FortiOS refuses to delete a cert any profile still points at.
+   *
+   * Matches on slot identity, so a stale predecessor left behind by an older
+   * Homelabrrr (`<domain>_<old date>`) is cleared alongside the current name.
+   * Never touches the cert in `vpn.certificate/local` — `caddy-forticertsync`
+   * owns that store.
+   *
+   * Emptying the list entirely is deliberately left alone: that would mean
+   * turning `server-cert-mode` off and changing how the profile inspects
+   * traffic, which is well beyond freeing a slot — and a profile down to its
+   * last certificate has no slot pressure to relieve anyway. `skipped` reports
+   * that case.
+   *
+   * @returns {Promise<{removed: string[], remaining: string[], skipped?: string}>}
+   */
+  async detachInspectionServerCert(profileName, certName, vdomOverride = null) {
+    const profile = await this.getSslSshProfile(profileName, vdomOverride);
+    if (!profile) throw new Error(`SSL/SSH inspection profile "${profileName}" not found`);
+
+    const existing = (Array.isArray(profile['server-cert']) ? profile['server-cert'] : [])
+      .map((c) => String((c && c.name) || c || '').trim())
+      .filter(Boolean);
+    const key = certSlotKey(certName);
+    const remaining = existing.filter((name) => certSlotKey(name) !== key);
+    const removed = existing.filter((name) => certSlotKey(name) === key);
+    if (removed.length === 0) return { removed: [], remaining };
+    if (remaining.length === 0) {
+      return { removed: [], remaining: existing, skipped: 'would empty the profile\'s server-certificate list' };
+    }
+
+    await this.request('PUT', `cmdb/firewall/ssl-ssh-profile/${encodeURIComponent(profileName)}`, {
+      'server-cert-mode': 'replace',
+      'server-cert': remaining.map((name) => ({ name })),
+    }, vdomOverride);
+    return { removed, remaining };
   }
 
   // ─── Switch-controller managed-switch ──────────────────────────────────────
