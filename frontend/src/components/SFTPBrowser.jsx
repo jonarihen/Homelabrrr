@@ -35,6 +35,7 @@ export default function SFTPBrowser({ token }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [mkdirName, setMkdirName] = useState('');
   const [showMkdir, setShowMkdir] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
@@ -98,17 +99,27 @@ export default function SFTPBrowser({ token }) {
   };
 
   const uploadFiles = async (files) => {
-    if (!files || files.length === 0) return;
+    const queue = Array.from(files || []);
+    if (queue.length === 0) return;
     setUploading(true);
     setError('');
     try {
-      for (const file of files) {
+      for (const [i, file] of queue.entries()) {
+        // `token` and `path` go in first: the backend reads them off the front
+        // of the multipart stream to authorize the upload before it forwards
+        // any of the file itself.
         const form = new FormData();
         form.append('token', token);
         form.append('path', currentPath);
         form.append('file', file);
+        setUploadProgress({ name: file.name, index: i + 1, total: queue.length, percent: 0 });
         await api.post('/sftp/upload', form, {
           headers: { 'Content-Type': 'multipart/form-data' },
+          onUploadProgress: (e) => {
+            if (!e.total) return;
+            const percent = Math.round((e.loaded / e.total) * 100);
+            setUploadProgress((p) => (p ? { ...p, percent } : p));
+          },
         });
       }
       await loadDir(currentPath);
@@ -116,6 +127,7 @@ export default function SFTPBrowser({ token }) {
       setError(e.response?.data?.error || 'Upload failed');
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -264,6 +276,31 @@ export default function SFTPBrowser({ token }) {
             onClick={() => { setShowMkdir(false); setMkdirName(''); }}
             className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
           >Cancel</button>
+        </div>
+      )}
+
+      {/* Upload progress */}
+      {uploadProgress && (
+        <div className="px-4 py-2 border-b border-gray-700 bg-gray-900/50">
+          <div className="flex items-center justify-between gap-3 text-xs text-gray-400">
+            <span className="truncate">
+              Uploading <span className="text-gray-200">{uploadProgress.name}</span>
+              {uploadProgress.total > 1 && (
+                <span className="text-gray-600"> ({uploadProgress.index}/{uploadProgress.total})</span>
+              )}
+            </span>
+            {/* At 100% the browser is done sending but the backend is still
+                flushing to the guest — say so instead of sitting on "100%". */}
+            <span className="shrink-0 font-mono text-gray-500">
+              {uploadProgress.percent === 100 ? 'Writing...' : `${uploadProgress.percent}%`}
+            </span>
+          </div>
+          <div className="mt-1.5 h-1 overflow-hidden rounded bg-gray-800">
+            <div
+              className="h-full bg-blue-500 transition-[width] duration-150"
+              style={{ width: `${uploadProgress.percent}%` }}
+            />
+          </div>
         </div>
       )}
 

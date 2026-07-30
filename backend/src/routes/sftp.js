@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import multer from 'multer';
+import Busboy from 'busboy';
 import { basename, posix } from 'path';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -8,12 +8,11 @@ import { userCanAccessVm } from '../utils/vmAccess.js';
 import { nodeLookupCandidates } from '../utils/nodeRef.js';
 import { normalizeSshHostFingerprint } from '../utils/sshHostKey.js';
 import { decryptSecret } from '../utils/secrets.js';
+import { sanitizeError } from '../utils/sanitize.js';
 import { createSshConnection } from '../utils/sshConnect.js';
 
 const router = Router();
 router.use(requireAuth);
-
-const upload = multer({ limits: { fileSize: 100 * 1024 * 1024 } }); // 100 MB
 
 // ─── SFTP session store ─────────────────────────────────────────────────────
 
@@ -215,33 +214,117 @@ router.get('/download', async (req, res) => {
   }
 });
 
-/** Upload a file to a remote directory. */
-router.post('/upload', upload.single('file'), async (req, res) => {
-  const { token, path: destDir = '/' } = req.body;
-  const sess = resolveSession(token);
-  if (!sess) return res.status(401).json({ error: 'SFTP session expired or invalid' });
-  if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-  const remotePath = posix.join(destDir, req.file.originalname);
-
-  let conn, sftp;
+/**
+ * Upload a file to a remote directory.
+ *
+ * The multipart body is piped straight into the SFTP write stream, so an upload
+ * never lands in this process's memory and the only ceiling on its size is free
+ * space on the remote host. `token` and `path` are sent ahead of the file part,
+ * which lets the session be checked before any bytes reach the guest.
+ */
+router.post('/upload', (req, res) => {
+  let bb;
   try {
-    ({ conn, sftp } = await openSftp(sess));
-
-    await new Promise((resolve, reject) => {
-      const writeStream = sftp.createWriteStream(remotePath);
-      writeStream.on('error', reject);
-      writeStream.on('close', resolve);
-      writeStream.end(req.file.buffer);
-    });
-
-    res.json({ ok: true, path: remotePath, size: req.file.size });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  } finally {
-    conn?.end();
+    bb = Busboy({ headers: req.headers, limits: { files: 1 } });
+  } catch {
+    return res.status(400).json({ error: 'Expected a multipart/form-data upload' });
   }
+
+  const fields = Object.create(null);
+  let conn = null;
+  let sawFile = false;
+  let settled = false;
+  /** Replaced once a partially written file can exist on the remote host. */
+  let discardPartial = (done) => done();
+
+  /** Stop parsing and answer at most once. */
+  const settle = (respond) => {
+    if (settled) return;
+    settled = true;
+    req.unpipe(bb);
+    bb.removeAllListeners();
+    respond();
+  };
+
+  const succeed = (body) => settle(() => {
+    conn?.end();
+    conn = null;
+    if (!res.headersSent && res.writable) res.json(body);
+  });
+
+  const fail = (status, message) => settle(() => {
+    if (!res.headersSent && res.writable) {
+      // Hang up rather than draining the rest of an upload we have already
+      // rejected — what is still on the wire may be gigabytes.
+      res.set('Connection', 'close');
+      res.status(status).json({ error: message });
+    }
+    // Never leave a truncated file behind under the name the user expects.
+    // Answering first keeps a stalled cleanup from hanging the request.
+    discardPartial(() => { conn?.end(); conn = null; });
+  });
+
+  bb.on('field', (name, value) => { fields[name] = value; });
+
+  bb.on('file', (name, fileStream, info) => {
+    if (settled || sawFile || name !== 'file') return fileStream.resume();
+    sawFile = true;
+
+    if (!fields.token) return fail(400, 'token and path must be sent before the file part');
+    const sess = resolveSession(fields.token);
+    if (!sess) return fail(401, 'SFTP session expired or invalid');
+    if (sess.userId !== req.session.userId) return fail(403, 'Access denied');
+
+    const filename = basename(info.filename || '');
+    if (!filename) return fail(400, 'No file uploaded');
+    const remotePath = posix.join(fields.path || '/', filename);
+
+    // Hold the part until the SSH channel is up; backpressure keeps the client
+    // from running ahead of us.
+    fileStream.pause();
+
+    openSftp(sess).then(({ conn: sshConn, sftp }) => {
+      if (settled) return sshConn.end();
+      conn = sshConn;
+
+      const writeStream = sftp.createWriteStream(remotePath);
+      let bytes = 0;
+      let touched = Date.now();
+
+      discardPartial = (done) => sftp.unlink(remotePath, () => done());
+
+      fileStream.on('data', (chunk) => {
+        bytes += chunk.length;
+        // A transfer measured in gigabytes can outlive TOKEN_TTL, which would
+        // then reject every remaining file in the batch. Keep it warm.
+        const now = Date.now();
+        if (now - touched > 60_000) {
+          touched = now;
+          sess.expires = now + TOKEN_TTL;
+        }
+      });
+
+      // `fail` settles synchronously, so the 'close' that destroy() triggers
+      // can no longer be mistaken for a completed upload.
+      fileStream.on('error', (err) => {
+        fail(500, sanitizeError(err.message));
+        writeStream.destroy();
+      });
+      writeStream.on('error', (err) => fail(500, sanitizeError(err.message)));
+      writeStream.on('close', () => succeed({ ok: true, path: remotePath, size: bytes }));
+
+      fileStream.pipe(writeStream);
+    }).catch((err) => fail(500, sanitizeError(err.message)));
+  });
+
+  bb.on('error', (err) => fail(400, err.message));
+  bb.on('close', () => { if (!sawFile) fail(400, 'No file uploaded'); });
+
+  // Tab closed or network dropped mid-transfer. The response is already gone,
+  // so this just discards the partial file and releases the SSH connection.
+  res.on('close', () => fail(499, 'Upload aborted'));
+
+  req.pipe(bb);
 });
 
 /** Create a remote directory. */
