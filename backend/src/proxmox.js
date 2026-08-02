@@ -3,6 +3,7 @@ import tls from 'tls';
 import db from './db.js';
 import { decryptSecret } from './utils/secrets.js';
 import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.js';
+import { pickVmid, isVmidTakenError, VmidReservations, VMID_MIN } from './utils/vmidAllocator.js';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
@@ -329,6 +330,21 @@ export async function getHostStatus(host) {
 
 // ── Provisioning helpers ─────────────────────────────────────────────────────
 
+// In-flight VMID reservations. The id is chosen from a snapshot of what Proxmox
+// reports and nothing upstream holds it, so without this two deploys started at
+// the same time are handed the same id and the second create fails with a raw
+// "already exists". The backend is single-process — the same assumption the
+// tag-sync scheduler makes — so an in-process set is enough. Entries expire on
+// their own (see VmidReservations) in case a caller never releases.
+const vmidReservations = new VmidReservations();
+
+// Hand a reserved id back early — call this when the create/clone that was
+// going to use it failed, so a botched deploy doesn't burn the id for the full
+// reservation TTL.
+export function releaseVmid(vmid) {
+  return vmidReservations.release(vmid);
+}
+
 export async function getNextVmid() {
   const hosts = getHosts();
   // Collect all used VMIDs across every connected host so IDs are globally unique
@@ -345,16 +361,49 @@ export async function getNextVmid() {
   if (failedHosts.length > 0) {
     throw new Error(`Cannot allocate a globally unique VMID while these Proxmox hosts are unreachable: ${failedHosts.join(', ')}`);
   }
+  let startAt = VMID_MIN;
   if (usedIds.size === 0) {
     // No VMs anywhere — ask any reachable host for its default next ID
     for (const h of hosts) {
-      try { return await makeRequest(h, 'GET', '/cluster/nextid'); } catch { /* next */ }
+      try {
+        const next = Number.parseInt(await makeRequest(h, 'GET', '/cluster/nextid'), 10);
+        if (Number.isInteger(next)) { startAt = next; break; }
+      } catch { /* next */ }
     }
   }
-  // Find the lowest free VMID starting at 100 (Proxmox minimum)
-  let vmid = 100;
-  while (usedIds.has(vmid)) vmid++;
+  // Lowest free VMID that no other in-flight deploy is already holding
+  const vmid = pickVmid(usedIds, vmidReservations.active(), startAt);
+  vmidReservations.reserve(vmid);
   return vmid;
+}
+
+// Allocate a VMID, run `fn(vmid)` (the createVM / cloneVM call), and self-heal
+// the one collision the reservation set can't prevent: an id Proxmox reported
+// as free that something outside this process took in the meantime. Returns
+// `{ vmid, result }`.
+//
+// On a collision the losing id stays reserved — it is genuinely taken upstream
+// — and one retry runs against a fresh allocation. Any other failure releases
+// the reservation immediately so a failed deploy doesn't burn an id.
+export async function withFreshVmid(fn) {
+  const vmid = await getNextVmid();
+  try {
+    return { vmid, result: await fn(vmid) };
+  } catch (err) {
+    if (!isVmidTakenError(err)) {
+      releaseVmid(vmid);
+      throw err;
+    }
+    console.warn(`[vmid] ${vmid} was taken upstream — retrying with a fresh id`);
+  }
+
+  const retryVmid = await getNextVmid();
+  try {
+    return { vmid: retryVmid, result: await fn(retryVmid) };
+  } catch (err) {
+    if (!isVmidTakenError(err)) releaseVmid(retryVmid);
+    throw err;
+  }
 }
 
 export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {

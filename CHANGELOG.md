@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-02 — Two people can deploy at the same time without clashing
+
+- **Simultaneous deployments no longer get handed the same VM ID.** The next free ID was picked from a snapshot of what Proxmox reported and nothing held it, so two people clicking Deploy at once — or one person double-clicking — could both be given ID 105. The second deployment then failed with a raw *"VM 105 already exists"* from Proxmox. An ID is now held for the deployment that was given it, so the next request skips it. A deployment that fails hands its ID straight back
+- **If an ID is taken behind the portal's back** (someone creating a VM directly in Proxmox, for instance), the deployment now quietly picks a new one and carries on instead of failing
+- **A failed deployment no longer leaves the VM assigned to you.** Ownership and the lease clock used to be recorded the moment the deployment was submitted, so a clone or cloud-image deploy that failed part-way left your account holding a VM that was never created — sometimes an ID that later belonged to someone else. Both are now recorded once the VM actually exists
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

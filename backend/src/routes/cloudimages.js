@@ -2,7 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import {
   downloadUrlToStorage, deleteVolume, convertToTemplate,
-  getTaskStatus, getStorageContent, getNextVmid, createVM, resizeVMDisk, getHost,
+  getTaskStatus, getStorageContent, withFreshVmid, createVM, resizeVMDisk, getHost,
 } from '../proxmox.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
@@ -311,9 +311,10 @@ router.post('/:id/template', async (req, res) => {
   }
 
   try {
-    const vmid = await getNextVmid();
-    const upid = await createVM(image.node, vmid, {
-      name: String(name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || `cloud-template-${vmid}`,
+    // The VMID is reserved for the duration of the create and handed back if it
+    // fails, so a template build can't collide with a concurrent VM deploy.
+    const { vmid, result: upid } = await withFreshVmid((id) => createVM(image.node, id, {
+      name: String(name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || `cloud-template-${id}`,
       cpu: 'host',
       cores: parseInt(cores, 10) || 2,
       memory: memoryMb,
@@ -327,7 +328,7 @@ router.post('/:id/template', async (req, res) => {
       net0: `virtio,bridge=${bridge}`,
       ipconfig0: 'ip=dhcp',
       description: `Cloud-init template built from ${image.name} (${image.url})`,
-    });
+    }));
 
     setImageStatus(image.id, 'templating', `Creating template "${name}" (VMID ${vmid})…`);
     logAudit(req, 'cloud_image_template', `${image.node}/${vmid}`, `image:${image.name} name:${name}`);
