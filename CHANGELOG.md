@@ -13,6 +13,12 @@
 
 - **Fixes a Port Forwarding page that could not be reached.** Granting someone only *Manage port forwards* — the intended grant for scoped self-service port forwarding — left them with no **Networking** heading in the sidebar and therefore no link to the page they had just been given. The only way in was for someone to send them the URL
 - The sidebar's section headings are now derived from the links inside them: a section appears exactly when the user can follow at least one of its links, so a granted page can no longer be hidden behind a heading that never renders
+## 2026-08-02 — Port forwarding says why a VM can't be published
+
+- **The "Target VM" dropdown no longer hides VMs.** A VM had to clear four separate checks — a recorded IP, a VLAN tag on its network interface, that VLAN synced to the firewall, and (for non-admins) that VLAN assigned to you — and failing any one of them silently removed it from the list. The dropdown could end up empty with nothing but an eleven-pixel grey line to explain it
+- **Every VM you can see is now listed.** The ones that aren't ready appear greyed out with the reason next to the name — `web-01 — no IP recorded`, `db-02 — VLAN not synced to this firewall` — so you can tell at a glance that your VM exists and what it's waiting on
+- **When nothing is publishable, the empty dropdown is replaced by a callout** naming the missing prerequisite and linking to where you fix it: the VM page for a missing IP or VLAN tag, Networking → VLANs for an unsynced VLAN, and "ask an admin" when the VLAN simply isn't yours
+- **Creating a port forward reports the actual blocker.** Two catch-all messages ("You can only create port forwards for your own VMs on VLANs assigned to you" / "This VM is not on a VLAN you can publish through this firewall") covered all four causes; the specific reason and its fix are now returned instead
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 

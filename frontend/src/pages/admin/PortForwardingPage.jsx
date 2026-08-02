@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
@@ -14,6 +15,24 @@ const SERVICE_PRESETS = [
   { label: 'RDP',    port: 3389, protocol: 'tcp' },
   { label: 'Custom', port: null, protocol: 'tcp' },
 ];
+
+// Headline for the "every VM is blocked the same way" callout. The per-VM
+// message the backend sends is singular, so the heading carries the count.
+const BLOCK_TITLES = {
+  no_ip: n => (n === 1 ? 'VM IP address not recorded' : 'No VM IP addresses recorded'),
+  untagged: n => (n === 1 ? 'VM has no VLAN tag' : 'No VLAN tags on your VMs'),
+  vlan_not_synced: () => 'VLAN not synced to this firewall',
+  vlan_not_assigned: n => (n === 1 ? 'VLAN not assigned to you' : 'No VLANs assigned to you'),
+};
+
+// Used when several VMs are blocked by the same code but for different VLANs,
+// so no single backend message describes all of them.
+const BLOCK_SUMMARIES = {
+  no_ip: n => `Homelabrrr doesn't know the IP address of any of your ${n} accessible VMs yet.`,
+  untagged: n => `None of your ${n} accessible VMs have a VLAN tag on their network interface, so there's no firewall interface to publish through.`,
+  vlan_not_synced: n => `The VLANs behind your ${n} accessible VMs haven't been synced to this firewall yet.`,
+  vlan_not_assigned: n => `The VLANs behind your ${n} accessible VMs aren't assigned to you.`,
+};
 
 function portProtocolLabel(port, protocol) {
   const trimmedPort = String(port || '').trim();
@@ -116,6 +135,41 @@ export default function PortForwardingPage() {
     if (!form.vmKey) return null;
     return vmTargets.find(v => `${routeNode(v)}/${v.vmid}` === form.vmKey) || null;
   }, [form.vmKey, vmTargets]);
+
+  // The backend now returns every VM the user can see, annotated with `eligible`
+  // and a structured `blocked` reason, instead of silently dropping the ones
+  // that are missing a prerequisite. Privileged users can still pick a
+  // VLAN-blocked VM and choose the destination interface by hand (`overridable`).
+  const selectableTargets = useMemo(
+    () => vmTargets.filter(v => v.eligible || v.overridable),
+    [vmTargets],
+  );
+  const blockedTargets = useMemo(
+    () => vmTargets.filter(v => !v.eligible && !v.overridable),
+    [vmTargets],
+  );
+
+  // When nothing is selectable and every blocked VM shares one cause, promote
+  // that cause to a callout with the fix (and a link to it, when there is one
+  // single place to go).
+  const blockedCallout = useMemo(() => {
+    if (loading || selectableTargets.length > 0 || blockedTargets.length === 0) return null;
+    const first = blockedTargets[0].blocked;
+    if (!first) return null;
+    if (!blockedTargets.every(v => v.blocked?.code === first.code)) return null;
+    const count = blockedTargets.length;
+    const sameMessage = blockedTargets.every(v => v.blocked?.message === first.message);
+    const sameHref = blockedTargets.every(v => (v.blocked?.href || '') === (first.href || ''));
+    return {
+      code: first.code,
+      title: (BLOCK_TITLES[first.code] || (() => 'These VMs cannot be published yet'))(count),
+      message: sameMessage
+        ? first.message
+        : (BLOCK_SUMMARIES[first.code] || (() => first.message))(count),
+      action: first.action || '',
+      href: sameHref ? (first.href || '') : '',
+    };
+  }, [loading, selectableTargets, blockedTargets]);
 
   // When VM selection changes, auto-fill IP, interface, and name from pre-resolved data
   const handleVmChange = (vmKey) => {
@@ -383,6 +437,30 @@ export default function PortForwardingPage() {
       {showCreate && !needsWanConfig && (
         <div className="bg-gray-900/50 border border-blue-500/20 rounded-xl p-5">
           <h3 className="text-sm font-semibold text-white mb-4">New Port Forward</h3>
+
+          {/* Every accessible VM is blocked by the same prerequisite — say which
+              one and where to fix it, instead of an empty dropdown. Same shape
+              as the "External IP not configured" callout above. */}
+          {blockedCallout && (
+            <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg mb-4">
+              <div className="text-center py-6 px-4">
+                <svg className="w-8 h-8 mx-auto text-yellow-500/60 mb-3" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                </svg>
+                <p className="text-yellow-400 text-sm font-medium mb-1">{blockedCallout.title}</p>
+                <p className="text-gray-500 text-xs mb-4">{blockedCallout.message}</p>
+                {blockedCallout.href ? (
+                  <Link to={blockedCallout.href}
+                    className="inline-block px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white text-sm font-medium rounded-lg transition-colors">
+                    {blockedCallout.action || 'Fix this'}
+                  </Link>
+                ) : blockedCallout.action ? (
+                  <p className="text-xs text-gray-600">{blockedCallout.action}</p>
+                ) : null}
+              </div>
+            </div>
+          )}
+
           <form onSubmit={handleCreate} className="space-y-4">
             {/* Row 1: VM + Service */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -391,17 +469,34 @@ export default function PortForwardingPage() {
                 <select value={form.vmKey} onChange={e => handleVmChange(e.target.value)}
                   className={inputCls} required>
                   <option value="">Select a VM...</option>
-                  {vmTargets.map(v => (
+                  {selectableTargets.map(v => (
                     <option key={`${routeNode(v)}/${v.vmid}`} value={`${routeNode(v)}/${v.vmid}`}>
                       {v.name} ({v.ip}) · {displayNode(v.node)} / {v.vmid}
                     </option>
                   ))}
+                  {/* Ineligible VMs stay visible but unselectable, with the reason
+                      inline, so the user can see their VM exists and learn why. */}
+                  {blockedTargets.length > 0 && (
+                    <optgroup label="Needs setup — cannot be published yet">
+                      {blockedTargets.map(v => (
+                        <option key={`${routeNode(v)}/${v.vmid}`} value={`${routeNode(v)}/${v.vmid}`} disabled>
+                          {v.name} — {v.blocked?.short || 'not ready'} · {displayNode(v.node)} / {v.vmid}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
                 {vmTargets.length === 0 && !loading && (
                   <p className="text-[11px] text-gray-600 mt-1">
                     {canManageAllPortForwards
-                      ? 'No VMs with SSH configs found. Configure SSH on a VM first.'
-                      : 'No accessible VMs with SSH configs on your assigned VLANs were found.'}
+                      ? 'No VMs found on any registered Proxmox host.'
+                      : 'No VMs are assigned to you yet — ask an admin for access.'}
+                  </p>
+                )}
+                {selectableTargets.length > 0 && blockedTargets.length > 0 && (
+                  <p className="text-[11px] text-gray-600 mt-1">
+                    {blockedTargets.length} VM{blockedTargets.length !== 1 ? 's are' : ' is'} missing a
+                    prerequisite and shown greyed out below.
                   </p>
                 )}
               </div>
@@ -498,9 +593,10 @@ export default function PortForwardingPage() {
                   )}
                   {!form.dstInterface && (
                     <p className="text-[11px] text-yellow-500/80 mt-0.5">
-                      {canManageAllPortForwards
-                        ? 'Could not auto-detect from VM VLAN'
-                        : 'This VM is not on a firewall-synced VLAN assigned to you'}
+                      {selectedVm?.blocked?.message
+                        || (canManageAllPortForwards
+                          ? 'Could not auto-detect from VM VLAN'
+                          : 'This VM is not on a firewall-synced VLAN assigned to you')}
                     </p>
                   )}
                 </div>
