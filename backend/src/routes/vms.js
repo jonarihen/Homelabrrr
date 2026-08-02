@@ -12,6 +12,7 @@ import {
 import { createClient } from '../fortigate.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
+import { httpError, sendError } from '../utils/httpError.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
 import { userCanAccessVm, userOwnsVm } from '../utils/vmAccess.js';
@@ -99,11 +100,10 @@ function hostNameForNode(nodeValue) {
   return db.prepare('SELECT name FROM pve_hosts WHERE id = ?').get(hostId)?.name || '';
 }
 
-function badRequest(message) {
-  const err = new Error(message);
-  err.statusCode = 400;
-  return err;
-}
+// Portal-authored validation failure. Handlers report it through sendError(),
+// which honours the tagged status and returns the message verbatim for 4xx —
+// these strings were written for the user, not scraped from an upstream.
+const badRequest = (message) => httpError(400, message);
 
 function normalizeMac(mac = '') {
   return String(mac || '').trim().toLowerCase().replace(/-/g, ':');
@@ -372,7 +372,7 @@ router.get('/', async (req, res) => {
         };
       })));
     } catch (err) {
-      return res.status(500).json({ error: sanitizeError(err.message) });
+      return sendError(res, err);
     }
   }
 
@@ -410,7 +410,7 @@ router.get('/:node/:vmid/status', async (req, res) => {
       res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, hostName, vmid: parseInt(vmid, 10), type: 'lxc', lease });
     }
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -430,7 +430,7 @@ router.post('/:node/:vmid/lease/renew', (req, res) => {
     logAudit(req, 'lease_renew', `${node}/${vmid}`, `renewal #${lease.renewal_count}`);
     res.json({ ok: true, lease: summarizeLease(node, vmid) });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -458,7 +458,7 @@ router.post('/:node/:vmid/action', async (req, res) => {
     logAudit(req, 'vm_action', `${node}/${vmid}`, action);
     res.json({ ok: true, upid });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -525,7 +525,7 @@ router.delete('/:node/:vmid', async (req, res) => {
     logAudit(req, 'vm_delete', `${node}/${vmid}`, `backups_deleted=${deletedBackups}${failedBackups.length > 0 ? ` backups_failed=${failedBackups.length}` : ''}`);
     res.json({ ok: true, deletedBackups, failedBackups });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -547,7 +547,7 @@ router.get('/:node/:vmid/rrddata', async (req, res) => {
     }
     res.json(data);
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -591,7 +591,7 @@ router.post('/:node/:vmid/vnc-ticket', async (req, res) => {
     // Return ticket so noVNC can use it as VNC password
     res.json({ token, ticket: vncData.ticket });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -735,7 +735,7 @@ router.get('/:node/:vmid/ip-management', async (req, res) => {
 
     res.json({ interfaces: payload });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -813,7 +813,7 @@ router.put('/:node/:vmid/ip-management/:netInterface/reservation', async (req, r
       sshConfigHost: sshConfigUpdated ? ip : null,
     });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -842,7 +842,7 @@ router.delete('/:node/:vmid/ip-management/:netInterface/reservation', async (req
     logAudit(req, 'vm_delete_ip_reservation', `${node}/${vmid}/${netInterface}`, scope.sync.firewall_name);
     res.json({ ok: true, removed: true });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -861,7 +861,7 @@ router.get('/:node/:vmid/config', async (req, res) => {
       res.json({ ...(await getLXCConfig(node, vmid)), ...nodeIdentity, vmid: parseInt(vmid, 10) });
     }
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -908,7 +908,7 @@ router.get('/:node/:vmid/cloudinit', async (req, res) => {
       ciuser: typeof config.ciuser === 'string' ? config.ciuser : '',
     });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1004,7 +1004,7 @@ router.post('/:node/:vmid/cloudinit-credentials', async (req, res) => {
       rebootRequired: !rebooted,
     });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1043,7 +1043,7 @@ router.put('/:node/:vmid/vlan', async (req, res) => {
     logAudit(req, 'vlan_change', `${node}/${vmid}`, `${netInterface}=tag:${vlanTag}`);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1107,8 +1107,7 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
     logAudit(req, 'vm_hardware_change', `${node}/${vmid}`, details.join(', '));
     res.json({ ok: true });
   } catch (err) {
-    const status = err.status || 500;
-    res.status(status).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1161,8 +1160,7 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
     logAudit(req, 'vm_disk_resize', `${node}/${vmid}`, `${disk}=${size}`);
     res.json({ ok: true });
   } catch (err) {
-    const status = err.status || 500;
-    res.status(status).json({ error: err.status ? err.message : sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1285,7 +1283,7 @@ router.get('/:node/:vmid/backups', async (req, res) => {
     const inProgress = new Set(inProgressVolids(backups, tasks));
     res.json(backups.map((b) => (inProgress.has(b.volid) ? { ...b, inProgress: true } : b)));
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1301,7 +1299,7 @@ router.get('/:node/:vmid/backup-tasks', async (req, res) => {
     await refreshBackupTasks(rows);
     res.json(rows.map(serializeBackupTask));
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1313,7 +1311,7 @@ router.get('/:node/:vmid/backup-storages', async (req, res) => {
   try {
     res.json(await getBackupStorages(node));
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1347,7 +1345,7 @@ router.post('/:node/:vmid/backup', async (req, res) => {
       detail: 'Backup could not be started',
       url: portalLink(`/vm/${node}/${vmid}`),
     });
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1366,7 +1364,7 @@ router.delete('/:node/:vmid/backups/:storage/*', async (req, res) => {
     logAudit(req, 'backup_delete', `${node}/${vmid}`, volid);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1390,7 +1388,7 @@ router.post('/:node/:vmid/restore', async (req, res) => {
     logAudit(req, 'vm_restore', `${node}/${vmid}`, archive);
     res.json({ ok: true, upid });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1410,7 +1408,7 @@ router.get('/:node/:vmid/backup-files/:storage/*', async (req, res) => {
     const files = await listBackupFiles(node, storage, volid, filepath);
     res.json(files);
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1445,7 +1443,7 @@ router.get('/:node/:vmid/backup-download/:storage/*', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
     stream.pipe(res);
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1465,7 +1463,7 @@ router.get('/:node/:vmid/snapshots', async (req, res) => {
     filtered.sort((a, b) => (b.snaptime || 0) - (a.snaptime || 0));
     res.json(filtered);
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1483,7 +1481,7 @@ router.post('/:node/:vmid/snapshots', async (req, res) => {
     logAudit(req, 'snapshot_create', `${node}/${vmid}`, name);
     res.json({ ok: true, upid });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1498,7 +1496,7 @@ router.delete('/:node/:vmid/snapshots/:snapname', async (req, res) => {
     logAudit(req, 'snapshot_delete', `${node}/${vmid}`, snapname);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1513,7 +1511,7 @@ router.post('/:node/:vmid/snapshots/:snapname/rollback', async (req, res) => {
     logAudit(req, 'snapshot_rollback', `${node}/${vmid}`, snapname);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 

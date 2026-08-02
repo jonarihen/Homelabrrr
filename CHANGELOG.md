@@ -1,6 +1,10 @@
 # Changelog
 
-## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
+## 2026-08-02 — Validation mistakes stop looking like server crashes
+
+- **"The IP page throws a 500" is fixed.** Picking a network interface that isn't VLAN-tagged, or one whose VLAN the portal doesn't manage, is an ordinary mistake — but saving or removing a DHCP reservation reported it as HTTP 500, so it read as an outage rather than a correction to make
+- **The explanation is no longer mangled.** Messages that named an address ("No DHCP server was found on …") had it replaced with `[internal-host]` on the way out, because the redaction meant for leaked upstream details was being applied to the portal's own wording. Portal-written messages now arrive intact, while genuine upstream failures are still redacted
+- The same mix-up affected quota, node-capacity, node-maintenance and storage-visibility refusals across VM hardware edits, provisioning and migration — those now come back with the right status code and their original wording too
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
 - **With a bundle configured, publishing a site touches the FortiGate not at all.** The pipeline stops waiting for a per-site certificate to sync and stops writing to the inspection profile — the new hostname is already inside the bundle's `*.parent-domain` SAN, so the certificate and inspection steps complete immediately. A new site costs **zero** of the ten slots

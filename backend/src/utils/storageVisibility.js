@@ -1,5 +1,6 @@
 import db from '../db.js';
 import { getHostIdForNode } from '../proxmox.js';
+import { httpError } from './httpError.js';
 
 // Storage pool exposure control.
 //
@@ -63,8 +64,6 @@ export async function assertStorageExposed(node, storage, user) {
   if (!storage) return; // nothing named ⇒ nothing to check
   const hostId = await getHostIdForNode(node);
   if (!storageExposedForHost(hostId, storage)) {
-    const err = new Error(`Storage pool "${storage}" is not available for provisioning. Pick an exposed pool.`);
-    err.status = 403;
-    throw err;
+    throw httpError(403, `Storage pool "${storage}" is not available for provisioning. Pick an exposed pool.`);
   }
 }

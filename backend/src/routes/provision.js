@@ -6,7 +6,7 @@ import {
   getAllVMs, getVMConfig,
 } from '../proxmox.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
-import { sanitizeError } from '../utils/sanitize.js';
+import { sendError, hasHttpStatus, tagStatus } from '../utils/httpError.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
@@ -155,7 +155,7 @@ router.get('/quota', async (req, res) => {
         : { maxCores: quota.maxCores, maxMemoryGb: quota.maxMemoryGb, maxStorageGb: quota.maxStorageGb },
     });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -213,7 +213,7 @@ router.get('/nodes', requirePermission('can_manage_templates', 'can_create_vms')
   try {
     res.json(await getNodes());
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -224,7 +224,7 @@ router.get('/nodes/:node/storages', requirePermission('can_provision', 'can_mana
     const visible = await filterExposedStorages(req.params.node, storages, { isAdmin: req.session.isAdmin });
     res.json(visible);
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -236,8 +236,7 @@ router.get('/nodes/:node/isos/:storage', requirePermission('can_create_vms'), as
     await assertStorageExposed(req.params.node, req.params.storage, { isAdmin: req.session.isAdmin });
     res.json(await getISOImages(req.params.node, req.params.storage));
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -245,7 +244,7 @@ router.get('/nodes/:node/networks', requireAdmin, async (req, res) => {
   try {
     res.json(await getNetworks(req.params.node));
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -286,7 +285,7 @@ router.post('/clone', async (req, res) => {
   try {
     await assertStorageExposed(template.node, storage || template.default_storage, user);
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
   }
 
@@ -294,7 +293,7 @@ router.post('/clone', async (req, res) => {
   try {
     assertNodeAvailable(template.node);
   } catch (err) {
-    return res.status(err.status || 423).json({ error: err.message });
+    return sendError(res, err);
   }
 
   // Validate CPU count against node's physical cores before cloning
@@ -302,7 +301,7 @@ router.post('/clone', async (req, res) => {
   try {
     await computeCpuTopology(template.node, finalCores);
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (hasHttpStatus(err)) return sendError(res, err);
     // Non-validation errors are fine — we'll fall back in pollAndConfigure
   }
 
@@ -322,7 +321,7 @@ router.post('/clone', async (req, res) => {
       addDiskGb: parseFloat(finalDisk) || 0,
     });
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
   }
 
@@ -384,8 +383,10 @@ router.post('/clone', async (req, res) => {
       upid,
     });
   } catch (err) {
-    const status = err.message?.includes('globally unique VMID') ? 503 : 500;
-    res.status(status).json({ error: sanitizeError(err.message) });
+    // An unreachable host makes VMID allocation unsafe rather than broken —
+    // report it as "try again later" instead of a flat 500.
+    if (!hasHttpStatus(err) && err.message?.includes('globally unique VMID')) tagStatus(err, 503);
+    sendError(res, err);
   }
 });
 
@@ -553,7 +554,7 @@ router.post('/from-image', async (req, res) => {
   try {
     await assertStorageExposed(targetImage.node, targetStorage, user);
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
   }
 
@@ -561,7 +562,7 @@ router.post('/from-image', async (req, res) => {
   try {
     assertNodeAvailable(targetImage.node);
   } catch (err) {
-    return res.status(err.status || 423).json({ error: err.message });
+    return sendError(res, err);
   }
 
   // CPU topology + node capacity checks run on the placed node (import-from
@@ -570,7 +571,7 @@ router.post('/from-image', async (req, res) => {
   try {
     cpuLayout = await computeCpuTopology(targetImage.node, cores);
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (hasHttpStatus(err)) return sendError(res, err);
     // Non-validation error — fall back to a plain socket/core split
     cpuLayout = { sockets: 1, cores: parseInt(cores, 10) || 2 };
   }
@@ -584,7 +585,7 @@ router.post('/from-image', async (req, res) => {
       addDiskGb: baseDiskGb,
     });
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
   }
 
@@ -649,8 +650,10 @@ router.post('/from-image', async (req, res) => {
       upid,
     });
   } catch (err) {
-    const status = err.message?.includes('globally unique VMID') ? 503 : 500;
-    res.status(status).json({ error: sanitizeError(err.message) });
+    // An unreachable host makes VMID allocation unsafe rather than broken —
+    // report it as "try again later" instead of a flat 500.
+    if (!hasHttpStatus(err) && err.message?.includes('globally unique VMID')) tagStatus(err, 503);
+    sendError(res, err);
   }
 });
 
@@ -707,7 +710,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
   try {
     await assertStorageExposed(node, storage, { isAdmin });
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
   }
 
@@ -797,8 +800,10 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
     logAudit(req, 'vm_create', `${node}/${vmid}`, name);
     res.json({ id: row.lastInsertRowid, vmid, ...serializeNodeIdentity(node), status: 'creating', upid });
   } catch (err) {
-    const status = err.status || (err.message?.includes('globally unique VMID') ? 503 : 500);
-    res.status(status).json({ error: err.status ? err.message : sanitizeError(err.message) });
+    // An unreachable host makes VMID allocation unsafe rather than broken —
+    // report it as "try again later" instead of a flat 500.
+    if (!hasHttpStatus(err) && err.message?.includes('globally unique VMID')) tagStatus(err, 503);
+    sendError(res, err);
   }
 });
 
@@ -875,7 +880,7 @@ router.get('/admin/pve-vms/:node', requirePermission('can_manage_templates'), as
       .sort((a, b) => (b.template ? 1 : 0) - (a.template ? 1 : 0) || a.vmid - b.vmid);
     res.json(nodeVms);
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -915,7 +920,7 @@ router.get('/admin/pve-vms/:node/:vmid/config', requirePermission('can_manage_te
       description: cfg.description || '',
     });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 

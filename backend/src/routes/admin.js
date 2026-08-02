@@ -6,6 +6,7 @@ import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibil
 import { createClient, vlanTagToSubnet } from '../fortigate.js';
 import { requireAuth, requireAdmin, requirePermission, requireInteractiveSession } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
+import { sendError } from '../utils/httpError.js';
 import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
 import { decodeNodeRef, encodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
@@ -1410,8 +1411,7 @@ router.post('/node-maintenance', pHosts, (req, res) => {
     const row = enterMaintenance({ node, reason, until, req });
     res.json(row);
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 

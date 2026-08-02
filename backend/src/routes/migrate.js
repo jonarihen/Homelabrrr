@@ -10,6 +10,7 @@ import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.js';
 import { sharedStorageKey } from '../utils/sharedStorage.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
+import { sendError } from '../utils/httpError.js';
 import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef, nodeLookupCandidates, isValidNodeName } from '../utils/nodeRef.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
@@ -780,8 +781,7 @@ router.post('/:node/:vmid', async (req, res) => {
       `mode=${mode} → ${targetHost.name}/${target.nodeName}${targetStorage ? ` storage=${targetStorage}` : ''} bridge=${targetBridge}${online ? ' online' : ''}${mode === 'adopt' || !deleteSource ? ' keep-source' : ''}${bootFix}`);
     res.json({ id: row.lastInsertRowid, vmid, upid, mode, status: 'running', bootFix: bootFix.trim() || undefined });
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 

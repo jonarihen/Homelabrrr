@@ -143,6 +143,9 @@ export class CaddyClient {
             const msg = parsed?.error || (typeof parsed === 'string' && parsed) || `HTTP ${res.statusCode}`;
             const err = new Error(`Caddy admin API error: ${msg}`);
             err.statusCode = res.statusCode;
+            // Remote status, reflected for caller branching. Upstream text —
+            // keep it sanitized even at 4xx (see utils/httpError.js).
+            err.expose = false;
             reject(err);
           }
         });

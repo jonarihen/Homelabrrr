@@ -1,14 +1,11 @@
 import db from '../db.js';
 import { getAllVMs } from '../proxmox.js';
+import { httpError } from './httpError.js';
 
 const MB = 1024 ** 2;
 const GB = 1024 ** 3;
 
-function quotaError(message) {
-  const err = new Error(message);
-  err.status = 403;
-  return err;
-}
+const quotaError = (message) => httpError(403, message);
 
 /**
  * Allocated resources of every VM assigned to the user, summed from the
@@ -63,8 +60,8 @@ export function getUserQuota(userId) {
 }
 
 /**
- * Throws (err.status = 403) when the requested additional allocation would
- * push the user over any of their quotas. Admins and users with no quotas
+ * Throws a 403-tagged error (utils/httpError.js) when the requested additional
+ * allocation would push the user over any of their quotas. Admins and users with no quotas
  * set pass straight through. Deltas are what the request ADDS on top of the
  * user's current allocation — pass only positive deltas for edits.
  */

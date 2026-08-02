@@ -1,6 +1,7 @@
 import db from '../db.js';
 import { decodeNodeRef } from './nodeRef.js';
 import { logAudit } from './audit.js';
+import { httpError } from './httpError.js';
 
 // ─── Node maintenance mode (soft drain) ──────────────────────────────────────
 //
@@ -101,7 +102,7 @@ export function findMaintenanceForNode(nodeValue) {
 
 // Guard for the provisioning paths. Synchronous (better-sqlite3). Throws a
 // 423 (Locked) error with a clear, user-facing message when the target node is
-// draining, so the clone/create handlers surface it verbatim via err.status.
+// draining, so the clone/create handlers surface it verbatim via sendError().
 export function assertNodeAvailable(nodeValue) {
   const row = findMaintenanceForNode(nodeValue);
   if (!row) return;
@@ -111,9 +112,7 @@ export function assertNodeAvailable(nodeValue) {
   if (untilLabel) message += ` until ~${untilLabel}`;
   if (row.reason) message += ` (${row.reason})`;
   message += '. New deployments to this node are blocked — pick another node. Running VMs are unaffected.';
-  const err = new Error(message);
-  err.status = 423;
-  throw err;
+  throw httpError(423, message);
 }
 
 function buildNoticeBody(nodeName, reason, until) {
@@ -130,11 +129,7 @@ function buildNoticeBody(nodeName, reason, until) {
 // auto-published notice, then audit-logs the action.
 export function enterMaintenance({ node, reason = '', until = null, req = SYSTEM_REQ }) {
   const { nodeName, nodeRef } = decodeNodeRef(node);
-  if (!nodeName) {
-    const err = new Error('A node is required');
-    err.status = 400;
-    throw err;
-  }
+  if (!nodeName) throw httpError(400, 'A node is required');
   const { hostId } = decodeNodeRef(node);
   const normalizedUntil = normalizeUntil(until);
   const cleanReason = String(reason || '').trim();
