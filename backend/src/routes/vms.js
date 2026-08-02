@@ -7,7 +7,7 @@ import {
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType,
   getLXCStatus, lxcAction, getLXCConfig, updateLXCConfig, getLXCRRD, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
-  getTaskStatus, getTaskLog,
+  getTaskStatus, getTaskLog, getVMAgentInterfaces,
 } from '../proxmox.js';
 import { createClient } from '../fortigate.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
@@ -31,6 +31,7 @@ import { decryptSecret } from '../utils/secrets.js';
 import { readTaskProgress } from '../utils/taskProgress.js';
 import { parseUpid, inProgressVolids } from '../utils/backupTask.js';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.js';
+import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -265,23 +266,40 @@ function findMatchingLease(leases = [], interfaceName, mac) {
     || null;
 }
 
-function syncReservationToSshConfig(node, vmid, ip) {
+// `vm_ssh_configs.host` is the portal's only record of "where this VM lives" —
+// port forwarding, website publishing and browser SSH all read it. Whenever the
+// firewall tells us the real address, write it back so the user never has to
+// look it up by hand.
+//
+// `onlyIfEmpty` is the opportunistic mode used for observed DHCP leases: a
+// lease is evidence, not a decision, so it fills a blank but never overwrites
+// an address the user (or a static reservation) put there on purpose.
+//
+// Returns { matched, updated, previous } — `matched` means a config row for
+// this VM exists and now holds `ip`; `previous` is what was recorded before,
+// so the caller can audit an address changing under the user.
+function syncReservationToSshConfig(node, vmid, ip, { onlyIfEmpty = false } = {}) {
+  const miss = { matched: false, updated: false, previous: '' };
   const { nodeName } = decodeNodeRef(node);
   const candidates = [...new Set([String(node || ''), String(nodeName || '')].filter(Boolean))];
-  if (candidates.length === 0) return false;
+  if (candidates.length === 0 || !ip) return miss;
 
   const placeholders = candidates.map(() => '?').join(', ');
   const rows = db.prepare(
-    `SELECT id, node FROM vm_ssh_configs WHERE vmid = ? AND node IN (${placeholders})`
+    `SELECT id, node, host FROM vm_ssh_configs WHERE vmid = ? AND node IN (${placeholders})`
   ).all(vmid, ...candidates);
 
-  if (rows.length === 0) return false;
+  if (rows.length === 0) return miss;
   const exact = rows.find((row) => row.node === node);
   const target = exact || (rows.length === 1 ? rows[0] : null);
-  if (!target) return false;
+  if (!target) return miss;
+
+  const previous = String(target.host || '').trim();
+  if (previous === ip) return { matched: true, updated: false, previous };
+  if (onlyIfEmpty && previous) return { matched: false, updated: false, previous };
 
   db.prepare('UPDATE vm_ssh_configs SET host = ? WHERE id = ?').run(ip, target.id);
-  return true;
+  return { matched: true, updated: true, previous };
 }
 
 async function resolveVmDhcpScope(node, vmid, netInterface, firewallId = null) {
@@ -734,7 +752,106 @@ router.get('/:node/:vmid/ip-management', async (req, res) => {
       };
     }));
 
-    res.json({ interfaces: payload });
+    // A VM that only ever got a plain DHCP lease used to keep an empty
+    // vm_ssh_configs.host forever — which silently blocks port forwarding,
+    // website publishing and browser SSH with no hint as to why. Now that the
+    // lease is in hand, fill the blank opportunistically. A recorded address is
+    // never overwritten here; only PUT .../reservation does that.
+    const observedIp = payload
+      .flatMap((entry) => entry.dhcpScopes || [])
+      .map((scope) => scope.effectiveIp)
+      .find((ip) => !!ip);
+    let recordedIp = null;
+    if (observedIp) {
+      const sshSync = syncReservationToSshConfig(node, vmid, observedIp, { onlyIfEmpty: true });
+      if (sshSync.updated) {
+        recordedIp = observedIp;
+        logAudit(req, 'vm_ip_record_changed', `${node}/${vmid}`, `recorded ${observedIp} from DHCP lease`);
+      }
+    }
+
+    res.json({ interfaces: payload, recordedIp });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// ─── Detected IPs ────────────────────────────────────────────────────────────
+// "What address does this VM actually have?" answered from every source the
+// portal can reach, ranked with provenance. Every source is best-effort: a
+// missing guest agent, an unreachable firewall or a VLAN with no managed DHCP
+// scope degrades the answer instead of failing the request.
+router.get('/:node/:vmid/detected-ips', async (req, res) => {
+  const { node, vmid } = req.params;
+  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  try {
+    const config = await loadVmConfigForIpManagement(node, vmid);
+    const observations = [];
+    const sourcesTried = [];
+
+    // 1. cloud-init statics — ipconfigN maps to netN (see parseCloudInitOptions).
+    let cloudInitDhcp = false;
+    const ipConfigKeys = Object.keys(config)
+      .filter((key) => /^ipconfig\d+$/.test(key))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    for (const key of ipConfigKeys) {
+      const parsed = parseIpConfig0(config[key]);
+      if (!parsed) continue;
+      sourcesTried.push('cloud_init');
+      if (parsed.dhcp) cloudInitDhcp = true;
+      if (parsed.ip) observations.push({ ip: parsed.ip, source: 'cloud_init', iface: `net${key.slice('ipconfig'.length)}` });
+    }
+
+    // 2. FortiGate DHCP reservation / lease, per VLAN-tagged interface. Reuses
+    //    the same resolution the /ip-management panel does.
+    for (const iface of parseVmNetworkInterfaces(config)) {
+      if (!iface.mac || !iface.vlanTag) continue;
+      try {
+        const scope = await resolveVmDhcpScope(node, vmid, iface.name);
+        sourcesTried.push('dhcp');
+        if (scope.currentReservation?.ip) {
+          observations.push({ ip: scope.currentReservation.ip, source: 'dhcp_reservation', iface: iface.name });
+        }
+        if (scope.currentLease?.ip) {
+          observations.push({ ip: scope.currentLease.ip, source: 'dhcp_lease', iface: iface.name });
+        }
+      } catch {
+        // Unmanaged VLAN, unsynced firewall, or the firewall is down — the
+        // other sources can still answer.
+      }
+    }
+
+    // 3. qemu-guest-agent. Absent/stopped agent → Proxmox 500s; not an error here.
+    let guestAgent = 'unavailable';
+    try {
+      const agentPayload = await getVMAgentInterfaces(node, vmid);
+      const agentEntries = normalizeGuestAgentInterfaces(agentPayload);
+      guestAgent = 'ok';
+      sourcesTried.push('guest_agent');
+      observations.push(...agentEntries.map((entry) => ({ ip: entry.ip, source: 'guest_agent', iface: entry.iface })));
+    } catch {
+      guestAgent = 'unavailable';
+    }
+
+    const candidates = rankCandidates(observations);
+    // Legacy rows store the bare node name, so match on every candidate form.
+    const lookupNodes = nodeLookupCandidates(node);
+    const sshRow = lookupNodes.length > 0
+      ? db.prepare(
+        `SELECT host FROM vm_ssh_configs WHERE vmid = ? AND node IN (${lookupNodes.map(() => '?').join(', ')})`
+      ).get(vmid, ...lookupNodes)
+      : null;
+
+    res.json({
+      candidates,
+      guestAgent,
+      cloudInitDhcp,
+      sourcesTried: [...new Set(sourcesTried)],
+      recordedHost: sshRow?.host || '',
+    });
   } catch (err) {
     sendError(res, err);
   }
@@ -806,12 +923,17 @@ router.put('/:node/:vmid/ip-management/:netInterface/reservation', async (req, r
       'reserved-address': nextReservations,
     });
 
-    const sshConfigUpdated = syncReservationToSshConfig(node, vmid, ip);
+    const sshSync = syncReservationToSshConfig(node, vmid, ip);
     logAudit(req, 'vm_set_ip_reservation', `${node}/${vmid}/${netInterface}`, `${scope.sync.firewall_name}:${ip}`);
+    // The recorded address also drives port forwarding and website publishing,
+    // so replacing one the user typed is worth its own audit line.
+    if (sshSync.updated && sshSync.previous) {
+      logAudit(req, 'vm_ip_record_changed', `${node}/${vmid}`, `${sshSync.previous} → ${ip} (dhcp reservation)`);
+    }
     res.json({
       ok: true,
       reservation: { ip, description: descriptionText },
-      sshConfigHost: sshConfigUpdated ? ip : null,
+      sshConfigHost: sshSync.matched ? ip : null,
     });
   } catch (err) {
     sendError(res, err);

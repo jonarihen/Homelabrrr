@@ -24,6 +24,12 @@
 - **A VM name Proxmox would reject is now caught immediately.** Creating a VM from scratch or cloning a template with a name like `my_test_vm` used to sail through the portal, reserve a VMID, pass the capacity and quota checks, and only then fail with a raw Proxmox error. All three provisioning flows now validate the name first and answer straight away
 - **Every provisioning form shows the name that will actually be created.** Proxmox VM names must be DNS-style — lowercase, hyphenated, 63 characters at most — so `My Test VM` becomes `my-test-vm`. That result is now shown live under the VM Name field in the deploy-from-image, clone-template and create-from-scratch forms instead of appearing as a surprise afterwards
 - A name made entirely of spaces or punctuation is flagged in the form rather than accepted and rejected later
+## 2026-08-02 — Stop hand-typing your VM's IP address
+
+- **The SSH connect form can now find the address for you.** A **Detect IP** button next to *Host / IP* asks the portal what it already knows — the VM's DHCP reservation, its current DHCP lease, the static address cloud-init was given, and what qemu-guest-agent reports from inside the guest. The best candidate fills the field, and every candidate is offered as a chip showing where it came from, so you can pick a different one
+- **Detection degrades instead of failing.** A VM with no guest agent, a VLAN with no managed DHCP scope, or an unreachable firewall simply contributes nothing; whatever the other sources found is still offered. Loopback and link-local addresses are never suggested
+- **The field now says what it actually controls.** A hint under *Host / IP* spells out that this same address is what port forwarding and website publishing use — previously nothing in either feature explained why they were blocked on a form buried in the SSH panel
+- **A VM that only ever had a DHCP lease no longer stays address-less.** Opening the VM's IP management panel records the observed lease as the VM's address when none was set, instead of waiting for someone to create a static reservation. Any change the portal makes to a recorded address is written to the audit log
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 ## 2026-08-02 — Validation mistakes stop looking like server crashes
