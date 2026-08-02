@@ -17,9 +17,31 @@ services:
       - ALLOW_INTERNAL_IMAGE_URLS=${ALLOW_INTERNAL_IMAGE_URLS:-false}
       - INITIAL_ADMIN_USERNAME=${INITIAL_ADMIN_USERNAME:-}
       - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD:-}
+      # Absolute portal URL for "open in portal" links in Discord embeds.
+      # Falls back to ALLOWED_ORIGIN when empty.
+      - PORTAL_BASE_URL=${PORTAL_BASE_URL:-}
+      # Background timers. Every value here is also the code's own default, so
+      # leaving them out of .env changes nothing.
+      - NODE_HEALTH_POLL_MS=${NODE_HEALTH_POLL_MS:-60000}
+      - LEASE_CHECK_INTERVAL_MS=${LEASE_CHECK_INTERVAL_MS:-900000}
+      - VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS=${VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS:-120000}
       - PORT=3000
+      # Explicit for clarity: this is the db_data volume mount point below.
+      # Changing it moves the database off the backed-up volume.
+      - DB_PATH=${DB_PATH:-/app/data/db.sqlite}
     volumes:
       - db_data:/app/data
+    # /api/health is unauthenticated and only answers once the server is
+    # listening — which is after db.js runs its migrations and index.js finishes
+    # the startup PuTTY-key sweep. start_period covers that window: probes that
+    # fail inside it don't count against `retries`, while a probe that succeeds
+    # marks the container healthy immediately.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
     networks:
       - internal
 
@@ -34,8 +56,12 @@ services:
         published: 8181
         protocol: tcp
         host_ip: ${FRONTEND_BIND_ADDRESS:-127.0.0.1}
+    # nginx resolves the backend upstream at request time, but waiting for the
+    # health check means the first page load can't land on a backend that is
+    # still migrating.
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - internal
 

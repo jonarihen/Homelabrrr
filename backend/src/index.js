@@ -39,6 +39,7 @@ import { authenticateApiToken } from './middleware/apiToken.js';
 import { requireAuth } from './middleware/auth.js';
 import { parseTrustProxy } from './utils/proxyChain.js';
 import { trustProxyCheck, inspectProxyChain } from './middleware/trustProxyCheck.js';
+import { buildConfigReport, formatConfigReport } from './utils/configReport.js';
 import { startScheduler } from './scheduler.js';
 
 const app = express();
@@ -645,7 +646,13 @@ if (NODE_HEALTH_POLL_MS > 0) {
 // Background enforcement of per-VM power schedules (vm_schedules).
 startScheduler();
 
+// Every optional setting is read inline as `process.env.<NAME> || <default>`, so a
+// variable that never reaches the process is indistinguishable from one left at
+// its default — which is how four documented settings went unnoticed for as long
+// as docker-compose.yml failed to pass them through. Print what was actually
+// recognised at boot so "I set it and nothing happened" shows up in the logs.
 const PORT_NUM = parseInt(process.env.PORT || '3000');
+for (const line of formatConfigReport(buildConfigReport(process.env))) console.log(line);
 server.listen(PORT_NUM, () => {
   console.log(`Backend running on port ${PORT_NUM}`);
 });
