@@ -100,6 +100,11 @@ export class FortiGateAPI {
             // doesn't reach the UI literally.
             const err = new Error(`FortiGate API error: ${decodeHtmlEntities(String(errMsg))}`);
             err.statusCode = res.statusCode;
+            // This is the *remote* status, reflected so callers can branch on
+            // 404-vs-403. The message is upstream text, not portal copy, so it
+            // must still go through sanitizeError() even at 4xx — see
+            // utils/httpError.js.
+            err.expose = false;
             reject(err);
           }
         });

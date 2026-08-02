@@ -1,4 +1,5 @@
 import { getNodeCpuInfo } from '../proxmox.js';
+import { httpError, hasHttpStatus } from './httpError.js';
 
 /**
  * Compute VM CPU topology to match the physical host layout.
@@ -14,9 +15,7 @@ export async function computeCpuTopology(node, requestedCores) {
     const physCoresPerSocket = Math.max(1, cpuInfo.coresPerSocket || 1);
     const maxCores = physSockets * physCoresPerSocket;
     if (vcpus > maxCores) {
-      const err = new Error(`Requested ${vcpus} cores exceeds this node's ${maxCores} physical cores (${physSockets}\u00d7${physCoresPerSocket})`);
-      err.status = 400;
-      throw err;
+      throw httpError(400, `Requested ${vcpus} cores exceeds this node's ${maxCores} physical cores (${physSockets}\u00d7${physCoresPerSocket})`);
     }
     const validSockets = [];
     for (let sockets = 1; sockets <= Math.min(physSockets, vcpus); sockets += 1) {
@@ -30,7 +29,7 @@ export async function computeCpuTopology(node, requestedCores) {
     const coresPerSocket = Math.ceil(vcpus / sockets);
     return { sockets, cores: coresPerSocket, totalVcpus: sockets * coresPerSocket, maxCores };
   } catch (err) {
-    if (err.status) throw err; // re-throw validation errors
+    if (hasHttpStatus(err)) throw err; // re-throw validation errors
     return { sockets: 1, cores: vcpus, totalVcpus: vcpus, maxCores: null };
   }
 }
