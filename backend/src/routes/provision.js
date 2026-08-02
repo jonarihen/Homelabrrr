@@ -7,6 +7,7 @@ import {
 } from '../proxmox.js';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.js';
 import { sendError, hasHttpStatus, tagStatus } from '../utils/httpError.js';
+import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
@@ -337,15 +338,19 @@ router.post('/clone', async (req, res) => {
     // Non-validation errors are fine — we'll fall back in pollAndConfigure
   }
 
-  // Refuse requests the node can't fit (free RAM / storage space)
+  // Refuse requests the node can't fit. Storage is a hard limit; memory is
+  // advisory by default (capacity policy — see utils/capacityPolicy.js) and
+  // comes back as a note recorded on the deployment.
   const finalMem = memoryGb ? Math.round(parseFloat(memoryGb) * 1024) : template.default_memory;
   const finalDisk = diskGb || template.default_disk_gb;
+  let capacityNote = '';
   try {
-    await assertNodeCapacity(template.node, {
+    const capacity = await assertNodeCapacity(template.node, {
       memoryMb: finalMem,
       diskGb: finalDisk,
       storage: storage || template.default_storage,
     });
+    capacityNote = capacity?.memoryWarning || '';
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
       addCores: parseInt(finalCores, 10) || 0,
@@ -374,7 +379,7 @@ router.post('/clone', async (req, res) => {
     // so those steps are seeded complete and the clone task is left active.
     const steps = stepList([
       { key: 'reserve', label: 'Reserving VMID', status: 'done' },
-      { key: 'capacity', label: 'Checking node capacity', status: 'done' },
+      { key: 'capacity', label: 'Checking node capacity', status: 'done', note: capacityNote },
       { key: 'clone', label: 'Cloning template', status: 'active' },
       { key: 'configure', label: 'Applying CPU / memory / cloud-init', status: 'pending' },
       { key: 'resize', label: 'Resizing disk', status: 'pending' },
@@ -422,8 +427,22 @@ router.post('/clone', async (req, res) => {
 // The same image (same download URL) may be present on several hosts. Rank
 // candidate hosts by guest count (fewest first) and take the first one that
 // actually has room: reachable, an images-capable storage with the most free
-// space, enough free RAM and disk (assertNodeCapacity). A nearly-full host is
+// space, and enough capacity (assertNodeCapacity). A nearly-full host is
 // skipped even when it has fewer VMs — count never beats capacity.
+//
+// Every skipped host records *why* it was skipped, so a placement failure comes
+// back as something the user (and the admin they escalate to) can act on rather
+// than a dead end.
+
+// Trim an upstream message down to something safe and readable in a 503 body.
+// Our own pre-flight errors carry err.status and a user-facing message; anything
+// else is an upstream failure and gets scrubbed of hosts/URLs first.
+function placementSkipReason(err) {
+  const raw = err?.status ? err.message : sanitizeError(err?.message);
+  const text = String(raw || 'unavailable').replace(/\s+/g, ' ').trim();
+  return text.length > 160 ? `${text.slice(0, 157)}…` : text;
+}
+
 async function autoPlaceImage(image, { memoryMb, diskGb }) {
   const rows = db.prepare(
     "SELECT * FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%' AND url = ?"
@@ -449,6 +468,13 @@ async function autoPlaceImage(image, { memoryMb, diskGb }) {
     .map(([hostId, info]) => ({ hostId, ...info }))
     .sort((a, b) => (countByHost.get(a.hostId) || 0) - (countByHost.get(b.hostId) || 0));
 
+  const skipped = [];
+  const skip = (nodeValue, reason) => {
+    const label = decodeNodeRef(nodeValue).nodeName || String(nodeValue);
+    skipped.push(`${label} — ${reason}`);
+    console.warn(`[placement] skipping ${nodeValue}: ${reason}`);
+  };
+
   for (const cand of ranked) {
     try {
       // Nodes drained for maintenance never receive auto-placed VMs
@@ -461,17 +487,22 @@ async function autoPlaceImage(image, { memoryMb, diskGb }) {
       // The image's admin-set default storage wins when it's exposed here
       const preferred = exposed.find((s) => s.storage === cand.default_storage);
       const pick = preferred || exposed[0];
-      if (!pick) continue;
+      if (!pick) {
+        skip(cand.node, 'no VM storage pool is exposed to you on this host');
+        continue;
+      }
       await assertNodeCapacity(cand.node, { memoryMb, diskGb, storage: pick.storage });
       return { image: { ...image, node: cand.node, volid: cand.volid }, storage: pick.storage };
     } catch (err) {
-      console.warn(`[placement] skipping ${cand.node}: ${err.message}`);
+      skip(cand.node, placementSkipReason(err));
     }
   }
   return {
     error: {
       status: 503,
-      message: 'No Proxmox host has enough free memory or storage for this VM right now — contact your admin on Discord so they can make room.',
+      message: skipped.length > 0
+        ? `No Proxmox host could take this VM: ${skipped.join('; ')}. Ask your admin on Discord to make room.`
+        : 'No Proxmox host currently carries this image — contact your admin on Discord.',
     },
   };
 }
@@ -606,8 +637,10 @@ router.post('/from-image', async (req, res) => {
     cpuLayout = { sockets: 1, cores: parseInt(cores, 10) || 2 };
   }
 
+  let capacityNote = '';
   try {
-    await assertNodeCapacity(targetImage.node, { memoryMb, diskGb: baseDiskGb, storage: targetStorage });
+    const capacity = await assertNodeCapacity(targetImage.node, { memoryMb, diskGb: baseDiskGb, storage: targetStorage });
+    capacityNote = capacity?.memoryWarning || '';
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
       addCores: parseInt(cores, 10) || 0,
@@ -644,7 +677,7 @@ router.post('/from-image', async (req, res) => {
     const startNow = !!start;
     const steps = stepList([
       { key: 'reserve', label: 'Reserving VMID', status: 'done' },
-      { key: 'capacity', label: 'Checking node capacity', status: 'done' },
+      { key: 'capacity', label: 'Checking node capacity', status: 'done', note: capacityNote },
       { key: 'create', label: 'Creating VM & importing cloud image', status: 'active' },
       { key: 'resize', label: 'Resizing disk', status: 'pending' },
       { key: 'cloudinit', label: 'Applying cloud-init config', status: 'pending' },
@@ -756,12 +789,14 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
 
     const cpuLayout = await computeCpuTopology(node, cores);
 
-    // Refuse requests the node can't fit (free RAM / storage space)
-    await assertNodeCapacity(node, {
+    // Refuse requests the node can't fit. Storage is a hard limit; memory is
+    // advisory by default and comes back as a note on the deployment.
+    const capacity = await assertNodeCapacity(node, {
       memoryMb: Math.round(parseFloat(memoryGb) * 1024),
       diskGb: String(diskSize).replace(/[^0-9]/g, ''),
       storage,
     });
+    const capacityNote = capacity?.memoryWarning || '';
     // Per-user resource quota (skips admins / users without quotas). Now that
     // the route is open to can_create_vms holders, this rail actually bounds
     // non-admin from-scratch builds.
@@ -793,7 +828,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
     // Track
     const steps = stepList([
       { key: 'reserve', label: 'Reserving VMID', status: 'done' },
-      { key: 'capacity', label: 'Checking node capacity', status: 'done' },
+      { key: 'capacity', label: 'Checking node capacity', status: 'done', note: capacityNote },
       { key: 'create', label: 'Creating VM', status: upid ? 'active' : 'done' },
       { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
     ]);

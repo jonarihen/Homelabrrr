@@ -153,6 +153,9 @@ export default function PVEHostsPage() {
         </button>
       </div>
 
+      {/* Provisioning capacity policy */}
+      <CapacityPolicySection />
+
       {/* Host cards */}
       {loading ? (
         <div className="space-y-4">
@@ -511,6 +514,113 @@ export default function PVEHostsPage() {
 }
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
+
+// Provisioning capacity policy. The pre-flight memory check compares a request
+// against the node's physical RAM × the overcommit ratio — never against
+// `memory.free`, which sits near zero on a healthy node (ARC, page cache,
+// ballooning) and used to make every overcommitted homelab node unusable.
+// Storage is deliberately not configurable: `avail` is a real hard limit.
+function CapacityPolicySection() {
+  const [form, setForm] = useState({ memoryMode: 'warn', overcommitRatio: 1.5 });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/admin/capacity-settings')
+      .then((r) => {
+        if (cancelled) return;
+        setForm({ memoryMode: r.data.memoryMode, overcommitRatio: r.data.overcommitRatio });
+      })
+      .catch((e) => { if (!cancelled) setError(e.response?.data?.error || 'Failed to load capacity policy'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setSaving(true); setError(''); setSaved('');
+    try {
+      const r = await api.put('/admin/capacity-settings', {
+        memoryMode: form.memoryMode,
+        overcommitRatio: parseFloat(form.overcommitRatio),
+      });
+      setForm({ memoryMode: r.data.memoryMode, overcommitRatio: r.data.overcommitRatio });
+      setSaved('Capacity policy saved');
+      setTimeout(() => setSaved(''), 4000);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to save capacity policy');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const modeHint = {
+    off: 'Memory is never checked before a deploy.',
+    warn: 'Deploys go ahead; the warning is recorded on the deployment.',
+    block: 'Deploys are refused when the node is out of budgeted memory.',
+  }[form.memoryMode] || '';
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+      <div className="flex items-center justify-between gap-4 mb-1">
+        <h2 className="text-white font-semibold">Capacity policy</h2>
+        <span className="text-[10px] font-mono uppercase tracking-[0.1em] text-gray-600">Provisioning pre-flight</span>
+      </div>
+      <p className="text-xs text-gray-500 mb-4 max-w-3xl">
+        New deployments are sized against each node's physical RAM × the overcommit ratio — not the RAM
+        that happens to be free right now, which is near zero on a healthy node. Disk space is always a
+        hard block and is not configurable here.
+      </p>
+
+      {loading ? (
+        <div className="h-16 bg-gray-800/40 rounded-xl animate-pulse" />
+      ) : (
+        <form onSubmit={save} className="flex flex-wrap items-end gap-4">
+          <div>
+            <label htmlFor="capacity-memory-mode" className="block text-xs text-gray-400 mb-1.5 font-medium">Memory check</label>
+            <select
+              id="capacity-memory-mode"
+              value={form.memoryMode}
+              onChange={e => setForm(f => ({ ...f, memoryMode: e.target.value }))}
+              className={`${inputCls} w-52`}
+            >
+              <option value="off">Off — don't check</option>
+              <option value="warn">Warn — deploy anyway</option>
+              <option value="block">Block — refuse</option>
+            </select>
+            <p className="text-[11px] text-gray-600 mt-1">{modeHint}</p>
+          </div>
+          <div>
+            <label htmlFor="capacity-overcommit" className="block text-xs text-gray-400 mb-1.5 font-medium">Overcommit ratio</label>
+            <input
+              id="capacity-overcommit"
+              type="number" min="0.1" step="0.1" value={form.overcommitRatio}
+              onChange={e => setForm(f => ({ ...f, overcommitRatio: e.target.value }))}
+              className={`${inputCls} w-32`}
+            />
+            <p className="text-[11px] text-gray-600 mt-1">1.0 = no overcommit · 1.5 = 50% over physical RAM</p>
+          </div>
+          <button
+            type="submit" disabled={saving}
+            className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl font-medium transition-colors"
+          >
+            {saving ? 'Saving...' : 'Save policy'}
+          </button>
+        </form>
+      )}
+
+      {error && (
+        <p role="alert" className="mt-3 text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">{error}</p>
+      )}
+      {saved && (
+        <p className="mt-3 text-xs text-green-400 bg-green-900/20 border border-green-800/30 rounded-lg px-3 py-2">{saved}</p>
+      )}
+    </div>
+  );
+}
 
 // Per-host storage pool exposure. Admins flip a pool "exposed to users" off to
 // hide it from the provisioning dropdowns (and reject it server-side). Pools are

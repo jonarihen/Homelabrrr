@@ -41,6 +41,12 @@
 - **A cloud-init deploy with no password and no SSH key is refused.** Cloud images ship with no default password and a locked default user, so those VMs booted, reported ready, and could not be logged into by anyone — not over SSH, not on the VNC console. Deploying from a cloud image, or cloning a cloud-init template, now needs a password, an SSH key, or both
 - **The deploy form says so before you deploy, not after.** Keys that can't be installed are listed but greyed out with the reason next to them, and the Deploy button stays disabled until there's a way in
 - **The SSH Keys page marks keys with no public key.** The warning used to appear once when the key was added and was never seen again
+## 2026-08-02 — Deploying to an overcommitted node works again
+
+- **A node with no free RAM no longer refuses new VMs.** The pre-flight check compared the request against the node's *momentarily free* memory, which on a healthy host is near zero — ZFS ARC, page cache and ballooning guests use it all. Deployments are now sized against **physical RAM × an overcommit ratio** (default 1.5), which is how a homelab actually runs
+- **The memory check is advisory by default.** A tight node produces a warning on the deployment's progress steps instead of a rejection. Admins can set it to *off*, *warn* or *block* and tune the overcommit ratio under **Admin → PVE Hosts → Capacity policy**
+- **Automatic placement explains itself.** When no host can take a cloud-image deploy, the message now lists every host and why it was skipped — out of memory budget, in maintenance, unreachable, no storage exposed — instead of a flat "contact your admin"
+- Disk space is unchanged and still a hard block: free space on a storage pool is a real limit
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 ## 2026-08-02 — Validation mistakes stop looking like server crashes
