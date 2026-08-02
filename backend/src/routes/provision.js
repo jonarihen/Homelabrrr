@@ -21,6 +21,7 @@ import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { getRolePermissions } from '../utils/permissions.js';
 import { createLeaseForVm } from '../utils/leases.js';
 import { toPveVmName } from '../utils/vmName.js';
+import { resolveSshKeys, unusableKeysError, assertLoginPossible } from '../utils/cloudInitCredentials.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -92,8 +93,13 @@ function notifyDeployment(provisionId) {
 // Returns { opts } to hand to the config step, or { error: { status, message } }
 // on a validation failure. SSH keys are always read from the requesting user's
 // own stored keys.
+//
+// `cloudInitCapable` says the guest gets its credentials from cloud-init and
+// nothing else (a cloud image, or a template flagged cloud_init). Those deploys
+// must end up with a password or an installable key — see
+// utils/cloudInitCredentials.js.
 
-function parseCloudInitOptions({ ciUser, ciPassword, sshKeyIds, ipMode, ipAddress, ipGateway }, userId) {
+function parseCloudInitOptions({ ciUser, ciPassword, sshKeyIds, ipMode, ipAddress, ipGateway }, userId, cloudInitCapable = false) {
   const opts = {};
   if (ciUser) {
     if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(ciUser)) {
@@ -108,11 +114,28 @@ function parseCloudInitOptions({ ciUser, ciPassword, sshKeyIds, ipMode, ipAddres
     opts.ciPassword = String(ciPassword);
   }
   if (Array.isArray(sshKeyIds) && sshKeyIds.length > 0) {
-    const placeholders = sshKeyIds.map(() => '?').join(',');
-    const keys = db.prepare(
-      `SELECT public_key FROM ssh_keys WHERE user_id = ? AND id IN (${placeholders}) AND public_key != ''`
-    ).all(userId, ...sshKeyIds.map(Number));
-    if (keys.length > 0) opts.sshKeys = keys.map((k) => k.public_key.trim()).join('\n');
+    // Load every requested row — including the ones with no stored public key —
+    // so a key that can't be installed is named back to the user instead of
+    // being filtered out and the deploy running on with no key at all.
+    const numericIds = sshKeyIds.map(Number).filter(Number.isInteger);
+    const placeholders = numericIds.map(() => '?').join(',');
+    const rows = numericIds.length > 0
+      ? db.prepare(
+        `SELECT id, name, public_key FROM ssh_keys WHERE user_id = ? AND id IN (${placeholders})`
+      ).all(userId, ...numericIds)
+      : [];
+    const { keys, unusable } = resolveSshKeys(sshKeyIds, rows);
+    if (unusable.length > 0) {
+      return { error: { status: 400, message: unusableKeysError(unusable) } };
+    }
+    if (keys.length > 0) opts.sshKeys = keys.join('\n');
+  }
+  // A cloud image has no default password and a locked default user, so a deploy
+  // with neither credential boots into a VM nobody can log into.
+  try {
+    assertLoginPossible({ ciPassword: opts.ciPassword, sshKeys: opts.sshKeys, cloudInitCapable });
+  } catch (err) {
+    return { error: { status: err.status || 400, message: err.message } };
   }
   if (ipMode === 'static') {
     if (!/^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(ipAddress || '')) {
@@ -279,7 +302,7 @@ router.post('/clone', async (req, res) => {
   // Cloud-init guest settings (only honored for cloud-init templates)
   let cloudInitOpts = {};
   if (template.cloud_init) {
-    const parsed = parseCloudInitOptions(req.body, req.session.userId);
+    const parsed = parseCloudInitOptions(req.body, req.session.userId, true);
     if (parsed.error) return res.status(parsed.error.status).json({ error: parsed.error.message });
     cloudInitOpts = parsed.opts;
   }
@@ -545,8 +568,9 @@ router.post('/from-image', async (req, res) => {
     targetStorage = placed.storage;
   }
 
-  // Cloud images are always cloud-init capable, so guest settings are honored.
-  const parsed = parseCloudInitOptions(req.body, req.session.userId);
+  // Cloud images are always cloud-init capable, so guest settings are honored —
+  // and a login credential is mandatory (the image ships with none).
+  const parsed = parseCloudInitOptions(req.body, req.session.userId, true);
   if (parsed.error) return res.status(parsed.error.status).json({ error: parsed.error.message });
   const cloudInitOpts = parsed.opts;
 
