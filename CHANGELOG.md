@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-02 — A deployed VM always has a way to log in
+
+- **Selecting an SSH key that can't be installed no longer fails silently.** A stored key without its public half — an encrypted private key added without its passphrase, for instance — was quietly dropped during provisioning, and the deploy finished green with no authorized key on the VM. The deploy is now refused up front, naming the key and how to fix it
+- **A cloud-init deploy with no password and no SSH key is refused.** Cloud images ship with no default password and a locked default user, so those VMs booted, reported ready, and could not be logged into by anyone — not over SSH, not on the VNC console. Deploying from a cloud image, or cloning a cloud-init template, now needs a password, an SSH key, or both
+- **The deploy form says so before you deploy, not after.** Keys that can't be installed are listed but greyed out with the reason next to them, and the Deploy button stays disabled until there's a way in
+- **The SSH Keys page marks keys with no public key.** The warning used to appear once when the key was added and was never seen again
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

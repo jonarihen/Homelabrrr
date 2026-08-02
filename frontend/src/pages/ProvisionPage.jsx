@@ -5,6 +5,7 @@ import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
+import { isUsableKey, unusableKeyReason, cloudInitLoginMissing, NO_LOGIN_MESSAGE, NO_PUBLIC_KEY_LABEL } from '../utils/cloudInitCredentials.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-all ${active ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`;
@@ -340,6 +341,10 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
   const toggleKey = (id) => {
     setCi(c => ({ ...c, keyIds: c.keyIds.includes(id) ? c.keyIds.filter(k => k !== id) : [...c.keyIds, id] }));
   };
+  // A cloud image has no default password and a locked default user, so a deploy
+  // with neither credential produces a VM nobody can log into. Same rule the API
+  // enforces (utils/cloudInitCredentials.js).
+  const loginMissing = cloudInitLoginMissing({ password: ci.password, keyIds: ci.keyIds, keys: sshKeys });
   return (
     <div className="border border-gray-800 rounded-2xl p-4 space-y-4">
       <div>
@@ -353,7 +358,7 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
           <input type="text" value={ci.user} onChange={e => setCi(c => ({ ...c, user: e.target.value }))} className={inputCls} placeholder="operator" autoComplete="off" />
         </div>
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Password (optional)</label>
+          <label className="block text-xs text-gray-400 mb-1.5 font-medium">Password</label>
           <input type="password" value={ci.password} onChange={e => setCi(c => ({ ...c, password: e.target.value }))} className={inputCls} placeholder="min. 8 characters" autoComplete="new-password" />
         </div>
       </div>
@@ -362,17 +367,51 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
         <label className="block text-xs text-gray-400 mb-1.5 font-medium">SSH Keys</label>
         {sshKeys.length > 0 ? (
           <div className="space-y-1.5">
-            {sshKeys.map(k => (
-              <label key={k.id} className="flex items-center gap-2.5 text-sm text-gray-300 cursor-pointer">
-                <input type="checkbox" checked={ci.keyIds.includes(k.id)} onChange={() => toggleKey(k.id)} className="accent-orange-600" />
-                <span className="font-mono text-xs">{k.name}</span>
-              </label>
-            ))}
+            {sshKeys.map(k => {
+              // Keys with no stored public key are shown but not selectable —
+              // cloud-init installs the public half, so there is nothing to
+              // inject. Saying why beats hiding the key the user is looking for.
+              const reason = unusableKeyReason(k);
+              return (
+                <label
+                  key={k.id}
+                  className={`flex items-start gap-2.5 text-sm ${reason ? 'text-gray-600 cursor-not-allowed' : 'text-gray-300 cursor-pointer'}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={!reason && ci.keyIds.includes(k.id)}
+                    onChange={() => toggleKey(k.id)}
+                    disabled={!!reason}
+                    className="accent-orange-600 mt-0.5 disabled:opacity-40"
+                  />
+                  <span className="min-w-0">
+                    <span className="font-mono text-xs">{k.name}</span>
+                    {reason && (
+                      <span className="block text-[11px] text-amber-500/80 mt-0.5">
+                        {NO_PUBLIC_KEY_LABEL} — {reason}
+                      </span>
+                    )}
+                  </span>
+                </label>
+              );
+            })}
+            {sshKeys.some(k => !isUsableKey(k)) && (
+              <p className="text-[11px] text-gray-600 pt-0.5">Fix a key under SSH Keys to make it selectable here.</p>
+            )}
           </div>
         ) : (
-          <p className="text-xs text-gray-600">No keys with a public key found — add one under SSH Keys to get key-based login.</p>
+          <p className="text-xs text-gray-600">No SSH keys yet — add one under SSH Keys to get key-based login.</p>
         )}
       </div>
+
+      {loginMissing && (
+        <div className="flex gap-2.5 text-xs text-amber-300 bg-amber-900/20 border border-amber-800/40 rounded-xl p-3">
+          <svg className="w-4 h-4 flex-shrink-0 text-amber-400 mt-px" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+          </svg>
+          <p>{NO_LOGIN_MESSAGE} A cloud-init guest has no default password and a locked default user.</p>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-4">
         <div>
@@ -431,7 +470,9 @@ function CloudImageForm({ onStarted }) {
       .catch(() => {})
       .finally(() => setLoading(false));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
-    api.get('/ssh/keys').then(r => setSshKeys((r.data || []).filter(k => k.public_key))).catch(() => {});
+    // Unusable keys are kept in the list and disabled in the picker, so a user
+    // whose key has no public half can see why it isn't offered.
+    api.get('/ssh/keys').then(r => setSshKeys(r.data || [])).catch(() => {});
     if (user?.isAdmin) {
       api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
     }
@@ -481,8 +522,12 @@ function CloudImageForm({ onStarted }) {
     setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   };
 
+  // Every cloud image is cloud-init only, so a credential is mandatory.
+  const loginMissing = cloudInitLoginMissing({ password: ci.password, keyIds: ci.keyIds, keys: sshKeys });
+
   const submit = async (e) => {
     e.preventDefault();
+    if (loginMissing) { setError(NO_LOGIN_MESSAGE); return; }
     setSaving(true); setError('');
     try {
       const r = await api.post('/provision/from-image', {
@@ -722,7 +767,8 @@ function CloudImageForm({ onStarted }) {
 
           <button
             type="submit"
-            disabled={saving || (user?.isAdmin && !form.storage)}
+            disabled={saving || (user?.isAdmin && !form.storage) || loginMissing}
+            title={loginMissing ? NO_LOGIN_MESSAGE : undefined}
             className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
           >
             {saving ? 'Starting deployment...' : 'Deploy VM'}
@@ -755,7 +801,9 @@ function CloneForm({ onStarted }) {
       .catch(() => {})
       .finally(() => setLoading(false));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
-    api.get('/ssh/keys').then(r => setSshKeys((r.data || []).filter(k => k.public_key))).catch(() => {});
+    // Unusable keys are kept in the list and disabled in the picker, so a user
+    // whose key has no public half can see why it isn't offered.
+    api.get('/ssh/keys').then(r => setSshKeys(r.data || [])).catch(() => {});
     if (user?.isAdmin) {
       api.get('/admin/users').then(r => setUsers(r.data)).catch(() => {});
     }
@@ -782,8 +830,14 @@ function CloneForm({ onStarted }) {
     setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   };
 
+  // A cloud-init template gets its credentials from cloud-init and nothing else,
+  // so one of password / SSH key is mandatory. Other templates bring their own.
+  const loginMissing = !!selected?.cloud_init
+    && cloudInitLoginMissing({ password: ci.password, keyIds: ci.keyIds, keys: sshKeys });
+
   const submit = async (e) => {
     e.preventDefault();
+    if (loginMissing) { setError(NO_LOGIN_MESSAGE); return; }
     setSaving(true); setError('');
     try {
       const r = await api.post('/provision/clone', {
@@ -983,7 +1037,8 @@ function CloneForm({ onStarted }) {
 
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || loginMissing}
+            title={loginMissing ? NO_LOGIN_MESSAGE : undefined}
             className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
           >
             {saving ? 'Creating VM...' : 'Create VM'}

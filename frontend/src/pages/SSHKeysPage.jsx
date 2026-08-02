@@ -3,6 +3,7 @@ import Layout from '../components/Layout.jsx';
 import Modal from '../components/Modal.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
+import { isUsableKey, unusableKeyReason, NO_PUBLIC_KEY_LABEL } from '../utils/cloudInitCredentials.js';
 
 export default function SSHKeysPage() {
   useDocumentTitle('SSH Keys');
@@ -74,18 +75,24 @@ export default function SSHKeysPage() {
                   <tr key={k.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 transition-colors">
                     <td className="px-4 py-3 text-white font-medium">{k.name}</td>
                     <td className="px-4 py-3 text-xs max-w-xs">
-                      {k.public_key ? (
+                      {isUsableKey(k) ? (
                         <span className="text-gray-400 font-mono block truncate">{k.public_key}</span>
                       ) : (
-                        <span
-                          title="No public key — this key can't set up key-based login when you deploy a VM (cloud-init). Add the matching .pub, or re-add an encrypted key with its passphrase."
-                          className="inline-flex items-center gap-1.5 text-amber-400"
-                        >
-                          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-                          </svg>
-                          No public key
-                        </span>
+                        // Without a public key, cloud-init has nothing to inject, so
+                        // this key can't set up login on a VM you deploy. The reason
+                        // stays on the row — the warning shown when the key was added
+                        // is long gone by the time it matters.
+                        <div>
+                          <span className="inline-flex items-center gap-1.5 text-amber-400 font-medium">
+                            <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                            </svg>
+                            {NO_PUBLIC_KEY_LABEL}
+                          </span>
+                          <span className="block text-[11px] text-gray-500 mt-0.5">
+                            Can’t set up key-based login when you deploy a VM. {unusableKeyReason(k)}
+                          </span>
+                        </div>
                       )}
                     </td>
                     <td className="px-4 py-3 text-gray-500 text-xs">
