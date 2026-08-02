@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-02 — Groundwork for dedicated public IPs: port 443 is no longer first-come, first-served
+
+- **External ports are now claimed per public address, not per firewall.** Until now the first person to publish TCP 443 owned it for the whole firewall and everybody else had to pick an odd port. A port forward is now checked against `firewall + public endpoint + protocol + port range`, so two people can each publish 443, 25565 or 19132 as long as they sit on different public addresses. Overlapping *ranges* are caught too — `4000-5000` and `4500` collide, `4000-4999` and `5000-6000` do not
+- **Nothing about existing port forwards changes.** A forward with no public address keeps meaning "the firewall's default WAN address", existing rules are untouched and un-renamed, and two legacy forwards still collide on the same port exactly as before
+- **An administrator can register a routed public IP pool**, import or enumerate its addresses, mark the provider's own addresses as reserved, and assign an address to a user and one of their VMs. The first and last address of a prefix are offered like any other — routed transit prefixes and `/31`s have provider-specific rules, so the portal no longer assumes they are unusable
+- **Users only ever see their own addresses.** A public IP can only be used by the user it was assigned to, only for the VM/private address it was assigned to, and the firewall interface and external address are always resolved server-side — never accepted from the browser
+- New **Manage Public IPs** permission, assignable per user or per role
+- **Not yet live:** assigning an address records it as *pending* and configures nothing on the FortiGate. The egress path (SNAT pool, policy route, kill switch) and the admin UI are still to come, and every response says so
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

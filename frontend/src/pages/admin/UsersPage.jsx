@@ -308,6 +308,7 @@ const PERM_DEFS = [
   { key: 'can_view_audit_log',     label: 'View Audit Log',     desc: 'Read the system audit log' },
   { key: 'can_edit_vm_hardware',   label: 'Edit VM Hardware',   desc: 'Change CPU, memory, and disk size on assigned VMs' },
   { key: 'can_manage_websites',    label: 'Manage Websites',    desc: 'Register the Caddy reverse proxy, see all published sites, and assign site ownership' },
+  { key: 'can_manage_public_ips',  label: 'Manage Public IPs',  desc: 'Register public IP pools, reserve addresses, and assign dedicated public IPs to users' },
 ];
 
 function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usage, onClose }) {

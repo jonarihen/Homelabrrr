@@ -10,6 +10,9 @@ import { logAudit } from '../utils/audit.js';
 import { encryptSecret } from '../utils/secrets.js';
 import { decodeNodeRef, encodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { shortenVipName, PORT_FORWARD_NAME_MAX } from '../utils/vipName.js';
+import { findPortConflict, portConflictMessage } from '../utils/portEndpoints.js';
+import { normalizeIpv4 } from '../utils/publicIpPools.js';
+import { checkPublicIpUsage, describeAssignmentProvisioning } from '../utils/publicIpAccess.js';
 import { listMaintenance, enterMaintenance, exitMaintenanceById } from '../utils/nodeMaintenance.js';
 import { userCanAccessVm } from '../utils/vmAccess.js';
 import {
@@ -176,7 +179,7 @@ router.get('/users', pUsers, (req, res) => {
     SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_provision, u.can_create_vms, u.totp_enabled, u.require_2fa,
       u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_port_forwards, u.can_manage_vlans, u.can_manage_policies,
       u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log, u.can_edit_vm_hardware,
-      u.can_manage_websites,
+      u.can_manage_websites, u.can_manage_public_ips,
       u.created_at, u.role_id, r.name AS role_name,
       u.max_cores, u.max_memory_gb, u.max_storage_gb,
       (SELECT COUNT(*) FROM vm_assignments WHERE user_id = u.id) as vm_count,
@@ -340,7 +343,7 @@ router.put('/users/:id/permission', requireAdmin, (req, res) => {
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { permission, enabled } = req.body;
-  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log', 'can_edit_vm_hardware', 'can_manage_websites'];
+  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log', 'can_edit_vm_hardware', 'can_manage_websites', 'can_manage_public_ips'];
   if (!validPerms.includes(permission)) {
     return res.status(400).json({ error: `Invalid permission: ${permission}` });
   }
@@ -2384,6 +2387,11 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   let { name, protocol = 'tcp', extPort, mappedIp, mappedPort, dstInterface, vlanInterface, srcAddresses = ['all'], node, vmid } = req.body;
+  // Which public endpoint to publish on. Omitted / null keeps the historical
+  // behavior: the firewall's default WAN address. Only the *id* is accepted —
+  // the address, interface and gateway are always resolved server-side from the
+  // stored pool, never taken from the client.
+  const publicIpId = req.body.publicIpId ?? req.body.public_ip_id ?? null;
   const unrestricted = canManageAllPortForwards(req);
   protocol = normalizePortForwardProtocol(protocol);
   extPort = parsePortForwardPort(extPort);
@@ -2442,27 +2450,98 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
       });
     }
 
-    const externalIp = fw.external_ip || '';
+    // Resolve the public endpoint. Everything the firewall needs — the external
+    // address and the interface it arrives on — comes out of the stored pool;
+    // the request only ever names an id, so a non-admin cannot publish onto an
+    // address (or an interface) that was not handed to them.
+    let publicIp = null;
+    let publicPool = null;
+    let publicAssignment = null;
+    if (publicIpId !== null && publicIpId !== undefined && publicIpId !== '') {
+      publicIp = db.prepare('SELECT * FROM public_ips WHERE id = ? AND firewall_id = ?')
+        .get(publicIpId, fw.id);
+      publicPool = publicIp ? db.prepare('SELECT * FROM public_ip_pools WHERE id = ?').get(publicIp.pool_id) : null;
+      publicAssignment = publicIp
+        ? db.prepare('SELECT * FROM public_ip_assignments WHERE public_ip_id = ?').get(publicIp.id)
+        : null;
+      const denial = checkPublicIpUsage({
+        isAdmin: req.session.isAdmin,
+        unrestricted,
+        userId: req.session.userId,
+        publicIp,
+        pool: publicPool,
+        assignment: publicAssignment,
+        target: { mappedIp, vmid },
+      });
+      if (denial) return res.status(denial.status).json({ error: denial.error });
+    }
+
+    const externalIp = publicIp ? publicIp.address : (fw.external_ip || '');
     if (!externalIp) {
       return res.status(400).json({ error: 'Firewall has no external IP configured. Set it in WAN config first.' });
     }
 
     labAddressName = vlanInterface ? buildManagedVipAddressName(name, mappedIp) : '';
     const { client, rootVdom } = getRootClient(fw);
-    const wanZone = fw.root_wan_zone || 'underlay';
+    // Inbound traffic for a dedicated address arrives on the pool's transit
+    // interface, not on the shared WAN zone.
+    const wanZone = publicPool?.external_interface || fw.root_wan_zone || 'underlay';
     const labVdom = fw.vdom || 'lab';
 
-    // Check for port conflict across ALL existing VIPs
+    // Endpoint-aware external-port conflict check. The boundary is
+    // firewall + public endpoint + protocol + overlapping port range, so two
+    // users may both publish 443/tcp as long as they sit on different public
+    // addresses — while two forwards on the SAME address still collide.
+    const candidateEndpoint = {
+      firewallId: fw.id,
+      publicIpId: publicIp?.id ?? null,
+      address: externalIp,
+      protocol,
+      port: extPort,
+      label: name,
+    };
+
+    // Managed forwards first: the portal's own records give the friendliest
+    // error and stay correct even when FortiGate is temporarily unreachable.
+    const managedEndpoints = db.prepare(`
+      SELECT mv.vip_name, mv.protocol, mv.ext_port, mv.public_ip_id, pi.address AS public_address
+      FROM managed_vips mv
+      LEFT JOIN public_ips pi ON pi.id = mv.public_ip_id
+      WHERE mv.firewall_id = ?
+    `).all(fw.id).map(row => ({
+      firewallId: fw.id,
+      publicIpId: row.public_ip_id,
+      // A NULL public_ip_id still means the default WAN endpoint.
+      address: row.public_address || (row.public_ip_id ? '' : (fw.external_ip || '')),
+      protocol: row.protocol,
+      port: row.ext_port,
+      label: row.vip_name,
+    }));
+    const managedConflict = findPortConflict(managedEndpoints, candidateEndpoint);
+    if (managedConflict) {
+      return res.status(409).json({ error: portConflictMessage(managedConflict) });
+    }
+
+    // Then everything live on the box, including VIPs nobody here created.
+    // A VIP whose extip cannot be read as an address (or is the catch-all
+    // 0.0.0.0) is attributed to the default WAN endpoint, which is where such a
+    // rule actually listens — that keeps the legacy check as strict as it was.
     const allVips = await client.getVips(rootVdom);
-    const conflict = allVips.find(v =>
-      v.portforward === 'enable' &&
-      String(v.extport) === String(extPort) &&
-      (v.protocol || 'tcp') === protocol
-    );
-    if (conflict) {
-      return res.status(409).json({
-        error: `External port ${extPort}/${protocol.toUpperCase()} is already in use by "${conflict.name}"`
+    const liveEndpoints = allVips
+      .filter(v => v.portforward === 'enable')
+      .map(v => {
+        const extip = normalizeIpv4(v.extip);
+        return {
+          firewallId: fw.id,
+          address: !extip || extip === '0.0.0.0' ? (fw.external_ip || '') : extip,
+          protocol: v.protocol || 'tcp',
+          port: v.extport,
+          label: v.name,
+        };
       });
+    const liveConflict = findPortConflict(liveEndpoints, candidateEndpoint);
+    if (liveConflict) {
+      return res.status(409).json({ error: portConflictMessage(liveConflict) });
     }
 
     // Check for duplicate VIP name
@@ -2529,11 +2608,21 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
 
     // Track in DB (with recorded artifacts for artifact-based teardown on delete)
     db.prepare(
-      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, service_name, protocol, ext_port, mapped_ip, mapped_port, dst_interface, lab_policy_id, vlan_interface, artifacts, workflow_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(fw.id, name, policyId, serviceName, protocol, extPort, mappedIp, mappedPort, dstInterface, labPolicyId, vlanInterface || '', JSON.stringify(artifacts), runId);
+      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, service_name, protocol, ext_port, mapped_ip, mapped_port, dst_interface, lab_policy_id, vlan_interface, artifacts, workflow_run_id, public_ip_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(fw.id, name, policyId, serviceName, protocol, extPort, mappedIp, mappedPort, dstInterface, labPolicyId, vlanInterface || '', JSON.stringify(artifacts), runId, publicIp?.id ?? null);
 
-    logAudit(req, 'admin_create_port_forward', name, `${protocol}/${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}/${vlanInterface}`);
-    res.json({ ok: true, vipName: name, policyId, labPolicyId, serviceName });
+    logAudit(req, 'admin_create_port_forward', name, `${protocol}/${externalIp}:${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}/${vlanInterface}`);
+    res.json({
+      ok: true, vipName: name, policyId, labPolicyId, serviceName, externalIp,
+      publicIpId: publicIp?.id ?? null,
+      // A dedicated address only has its inbound VIP built here. The egress
+      // path that makes replies leave through the same transit interface is
+      // provisioned by a workflow that does not exist yet — say so instead of
+      // letting the caller assume the forward is complete.
+      publicIpProvisioning: publicAssignment
+        ? describeAssignmentProvisioning(publicAssignment.status)
+        : null,
+    });
   } catch (err) {
     // The engine already rolled back anything it created on failure.
     res.status(500).json({ error: sanitizeError(err.message) });
