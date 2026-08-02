@@ -21,6 +21,13 @@ const NOTICE_LEVELS = {
 
 const EMPTY_NOTICE = { title: '', body: '', level: 'info' };
 
+// Setup-status rows: missing (red) first, then warn (amber), then ok.
+const READINESS_STATES = {
+  missing: { led: 'aaris-led--error', tag: 'border-red-500/40 text-red-400', label: 'Missing', rank: 2 },
+  warn: { led: 'aaris-led--warning', tag: 'border-amber-500/40 text-amber-400', label: 'Check', rank: 1 },
+  ok: { led: 'aaris-led--ok', tag: 'border-green-500/40 text-green-400', label: 'OK', rank: 0 },
+};
+
 export default function WelcomePage() {
   useDocumentTitle('Welcome');
   const { user } = useAuth();
@@ -34,6 +41,11 @@ export default function WelcomePage() {
   const [notices, setNotices] = useState([]);
   const [links, setLinks] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // Setup status (admin only) — the prerequisite chain behind each feature.
+  const [readiness, setReadiness] = useState(null);
+  const [readinessError, setReadinessError] = useState('');
+  const [showAllChecks, setShowAllChecks] = useState(false);
 
   // Notice admin form
   const [noticeForm, setNoticeForm] = useState(null); // null = closed, {id?} = editing
@@ -79,12 +91,23 @@ export default function WelcomePage() {
     } catch { /* non-fatal */ }
   }, []);
 
+  const loadReadiness = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const r = await api.get('/admin/readiness');
+      setReadiness(r.data);
+      setReadinessError('');
+    } catch (e) {
+      setReadinessError(e.response?.data?.error || 'Failed to load setup status');
+    }
+  }, [isAdmin]);
+
   useEffect(() => {
-    Promise.allSettled([loadStatus(), loadVms(), loadNotices(), loadLinks()])
+    Promise.allSettled([loadStatus(), loadVms(), loadNotices(), loadLinks(), loadReadiness()])
       .then(() => setLoading(false));
     const interval = setInterval(() => { loadStatus(); loadVms(); }, 30000);
     return () => clearInterval(interval);
-  }, [loadStatus, loadVms, loadNotices, loadLinks]);
+  }, [loadStatus, loadVms, loadNotices, loadLinks, loadReadiness]);
 
   const running = vms.filter(v => v.status === 'running').length;
   const stopped = vms.length - running;
@@ -98,6 +121,16 @@ export default function WelcomePage() {
     });
     return sorted.slice(0, 8);
   }, [vms]);
+
+  // Actionable rows first; the ok rows are collapsed behind a toggle so a
+  // healthy install shows one green line instead of a wall of green.
+  const checks = useMemo(() => {
+    const all = readiness?.checks || [];
+    return [...all].sort((a, b) =>
+      (READINESS_STATES[b.status]?.rank ?? 0) - (READINESS_STATES[a.status]?.rank ?? 0));
+  }, [readiness]);
+  const openChecks = checks.filter(c => c.status !== 'ok');
+  const visibleChecks = showAllChecks ? checks : openChecks;
 
   const saveNotice = async () => {
     if (!noticeForm?.title.trim()) {
@@ -286,6 +319,73 @@ export default function WelcomePage() {
                   </>
                 )}
               </Panel>
+
+              {/* Setup status — the prerequisite chain behind each feature.
+                  Admin only: it names env vars and cross-domain infra state. */}
+              {isAdmin && (readiness || readinessError) && (
+                <Panel
+                  label="Setup status"
+                  action={readiness && checks.length > 0 && (
+                    <PanelButton onClick={() => setShowAllChecks(v => !v)}>
+                      {showAllChecks ? 'Only issues' : `All ${checks.length}`}
+                    </PanelButton>
+                  )}
+                >
+                  {readinessError ? (
+                    <p className="text-sm text-red-400 px-4 py-3">{readinessError}</p>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-4 px-4 py-2.5 border-b border-gray-800 font-mono text-[11px] uppercase tracking-[0.1em]">
+                        {readiness.summary.missing > 0 && (
+                          <span className="flex items-center gap-1.5 text-red-400">
+                            <span className="aaris-led aaris-led--error" />{readiness.summary.missing} missing
+                          </span>
+                        )}
+                        {readiness.summary.warn > 0 && (
+                          <span className="flex items-center gap-1.5 text-amber-400">
+                            <span className="aaris-led aaris-led--warning" />{readiness.summary.warn} to check
+                          </span>
+                        )}
+                        <span className="flex items-center gap-1.5 text-gray-500">
+                          <span className="aaris-led aaris-led--ok" />{readiness.summary.ok} of {readiness.summary.total} OK
+                        </span>
+                      </div>
+
+                      {visibleChecks.length === 0 ? (
+                        <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-600">
+                          Every prerequisite is satisfied — nothing is waiting on setup.
+                        </p>
+                      ) : (
+                        visibleChecks.map(check => {
+                          const state = READINESS_STATES[check.status] || READINESS_STATES.ok;
+                          return (
+                            <div key={check.id} className="flex items-start gap-2.5 px-4 py-2.5 border-b border-gray-800/60 last:border-b-0">
+                              <span className={`aaris-led ${state.led} mt-1.5 shrink-0`} />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-mono text-xs text-gray-200 uppercase tracking-[0.08em]">{check.label}</span>
+                                  <span className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] ${state.tag}`}>
+                                    {state.label}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-gray-500 mt-0.5">{check.detail}</p>
+                              </div>
+                              {check.href && (
+                                <Link
+                                  to={check.href}
+                                  className="shrink-0 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500 hover:text-orange-500 transition-colors"
+                                >
+                                  Fix →
+                                </Link>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </>
+                  )}
+                </Panel>
+              )}
 
               {/* Notices */}
               <Panel

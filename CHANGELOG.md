@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-02 — Missing setup is now visible before anyone hits a wall
+
+- **A new "Setup status" card on the Overview page** (admins only) checks the whole prerequisite chain in one place: hosts registered and reachable, API tokens accepted, storage actually exposed to users, a deployable template or cloud image, firewall external IP and synced VLANs, the reverse proxy's WAN IP, and the environment variables that quietly weaken things when unset. Only the rows that need attention are shown; the rest collapse behind a toggle. A single unreachable Proxmox host degrades its own rows instead of blanking the card
+- **Empty states now say what to do next and who can do it.** The Websites page, the New VM page and the browser SSH panel used to end at "no items found"; they now name the missing prerequisite and either link straight to the fix or tell you exactly what to ask an admin for
+- The Websites page also warns up front when the reverse proxy has no WAN IP — previously the first sign was a DNS check that could not say where to point the A record
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

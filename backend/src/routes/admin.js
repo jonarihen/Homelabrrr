@@ -16,7 +16,8 @@ import {
   syncVmTagsSafe, runFullTagSync, isTagSyncRunning, getTagSyncProgress,
   getTagSyncSettings, setTagSyncPaused, setTagSyncIntervalHours,
 } from '../utils/vmTags.js';
-import { PERMISSION_KEYS } from '../utils/permissions.js';
+import { PERMISSION_KEYS, effectivePermissions } from '../utils/permissions.js';
+import { evaluateReadiness, summarizeReadiness } from '../utils/readiness.js';
 import { generateInviteToken, hashInviteToken, normalizeInvitePreset, summarizeInvitePreset, inviteStatus } from '../utils/invites.js';
 import {
   getLeaseSettings, setLeaseSettings, computeLeaseView, updateLease, renewLease,
@@ -149,6 +150,97 @@ async function getScopedPortForwardTargets(req, fw) {
     .filter(target => unrestricted || !!target.vlanInterface)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+// ─── Setup readiness / prerequisites ──────────────────────────────────────────
+// Collects the plain data every prerequisite check needs, then hands it to the
+// pure evaluator in utils/readiness.js. Each upstream round-trip is wrapped
+// individually: one unreachable Proxmox host must degrade its own rows, never
+// fail the whole endpoint.
+
+async function collectHostReadiness(hosts) {
+  const hostStatuses = await Promise.all(hosts.map(async (h) => {
+    try {
+      const s = await getHostStatus(h); // already swallows its own errors
+      return { hostId: h.id, online: !!s.online, error: s.error || '' };
+    } catch (err) {
+      return { hostId: h.id, online: false, error: err.message };
+    }
+  }));
+
+  const hostStorages = await Promise.all(hosts.map(async (h) => {
+    // Don't spend another 15s timeout on a host we already know is down.
+    const status = hostStatuses.find((s) => s.hostId === h.id);
+    if (!status?.online) return { hostId: h.id, total: 0, exposed: 0, error: 'Host unreachable' };
+    try {
+      const pools = await getHostStoragePools(h);
+      const visibility = storageVisibilityMap(h.id);
+      // Missing visibility row ⇒ exposed (default-open), same as the picker.
+      const exposed = pools.filter((p) => (visibility.has(p.storage) ? visibility.get(p.storage) : true)).length;
+      return { hostId: h.id, total: pools.length, exposed };
+    } catch (err) {
+      return { hostId: h.id, total: 0, exposed: 0, error: err.message };
+    }
+  }));
+
+  return { hostStatuses, hostStorages };
+}
+
+// Users who can actually reach the New VM page — role grants and the legacy
+// per-user column both count, so this goes through effectivePermissions.
+function countProvisioners() {
+  const users = db.prepare('SELECT * FROM users').all();
+  return users.filter((u) => u.is_admin === 1 || effectivePermissions(u).can_provision).length;
+}
+
+router.get('/readiness', requireAdmin, async (req, res) => {
+  try {
+    const hosts = getHosts();
+    const { hostStatuses, hostStorages } = await collectHostReadiness(hosts);
+
+    // Mirrors websites.js effectiveWanIp(): the manual value wins, otherwise
+    // the linked FortiGate's external IP stands in.
+    const caddyServers = db.prepare(`
+      SELECT cs.id, cs.name, cs.wan_ip, f.external_ip
+      FROM caddy_servers cs
+      LEFT JOIN firewalls f ON f.id = cs.fortigate_id
+      ORDER BY cs.name
+    `).all().map((s) => ({
+      id: s.id,
+      name: s.name,
+      wanIp: s.wan_ip || s.external_ip || '',
+    }));
+
+    const checks = evaluateReadiness({
+      hosts: hosts.map((h) => ({ id: h.id, name: h.name })),
+      hostStatuses,
+      hostStorages,
+      firewalls: db.prepare('SELECT id, name, external_ip FROM firewalls ORDER BY name')
+        .all().map((f) => ({ id: f.id, name: f.name, externalIp: f.external_ip || '' })),
+      vlanSyncCounts: db.prepare('SELECT firewall_id AS firewallId, COUNT(*) AS count FROM firewall_vlan_sync GROUP BY firewall_id').all(),
+      templateCount: db.prepare('SELECT COUNT(*) AS c FROM vm_templates WHERE enabled = 1').get().c,
+      // Same predicate provision.js /images uses: only a ready, import-content
+      // volume can be an import-from disk source on PVE 9.
+      cloudImageCount: db.prepare(
+        "SELECT COUNT(*) AS c FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%'"
+      ).get().c,
+      provisionUserCount: countProvisioners(),
+      caddyServers,
+      siteCount: db.prepare('SELECT COUNT(*) AS c FROM caddy_sites').get().c,
+      webhookCount: db.prepare('SELECT COUNT(*) AS c FROM notification_webhooks WHERE enabled = 1').get().c,
+      env: {
+        secretEncryptionKey: !!process.env.SECRET_ENCRYPTION_KEY,
+        sessionSecret: !!process.env.SESSION_SECRET,
+        allowedOrigin: process.env.ALLOWED_ORIGIN || '',
+        portalBaseUrl: process.env.PORTAL_BASE_URL || '',
+        trustProxy: process.env.TRUST_PROXY || '',
+      },
+    });
+
+    res.json({ checks, summary: summarizeReadiness(checks) });
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 
