@@ -16,7 +16,7 @@ import {
   syncVmTagsSafe, runFullTagSync, isTagSyncRunning, getTagSyncProgress,
   getTagSyncSettings, setTagSyncPaused, setTagSyncIntervalHours,
 } from '../utils/vmTags.js';
-import { PERMISSION_KEYS } from '../utils/permissions.js';
+import { PERMISSION_KEYS, userHasPermission } from '../utils/permissions.js';
 import { generateInviteToken, hashInviteToken, normalizeInvitePreset, summarizeInvitePreset, inviteStatus } from '../utils/invites.js';
 import {
   getLeaseSettings, setLeaseSettings, computeLeaseView, updateLease, renewLease,
@@ -55,10 +55,10 @@ function serializeNodeIdentity(nodeValue) {
   };
 }
 
+// Effective check — a role that grants can_manage_firewalls counts, so never
+// read the legacy users.can_manage_firewalls column here.
 function canManageAllPortForwards(req) {
-  if (req.session.isAdmin) return true;
-  const user = db.prepare('SELECT can_manage_firewalls FROM users WHERE id = ?').get(req.session.userId);
-  return user?.can_manage_firewalls === 1;
+  return !!req.session.isAdmin || userHasPermission(req.session.userId, 'can_manage_firewalls');
 }
 
 function getScopedFirewallSyncs(userId, firewallId, unrestricted = false) {
@@ -1430,8 +1430,8 @@ router.delete('/node-maintenance/:id', pHosts, (req, res) => {
 // Firewalls read also needed by policies page and vlans page
 router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_policies', 'can_manage_vlans'), (req, res) => {
   const firewalls = db.prepare('SELECT * FROM firewalls ORDER BY name').all();
-  const user = db.prepare('SELECT can_manage_firewalls FROM users WHERE id = ?').get(req.session.userId);
-  const canSeeSensitiveFields = req.session.isAdmin || user?.can_manage_firewalls === 1;
+  const canSeeSensitiveFields = req.session.isAdmin
+    || userHasPermission(req.session.userId, 'can_manage_firewalls');
   // Don't expose api_key to frontend
   res.json(firewalls.map(f => ({
     id: f.id,

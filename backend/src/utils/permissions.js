@@ -1,8 +1,16 @@
 import db from '../db.js';
+import { resolvePermissionCheck, resolveEffectivePermissions } from './permissionRules.js';
 
 // Every granular permission the portal knows. These are simultaneously the
 // legacy per-user column names on `users` and the permission key strings
 // stored in `role_permissions` — one vocabulary, two layers.
+//
+// NEVER read these columns off the `users` table directly to make an
+// authorization decision — `SELECT can_x FROM users ...` silently ignores
+// role_id, so anyone who got the permission from a role (including the
+// built-in Administrator role) is treated as not having it. Always go
+// through `userHasPermission` / `effectivePermissions` below, or
+// `requirePermission` in middleware/auth.js.
 export const PERMISSION_KEYS = [
   'see_all_vms',
   'can_provision',
@@ -39,12 +47,9 @@ export function getRolePermissions(roleId) {
 export function userHasPermission(userId, ...keys) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) return false;
+  // Short-circuit the admin bypass before spending a query on the role.
   if (user.is_admin === 1) return true;
-  if (user.role_id) {
-    const rolePerms = getRolePermissions(user.role_id);
-    return keys.some((k) => rolePerms.has(k));
-  }
-  return keys.some((k) => user[k] === 1);
+  return resolvePermissionCheck(user, user.role_id ? getRolePermissions(user.role_id) : null, keys);
 }
 
 /**
@@ -55,12 +60,9 @@ export function userHasPermission(userId, ...keys) {
  * frontend treats isAdmin separately.
  */
 export function effectivePermissions(userRow) {
-  const out = {};
-  if (userRow?.role_id) {
-    const rolePerms = getRolePermissions(userRow.role_id);
-    for (const key of PERMISSION_KEYS) out[key] = rolePerms.has(key);
-  } else {
-    for (const key of PERMISSION_KEYS) out[key] = userRow?.[key] === 1;
-  }
-  return out;
+  return resolveEffectivePermissions(
+    userRow,
+    userRow?.role_id ? getRolePermissions(userRow.role_id) : null,
+    PERMISSION_KEYS,
+  );
 }
