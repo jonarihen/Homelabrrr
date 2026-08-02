@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import Layout from '../components/Layout.jsx';
+import PrereqCallout from '../components/PrereqCallout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
@@ -35,6 +36,12 @@ export default function WebsitesPage() {
 
   useEffect(() => { load(); }, []);
 
+  // Publishing chains off a registered Caddy server that knows its own WAN IP —
+  // without it the DNS pre-check cannot tell the user where to point the A
+  // record, and the certificate step will never validate.
+  const canManageWebsites = !!(user?.isAdmin || user?.permissions?.canManageWebsites);
+  const noWanIp = servers.length > 0 && servers.every((s) => !s.wanIp);
+
   const hasInFlight = sites.some((s) => IN_FLIGHT.includes(s.status));
   // While something is publishing, refresh the list periodically so terminal
   // transitions land even if a card unmounts.
@@ -63,12 +70,25 @@ export default function WebsitesPage() {
         {loading ? (
           <div className="space-y-4">{[1, 2].map((i) => <div key={i} className="bg-gray-900 border border-gray-800 rounded-2xl h-24 animate-pulse" />)}</div>
         ) : servers.length === 0 ? (
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
-            <p className="text-white font-semibold">No reverse proxy configured yet</p>
-            <p className="text-sm text-gray-500 mt-2">An admin needs to register a Caddy server before you can publish websites.</p>
-          </div>
+          <PrereqCallout
+            title="No reverse proxy configured yet"
+            detail="Publishing a website needs a Caddy server registered in the portal — it is what terminates TLS and proxies the domain to your VM."
+            to={canManageWebsites ? '/admin/websites' : undefined}
+            actionLabel="Register a Caddy server"
+            fallback="Ask an admin to register a Caddy server under Admin → Websites."
+          />
         ) : (
           <>
+            {noWanIp && (
+              <PrereqCallout
+                title="Reverse proxy has no WAN IP"
+                detail="Nobody can be told where to point a domain's A record, and the certificate step will keep failing. Set the WAN IP on the Caddy server, or link a FortiGate that has an external IP."
+                to={canManageWebsites ? '/admin/websites' : undefined}
+                actionLabel="Set the WAN IP"
+                fallback="Ask an admin to set the reverse proxy's WAN IP under Admin → Websites."
+              />
+            )}
+
             {showForm && (
               <PublishForm
                 servers={servers}

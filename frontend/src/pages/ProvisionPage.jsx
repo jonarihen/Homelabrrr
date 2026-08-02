@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
+import PrereqCallout from '../components/PrereqCallout.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
@@ -471,6 +472,8 @@ function fmtSize(bytes) {
 
 function CloudImageForm({ onStarted }) {
   const { user } = useAuth();
+  // Whether *this* viewer can fix an empty catalog themselves, or has to ask.
+  const canManageTemplates = !!(user?.isAdmin || user?.permissions?.canManageTemplates);
   const [images, setImages] = useState([]);
   const [selected, setSelected] = useState(null);
   const [storages, setStorages] = useState([]);
@@ -585,15 +588,13 @@ function CloudImageForm({ onStarted }) {
 
   if (images.length === 0) {
     return (
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
-        <div className="w-14 h-14 bg-gray-800/50 rounded-2xl flex items-center justify-center mx-auto mb-4">
-          <svg className="w-7 h-7 text-gray-600" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" />
-          </svg>
-        </div>
-        <p className="text-gray-400 font-medium">No cloud images available</p>
-        <p className="text-sm text-gray-600 mt-1">An admin needs to download a cloud image under Templates → Cloud Images first.</p>
-      </div>
+      <PrereqCallout
+        title="No cloud images available"
+        detail="Deploying from a cloud image needs one downloaded onto a Proxmox storage as import content first. Only images that finished downloading show up here."
+        to={canManageTemplates ? '/admin/templates' : undefined}
+        actionLabel="Add a cloud image"
+        fallback="Ask an admin to download a cloud image under Admin → Templates → Cloud Images."
+      />
     );
   }
 
@@ -806,6 +807,7 @@ function CloudImageForm({ onStarted }) {
 
 function CloneForm({ onStarted }) {
   const { user } = useAuth();
+  const canManageTemplates = !!(user?.isAdmin || user?.permissions?.canManageTemplates);
   const [templates, setTemplates] = useState([]);
   const [selected, setSelected] = useState(null);
   const [storages, setStorages] = useState([]);
@@ -894,15 +896,13 @@ function CloneForm({ onStarted }) {
 
   if (templates.length === 0) {
     return (
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
-        <div className="w-14 h-14 bg-gray-800/50 rounded-2xl flex items-center justify-center mx-auto mb-4">
-          <svg className="w-7 h-7 text-gray-600" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m3.75 9v6m3-3H9m1.5-12H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-          </svg>
-        </div>
-        <p className="text-gray-400 font-medium">No templates available</p>
-        <p className="text-sm text-gray-600 mt-1">An admin needs to register VM templates first.</p>
-      </div>
+      <PrereqCallout
+        title="No templates available"
+        detail="Cloning needs a Proxmox VM registered as an enabled template in the portal. A template that exists in Proxmox but was never registered here will not appear."
+        to={canManageTemplates ? '/admin/templates' : undefined}
+        actionLabel="Register a template"
+        fallback="Ask an admin to register a VM template under Admin → Templates."
+      />
     );
   }
 

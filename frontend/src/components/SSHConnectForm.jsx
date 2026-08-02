@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import api from '../api.js';
+import PrereqCallout from './PrereqCallout.jsx';
 import { routeNode } from '../utils/nodeRef.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
@@ -175,12 +176,18 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
     return <div className="h-40 flex items-center justify-center text-gray-500 text-sm">Loading...</div>;
   }
 
+  // Browser SSH authenticates with a key you uploaded — there is no password
+  // path — so an empty key list is a hard prerequisite, and one you can fix
+  // yourself without an admin.
   if (keys.length === 0) {
     return (
-      <div className="text-center py-8">
-        <p className="text-gray-400 text-sm mb-2">No SSH keys found</p>
-        <p className="text-gray-500 text-xs">Add an SSH key in the SSH Keys page first.</p>
-      </div>
+      <PrereqCallout
+        card={false}
+        title="No SSH keys uploaded"
+        detail="Browser SSH signs in with one of your own keys — upload or generate one on the SSH Keys page, then come back and connect."
+        to="/ssh-keys"
+        actionLabel="Add an SSH key"
+      />
     );
   }
 
