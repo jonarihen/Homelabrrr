@@ -19,6 +19,11 @@
 - **Every VM you can see is now listed.** The ones that aren't ready appear greyed out with the reason next to the name — `web-01 — no IP recorded`, `db-02 — VLAN not synced to this firewall` — so you can tell at a glance that your VM exists and what it's waiting on
 - **When nothing is publishable, the empty dropdown is replaced by a callout** naming the missing prerequisite and linking to where you fix it: the VM page for a missing IP or VLAN tag, Networking → VLANs for an unsynced VLAN, and "ask an admin" when the VLAN simply isn't yours
 - **Creating a port forward reports the actual blocker.** Two catch-all messages ("You can only create port forwards for your own VMs on VLANs assigned to you" / "This VM is not on a VLAN you can publish through this firewall") covered all four causes; the specific reason and its fix are now returned instead
+## 2026-08-02 — VM names are checked before provisioning starts, and previewed as you type
+
+- **A VM name Proxmox would reject is now caught immediately.** Creating a VM from scratch or cloning a template with a name like `my_test_vm` used to sail through the portal, reserve a VMID, pass the capacity and quota checks, and only then fail with a raw Proxmox error. All three provisioning flows now validate the name first and answer straight away
+- **Every provisioning form shows the name that will actually be created.** Proxmox VM names must be DNS-style — lowercase, hyphenated, 63 characters at most — so `My Test VM` becomes `my-test-vm`. That result is now shown live under the VM Name field in the deploy-from-image, clone-template and create-from-scratch forms instead of appearing as a surprise afterwards
+- A name made entirely of spaces or punctuation is flagged in the form rather than accepted and rejected later
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
