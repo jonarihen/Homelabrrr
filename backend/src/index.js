@@ -36,18 +36,13 @@ import { sweepExpiredMaintenance } from './utils/nodeMaintenance.js';
 import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.js';
 import { logAuditEntry } from './utils/audit.js';
 import { authenticateApiToken } from './middleware/apiToken.js';
+import { requireAuth } from './middleware/auth.js';
+import { parseTrustProxy } from './utils/proxyChain.js';
+import { trustProxyCheck, inspectProxyChain } from './middleware/trustProxyCheck.js';
 import { startScheduler } from './scheduler.js';
 
 const app = express();
 const server = createServer(app);
-
-function parseTrustProxy(value) {
-  if (value === undefined || value === null || value === '') return 1;
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  const numeric = Number(value);
-  return Number.isNaN(numeric) ? value : numeric;
-}
 
 app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 
@@ -114,6 +109,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Compare the observed X-Forwarded-For hop count against TRUST_PROXY on the
+// first few authenticated requests and warn once if they disagree — a wrong
+// value silently breaks per-IP login lockout and audit attribution.
+app.use(trustProxyCheck);
+
 app.use((req, res, next) => {
   if (!req.session?.twoFactorEnrollmentOnly) return next();
 
@@ -146,6 +146,24 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/websites', websiteRoutes);
 app.use('/api/workflows', workflowRoutes);
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+// Self-diagnosis for the reverse-proxy chain: what address does the portal
+// actually see for *this* caller, how many X-Forwarded-For hops arrived, and
+// does that match TRUST_PROXY? Auth-gated — it reflects request headers back,
+// so it must only ever describe the caller's own request. Nothing beyond the
+// caller's request metadata and the configured hop count is returned.
+app.get('/api/health/client-ip', requireAuth, (req, res) => {
+  const analysis = inspectProxyChain(req);
+  res.json({
+    ip: req.ip || '',
+    forwardedFor: String(req.headers['x-forwarded-for'] || ''),
+    hops: analysis.hops,
+    trustProxy: process.env.TRUST_PROXY || '(default 1)',
+    agrees: analysis.agrees,
+    suspicious: analysis.suspicious,
+    reason: analysis.reason,
+  });
+});
 
 // Seed built-in default workflows for every registered firewall (migration).
 // Idempotent: only inserts a workflow+steps for a (firewall, trigger) with none.

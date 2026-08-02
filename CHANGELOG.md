@@ -47,6 +47,11 @@
 - **The memory check is advisory by default.** A tight node produces a warning on the deployment's progress steps instead of a rejection. Admins can set it to *off*, *warn* or *block* and tune the overcommit ratio under **Admin → PVE Hosts → Capacity policy**
 - **Automatic placement explains itself.** When no host can take a cloud-image deploy, the message now lists every host and why it was skipped — out of memory budget, in maintenance, unreachable, no storage exposed — instead of a flat "contact your admin"
 - Disk space is unchanged and still a hard block: free space on a storage pool is a real limit
+## 2026-08-02 — See the address the portal has for you, and catch a wrong TRUST_PROXY
+
+- **Account → Connection** now shows the address the portal sees you coming from, how many `X-Forwarded-For` hops arrived, and whether that matches the configured `TRUST_PROXY`. If the address shown is not your real public IP, the value is wrong — and the panel says so
+- A wrong `TRUST_PROXY` used to fail completely silently while making every client look like the reverse proxy: the audit log recorded the proxy's address for every action, and the per-account login lockout collapsed into a global one that anyone could trip for everyone. The backend now logs a **one-time warning** when the hop count that actually arrives disagrees with the configured value
+- The README gained a **"Counting your proxies"** table next to the deployment steps, mapping each common topology (direct, one external proxy, Cloudflare in front) to the right number
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 ## 2026-08-02 — Validation mistakes stop looking like server crashes
