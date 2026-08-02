@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-02 — Restoring a container backup from Proxmox Backup Server works
+
+- **A PBS container snapshot now restores.** Homelabrrr worked out whether a backup held a container or a VM by looking for `vzdump-lxc-` in the file name — a marker that only exists on classic vzdump archives. PBS snapshots don't have it, so every container restore from a PBS datastore was sent to Proxmox's VM endpoint and rejected with a raw upstream error. Both naming schemes are now understood
+- **The guest at the restore target decides the endpoint.** If the backup and the target disagree — a container backup aimed at a VM, or the reverse — the restore is refused up front with a message saying so, instead of failing halfway through Proxmox
+- A backup in a format Homelabrrr doesn't recognise is now reported as such rather than being quietly treated as a VM
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
