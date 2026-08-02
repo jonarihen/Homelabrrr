@@ -12,8 +12,20 @@
 // `statusCode` is canonical here. `status` is kept as an accepted alias in both
 // directions — readers honour it, and httpError()/tagStatus() write both — so
 // nothing that still reads the old property silently regresses.
+//
+// This module is the single entry point for answering a failed request. It owns
+// two decisions and delegates the third:
+//
+//   status   — resolveErrorStatus(), below.
+//   authorship — isPortalAuthoredError(), below: is this the portal's own prose
+//                or text that came back from Proxmox / FortiGate / SSH / Caddy?
+//   wording  — utils/upstreamError.js, for the upstream half: it recognises the
+//              failures people actually hit and rewrites them as
+//              title/detail/action, falling back to sanitizeError().
+//
+// Route handlers should only ever need sendError().
 
-import { sanitizeError } from './sanitize.js';
+import { upstreamErrorPayload } from './upstreamError.js';
 
 const MIN_STATUS = 400;
 const MAX_STATUS = 599;
@@ -34,7 +46,32 @@ function coerceStatus(value) {
 // "401 ⇒ redirect to /login" interceptor and sign the user out over a firewall
 // misconfiguration. Those errors mark themselves `expose = false` and are
 // reported as a plain sanitized 500, exactly as before this helper existed.
-const isPortalAuthored = (err) => err.expose !== false;
+const isExposable = (err) => err.expose !== false;
+
+/**
+ * True when `err` carries prose the portal wrote itself rather than text that
+ * came back from Proxmox / FortiGate / SSH / Caddy. Portal prose is already
+ * safe and already actionable, so redacting it only makes it worse ("needs
+ * 8 GB free on 10.0.0.5" → "… on [internal-host]").
+ *
+ * The marker is an explicit 4xx status, which is the shape every portal-side
+ * guard already throws (utils/capacity.js, utils/quota.js, utils/cpuTopology.js,
+ * utils/nodeMaintenance.js, utils/storageVisibility.js) and the one httpError()
+ * and tagStatus() write.
+ *
+ * `statusCode` counts here only because `expose = false` is checked first: the
+ * two clients that stamp a *remote* status onto an error — fortigate.js and
+ * utils/caddy.js — both set it, and they are the only ones that do. Keep that
+ * true when adding an upstream client, or its raw text reaches the browser.
+ *
+ * This is the one authorship check in the codebase. Anything that needs to know
+ * whether a message may be shown verbatim asks here.
+ */
+export function isPortalAuthoredError(err) {
+  if (!err || typeof err !== 'object' || !isExposable(err)) return false;
+  const status = coerceStatus(err.statusCode) ?? coerceStatus(err.status);
+  return status !== null && status <= 499;
+}
 
 /**
  * The HTTP status a thrown value should be reported as.
@@ -43,13 +80,13 @@ const isPortalAuthored = (err) => err.expose !== false;
  */
 export function resolveErrorStatus(err) {
   if (!err || typeof err !== 'object') return 500;
-  if (!isPortalAuthored(err)) return 500;
+  if (!isExposable(err)) return 500;
   return coerceStatus(err.statusCode) ?? coerceStatus(err.status) ?? 500;
 }
 
 /** True when the thrown value carries an explicit portal-authored 4xx/5xx status. */
 export function hasHttpStatus(err) {
-  if (!err || typeof err !== 'object' || !isPortalAuthored(err)) return false;
+  if (!err || typeof err !== 'object' || !isExposable(err)) return false;
   return coerceStatus(err.statusCode) !== null || coerceStatus(err.status) !== null;
 }
 
@@ -63,26 +100,41 @@ function messageOf(err) {
  * Build the JSON body for an error response.
  *
  * 4xx bodies are portal-authored, user-facing text ("Network interface net0 is
- * not VLAN-tagged") and are returned verbatim. 5xx bodies may be raw upstream
- * output, so they keep going through sanitizeError().
+ * not VLAN-tagged") and are returned verbatim. Everything else is upstream
+ * output and goes to utils/upstreamError.js, which answers with a translated
+ * `{ error, title, detail, action, href? }` when it recognises the failure and
+ * with the sanitizeError() string when it does not.
  *
- * `expose = false` errors already resolve to 500 and so are sanitized; the
- * explicit check keeps that true even if a caller passes a status by hand. A
- * FortiGate rejection can quote internal addresses, which is exactly what
- * sanitizeError() exists to strip.
+ * `status` can only ever make the answer more conservative: a 5xx body is never
+ * returned as portal prose, even for an error that would otherwise qualify.
+ * That, plus the `expose = false` check inside isPortalAuthoredError(), is what
+ * keeps a FortiGate rejection — which can quote internal addresses — redacted.
+ *
+ * @param {Error|string} err
+ * @param {number} [status]
+ * @param {{host?: string, node?: string, href?: string}} [context] portal labels
+ *        used to make a translated message specific. Rarely needed: the Proxmox
+ *        client already tags its rejections with the host's label.
  */
-export function errorPayload(err, status = resolveErrorStatus(err)) {
-  const message = messageOf(err);
-  if (status >= 500 || err?.expose === false) {
-    return { error: sanitizeError(message) };
+export function errorPayload(err, status = resolveErrorStatus(err), context) {
+  if (status < 500 && isPortalAuthoredError(err)) {
+    return { error: messageOf(err) || 'Request failed' };
   }
-  return { error: message || 'Request failed' };
+  return upstreamErrorPayload(err, context);
 }
 
-/** Terminal error response for a route handler. */
-export function sendError(res, err) {
+/**
+ * Terminal error response for a route handler — the one entry point.
+ *
+ * A recognised upstream failure is answered in the portal's own words, so the
+ * raw text (the only thing naming the actual Proxmox/FortiGate fault) would
+ * otherwise be lost. Operators get it in the log; the browser must not.
+ */
+export function sendError(res, err, context) {
   const status = resolveErrorStatus(err);
-  return res.status(status).json(errorPayload(err, status));
+  const body = errorPayload(err, status, context);
+  if (body.title) console.error('Upstream failure:', messageOf(err));
+  return res.status(status).json(body);
 }
 
 /** Stamp an existing error with a status (canonical + legacy alias). */

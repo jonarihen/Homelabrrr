@@ -4,6 +4,7 @@ import db from './db.js';
 import { decryptSecret } from './utils/secrets.js';
 import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.js';
 import { pickVmid, isVmidTakenError, VmidReservations, VMID_MIN } from './utils/vmidAllocator.js';
+import { ADMIN_PVE_HOSTS_HREF } from './utils/upstreamError.js';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
@@ -28,12 +29,24 @@ function getHostById(hostId) {
 
 // ── Per-host API request ─────────────────────────────────────────────────────
 
+// Carry the host's portal label (and where to go to fix it) on the rejection
+// itself, so utils/upstreamError.js can name the host in a user-facing message
+// without echoing the raw upstream text — which routinely contains an IP.
+function tagUpstreamHost(err, host) {
+  if (err && typeof err === 'object') {
+    err.upstreamHost = host?.name || host?.host;
+    err.upstreamHref = ADMIN_PVE_HOSTS_HREF;
+  }
+  return err;
+}
+
 function makeRequest(host, method, path, body) {
   const url = new URL(`https://${host.host}:${host.port}/api2/json${path}`);
   const authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
   const payload = body && method !== 'DELETE' ? JSON.stringify(body) : null;
 
   return new Promise((resolve, reject) => {
+    const fail = (err) => reject(tagUpstreamHost(err, host));
     const req = https.request(url, {
       method,
       agent: agentForHost(host),
@@ -47,7 +60,7 @@ function makeRequest(host, method, path, body) {
       res.on('data', (chunk) => { text += chunk; });
       res.on('end', () => {
         if (res.statusCode >= 400) {
-          reject(new Error(`Proxmox ${method} ${path} → ${res.statusCode}: ${text}`));
+          fail(new Error(`Proxmox ${method} ${path} → ${res.statusCode}: ${text}`));
           return;
         }
         try { resolve(JSON.parse(text).data); }
@@ -55,7 +68,7 @@ function makeRequest(host, method, path, body) {
       });
     });
 
-    req.on('error', reject);
+    req.on('error', fail);
     req.setTimeout(15000, () => req.destroy(new Error('Proxmox request timeout')));
     if (payload) req.write(payload);
     req.end();

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import api from '../api.js';
+import ErrorCallout from './ErrorCallout.jsx';
+import { normalizeApiError } from '../utils/apiError.js';
 
 function formatSize(bytes) {
   if (bytes == null) return '—';
@@ -53,7 +55,7 @@ export default function SFTPBrowser({ token }) {
       setCurrentPath(data.path || path);
       setInitialLoaded(true);
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to list directory');
+      setError(normalizeApiError(e, 'Failed to list directory'));
     } finally {
       setLoading(false);
     }
@@ -92,7 +94,7 @@ export default function SFTPBrowser({ token }) {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      setError(e.response?.data?.error || 'Download failed');
+      setError(normalizeApiError(e, 'Download failed'));
     } finally {
       setDownloading(null);
     }
@@ -124,7 +126,7 @@ export default function SFTPBrowser({ token }) {
       }
       await loadDir(currentPath);
     } catch (e) {
-      setError(e.response?.data?.error || 'Upload failed');
+      setError(normalizeApiError(e, 'Upload failed'));
     } finally {
       setUploading(false);
       setUploadProgress(null);
@@ -140,7 +142,7 @@ export default function SFTPBrowser({ token }) {
       setShowMkdir(false);
       await loadDir(currentPath);
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to create directory');
+      setError(normalizeApiError(e, 'Failed to create directory'));
     }
   };
 
@@ -155,7 +157,7 @@ export default function SFTPBrowser({ token }) {
       setDeleteConfirm(null);
       await loadDir(currentPath);
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to delete');
+      setError(normalizeApiError(e, 'Failed to delete'));
     }
   };
 
@@ -305,8 +307,8 @@ export default function SFTPBrowser({ token }) {
       )}
 
       {error && (
-        <div className="px-4 py-2 text-xs text-red-400 bg-red-900/20 border-b border-gray-700">
-          {error}
+        <div className="px-3 py-2">
+          <ErrorCallout error={error} />
         </div>
       )}
 

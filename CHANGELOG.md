@@ -85,6 +85,13 @@
 - New **Manage Public IPs** permission, assignable per user or per role
 - **Not yet live:** assigning an address records it as *pending* and configures nothing on the FortiGate. The egress path (SNAT pool, policy route, kill switch) and the admin UI are still to come, and every response says so
 
+## 2026-08-02 — Proxmox and FortiGate failures now say what actually went wrong
+
+- **Raw upstream errors are translated instead of forwarded.** Starting a VM whose disk is missing used to answer with the whole Proxmox reply — `Proxmox POST /nodes/…/status/start → 500: {"data":null,"errors":{"":"volume 'local-lvm:vm-105-disk-0' does not exist"}}`. It now reads *"The disk is missing — Proxmox cannot find this guest's disk on storage local-lvm."* The same goes for a VM or container locked by a running backup, a storage that isn't enabled on the node, a rejected API token, an untrusted TLS certificate, a host that can't be reached, and FortiGate's `-5` / `-3` rejections
+- **Every translated failure now says what to do about it, and links to the page that fixes it** — Admin → PVE Hosts for a token or certificate problem, Admin → Firewalls for a FortiGate one
+- **A translated failure never quotes the upstream text.** Host and storage names come from the portal's own configuration, so internal addresses can't ride along in the new wording. Anything the portal doesn't recognise is still scrubbed exactly as before, and the raw upstream string always stays in the server log for operators
+- **The file browser reports failures like the rest of the portal.** SFTP listing, upload, download, mkdir and delete used to return the raw SSH error with no filtering at all
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 ## 2026-08-02 — Validation mistakes stop looking like server crashes
 

@@ -132,7 +132,7 @@ app.use((req, res, next) => {
   return res.status(403).json({ error: 'Two-factor setup is required before accessing the portal' });
 });
 
-import { sanitizeError } from './utils/sanitize.js';
+import { errorPayload } from './utils/httpError.js';
 
 app.use('/api/auth',  authRoutes);
 app.use('/api/admin', adminRoutes);
@@ -177,10 +177,12 @@ try {
   console.warn('[workflows] Default workflow seeding failed:', err.message);
 }
 
-// Global error handler — sanitize leaked details
+// Global error handler — the raw error stays in the log for operators; the
+// browser gets a translated payload where we recognise the failure, and the
+// sanitized string otherwise.
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({ error: sanitizeError(err.message) });
+  res.status(500).json(errorPayload(err, 500));
 });
 
 // ─── VNC WebSocket Proxy ──────────────────────────────────────────────────────
