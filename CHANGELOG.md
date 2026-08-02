@@ -30,6 +30,11 @@
 - **Detection degrades instead of failing.** A VM with no guest agent, a VLAN with no managed DHCP scope, or an unreachable firewall simply contributes nothing; whatever the other sources found is still offered. Loopback and link-local addresses are never suggested
 - **The field now says what it actually controls.** A hint under *Host / IP* spells out that this same address is what port forwarding and website publishing use — previously nothing in either feature explained why they were blocked on a form buried in the SSH panel
 - **A VM that only ever had a DHCP lease no longer stays address-less.** Opening the VM's IP management panel records the observed lease as the VM's address when none was set, instead of waiting for someone to create a static reservation. Any change the portal makes to a recorded address is written to the audit log
+## 2026-08-02 — Two people can deploy at the same time without clashing
+
+- **Simultaneous deployments no longer get handed the same VM ID.** The next free ID was picked from a snapshot of what Proxmox reported and nothing held it, so two people clicking Deploy at once — or one person double-clicking — could both be given ID 105. The second deployment then failed with a raw *"VM 105 already exists"* from Proxmox. An ID is now held for the deployment that was given it, so the next request skips it. A deployment that fails hands its ID straight back
+- **If an ID is taken behind the portal's back** (someone creating a VM directly in Proxmox, for instance), the deployment now quietly picks a new one and carries on instead of failing
+- **A failed deployment no longer leaves the VM assigned to you.** Ownership and the lease clock used to be recorded the moment the deployment was submitted, so a clone or cloud-image deploy that failed part-way left your account holding a VM that was never created — sometimes an ID that later belonged to someone else. Both are now recorded once the VM actually exists
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 ## 2026-08-02 — Validation mistakes stop looking like server crashes
