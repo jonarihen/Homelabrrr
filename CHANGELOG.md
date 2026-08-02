@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-02 — Port forwarding says why a VM can't be published
+
+- **The "Target VM" dropdown no longer hides VMs.** A VM had to clear four separate checks — a recorded IP, a VLAN tag on its network interface, that VLAN synced to the firewall, and (for non-admins) that VLAN assigned to you — and failing any one of them silently removed it from the list. The dropdown could end up empty with nothing but an eleven-pixel grey line to explain it
+- **Every VM you can see is now listed.** The ones that aren't ready appear greyed out with the reason next to the name — `web-01 — no IP recorded`, `db-02 — VLAN not synced to this firewall` — so you can tell at a glance that your VM exists and what it's waiting on
+- **When nothing is publishable, the empty dropdown is replaced by a callout** naming the missing prerequisite and linking to where you fix it: the VM page for a missing IP or VLAN tag, Networking → VLANs for an unsynced VLAN, and "ask an admin" when the VLAN simply isn't yours
+- **Creating a port forward reports the actual blocker.** Two catch-all messages ("You can only create port forwards for your own VMs on VLANs assigned to you" / "This VM is not on a VLAN you can publish through this firewall") covered all four causes; the specific reason and its fix are now returned instead
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

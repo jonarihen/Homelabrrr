@@ -16,7 +16,8 @@ import {
   syncVmTagsSafe, runFullTagSync, isTagSyncRunning, getTagSyncProgress,
   getTagSyncSettings, setTagSyncPaused, setTagSyncIntervalHours,
 } from '../utils/vmTags.js';
-import { PERMISSION_KEYS } from '../utils/permissions.js';
+import { PERMISSION_KEYS, userHasPermission } from '../utils/permissions.js';
+import { buildPortForwardTargets, blockedErrorText, blockedStatus } from '../utils/portForwardTargets.js';
 import { generateInviteToken, hashInviteToken, normalizeInvitePreset, summarizeInvitePreset, inviteStatus } from '../utils/invites.js';
 import {
   getLeaseSettings, setLeaseSettings, computeLeaseView, updateLease, renewLease,
@@ -80,31 +81,52 @@ function getScopedFirewallSyncs(userId, firewallId, unrestricted = false) {
   `).all(userId, firewallId);
 }
 
+// Every VM the user can see, annotated with whether it can be published through
+// `fw` and — when it cannot — a structured reason. Nothing is filtered out:
+// silently dropping VMs is exactly what made this screen impossible to debug.
+// The classification itself lives in utils/portForwardTargets.js so it is pure
+// and unit-testable; this function only gathers the rows it needs.
 async function getScopedPortForwardTargets(req, fw) {
   const unrestricted = canManageAllPortForwards(req);
-  const scopedSyncs = getScopedFirewallSyncs(req.session.userId, fw.id, unrestricted);
-  const tagToInterface = new Map(scopedSyncs.map(sync => [sync.vlan_tag, sync.interface_name]));
+  const canManageVlans = req.session.isAdmin || userHasPermission(req.session.userId, 'can_manage_vlans');
 
   const vms = await getAllVMs();
   const sshConfigs = db.prepare('SELECT node, vmid, host, port FROM vm_ssh_configs').all();
-  const sshMap = new Map(sshConfigs.map(config => [`${config.node}/${config.vmid}`, config]));
-  const rawVmCounts = new Map();
-  vms.forEach(vm => {
-    const key = `${vm.node}/${vm.vmid}`;
-    rawVmCounts.set(key, (rawVmCounts.get(key) || 0) + 1);
-  });
+  const vlans = db.prepare('SELECT id, name, tag FROM vlans').all();
+  const vlanSyncs = db.prepare(`
+    SELECT fvs.interface_name, v.tag AS vlan_tag
+    FROM firewall_vlan_sync fvs
+    JOIN vlans v ON v.id = fvs.vlan_id
+    WHERE fvs.firewall_id = ?
+  `).all(fw.id);
+  const userVlanTags = db.prepare(
+    'SELECT v.tag FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ?'
+  ).all(req.session.userId).map(r => r.tag);
 
-  const vmList = vms.filter(vm => {
+  const accessibleVms = vms.filter(vm => {
     if (vm.type !== 'qemu' && vm.type !== 'lxc') return false;
-    const hasSshConfig = sshMap.has(`${vm.nodeRef || vm.node}/${vm.vmid}`)
-      || (rawVmCounts.get(`${vm.node}/${vm.vmid}`) === 1 && sshMap.has(`${vm.node}/${vm.vmid}`));
-    if (!hasSshConfig) return false;
     if (unrestricted) return true;
     return userCanAccessVm(req.session.userId, vm.nodeRef || vm.node, vm.vmid, req.session.isAdmin);
   });
+  const accessibleKeys = accessibleVms.map(vm => `${vm.nodeRef || vm.node}/${vm.vmid}`);
+
+  // Only VMs that already have an IP need a config fetch: a VM without one is
+  // blocked by `no_ip` regardless of its VLAN tag, and that reason outranks the
+  // VLAN ones. Keeps the Proxmox call count identical to before this change.
+  const sshKeys = new Set(sshConfigs.filter(c => c.host).map(c => `${c.node}/${c.vmid}`));
+  const rawVmCounts = new Map();
+  for (const vm of vms) {
+    const raw = `${vm.node}/${vm.vmid}`;
+    rawVmCounts.set(raw, (rawVmCounts.get(raw) || 0) + 1);
+  }
+  const configTargets = accessibleVms.filter(vm => {
+    const raw = `${vm.node}/${vm.vmid}`;
+    return sshKeys.has(`${vm.nodeRef || vm.node}/${vm.vmid}`)
+      || (rawVmCounts.get(raw) === 1 && sshKeys.has(raw));
+  });
 
   const configResults = await Promise.allSettled(
-    vmList.map(async vm => {
+    configTargets.map(async vm => {
       const routeNode = vm.nodeRef || vm.node;
       try {
         const cfg = await getVMConfig(routeNode, vm.vmid);
@@ -122,32 +144,19 @@ async function getScopedPortForwardTargets(req, fw) {
     if (result.status === 'fulfilled') vlanTagMap.set(result.value.key, result.value.vlanTag);
   }
 
-  const rootDstInterface = fw.root_vdom_link || 'lab-root1';
-
-  return vmList
-    .map(vm => {
-      const routeNode = vm.nodeRef || vm.node;
-      const rawKey = `${vm.node}/${vm.vmid}`;
-      const ssh = sshMap.get(`${routeNode}/${vm.vmid}`)
-        || (rawVmCounts.get(rawKey) === 1 ? sshMap.get(rawKey) : null);
-      const vlanTag = vlanTagMap.get(`${routeNode}/${vm.vmid}`) || null;
-      const vlanInterface = vlanTag ? (tagToInterface.get(vlanTag) || '') : '';
-      return {
-        node: vm.node,
-        nodeRef: routeNode,
-        vmid: vm.vmid,
-        name: vm.name || `VM ${vm.vmid}`,
-        status: vm.status,
-        type: vm.type,
-        ip: ssh?.host || '',
-        sshPort: ssh?.port || 22,
-        vlanTag,
-        dstInterface: vlanInterface ? rootDstInterface : '',
-        vlanInterface,
-      };
-    })
-    .filter(target => unrestricted || !!target.vlanInterface)
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return buildPortForwardTargets({
+    vms,
+    accessibleKeys,
+    sshConfigs,
+    vlanTags: vlanTagMap,
+    vlans,
+    vlanSyncs,
+    userVlanTags,
+    unrestricted,
+    canManageVlans,
+    rootDstInterface: fw.root_vdom_link || 'lab-root1',
+    firewallName: fw.name || '',
+  });
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────
@@ -2417,10 +2426,16 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
       const targets = await getScopedPortForwardTargets(req, fw);
       const target = targets.find(t => (t.nodeRef || t.node) === node && String(t.vmid) === String(vmid));
       if (!target) {
-        return res.status(403).json({ error: 'You can only create port forwards for your own VMs on VLANs assigned to you' });
+        return res.status(403).json({ error: 'You can only create port forwards for VMs assigned to you' });
       }
-      if (!target.ip || !target.vlanInterface || !target.dstInterface) {
-        return res.status(400).json({ error: 'This VM is not on a VLAN you can publish through this firewall' });
+      // Report the specific missing prerequisite rather than a generic "not on a
+      // VLAN you can publish through" — the user cannot act on the generic one.
+      if (!target.eligible) {
+        const blocked = target.blocked;
+        return res.status(blockedStatus(blocked)).json({
+          error: blockedErrorText(blocked) || 'This VM is not on a VLAN you can publish through this firewall',
+          blocked: blocked || null,
+        });
       }
 
       mappedIp = target.ip;
