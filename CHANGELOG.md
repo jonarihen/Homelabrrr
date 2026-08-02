@@ -64,6 +64,11 @@
 - **The UI no longer comes up before the API is ready.** Docker now waits for the backend's health check instead of just for its container to exist, so the first page load after a restart can't land on a backend still running database migrations
 - **The backend no longer runs as root.** It drops to an unprivileged user before starting the API — the process holding decrypted Proxmox tokens and SSH keys in memory has no need for root. Existing installations upgrade in place; the database volume's ownership is corrected automatically on first start
 - **The README now explains how to back up the database volume**, which holds every registered host, user, key and encrypted secret, along with what to restore it with and why the encryption key has to be backed up separately
+## 2026-08-02 — Cross-host migrations stop failing on attached ISOs and unusable target storage
+
+- **A VM with an ISO in its CD-ROM drive migrates again.** Proxmox refuses to move a guest that has a local ISO attached and aborted the migration before it copied a single byte — while the portal cheerfully promised the ISO would simply be "detached on the target". The drive is now emptied on the source host before the migration starts, and the migration plan says exactly which ISOs will be ejected so it is no chance discovery. An ISO on storage the target host also mounts is left attached
+- **A container is no longer shut down for a migration that cannot succeed.** Moving a container to a storage that cannot accept its disk format (a raw root filesystem onto a ZFS pool, for example) failed deep in the transfer — after Proxmox had already stopped the container — and Proxmox then restarted it on the source, so the downtime bought nothing. The target storage is now checked up front: an incompatible one is named in the migration window with the reason, and the migration cannot be started at all
+- The check only refuses combinations it can prove will fail. If a storage type is unfamiliar it lets the migration proceed rather than standing in the way
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 ## 2026-08-02 — Validation mistakes stop looking like server crashes

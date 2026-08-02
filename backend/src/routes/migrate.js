@@ -14,6 +14,7 @@ import { sendError } from '../utils/httpError.js';
 import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef, nodeLookupCandidates, isValidNodeName } from '../utils/nodeRef.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
+import { planCdromDetach, checkStorageCompatibility } from '../utils/migrationPreflight.js';
 
 // Cross-host migration: move a guest between separate (non-clustered) Proxmox
 // hosts. Two modes, decided per VM:
@@ -158,8 +159,7 @@ function progressReader(id, node, upid, { persistOffset = false, step = null, no
 
 // ─── Shared storage detection ────────────────────────────────────────────────
 
-async function findSharedStorages(sourceHost, targetHost) {
-  const [srcDefs, tgtDefs] = await Promise.all([getStorageDefs(sourceHost), getStorageDefs(targetHost)]);
+function buildSharedMap(srcDefs, tgtDefs) {
   const tgtByKey = new Map();
   for (const def of tgtDefs || []) {
     const key = sharedStorageKey(def);
@@ -173,6 +173,19 @@ async function findSharedStorages(sourceHost, targetHost) {
     if (tgt) map.set(def.storage, { targetId: tgt.storage, content: String(def.content || '') });
   }
   return map;
+}
+
+const storageTypeMap = (defs) => new Map((defs || []).map((d) => [d.storage, d.type]));
+
+// The volumes a full copy actually streams to the target, tagged with their
+// source storage's plugin type — that pair is what decides whether the target
+// storage can import them at all (see utils/migrationPreflight.js). CD-ROM and
+// cloud-init references carry no data and are excluded.
+function dataVolumes(disks, srcDefs) {
+  const types = storageTypeMap(srcDefs);
+  return disks
+    .filter((d) => d.action === 'copy' || d.action === 'remount')
+    .map((d) => ({ key: d.key, volid: d.volid, storage: d.storage, storageType: types.get(d.storage) || null }));
 }
 
 // ─── Disk plan ───────────────────────────────────────────────────────────────
@@ -221,6 +234,16 @@ async function resolveVm(requestedRef, vmid) {
 
 async function computePlan(vm, sourceHost, targetHost) {
   if (vm.type === 'lxc') {
+    // Storage definitions are best effort on this path: they only feed the
+    // target-storage compatibility check, which degrades to a warning when it
+    // has nothing to go on rather than blocking a migration.
+    let srcDefs = [];
+    let tgtDefs = [];
+    try {
+      [srcDefs, tgtDefs] = await Promise.all([getStorageDefs(sourceHost), getStorageDefs(targetHost)]);
+    } catch (err) {
+      console.warn(`[migrate] could not read storage definitions for CT ${vm.vmid}: ${err.message}`);
+    }
     let disks = [];
     try {
       const cfg = await getLXCConfig(vm.nodeRef, vm.vmid);
@@ -232,11 +255,14 @@ async function computePlan(vm, sourceHost, targetHost) {
       mode: 'remote_migrate',
       disks,
       sharedMap: new Map(),
+      targetStorageDefs: tgtDefs || [],
+      sourceVolumes: dataVolumes(disks, srcDefs),
       warnings: ['Containers always do a full copy — shared-storage adoption is QEMU-only.'],
     };
   }
 
-  const sharedMap = await findSharedStorages(sourceHost, targetHost);
+  const [srcDefs, tgtDefs] = await Promise.all([getStorageDefs(sourceHost), getStorageDefs(targetHost)]);
+  const sharedMap = buildSharedMap(srcDefs, tgtDefs);
   const config = await getVMConfig(vm.nodeRef, vm.vmid);
   const disks = buildDiskPlan(config, sharedMap);
   const sharedDisks = disks.filter((d) => d.action === 'remount');
@@ -249,13 +275,29 @@ async function computePlan(vm, sourceHost, targetHost) {
     // Local boot disks travel via a shared storage the VM already uses
     transferStorage = sharedDisks[0].storage;
   }
-  if (disks.some((d) => d.action === 'detach')) {
-    warnings.push('CD-ROM ISO references are detached on the target (ISO files are not migrated).');
+  // Adopt builds the target config itself and empties every CD-ROM drive on the
+  // way. remote_migrate cannot: Proxmox ships the source's own config and its
+  // volume scan aborts phase 1 on an attached local ISO, so the drive has to be
+  // emptied on the SOURCE before the migration starts — a user-visible change,
+  // hence spelled out here rather than promised as a target-side detach.
+  const cdrom = planCdromDetach(config, { sharedStorages: [...sharedMap.keys()] });
+  if (cdrom.detach.length > 0) {
+    const list = cdrom.detach.map((d) => `${d.key} (${d.volid})`).join(', ');
+    warnings.push(mode === 'adopt'
+      ? `CD-ROM ISO references are detached on the target (ISO files are not migrated): ${list}. Forcing a full copy instead ejects them on the source host first.`
+      : `Proxmox refuses to migrate a guest with a local ISO attached, so ${list} ${cdrom.detach.length === 1 ? 'is' : 'are'} ejected from the VM on the source host before the migration starts. Re-attach the ISO afterwards if you still need it.`);
+  }
+  if (mode !== 'adopt' && cdrom.kept.length > 0) {
+    warnings.push(`Left attached because the target host mounts the same storage: ${cdrom.kept.map((k) => `${k.key} (${k.volid})`).join(', ')}. If Proxmox still refuses with "local cdrom image", eject it manually and retry.`);
   }
   if (mode === 'adopt' && config.cipassword) {
     warnings.push('Cloud-init password cannot be carried over (Proxmox masks it) — set it again on the target if you used one.');
   }
-  return { mode, disks, sharedMap, transferStorage, config, warnings };
+  return {
+    mode, disks, sharedMap, transferStorage, config, warnings,
+    targetStorageDefs: tgtDefs || [],
+    sourceVolumes: dataVolumes(disks, srcDefs),
+  };
 }
 
 // ─── Adopt-mode background job ───────────────────────────────────────────────
@@ -568,8 +610,9 @@ router.get('/plan/:node/:vmid', async (req, res) => {
     }
 
     const plan = await computePlan(vm, sourceHost, targetHost);
+    const guestType = vm.type === 'lxc' ? 'lxc' : 'qemu';
     res.json({
-      vmtype: vm.type === 'lxc' ? 'lxc' : 'qemu',
+      vmtype: guestType,
       running: vm.status === 'running',
       mode: plan.mode,
       requiresStop: plan.mode === 'adopt',
@@ -577,6 +620,15 @@ router.get('/plan/:node/:vmid', async (req, res) => {
       disks: plan.disks.map(({ key, volid, storage, sizeGb, shared, action, targetStorageId }) =>
         ({ key, volid, storage, sizeGb, shared, action, targetStorageId })),
       sharedStorages: [...plan.sharedMap.entries()].map(([sourceId, m]) => ({ sourceId, targetId: m.targetId })),
+      // Per-candidate verdict so the modal can refuse a target storage that
+      // cannot import this guest's volumes *before* anything is stopped. Only
+      // meaningful for a full copy — adopt moves disks host-locally.
+      storageCompatibility: (plan.targetStorageDefs || [])
+        .filter((d) => d && d.storage && !d.disable)
+        .map((d) => ({
+          storage: d.storage,
+          ...checkStorageCompatibility({ sourceVolumes: plan.sourceVolumes, targetStorageDef: d, guestType }),
+        })),
       warnings: plan.warnings,
     });
   } catch (err) {
@@ -686,6 +738,22 @@ router.post('/:node/:vmid', async (req, res) => {
       if (!targetStorage) {
         return res.status(400).json({ error: 'targetStorage is required for a full-copy migration' });
       }
+      // Pre-flight: a target storage that cannot import the source volume's
+      // stream format fails deep inside the transfer — by then Proxmox has
+      // already stopped the guest, so the shutdown happens for nothing. This is
+      // knowable from the storage definitions, so refuse up front. Only a
+      // provable incompatibility blocks; anything undeterminable is a warning.
+      const compat = checkStorageCompatibility({
+        sourceVolumes: plan.sourceVolumes,
+        targetStorageDef: (plan.targetStorageDefs || []).find((d) => d.storage === targetStorage) || null,
+        guestType: vmtype,
+      });
+      if (!compat.ok) {
+        return res.status(400).json({ code: 'incompatible_target_storage', error: compat.reason });
+      }
+      if (compat.severity === 'warn') {
+        console.warn(`[migrate] ${vmtype} ${vmid} → ${targetStorage}: ${compat.reason}`);
+      }
       // Pre-flight: skip silently if the target can't be queried (same policy
       // as provisioning), but refuse when it clearly doesn't fit.
       await assertNodeCapacity(targetNode, {
@@ -697,6 +765,7 @@ router.post('/:node/:vmid', async (req, res) => {
 
     let upid = '';
     let bootFix = '';
+    let ejected = [];
     if (mode === 'remote_migrate') {
       // Proxmox ships the ACTIVE (on-disk) source config for a cross-host
       // migration, so a stale boot-order entry (device removed/rebused but
@@ -725,14 +794,54 @@ router.post('/:node/:vmid', async (req, res) => {
           bootFix = ` (corrected stale boot order "${activeCfg.boot}" → "${fixedBoot}")`;
           console.log(`[migrate] VM ${vmid}: ${bootFix.trim()}`);
         }
+
+        // Proxmox scans every referenced volume before phase 1 and aborts the
+        // whole migration on an attached local ISO ("can't migrate local disk
+        // ...: local cdrom image"). remote_migrate has no way to rewrite the
+        // drive list for the target — the source ships its own config — so the
+        // drives are emptied here, on the source, and reported back.
+        const sharedStorages = [...plan.sharedMap.keys()];
+        const cdrom = planCdromDetach(activeCfg, { sharedStorages });
+        if (cdrom.keys.length > 0) {
+          const patch = {};
+          for (const entry of cdrom.detach) patch[entry.key] = 'none,media=cdrom';
+          await updateVMConfig(sourceRef, vmid, patch);
+          // Verify it landed in the ACTIVE config: anything Proxmox deferred to
+          // pending would still be shipped with the ISO attached, and the
+          // migration would abort exactly as before.
+          const afterCfg = await getVMConfigCurrent(sourceRef, vmid);
+          const stillAttached = planCdromDetach(afterCfg, { sharedStorages });
+          if (stillAttached.keys.length > 0) {
+            return res.status(409).json({
+              code: 'cdrom_eject_pending',
+              error: `Could not eject the CD-ROM ISO from ${stillAttached.keys.join(', ')} — Proxmox deferred the change instead of applying it. Eject the ISO in Proxmox (or stop the VM) and start the migration again; a guest with a local ISO attached cannot be migrated.`,
+            });
+          }
+          ejected = cdrom.detach;
+          console.log(`[migrate] VM ${vmid}: ejected local CD-ROM ${ejected.map((e) => `${e.key}=${e.volid}`).join(', ')}`);
+        }
       }
-      upid = await remoteMigrateVm(sourceRef, vmid, vmtype, targetHost, {
-        targetStorage,
-        targetBridge,
-        online: vmtype === 'qemu' && running && !!online,
-        restart: vmtype === 'lxc' && running,
-        deleteSource: !!deleteSource,
-      });
+      try {
+        upid = await remoteMigrateVm(sourceRef, vmid, vmtype, targetHost, {
+          targetStorage,
+          targetBridge,
+          online: vmtype === 'qemu' && running && !!online,
+          restart: vmtype === 'lxc' && running,
+          deleteSource: !!deleteSource,
+        });
+      } catch (err) {
+        // The migration never started — put the ISOs back so the VM is left
+        // exactly as it was found.
+        if (ejected.length > 0) {
+          try {
+            await updateVMConfig(sourceRef, vmid, Object.fromEntries(ejected.map((e) => [e.key, e.value])));
+            ejected = [];
+          } catch (restoreErr) {
+            console.warn(`[migrate] VM ${vmid}: could not re-attach ejected CD-ROM ISOs: ${restoreErr.message}`);
+          }
+        }
+        throw err;
+      }
     }
 
     const row = db.prepare(`
@@ -769,7 +878,14 @@ router.post('/:node/:vmid', async (req, res) => {
       // behind us — seeding gives the transfer a step to hang its progress bar
       // on instead of leaving this path a blank panel.
       seedSteps(row.lastInsertRowid, [
-        { key: 'prepare', label: 'Preparing migration on the source host', status: 'done' },
+        {
+          key: 'prepare',
+          label: 'Preparing migration on the source host',
+          status: 'done',
+          // The ejection is permanent and not something the user asked for
+          // explicitly, so it stays visible for the life of the migration row.
+          note: ejected.length > 0 ? `ejected CD-ROM ${ejected.map((e) => `${e.key} (${e.volid})`).join(', ')}` : '',
+        },
         { key: 'transfer', label: `Transferring ${vmtype === 'lxc' ? 'the container' : 'disks'} to ${targetHost.name}`, status: 'active' },
         { key: 'finalize', label: 'Finalizing on the target host' },
       ]);
@@ -777,9 +893,14 @@ router.post('/:node/:vmid', async (req, res) => {
         .catch((err) => console.error(`[migrate] polling failed for VM ${vmid}:`, err.message));
     }
 
+    const cdromNote = ejected.length > 0 ? ` (ejected CD-ROM ${ejected.map((e) => `${e.key}=${e.volid}`).join(', ')})` : '';
     logAudit(req, 'vm_remote_migrate', `${vm.node}/${vmid}`,
-      `mode=${mode} → ${targetHost.name}/${target.nodeName}${targetStorage ? ` storage=${targetStorage}` : ''} bridge=${targetBridge}${online ? ' online' : ''}${mode === 'adopt' || !deleteSource ? ' keep-source' : ''}${bootFix}`);
-    res.json({ id: row.lastInsertRowid, vmid, upid, mode, status: 'running', bootFix: bootFix.trim() || undefined });
+      `mode=${mode} → ${targetHost.name}/${target.nodeName}${targetStorage ? ` storage=${targetStorage}` : ''} bridge=${targetBridge}${online ? ' online' : ''}${mode === 'adopt' || !deleteSource ? ' keep-source' : ''}${bootFix}${cdromNote}`);
+    res.json({
+      id: row.lastInsertRowid, vmid, upid, mode, status: 'running',
+      bootFix: bootFix.trim() || undefined,
+      cdromDetached: ejected.length > 0 ? ejected.map((e) => ({ key: e.key, volid: e.volid })) : undefined,
+    });
   } catch (err) {
     sendError(res, err);
   }
