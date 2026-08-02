@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-08-02 — Delegated permissions always come with a sidebar link
+
+- **Fixes a Port Forwarding page that could not be reached.** Granting someone only *Manage port forwards* — the intended grant for scoped self-service port forwarding — left them with no **Networking** heading in the sidebar and therefore no link to the page they had just been given. The only way in was for someone to send them the URL
+- The sidebar's section headings are now derived from the links inside them: a section appears exactly when the user can follow at least one of its links, so a granted page can no longer be hidden behind a heading that never renders
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
