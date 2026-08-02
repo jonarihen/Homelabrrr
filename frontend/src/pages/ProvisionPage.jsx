@@ -5,9 +5,32 @@ import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
+import { toPveVmName } from '../utils/vmName.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-all ${active ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`;
+
+// Live preview of the name Proxmox will actually get. Every provisioning route
+// sanitizes the typed name to a DNS label (lowercase, hyphenated, 63 chars max,
+// no leading/trailing hyphen) before it reaches the API, so "My Test VM" quietly
+// becomes "my-test-vm". Showing the result under the input keeps that from being
+// a surprise — and flags a name that sanitizes to nothing before submit, which
+// the backend answers with a 400. utils/vmName.js mirrors backend/src/utils/vmName.js.
+function VmNamePreview({ value }) {
+  const typed = String(value || '');
+  if (!typed.trim()) {
+    return <p className="text-xs text-gray-600 mt-1">Lowercased and hyphenated for Proxmox (e.g. "My Web" → my-web).</p>;
+  }
+  const safe = toPveVmName(typed);
+  if (!safe) {
+    return <p className="text-xs text-amber-400 mt-1">Name must contain letters or digits.</p>;
+  }
+  return (
+    <p className="text-xs text-gray-500 mt-1">
+      Will be created as <span className="font-mono text-cyan-400">{safe}</span>
+    </p>
+  );
+}
 
 // Usage-vs-quota meters; renders nothing when the user has no limits set
 function QuotaBanner({ quota }) {
@@ -618,7 +641,7 @@ function CloudImageForm({ onStarted }) {
               placeholder="my-new-vm"
               autoFocus
             />
-            <p className="text-xs text-gray-600 mt-1">Lowercased and hyphenated for Proxmox (e.g. "My Web" → my-web).</p>
+            <VmNamePreview value={form.name} />
           </div>
 
           <div className="grid grid-cols-3 gap-4">
@@ -907,6 +930,7 @@ function CloneForm({ onStarted }) {
               placeholder="my-new-vm"
               autoFocus
             />
+            <VmNamePreview value={form.name} />
           </div>
 
           <div className="grid grid-cols-3 gap-4">
@@ -1110,6 +1134,7 @@ function CreateForm({ onStarted }) {
           <div>
             <label className="block text-xs text-gray-400 mb-1.5 font-medium">VM Name</label>
             <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} placeholder="my-vm" />
+            <VmNamePreview value={form.name} />
           </div>
         </div>
 

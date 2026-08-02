@@ -20,6 +20,7 @@ import { assertUserQuota, getUserQuota, getUserResourceUsage } from '../utils/qu
 import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { getRolePermissions } from '../utils/permissions.js';
 import { createLeaseForVm } from '../utils/leases.js';
+import { toPveVmName } from '../utils/vmName.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -265,6 +266,14 @@ router.post('/clone', async (req, res) => {
     return res.status(400).json({ error: 'Template and name are required' });
   }
 
+  // PVE VM names must be DNS-like — sanitize before reserving a VMID or running
+  // the capacity/quota checks, so a bad name fails fast instead of coming back
+  // as a raw upstream 400 from the clone call (utils/vmName.js).
+  const vmName = toPveVmName(name);
+  if (!vmName) {
+    return res.status(400).json({ error: 'Name must contain letters or digits' });
+  }
+
   const template = db.prepare('SELECT * FROM vm_templates WHERE id = ? AND enabled = 1').get(templateId);
   if (!template) return res.status(404).json({ error: 'Template not found' });
 
@@ -334,7 +343,7 @@ router.post('/clone', async (req, res) => {
       template.node,
       template.vmid,
       newVmid,
-      name,
+      vmName,
       { storage: storage || template.default_storage, description: description || '' }
     );
 
@@ -350,7 +359,7 @@ router.post('/clone', async (req, res) => {
     ]);
     const row = db.prepare(
       "INSERT INTO provisioned_vms (user_id, node, vmid, name, template_id, source_type, steps, status, upid) VALUES (?, ?, ?, ?, ?, 'template', ?, 'cloning', ?)"
-    ).run(req.session.userId, template.node, newVmid, name, template.id, steps, upid || '');
+    ).run(req.session.userId, template.node, newVmid, vmName, template.id, steps, upid || '');
 
     // Assign VM — admins only get an assignment if they explicitly pick a target user
     const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
@@ -470,6 +479,13 @@ router.post('/from-image', async (req, res) => {
     return res.status(400).json({ error: 'Image and name are required' });
   }
 
+  // PVE VM names must be DNS-like — sanitize before reserving a VMID or running
+  // the capacity/quota checks, so a bad name fails fast (utils/vmName.js).
+  const vmName = toPveVmName(name);
+  if (!vmName) {
+    return res.status(400).json({ error: 'Name must contain letters or digits' });
+  }
+
   // `bridge` and the resolved target storage are concatenated into Proxmox
   // property strings, so both must be strict identifiers (storage is validated
   // below, once the image and its default are known). Non-admins can't pick a
@@ -514,12 +530,6 @@ router.post('/from-image', async (req, res) => {
       }
       targetImage = { ...image, node: chosen.nodeRef, volid: chosen.volid };
     }
-  }
-
-  // PVE VM names must be DNS-like — sanitize so the deploy doesn't fail late.
-  const vmName = String(name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
-  if (!vmName) {
-    return res.status(400).json({ error: 'Name must contain letters or digits' });
   }
 
   const baseDiskGb = parseInt(diskGb, 10);
@@ -679,14 +689,25 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
     return res.status(400).json({ error: 'Node and name are required' });
   }
 
+  // PVE VM names must be DNS-like — sanitize before reserving a VMID or running
+  // the capacity/quota checks, so a bad name fails fast instead of coming back
+  // as a raw upstream 400 from createVM (utils/vmName.js). The identifier
+  // pattern below is the wrong shape for a VM name: it permits "_" and leading
+  // or trailing dots, which Proxmox rejects, and caps nothing.
+  const vmName = toPveVmName(name);
+  if (!vmName) {
+    return res.status(400).json({ error: 'Name must contain letters or digits' });
+  }
+
   // Non-admins can't pick a bridge (the networks list is admin-only) — pin them
   // to vmbr0. This also blocks a `bridge=vmbr0,tag=N` injection that would put
   // the NIC on a VLAN the user has no access to, bypassing the VLAN check below.
   const bridge = isAdmin ? String(req.body.bridge || 'vmbr0') : 'vmbr0';
 
   // These land in PVE property strings — same strict identifier rule as
-  // /from-image and /clone.
-  for (const [field, value] of Object.entries({ name, storage, bridge, ostype, bios, scsihw })) {
+  // /from-image and /clone. (`name` is not one of them: it is a DNS label, not
+  // an identifier, and is validated by toPveVmName above.)
+  for (const [field, value] of Object.entries({ storage, bridge, ostype, bios, scsihw })) {
     if (!/^[a-zA-Z0-9._-]+$/.test(String(value))) {
       return res.status(400).json({ error: `Invalid ${field}` });
     }
@@ -734,7 +755,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
     });
 
     const config = {
-      name,
+      name: vmName,
       cpu: 'host',
       sockets: cpuLayout.sockets,
       cores: cpuLayout.cores,
@@ -759,7 +780,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
     ]);
     const row = db.prepare(
       "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, steps, status, upid) VALUES (?, ?, ?, ?, 'create', ?, 'creating', ?)"
-    ).run(req.session.userId, node, vmid, name, steps, upid || '');
+    ).run(req.session.userId, node, vmid, vmName, steps, upid || '');
 
     // Assign VM — admins only get an assignment if they explicitly pick a
     // target user; non-admins always self-assign (assignTo is ignored).
@@ -794,7 +815,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
       notifyDeployment(row.lastInsertRowid);
     }
 
-    logAudit(req, 'vm_create', `${node}/${vmid}`, name);
+    logAudit(req, 'vm_create', `${node}/${vmid}`, vmName);
     res.json({ id: row.lastInsertRowid, vmid, ...serializeNodeIdentity(node), status: 'creating', upid });
   } catch (err) {
     const status = err.status || (err.message?.includes('globally unique VMID') ? 503 : 500);

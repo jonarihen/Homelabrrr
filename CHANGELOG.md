@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-02 — VM names are checked before provisioning starts, and previewed as you type
+
+- **A VM name Proxmox would reject is now caught immediately.** Creating a VM from scratch or cloning a template with a name like `my_test_vm` used to sail through the portal, reserve a VMID, pass the capacity and quota checks, and only then fail with a raw Proxmox error. All three provisioning flows now validate the name first and answer straight away
+- **Every provisioning form shows the name that will actually be created.** Proxmox VM names must be DNS-style — lowercase, hyphenated, 63 characters at most — so `My Test VM` becomes `my-test-vm`. That result is now shown live under the VM Name field in the deploy-from-image, clone-template and create-from-scratch forms instead of appearing as a surprise afterwards
+- A name made entirely of spaces or punctuation is flagged in the form rather than accepted and rejected later
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
