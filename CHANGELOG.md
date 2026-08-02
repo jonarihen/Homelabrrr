@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-08-02 — A role that grants firewall management now actually grants it
+
+- **Firewall permissions handed out through a role work everywhere again.** A user whose `can_manage_firewalls` came from a role — including the built-in **Administrator** role — was treated as not having it in two places, with no error to explain why. The Firewalls admin page loaded with **host, port, VDOM, WAN interface and TLS verification blank**, and port forwarding quietly dropped to the restricted path: forwards could only be created for VLANs assigned to that user personally, and deleting a forward on any other VLAN was refused. Both now honour the role
+- Permissions granted directly on the user account were never affected — only role-granted ones
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
