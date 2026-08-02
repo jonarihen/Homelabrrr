@@ -234,6 +234,15 @@ export async function getVMConfigCurrent(node, vmid) {
   return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config?current=1`);
 }
 
+// Addresses as the guest itself sees them. Requires qemu-guest-agent running
+// inside the VM — Proxmox answers 500 when the agent is absent, stopped, or
+// the VM is powered off, so every caller must treat a rejection as "unknown",
+// never as an error worth surfacing.
+export async function getVMAgentInterfaces(node, vmid) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/agent/network-get-interfaces`);
+}
+
 export async function updateVMConfig(node, vmid, config) {
   const { host, nodeName } = await resolveNode(node, { vmid });
   clearCachedVmConfig(node, vmid, 'qemu');

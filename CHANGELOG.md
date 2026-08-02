@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-02 — Stop hand-typing your VM's IP address
+
+- **The SSH connect form can now find the address for you.** A **Detect IP** button next to *Host / IP* asks the portal what it already knows — the VM's DHCP reservation, its current DHCP lease, the static address cloud-init was given, and what qemu-guest-agent reports from inside the guest. The best candidate fills the field, and every candidate is offered as a chip showing where it came from, so you can pick a different one
+- **Detection degrades instead of failing.** A VM with no guest agent, a VLAN with no managed DHCP scope, or an unreachable firewall simply contributes nothing; whatever the other sources found is still offered. Loopback and link-local addresses are never suggested
+- **The field now says what it actually controls.** A hint under *Host / IP* spells out that this same address is what port forwarding and website publishing use — previously nothing in either feature explained why they were blocked on a form buried in the SSH panel
+- **A VM that only ever had a DHCP lease no longer stays address-less.** Opening the VM's IP management panel records the observed lease as the VM's address when none was set, instead of waiting for someone to create a static reservation. Any change the portal makes to a recorded address is written to the audit log
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
