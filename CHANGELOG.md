@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-08-02 — Settings you put in `.env` now actually reach the backend
+
+- **Four documented settings were being thrown away.** `PORTAL_BASE_URL`, `NODE_HEALTH_POLL_MS`, `LEASE_CHECK_INTERVAL_MS` and `VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS` are all read by the backend, but `docker-compose.yml` never passed them into the container — so setting one and restarting did exactly nothing, with no error to explain why. The most visible symptom: Discord embeds shipped without their "open in portal" links, and slow-shutting-down VMs on a schedule got force-stopped after two minutes with no way to extend the window. All four now reach the backend, and the last two are documented in `.env.example`
+- **The backend lists its configuration at startup.** Every optional setting it recognises is printed with its value, or with what happens because it is unset — so "I set it and nothing happened" is now something you can see in `docker compose logs backend`
+- **The UI no longer comes up before the API is ready.** Docker now waits for the backend's health check instead of just for its container to exist, so the first page load after a restart can't land on a backend still running database migrations
+- **The backend no longer runs as root.** It drops to an unprivileged user before starting the API — the process holding decrypted Proxmox tokens and SSH keys in memory has no need for root. Existing installations upgrade in place; the database volume's ownership is corrected automatically on first start
+- **The README now explains how to back up the database volume**, which holds every registered host, user, key and encrypted secret, along with what to restore it with and why the encryption key has to be backed up separately
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

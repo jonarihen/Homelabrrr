@@ -227,6 +227,41 @@ Recommended model:
 By default, the frontend is published on port `8181` and bound to `127.0.0.1` (loopback only, matching `.env.example`).
 Set `FRONTEND_BIND_ADDRESS=0.0.0.0` if the reverse proxy runs on another host and needs to reach the UI directly.
 
+### 4. Back up the `db_data` volume
+
+Everything Homelabrrr knows lives in one SQLite file inside the `db_data` Docker volume: every registered Proxmox host and FortiGate, every user, permission, VM assignment, lease, schedule, website, and audit entry — plus every upstream secret (PVE API tokens, FortiGate keys, SSH private keys, TOTP secrets), encrypted at rest.
+
+Losing that volume means re-registering every host, firewall, key and user by hand. `docker compose down` keeps it; `docker compose down -v` **deletes it**.
+
+Back it up on a schedule:
+
+```bash
+# Volume names are prefixed with the compose project (the directory name).
+# Confirm yours first:  docker volume ls | grep db_data
+docker compose stop backend
+docker run --rm -v homelabrrr_db_data:/data -v "$PWD:/backup" alpine \
+  tar czf "/backup/homelabrrr-db-$(date +%F).tar.gz" -C /data .
+docker compose start backend
+```
+
+Stopping the backend first matters: SQLite runs with a write-ahead log, so copying the files out from under a live process can capture a torn database.
+
+Restore is the same trip in reverse:
+
+```bash
+docker compose down
+docker run --rm -v homelabrrr_db_data:/data -v "$PWD:/backup" alpine \
+  sh -c 'rm -rf /data/* && tar xzf /backup/homelabrrr-db-YYYY-MM-DD.tar.gz -C /data'
+docker compose up -d
+```
+
+Two things worth knowing:
+
+- **Back up `SECRET_ENCRYPTION_KEY` with it.** The database is restorable but useless without the key that decrypts the secrets inside it. Keep the key somewhere other than the same archive.
+- **The archive is as sensitive as the live volume.** It contains your infrastructure's credentials. Store it encrypted, off the Docker host.
+
+File ownership inside the volume is corrected automatically on container start, so a restore performed as root is fine.
+
 ## Local Development
 
 Docker Compose is the normal deployment path. For local frontend/backend development:
@@ -273,6 +308,9 @@ Example values live in [`.env.example`](.env.example).
 | `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing (default `127.0.0.1`; set `0.0.0.0` to expose on all interfaces) |
 | `LEASE_CHECK_INTERVAL_MS` | How often the background VM-lease sweeper runs to gracefully stop expired VMs (default `900000` = 15 min; minimum `60000`). Default lease duration and grace period are set in-app on the admin VM Leases page |
 | `VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS` | How long a scheduled graceful shutdown waits before the hard-stop fallback fires (default `120000`) |
+| `DB_PATH` | SQLite database file (default `/app/data/db.sqlite`, inside the `db_data` volume — moving it takes the database off the volume you back up) |
+
+Every variable in this table is passed into the backend container by `docker-compose.yml`, and the backend logs which ones it recognised at startup (`docker compose logs backend | grep '\[config\]'`) — so a setting that is being ignored is visible rather than silent.
 
 Useful implementation defaults:
 
@@ -314,7 +352,8 @@ Operationally important:
 - The frontend is plain HTTP inside Docker by design.
   Put TLS at the reverse proxy.
 - The SQLite volume contains sensitive operational data encrypted at rest.
-  Back it up and protect it.
+  Back it up and protect it — see [Back up the `db_data` volume](#4-back-up-the-db_data-volume).
+- The backend container drops to an unprivileged user (`node`, uid 1000) before starting the API.
 - SSH private keys are stored encrypted in the application database for browser terminal access.
   Treat the DB as sensitive.
 
@@ -357,6 +396,7 @@ It does not roll back:
 - Proxmox-side changes already applied
 
 If you want safe rollback in practice, pair Git with database backups and network config backups.
+See [Back up the `db_data` volume](#4-back-up-the-db_data-volume) for the database half.
 
 ## Changelog
 
