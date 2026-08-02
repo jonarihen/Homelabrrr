@@ -128,6 +128,13 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
   const effectiveMode = plan && !fullCopy ? plan.mode : 'remote_migrate';
   const adopt = effectiveMode === 'adopt';
   const blockedByRunning = adopt && running;
+  // A full copy streams every volume to the target storage, and a storage that
+  // can't import the source's format only fails once the guest is already
+  // stopped. The backend refuses it too — this just says so before the click.
+  // Adopt never streams, so the verdict doesn't apply there.
+  const storageIssue = adopt
+    ? null
+    : (plan?.storageCompatibility || []).find((c) => c.storage === storage && c.severity === 'error');
 
   const submitMigration = async (onlineOverride) => {
     const { data } = await api.post(`/migrate/${encodeURIComponent(routeNode(vm))}/${vm.vmid}`, {
@@ -332,6 +339,11 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                   </option>
                 ))}
               </select>
+              {storageIssue && (
+                <p className="text-sm text-red-400 bg-red-900/20 border border-red-800/30 rounded-lg p-3 mt-2 break-words">
+                  {storageIssue.reason}
+                </p>
+              )}
             </div>
 
             <div>
@@ -424,7 +436,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
             ) : (
               <button
                 onClick={start}
-                disabled={starting || loadingTarget || !targetNode || !bridge || blockedByRunning || (!adopt && !storage)}
+                disabled={starting || loadingTarget || !targetNode || !bridge || blockedByRunning || !!storageIssue || (!adopt && !storage)}
                 className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
               >
                 {starting ? 'Starting…' : adopt ? 'Start shared-storage migration' : 'Start migration'}

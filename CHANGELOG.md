@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-02 — Cross-host migrations stop failing on attached ISOs and unusable target storage
+
+- **A VM with an ISO in its CD-ROM drive migrates again.** Proxmox refuses to move a guest that has a local ISO attached and aborted the migration before it copied a single byte — while the portal cheerfully promised the ISO would simply be "detached on the target". The drive is now emptied on the source host before the migration starts, and the migration plan says exactly which ISOs will be ejected so it is no chance discovery. An ISO on storage the target host also mounts is left attached
+- **A container is no longer shut down for a migration that cannot succeed.** Moving a container to a storage that cannot accept its disk format (a raw root filesystem onto a ZFS pool, for example) failed deep in the transfer — after Proxmox had already stopped the container — and Proxmox then restarted it on the source, so the downtime bought nothing. The target storage is now checked up front: an incompatible one is named in the migration window with the reason, and the migration cannot be started at all
+- The check only refuses combinations it can prove will fail. If a storage type is unfamiliar it lets the migration proceed rather than standing in the way
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**
