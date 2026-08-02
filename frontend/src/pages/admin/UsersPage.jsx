@@ -146,7 +146,13 @@ export default function UsersPage() {
                       })()
                     }
                   </td>
-                  <td className="px-4 py-3 text-gray-400">{u.see_all_vms ? <span className="text-xs text-blue-400">All</span> : u.vm_count}</td>
+                  <td className="px-4 py-3 text-gray-400">
+                    {u.can_operate_all_vms
+                      ? <span className="text-xs text-amber-400" title="Operate all VMs — console, SSH and power control on every VM">All (operate)</span>
+                      : u.see_all_vms
+                        ? <span className="text-xs text-blue-400" title="View all VMs — read-only">All (view)</span>
+                        : u.vm_count}
+                  </td>
                   <td className="px-4 py-3">
                     <UsageCell usage={usage[u.id]} user={u} role={u.role_id ? roles.find(r => r.id === u.role_id) : null} />
                   </td>
@@ -317,6 +323,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   const [userVLANs, setUserVLANs] = useState([]);
   const [roleId, setRoleId]     = useState(user.role_id || '');
   const [seeAllVMs, setSeeAllVMs] = useState(!!user.see_all_vms);
+  const [operateAllVMs, setOperateAllVMs] = useState(!!user.can_operate_all_vms);
   const [canProvision, setCanProvision] = useState(!!user.canProvision);
   const [canCreateVms, setCanCreateVms] = useState(!!user.canCreateVms);
   const [require2fa, setRequire2fa] = useState(!!user.require2fa);
@@ -382,6 +389,13 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
     try {
       await api.put(`/admin/users/${user.id}/see-all-vms`, { enabled });
       setSeeAllVMs(enabled);
+    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
+  };
+
+  const toggleOperateAllVMs = async (enabled) => {
+    try {
+      await api.put(`/admin/users/${user.id}/permission`, { permission: 'can_operate_all_vms', enabled });
+      setOperateAllVMs(enabled);
     } catch (e) { setError(e.response?.data?.error || 'Failed'); }
   };
 
@@ -548,10 +562,17 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                     <div className="space-y-1 pt-2">
                       <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">VM Access</p>
                       <PermToggle
-                        label="Access all VMs"
-                        desc="Grant access to every VM on Proxmox without individual assignments"
+                        label="View all VMs (read-only)"
+                        desc="See every VM on Proxmox without individual assignments — status, config, graphs and backup listings only. No power, console or edit rights."
                         checked={seeAllVMs}
                         onChange={toggleSeeAllVMs}
+                      />
+                      <PermToggle
+                        label="Operate all VMs"
+                        desc="Full operator control of every VM: VNC console, SSH and SFTP shell, power on/off/reboot, snapshots, backups, VLAN and hardware changes. Console + SSH on the whole fleet is effectively root on the fleet."
+                        checked={operateAllVMs}
+                        onChange={toggleOperateAllVMs}
+                        danger
                       />
                       <PermToggle
                         label="Provision VMs"
@@ -607,46 +628,47 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
         {tab === 'vms' && (
           <div className="space-y-4">
-            {seeAllVMs && (
+            {(seeAllVMs || operateAllVMs) && (
               <div className="bg-blue-900/20 border border-blue-800/30 rounded-lg px-4 py-2.5">
-                <p className="text-xs text-blue-300">This user has "Access all VMs" enabled (change in Permissions tab)</p>
+                <p className="text-xs text-blue-300">
+                  {operateAllVMs
+                    ? 'This user has "Operate all VMs" enabled — console, SSH and power control on every VM (change in Permissions tab).'
+                    : 'This user has "View all VMs" enabled — read-only access to every VM (change in Permissions tab).'}
+                  {' '}Assignments below still matter: only an assigned VM can be deleted, restored, or rolled back by this user.
+                </p>
               </div>
             )}
-            {!seeAllVMs && (
-              <>
-                <Section title="Assigned VMs">
-                  {userVMs.length === 0
-                    ? <Empty text="No VMs assigned" />
-                    : userVMs.map(a => {
-                      const vm = allVMs.find(v => vmIdentityKey(v) === vmIdentityKey(a));
-                      return (
-                        <Row
-                          key={a.id}
-                          label={vm?.name || `VM ${a.vmid}`}
-                          sub={`${displayNode(a.node)} · VMID ${a.vmid}`}
-                          badge={vm?.status}
-                          action={<DangerBtn onClick={() => unassignVM(a)}>Remove</DangerBtn>}
-                        />
-                      );
-                    })
-                  }
-                </Section>
-                <Section title="Available VMs">
-                  {unassignedVMs.length === 0
-                    ? <Empty text="All VMs are assigned" />
-                    : unassignedVMs.map(vm => (
-                      <Row
-                        key={vmIdentityKey(vm)}
-                        label={vm.name || `VM ${vm.vmid}`}
-                        sub={`${displayNode(vm.node)} · VMID ${vm.vmid}`}
-                        badge={vm.status}
-                        action={<BlueBtn onClick={() => assignVM(vm)}>Assign</BlueBtn>}
-                      />
-                    ))
-                  }
-                </Section>
-              </>
-            )}
+            <Section title="Assigned VMs">
+              {userVMs.length === 0
+                ? <Empty text="No VMs assigned" />
+                : userVMs.map(a => {
+                  const vm = allVMs.find(v => vmIdentityKey(v) === vmIdentityKey(a));
+                  return (
+                    <Row
+                      key={a.id}
+                      label={vm?.name || `VM ${a.vmid}`}
+                      sub={`${displayNode(a.node)} · VMID ${a.vmid}`}
+                      badge={vm?.status}
+                      action={<DangerBtn onClick={() => unassignVM(a)}>Remove</DangerBtn>}
+                    />
+                  );
+                })
+              }
+            </Section>
+            <Section title="Available VMs">
+              {unassignedVMs.length === 0
+                ? <Empty text="All VMs are assigned" />
+                : unassignedVMs.map(vm => (
+                  <Row
+                    key={vmIdentityKey(vm)}
+                    label={vm.name || `VM ${vm.vmid}`}
+                    sub={`${displayNode(vm.node)} · VMID ${vm.vmid}`}
+                    badge={vm.status}
+                    action={<BlueBtn onClick={() => assignVM(vm)}>Assign</BlueBtn>}
+                  />
+                ))
+              }
+            </Section>
           </div>
         )}
 
@@ -1125,15 +1147,29 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
               <div>
                 <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Permissions</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                  {[{ key: 'see_all_vms', label: 'Access all VMs' }, { key: 'can_provision', label: 'Provision VMs' }, { key: 'can_create_vms', label: 'Create VMs' }, ...PERM_DEFS].map(p => (
-                    <label key={p.key} className="flex items-center gap-2.5 bg-gray-800 rounded-lg px-3 py-2 cursor-pointer hover:bg-gray-800/80 transition-colors">
+                  {[
+                    { key: 'see_all_vms', label: 'View all VMs (read-only)', title: 'See every VM without individual assignments — status, config, graphs and backup listings only.' },
+                    { key: 'can_operate_all_vms', label: 'Operate all VMs', title: 'Console, SSH/SFTP, power, snapshots, backups, VLAN and hardware changes on every VM. Effectively root on the fleet.', danger: true },
+                    { key: 'can_provision', label: 'Provision VMs' },
+                    { key: 'can_create_vms', label: 'Create VMs' },
+                    ...PERM_DEFS,
+                  ].map(p => (
+                    <label
+                      key={p.key}
+                      title={p.title || p.desc}
+                      className={`flex items-center gap-2.5 rounded-lg px-3 py-2 cursor-pointer transition-colors ${
+                        p.danger && perms[p.key]
+                          ? 'bg-amber-900/20 border border-amber-800/40 hover:bg-amber-900/25'
+                          : 'bg-gray-800 hover:bg-gray-800/80'
+                      }`}
+                    >
                       <input
                         type="checkbox"
                         checked={!!perms[p.key]}
                         onChange={() => togglePerm(p.key)}
                         className="accent-blue-500 shrink-0"
                       />
-                      <span className="text-xs text-gray-300">{p.label}</span>
+                      <span className={`text-xs ${p.danger && perms[p.key] ? 'text-amber-300' : 'text-gray-300'}`}>{p.label}</span>
                     </label>
                   ))}
                 </div>
@@ -1298,12 +1334,18 @@ function DangerBtn({ children, onClick }) {
   );
 }
 
-function PermToggle({ label, desc, checked, onChange }) {
+function PermToggle({ label, desc, checked, onChange, danger = false }) {
+  const hot = danger && checked;
   return (
-    <label className="flex items-center justify-between bg-gray-800 rounded-lg px-4 py-2.5 cursor-pointer hover:bg-gray-800/80 transition-colors">
+    <label className={`flex items-center justify-between rounded-lg px-4 py-2.5 cursor-pointer transition-colors ${
+      hot ? 'bg-amber-900/20 border border-amber-800/40 hover:bg-amber-900/25' : 'bg-gray-800 hover:bg-gray-800/80'
+    }`}>
       <div>
-        <p className="text-sm text-white">{label}</p>
-        {desc && <p className="text-xs text-gray-500">{desc}</p>}
+        <p className="text-sm text-white">
+          {label}
+          {danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+        </p>
+        {desc && <p className={`text-xs ${hot ? 'text-amber-300/80' : 'text-gray-500'}`}>{desc}</p>}
       </div>
       <input
         type="checkbox"

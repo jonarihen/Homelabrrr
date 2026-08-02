@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-08-02 — "Access all VMs" is now two permissions: view, and operate
+
+- **"View all VMs" is finally read-only.** The old `see_all_vms` flag was documented as VM *visibility*, but it also handed out power actions, snapshots, VLAN and hardware edits, backups, DHCP reservations, and VNC/SSH/SFTP console access on every VM in the lab. It now grants exactly what its name says: status, config, RRD graphs, and backup listings
+- **A new "Operate all VMs" permission carries the rest.** Grant it to a fleet operator who genuinely needs console, SSH and power control across every VM — the role editor and the per-user permission editor now flag it as high blast radius and spell out what it includes
+- **Nothing changes on upgrade.** Every account and every role that already held "Access all VMs" is granted "Operate all VMs" automatically, so existing setups keep working exactly as before. Revoking it afterwards sticks
+- **Rolling back a snapshot now requires the VM to be assigned to you.** It throws away the VM's current disks — exactly as destructive as a restore, which already required ownership
+- **Backup deletion now matches backup creation.** Whoever can start a dump can also remove it, so a fleet operator can no longer fill a backup storage with archives they aren't allowed to clean up
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

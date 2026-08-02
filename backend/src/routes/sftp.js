@@ -4,7 +4,7 @@ import Busboy from 'busboy';
 import { basename, posix } from 'path';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { userCanAccessVm } from '../utils/vmAccess.js';
+import { userCanPerformVmOp } from '../utils/vmAccess.js';
 import { nodeLookupCandidates } from '../utils/nodeRef.js';
 import { normalizeSshHostFingerprint } from '../utils/sshHostKey.js';
 import { decryptSecret } from '../utils/secrets.js';
@@ -91,7 +91,7 @@ router.post('/connect', (req, res) => {
   if (!node || !vmid || !keyId) {
     return res.status(400).json({ error: 'node, vmid, and keyId are required' });
   }
-  if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sftp.connect')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 

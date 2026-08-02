@@ -5,6 +5,7 @@ import db from '../db.js';
 // stored in `role_permissions` — one vocabulary, two layers.
 export const PERMISSION_KEYS = [
   'see_all_vms',
+  'can_operate_all_vms',
   'can_provision',
   'can_create_vms',
   'can_manage_hosts',
