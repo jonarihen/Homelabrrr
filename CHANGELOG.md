@@ -69,6 +69,13 @@
 - **A VM with an ISO in its CD-ROM drive migrates again.** Proxmox refuses to move a guest that has a local ISO attached and aborted the migration before it copied a single byte — while the portal cheerfully promised the ISO would simply be "detached on the target". The drive is now emptied on the source host before the migration starts, and the migration plan says exactly which ISOs will be ejected so it is no chance discovery. An ISO on storage the target host also mounts is left attached
 - **A container is no longer shut down for a migration that cannot succeed.** Moving a container to a storage that cannot accept its disk format (a raw root filesystem onto a ZFS pool, for example) failed deep in the transfer — after Proxmox had already stopped the container — and Proxmox then restarted it on the source, so the downtime bought nothing. The target storage is now checked up front: an incompatible one is named in the migration window with the reason, and the migration cannot be started at all
 - The check only refuses combinations it can prove will fail. If a storage type is unfamiliar it lets the migration proceed rather than standing in the way
+## 2026-08-02 — "Access all VMs" is now two permissions: view, and operate
+
+- **"View all VMs" is finally read-only.** The old `see_all_vms` flag was documented as VM *visibility*, but it also handed out power actions, snapshots, VLAN and hardware edits, backups, DHCP reservations, and VNC/SSH/SFTP console access on every VM in the lab. It now grants exactly what its name says: status, config, RRD graphs, and backup listings
+- **A new "Operate all VMs" permission carries the rest.** Grant it to a fleet operator who genuinely needs console, SSH and power control across every VM — the role editor and the per-user permission editor now flag it as high blast radius and spell out what it includes
+- **Nothing changes on upgrade.** Every account and every role that already held "Access all VMs" is granted "Operate all VMs" automatically, so existing setups keep working exactly as before. Revoking it afterwards sticks
+- **Rolling back a snapshot now requires the VM to be assigned to you.** It throws away the VM's current disks — exactly as destructive as a restore, which already required ownership
+- **Backup deletion now matches backup creation.** Whoever can start a dump can also remove it, so a fleet operator can no longer fill a backup storage with archives they aren't allowed to clean up
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 ## 2026-08-02 — Validation mistakes stop looking like server crashes

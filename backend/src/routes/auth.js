@@ -51,6 +51,10 @@ function serializeUser(user) {
     canProvision: perms.can_provision,
     canCreateVms: perms.can_create_vms,
     permissions: {
+      // Fleet reach, split (issue #73): seeAllVms is read-only, canOperateAllVms
+      // is what carries power/console/edit rights across every VM.
+      seeAllVms: perms.see_all_vms,
+      canOperateAllVms: perms.can_operate_all_vms,
       canManageHosts: perms.can_manage_hosts,
       canManageFirewalls: perms.can_manage_firewalls,
       canManagePortForwards: perms.can_manage_port_forwards,

@@ -6,7 +6,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { userCanAccessVm } from '../utils/vmAccess.js';
+import { userCanPerformVmOp } from '../utils/vmAccess.js';
 import { nodeLookupCandidates } from '../utils/nodeRef.js';
 import { normalizeSshHostFingerprint, scanSshHostFingerprint } from '../utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
@@ -160,7 +160,7 @@ router.delete('/keys/:id', (req, res) => {
 
 router.get('/config/:node/:vmid', (req, res) => {
   const { node, vmid } = req.params;
-  if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.read')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   const global = getGlobalSshConfig(node, vmid);
@@ -177,7 +177,7 @@ router.get('/config/:node/:vmid', (req, res) => {
 router.put('/config/:node/:vmid', (req, res) => {
   const { node, vmid } = req.params;
   const { host, port = 22, username = 'root', hostFingerprint = '' } = req.body;
-  if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.write')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!host) return res.status(400).json({ error: 'Host/IP required' });
@@ -225,7 +225,7 @@ function scanRateLimited(userId) {
 router.post('/config/:node/:vmid/scan-fingerprint', async (req, res) => {
   const { node, vmid } = req.params;
   const { host, port = 22 } = req.body;
-  if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.scan')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!host) return res.status(400).json({ error: 'Host/IP required' });
@@ -250,7 +250,7 @@ router.post('/connect', (req, res) => {
   if (!node || !vmid || !keyId) {
     return res.status(400).json({ error: 'node, vmid, and keyId are required' });
   }
-  if (!userCanAccessVm(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.ssh.connect')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 

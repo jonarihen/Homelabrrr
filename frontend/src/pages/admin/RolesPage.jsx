@@ -9,7 +9,8 @@ const PERM_GROUPS = [
   {
     label: 'VM Access',
     perms: [
-      { key: 'see_all_vms',    label: 'Access all VMs',  desc: 'See every VM on Proxmox without individual assignments' },
+      { key: 'see_all_vms',    label: 'View all VMs (read-only)',  desc: 'See every VM on Proxmox without individual assignments — status, config, graphs and backup listings only. Grants no power, console or edit rights.' },
+      { key: 'can_operate_all_vms', label: 'Operate all VMs', desc: 'Full operator control of every VM: VNC console, SSH and SFTP shell, power on/off/reboot, snapshots, backups, VLAN and hardware changes. Console + SSH on the whole fleet is effectively root on the fleet.', danger: true },
       { key: 'can_provision',  label: 'Provision VMs',   desc: 'Create VMs from templates and cloud images' },
       { key: 'can_create_vms', label: 'Create VMs',      desc: 'Build VMs from scratch / from an available ISO' },
       { key: 'can_edit_vm_hardware', label: 'Edit VM Hardware', desc: 'Change CPU, memory, and disk size on assigned VMs' },
@@ -253,11 +254,18 @@ function RoleModal({ role, onClose, onSaved }) {
             {group.perms.map(p => (
               <label
                 key={p.key}
-                className="flex items-center justify-between bg-gray-800 rounded-lg px-4 py-2.5 cursor-pointer hover:bg-gray-800/80 transition-colors"
+                className={`flex items-center justify-between rounded-lg px-4 py-2.5 cursor-pointer transition-colors ${
+                  p.danger && perms.has(p.key)
+                    ? 'bg-amber-900/20 border border-amber-800/40 hover:bg-amber-900/25'
+                    : 'bg-gray-800 hover:bg-gray-800/80'
+                }`}
               >
                 <div>
-                  <p className="text-sm text-white">{p.label}</p>
-                  <p className="text-xs text-gray-500">{p.desc}</p>
+                  <p className="text-sm text-white">
+                    {p.label}
+                    {p.danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+                  </p>
+                  <p className={`text-xs ${p.danger && perms.has(p.key) ? 'text-amber-300/80' : 'text-gray-500'}`}>{p.desc}</p>
                 </div>
                 <input
                   type="checkbox"

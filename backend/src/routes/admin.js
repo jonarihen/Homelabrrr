@@ -277,7 +277,7 @@ function ensureCanManageTargetUser(req, res, userId) {
 router.get('/users', pUsers, (req, res) => {
   const windowStart = Date.now() - LOCKOUT_WINDOW_MS;
   const users = db.prepare(`
-    SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_provision, u.can_create_vms, u.totp_enabled, u.require_2fa,
+    SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_operate_all_vms, u.can_provision, u.can_create_vms, u.totp_enabled, u.require_2fa,
       u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_port_forwards, u.can_manage_vlans, u.can_manage_policies,
       u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log, u.can_edit_vm_hardware,
       u.can_manage_websites,
@@ -444,7 +444,7 @@ router.put('/users/:id/permission', requireAdmin, (req, res) => {
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { permission, enabled } = req.body;
-  const validPerms = ['can_manage_hosts', 'can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log', 'can_edit_vm_hardware', 'can_manage_websites'];
+  const validPerms = ['can_operate_all_vms', 'can_manage_hosts', 'can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log', 'can_edit_vm_hardware', 'can_manage_websites'];
   if (!validPerms.includes(permission)) {
     return res.status(400).json({ error: `Invalid permission: ${permission}` });
   }

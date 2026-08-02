@@ -136,6 +136,11 @@ try { db.exec("ALTER TABLE vm_ssh_configs ADD COLUMN host_fingerprint TEXT DEFAU
 try { db.exec("ALTER TABLE vlans ADD COLUMN mode TEXT DEFAULT 'managed'"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE vlans ADD COLUMN subnet_cidr TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN see_all_vms INTEGER DEFAULT 0'); } catch { /* exists */ }
+// see_all_vms is read-only (issue #73). The mutating/console half of what it
+// used to grant — power actions, snapshots, VLAN/hardware edits, backups,
+// DHCP reservations, VNC/SSH/SFTP — lives on this flag instead. Existing
+// holders are backfilled below so nothing breaks on upgrade.
+try { db.exec('ALTER TABLE users ADD COLUMN can_operate_all_vms INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE users ADD COLUMN require_2fa INTEGER DEFAULT 0'); } catch { /* exists */ }
@@ -382,6 +387,25 @@ if (db.prepare('SELECT COUNT(*) AS c FROM roles').get().c === 0) {
   db.prepare(
     "INSERT INTO roles (name, description, built_in) VALUES ('User', 'Basic access — no extra permissions', 1)"
   ).run();
+}
+
+// One-time backfill for the see_all_vms split (issue #73): everyone who already
+// held the old all-in-one flag keeps the operations it used to grant, so an
+// upgrade takes nothing away. Both layers are covered — the legacy per-user
+// column and every role that grants see_all_vms (including the built-in
+// Administrator role, which is only seeded on a fresh DB). Guarded by a
+// settings key so an admin who later revokes the operator flag doesn't get it
+// handed back on the next restart.
+const operateAllVmsBackfillKey = 'can_operate_all_vms_backfill_v1';
+if (!db.prepare('SELECT value FROM settings WHERE key = ?').get(operateAllVmsBackfillKey)) {
+  db.transaction(() => {
+    db.prepare('UPDATE users SET can_operate_all_vms = 1 WHERE see_all_vms = 1').run();
+    db.prepare(
+      "INSERT OR IGNORE INTO role_permissions (role_id, permission) SELECT role_id, 'can_operate_all_vms' FROM role_permissions WHERE permission = 'see_all_vms'"
+    ).run();
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(operateAllVmsBackfillKey, '1');
+  })();
 }
 
 // Audit log

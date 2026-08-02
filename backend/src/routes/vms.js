@@ -15,9 +15,8 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { httpError, sendError } from '../utils/httpError.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
-import { userCanAccessVm, userOwnsVm } from '../utils/vmAccess.js';
+import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.js';
 import { checkVlanAssignment } from '../utils/vlanAccess.js';
-import { userHasPermission } from '../utils/permissions.js';
 import { summarizeLease, renewLease } from '../utils/leases.js';
 import { assertUserQuota, sizeToGb } from '../utils/quota.js';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
@@ -39,8 +38,11 @@ router.use(requireAuth);
 // Short-lived VNC session store (token → {node, vmid, ticket, port, expires})
 export const vncSessions = new Map();
 
-function checkAccess(userId, node, vmid, isAdmin) {
-  return userCanAccessVm(userId, node, vmid, isAdmin);
+// Every VM route runs through here. `op` is a key of VM_OP_TIERS
+// (utils/vmOps.js) — that table, not the call site, decides whether the caller
+// needs an assignment, `see_all_vms`, or `can_operate_all_vms`.
+function allowOp(req, node, vmid, op) {
+  return userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, op);
 }
 
 // Backup volume IDs embed the VMID they belong to. The route-level access
@@ -89,9 +91,9 @@ function attachSchedules(list) {
 }
 
 // Editing a schedule requires strict ownership (admins bypass) — mirrors the
-// destructive-op gate. Reads use userCanAccessVm at the call site.
+// destructive-op gate. Reads are the 'vm.schedule.read' op at the call site.
 function canEditSchedule(req, node, vmid) {
-  return req.session.isAdmin || userOwnsVm(req.session.userId, node, vmid);
+  return allowOp(req, node, vmid, 'vm.schedule.write');
 }
 
 // Display name of the PVE host a node ref belongs to — users get to SEE which
@@ -379,7 +381,7 @@ async function resolveVmDhcpScope(node, vmid, netInterface, firewallId = null) {
 // ─── User's assigned VMs ──────────────────────────────────────────────────────
 
 router.get('/', async (req, res) => {
-  if (userHasPermission(req.session.userId, 'see_all_vms')) {
+  if (userSeesAllVms(req.session.userId, req.session.isAdmin)) {
     try {
       const vms = await getAllVMs();
       return res.json(attachSchedules(vms.map(vm => {
@@ -416,7 +418,7 @@ router.get('/', async (req, res) => {
 
 router.get('/:node/:vmid/status', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.status')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -439,7 +441,7 @@ router.get('/:node/:vmid/status', async (req, res) => {
 router.post('/:node/:vmid/lease/renew', (req, res) => {
   const { node, vmid } = req.params;
 
-  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+  if (!allowOp(req, node, vmid, 'vm.lease.renew')) {
     return res.status(403).json({ error: 'You can only renew leases for VMs assigned to you' });
   }
 
@@ -459,7 +461,7 @@ router.post('/:node/:vmid/action', async (req, res) => {
   const { node, vmid } = req.params;
   const { action } = req.body;
 
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.power')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -487,8 +489,9 @@ router.delete('/:node/:vmid', async (req, res) => {
   const { node, vmid } = req.params;
 
   // Admins can delete any VM; regular users only VMs assigned to them.
-  // Deliberately NOT userCanAccessVm — see_all_vms must not grant deletion.
-  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+  // 'vm.delete' is an owner-only op — neither see_all_vms nor
+  // can_operate_all_vms grants deletion.
+  if (!allowOp(req, node, vmid, 'vm.delete')) {
     return res.status(403).json({ error: 'You can only delete VMs assigned to you' });
   }
 
@@ -553,7 +556,7 @@ router.delete('/:node/:vmid', async (req, res) => {
 router.get('/:node/:vmid/rrddata', async (req, res) => {
   const { node, vmid } = req.params;
   const { timeframe = 'hour' } = req.query;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.rrd')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -574,7 +577,7 @@ router.get('/:node/:vmid/rrddata', async (req, res) => {
 
 router.post('/:node/:vmid/vnc-ticket', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.vnc')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -616,7 +619,7 @@ router.post('/:node/:vmid/vnc-ticket', async (req, res) => {
 
 router.get('/:node/:vmid/ip-management', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.ipManagement.read')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -783,7 +786,7 @@ router.get('/:node/:vmid/ip-management', async (req, res) => {
 // scope degrades the answer instead of failing the request.
 router.get('/:node/:vmid/detected-ips', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.ipManagement.read')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -861,7 +864,7 @@ router.put('/:node/:vmid/ip-management/:netInterface/reservation', async (req, r
   const { node, vmid, netInterface } = req.params;
   const { firewallId = null, ip, description = '' } = req.body;
 
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.ipManagement.write')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!ip) {
@@ -944,7 +947,7 @@ router.delete('/:node/:vmid/ip-management/:netInterface/reservation', async (req
   const { node, vmid, netInterface } = req.params;
   const { firewallId = null } = req.body || {};
 
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.ipManagement.write')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -973,7 +976,7 @@ router.delete('/:node/:vmid/ip-management/:netInterface/reservation', async (req
 
 router.get('/:node/:vmid/config', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.config')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -1008,11 +1011,11 @@ function looksLikeSshPublicKey(value = '') {
 
 // Availability probe for the frontend: reveal the reset action only for a
 // strict owner (admins bypass) of a qemu VM that actually has a cloud-init
-// drive. Keeps the feature hidden for non-owners (incl. see_all_vms) and for
-// VMs without cloud-init.
+// drive. Keeps the feature hidden for non-owners (incl. see_all_vms and
+// can_operate_all_vms) and for VMs without cloud-init.
 router.get('/:node/:vmid/cloudinit', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.cloudinit.read')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -1024,7 +1027,7 @@ router.get('/:node/:vmid/cloudinit', async (req, res) => {
       return res.json({ cloudInit: false, canReset: false, ciuser: '' });
     }
     const cloudInit = hasCloudInitDrive(config);
-    const owns = req.session.isAdmin || userOwnsVm(req.session.userId, node, vmid);
+    const owns = allowOp(req, node, vmid, 'vm.cloudinit.credentials');
     res.json({
       cloudInit,
       canReset: cloudInit && owns,
@@ -1039,9 +1042,9 @@ router.post('/:node/:vmid/cloudinit-credentials', async (req, res) => {
   const { node, vmid } = req.params;
   const { password, sshKeyId, sshKey, reboot } = req.body || {};
 
-  // Strict ownership only — see_all_vms must NOT grant credential resets,
+  // Strict ownership only — no fleet-wide permission grants credential resets,
   // mirroring VM deletion. Admins bypass.
-  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+  if (!allowOp(req, node, vmid, 'vm.cloudinit.credentials')) {
     return res.status(403).json({ error: 'You can only reset credentials for VMs assigned to you' });
   }
 
@@ -1135,7 +1138,7 @@ router.put('/:node/:vmid/vlan', async (req, res) => {
   const { node, vmid } = req.params;
   const { netInterface = 'net0', vlanTag } = req.body;
 
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.vlan')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -1178,7 +1181,7 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
   const { node, vmid } = req.params;
   const { cores, memory } = req.body;
 
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.hardware')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -1243,7 +1246,7 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
   const { node, vmid } = req.params;
   const { disk, size } = req.body;
 
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.disk.resize')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -1394,7 +1397,7 @@ function serializeBackupTask(row) {
 
 router.get('/:node/:vmid/backups', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.backups.list')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -1414,7 +1417,7 @@ router.get('/:node/:vmid/backups', async (req, res) => {
 // running; also the reason progress survives a page reload or a backend restart.
 router.get('/:node/:vmid/backup-tasks', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.backups.tasks')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -1428,7 +1431,7 @@ router.get('/:node/:vmid/backup-tasks', async (req, res) => {
 
 router.get('/:node/:vmid/backup-storages', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.backups.storages')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -1440,7 +1443,7 @@ router.get('/:node/:vmid/backup-storages', async (req, res) => {
 
 router.post('/:node/:vmid/backup', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.backups.create')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   const { mode, compress, storage, notes } = req.body;
@@ -1475,8 +1478,10 @@ router.post('/:node/:vmid/backup', async (req, res) => {
 router.delete('/:node/:vmid/backups/:storage/*', async (req, res) => {
   const { node, vmid, storage } = req.params;
   const volid = req.params[0];
-  // Deliberately NOT userCanAccessVm — see_all_vms must not grant backup deletion.
-  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+  // Same tier as starting a dump and as snapshot deletion (issue #73): a
+  // fleet operator who can fill a backup storage must be able to clean it up.
+  // `see_all_vms` alone still cannot get here.
+  if (!allowOp(req, node, vmid, 'vm.backups.delete')) {
     return res.status(403).json({ error: 'You can only delete backups of VMs assigned to you' });
   }
   if (!volidBelongsToVm(volid, vmid)) {
@@ -1495,9 +1500,9 @@ router.delete('/:node/:vmid/backups/:storage/*', async (req, res) => {
 
 router.post('/:node/:vmid/restore', async (req, res) => {
   const { node, vmid } = req.params;
-  // Deliberately NOT userCanAccessVm — restore overwrites the VM's disks
-  // (force: 1), so see_all_vms must not grant it.
-  if (!req.session.isAdmin && !userOwnsVm(req.session.userId, node, vmid)) {
+  // Owner-only — restore overwrites the VM's disks (force: 1), so no
+  // fleet-wide permission grants it.
+  if (!allowOp(req, node, vmid, 'vm.restore')) {
     return res.status(403).json({ error: 'You can only restore backups to VMs assigned to you' });
   }
   const { archive, storage } = req.body;
@@ -1529,7 +1534,7 @@ router.get('/:node/:vmid/backup-files/:storage/*', async (req, res) => {
   const { node, vmid, storage } = req.params;
   const volid = req.params[0]; // everything after storage/
   const { filepath = '/' } = req.query;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.backups.browse')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!volidBelongsToVm(volid, vmid)) {
@@ -1547,7 +1552,7 @@ router.get('/:node/:vmid/backup-download/:storage/*', async (req, res) => {
   const { node, vmid, storage } = req.params;
   const volid = req.params[0]; // everything after storage/
   const { filepath } = req.query;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.backups.browse')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!volidBelongsToVm(volid, vmid)) {
@@ -1582,7 +1587,7 @@ router.get('/:node/:vmid/backup-download/:storage/*', async (req, res) => {
 
 router.get('/:node/:vmid/snapshots', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.snapshots.list')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -1601,7 +1606,7 @@ router.get('/:node/:vmid/snapshots', async (req, res) => {
 router.post('/:node/:vmid/snapshots', async (req, res) => {
   const { node, vmid } = req.params;
   const { name, description, vmstate } = req.body;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.snapshots.create')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!name) return res.status(400).json({ error: 'Snapshot name is required' });
@@ -1618,7 +1623,7 @@ router.post('/:node/:vmid/snapshots', async (req, res) => {
 
 router.delete('/:node/:vmid/snapshots/:snapname', async (req, res) => {
   const { node, vmid, snapname } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.snapshots.delete')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -1631,10 +1636,13 @@ router.delete('/:node/:vmid/snapshots/:snapname', async (req, res) => {
   }
 });
 
+// Owner-only (issue #73): a rollback throws away the VM's current disks, which
+// is exactly as destructive as a restore — neither see_all_vms nor
+// can_operate_all_vms reaches it.
 router.post('/:node/:vmid/snapshots/:snapname/rollback', async (req, res) => {
   const { node, vmid, snapname } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
-    return res.status(403).json({ error: 'Access denied' });
+  if (!allowOp(req, node, vmid, 'vm.snapshots.rollback')) {
+    return res.status(403).json({ error: 'You can only roll back snapshots on VMs assigned to you' });
   }
   try {
     try { await rollbackSnapshot(node, vmid, 'qemu', snapname); }
@@ -1663,7 +1671,7 @@ function loadScheduleRow(node, vmid) {
 // Read the schedule (view access is enough).
 router.get('/:node/:vmid/schedule', (req, res) => {
   const { node, vmid } = req.params;
-  if (!checkAccess(req.session.userId, node, vmid, req.session.isAdmin)) {
+  if (!allowOp(req, node, vmid, 'vm.schedule.read')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   const row = loadScheduleRow(node, vmid);

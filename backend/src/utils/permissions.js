@@ -13,6 +13,7 @@ import { resolvePermissionCheck, resolveEffectivePermissions } from './permissio
 // `requirePermission` in middleware/auth.js.
 export const PERMISSION_KEYS = [
   'see_all_vms',
+  'can_operate_all_vms',
   'can_provision',
   'can_create_vms',
   'can_manage_hosts',
