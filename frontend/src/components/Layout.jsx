@@ -1,5 +1,6 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { makeCan, visibleSections } from '../utils/navSections.js';
 import ChangelogPanel from './ChangelogPanel.jsx';
 
 const navItem = 'group flex items-center gap-2.5 pl-3 pr-3 py-2 border-l-2 font-mono text-[11px] uppercase tracking-[0.08em] text-gray-400 hover:text-gray-100 hover:bg-gray-800 transition-colors';
@@ -60,103 +61,19 @@ export default function Layout({ children }) {
             <Icon d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" /> Account
           </NavLink>
 
-          {(() => {
-            const isAdmin = user?.isAdmin;
-            const p = user?.permissions || {};
-            const can = (perm) => isAdmin || p[perm];
-            const showInfra = can('canManageHosts') || can('canManageFirewalls') || can('canManageTemplates');
-            const showNet = can('canManageVlans') || can('canManagePolicies') || can('canManageAssignments') || can('canManageWebsites');
-            const showAccess = can('canManageUsers') || can('canViewAuditLog') || isAdmin;
-            if (!showInfra && !showNet && !showAccess) return null;
-            return (
-              <>
-                {showInfra && (
-                  <NavSection label="Infrastructure">
-                    {can('canManageHosts') && (
-                      <NavLink to="/admin/hosts" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7" /> PVE Hosts
-                      </NavLink>
-                    )}
-                    {can('canManageFirewalls') && (
-                      <NavLink to="/admin/firewalls" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M12 9v3.75m0-10.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.75c0 5.592 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.249-8.25-3.286zm0 13.036h.008v.008H12v-.008z" /> Firewalls
-                      </NavLink>
-                    )}
-                    {can('canManageFirewalls') && (
-                      <NavLink to="/admin/workflows" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" /> Workflows
-                      </NavLink>
-                    )}
-                    {can('canManageTemplates') && (
-                      <NavLink to="/admin/templates" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m3.75 9v6m3-3H9m1.5-12H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /> Templates
-                      </NavLink>
-                    )}
-                    {isAdmin && (
-                      <NavLink to="/admin/leases" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /> VM Leases
-                      </NavLink>
-                    )}
-                  </NavSection>
-                )}
-
-                {showNet && (
-                  <NavSection label="Networking">
-                    {can('canManageVlans') && (
-                      <NavLink to="/admin/vlans" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M3 6h18M3 12h18M3 18h18" /> VLANs
-                      </NavLink>
-                    )}
-                    {can('canManagePolicies') && (
-                      <NavLink to="/admin/policies" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M7.5 3.75H6A2.25 2.25 0 003.75 6v1.5M16.5 3.75H18A2.25 2.25 0 0120.25 6v1.5m0 9V18A2.25 2.25 0 0118 20.25h-1.5m-9 0H6A2.25 2.25 0 013.75 18v-1.5M15 12a3 3 0 11-6 0 3 3 0 016 0z" /> Policies
-                      </NavLink>
-                    )}
-                    {(can('canManageFirewalls') || can('canManagePortForwards')) && (
-                      <NavLink to="/admin/port-forwarding" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M7.5 3.75H6A2.25 2.25 0 003.75 6v1.5M16.5 3.75H18A2.25 2.25 0 0120.25 6v1.5m0 9V18A2.25 2.25 0 0118 20.25h-1.5m-9 0H6A2.25 2.25 0 013.75 18v-1.5M9 12h6m-3-3v6" /> Port Forwarding
-                      </NavLink>
-                    )}
-                    {can('canManageWebsites') && (
-                      <NavLink to="/admin/websites" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" /> Websites
-                      </NavLink>
-                    )}
-                    {can('canManageAssignments') && (
-                      <NavLink to="/admin/assignments" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /> Assignments
-                      </NavLink>
-                    )}
-                  </NavSection>
-                )}
-
-                {showAccess && (
-                  <NavSection label="Access">
-                    {can('canManageUsers') && (
-                      <NavLink to="/admin/users" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /> Users
-                      </NavLink>
-                    )}
-                    {can('canManageUsers') && (
-                      <NavLink to="/admin/roles" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /> Roles
-                      </NavLink>
-                    )}
-                    {isAdmin && (
-                      <NavLink to="/admin/notifications" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" /> Notifications
-                      </NavLink>
-                    )}
-                    {can('canViewAuditLog') && (
-                      <NavLink to="/admin/audit-log" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
-                        <Icon d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /> Audit Log
-                      </NavLink>
-                    )}
-                  </NavSection>
-                )}
-              </>
-            );
-          })()}
+          {/* Admin sections are derived from utils/navSections.js: a section is
+              rendered exactly when it still holds a link this user may follow,
+              so a section gate can no longer drift away from its links and
+              swallow a page the user was granted. */}
+          {visibleSections(makeCan(user)).map((section) => (
+            <NavSection key={section.label} label={section.label}>
+              {section.links.map((link) => (
+                <NavLink key={link.to} to={link.to} className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
+                  <Icon d={link.icon} /> {link.label}
+                </NavLink>
+              ))}
+            </NavSection>
+          ))}
         </nav>
 
         <div className="p-3 border-t border-gray-800">
