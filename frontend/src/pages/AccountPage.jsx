@@ -46,6 +46,7 @@ export default function AccountPage() {
         )}
         <TwoFactorSection user={user} setUser={setUser} />
         {!enrollmentOnly && <NotificationsSection />}
+        {!enrollmentOnly && <ConnectionSection />}
         {!enrollmentOnly && <ApiTokensSection />}
       </div>
     </Layout>
@@ -211,6 +212,92 @@ function NotificationsSection() {
         />
       </label>
       {msg && <p className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
+    </div>
+  );
+}
+
+// ── Connection (client IP / proxy chain) ─────────────────────────────────────
+
+// A wrong TRUST_PROXY makes the portal see the reverse proxy's address instead
+// of the user's, which silently breaks per-IP login lockout and the audit log's
+// IP column. Comparing this line against your real public IP diagnoses it.
+function ConnectionSection() {
+  const [info, setInfo] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.get('/health/client-ip')
+      .then(({ data }) => setInfo(data))
+      .catch(() => setFailed(true))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const mismatch = !!info && (info.suspicious || info.agrees === false);
+  const confirmed = !!info && info.agrees === true && !info.suspicious;
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4">
+      <div className="flex items-center gap-3">
+        <div className="w-9 h-9 border border-gray-700 bg-gray-800 flex items-center justify-center">
+          <svg aria-hidden="true" focusable="false" className="w-4.5 h-4.5 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+          </svg>
+        </div>
+        <div>
+          <h2 className="aaris-display text-sm text-white">Connection</h2>
+          <p className="text-xs text-gray-500">The address this portal sees you coming from</p>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="h-5 bg-gray-800/60 rounded animate-pulse" />
+      ) : failed || !info ? (
+        <p className="text-xs text-gray-600 italic">Connection details are unavailable right now.</p>
+      ) : (
+        <>
+          <p className="text-sm text-gray-400 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+            <span>Your address as seen by the portal:</span>
+            <span className="font-mono text-white select-all">{info.ip || 'unknown'}</span>
+            <span className="text-gray-700">·</span>
+            <span>X-Forwarded-For chain:</span>
+            <span className="font-mono text-white">{info.hops} hop{info.hops === 1 ? '' : 's'}</span>
+            <span className="text-gray-700">·</span>
+            <span className="font-mono text-white">TRUST_PROXY={info.trustProxy}</span>
+            <span className={`text-xs px-2 py-0.5 rounded-full ring-1 ${
+              mismatch
+                ? 'bg-yellow-500/10 ring-yellow-500/30 text-yellow-400'
+                : confirmed
+                  ? 'bg-green-500/10 ring-green-500/20 text-green-400'
+                  : 'bg-gray-800 ring-gray-700 text-gray-400'
+            }`}>
+              {mismatch ? 'Mismatch' : confirmed ? 'Match' : 'Unverified'}
+            </span>
+          </p>
+
+          {mismatch ? (
+            <div className="bg-yellow-900/20 border border-yellow-700/50 rounded-xl p-4 flex items-start gap-3">
+              <svg aria-hidden="true" focusable="false" className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <div>
+                <p className="text-sm text-yellow-300 font-medium">TRUST_PROXY does not match this deployment</p>
+                <p className="text-xs text-yellow-400/70 mt-0.5">{info.reason}</p>
+                <p className="text-xs text-yellow-400/70 mt-1.5">
+                  Ask an admin to set <code className="font-mono">TRUST_PROXY</code> to the number of proxies in front of
+                  the backend — see “Counting your proxies” in the README.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500">
+              If that is not your real public IP address, <code className="font-mono text-gray-400">TRUST_PROXY</code> does
+              not match the number of proxies in front of the portal — per-IP login lockout and the audit log's IP column
+              are then recording a proxy instead of you. Tell an admin.
+            </p>
+          )}
+        </>
+      )}
     </div>
   );
 }

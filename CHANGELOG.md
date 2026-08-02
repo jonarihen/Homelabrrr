@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-02 — See the address the portal has for you, and catch a wrong TRUST_PROXY
+
+- **Account → Connection** now shows the address the portal sees you coming from, how many `X-Forwarded-For` hops arrived, and whether that matches the configured `TRUST_PROXY`. If the address shown is not your real public IP, the value is wrong — and the panel says so
+- A wrong `TRUST_PROXY` used to fail completely silently while making every client look like the reverse proxy: the audit log recorded the proxy's address for every action, and the per-account login lockout collapsed into a global one that anyone could trip for everyone. The backend now logs a **one-time warning** when the hop count that actually arrives disagrees with the configured value
+- The README gained a **"Counting your proxies"** table next to the deployment steps, mapping each common topology (direct, one external proxy, Cloudflare in front) to the right number
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

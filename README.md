@@ -227,6 +227,28 @@ Recommended model:
 By default, the frontend is published on port `8181` and bound to `127.0.0.1` (loopback only, matching `.env.example`).
 Set `FRONTEND_BIND_ADDRESS=0.0.0.0` if the reverse proxy runs on another host and needs to reach the UI directly.
 
+### 4. Counting your proxies (`TRUST_PROXY`)
+
+`TRUST_PROXY` must equal the number of proxies between the client and the backend. Every proxy appends one
+entry to `X-Forwarded-For`, and the backend walks back exactly `TRUST_PROXY` entries to decide who the client
+is. Count each hop that touches the request — the bundled frontend nginx always counts as one:
+
+| Topology | Hops | `TRUST_PROXY` |
+| --- | --- | --- |
+| clients → bundled nginx on `:8181` | nginx | `1` |
+| clients → external reverse proxy (NPM, Caddy, Traefik) → bundled nginx | proxy + nginx | `2` *(recommended, the default)* |
+| clients → Cloudflare → external reverse proxy → bundled nginx | CDN + proxy + nginx | `3` |
+| a load balancer added in front of any of the above | +1 per extra proxy | add `1` |
+
+Get it wrong and nothing visibly fails — but the portal records the proxy's address instead of the client's,
+which makes the audit log's IP column useless and turns the per-account login lockout into a global one that
+anyone can trip for everyone.
+
+**Verify it:** sign in and open **Account → Connection**. It shows the address the portal sees for you, the
+hop count that arrived, and whether it matches `TRUST_PROXY`. If the address shown is not your real public
+IP, the value is wrong. The same data is available at `GET /api/health/client-ip` (requires authentication),
+and the backend logs a one-time warning on startup traffic when the numbers disagree.
+
 ## Local Development
 
 Docker Compose is the normal deployment path. For local frontend/backend development:
@@ -263,7 +285,7 @@ Example values live in [`.env.example`](.env.example).
 | `SECRET_ENCRYPTION_KEY` | 32-byte master key for encrypting secrets at rest; accepted as base64, 64-char hex, or exactly 32 bytes of raw text |
 | `ALLOWED_ORIGIN` | Exact public browser origin allowed for CORS and websocket upgrades |
 | `COOKIE_SECURE` | Marks auth cookies as `Secure` (default `true`; set to `false` only for plain-HTTP local dev) |
-| `TRUST_PROXY` | Number of proxy hops in front of the backend (default `2`: external reverse proxy + bundled nginx; set `1` if clients reach port 8181 directly) |
+| `TRUST_PROXY` | Number of proxy hops in front of the backend (default `2`: external reverse proxy + bundled nginx; set `1` if clients reach port 8181 directly) — see [Counting your proxies](#4-counting-your-proxies-trust_proxy) |
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
 | `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image and ISO downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
 | `PORTAL_BASE_URL` | Absolute portal URL used for "open in portal" links in Discord embeds (falls back to `ALLOWED_ORIGIN`; links omitted if neither is set) |

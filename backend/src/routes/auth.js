@@ -5,6 +5,7 @@ import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
 import db from '../db.js';
 import { requireAuth, requireInteractiveSession } from '../middleware/auth.js';
+import { warnIfProxyMismatch } from '../middleware/trustProxyCheck.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
@@ -130,6 +131,15 @@ router.post('/login', loginLimiter, async (req, res, next) => {
   // handful of bad passwords. Requires TRUST_PROXY to match the real proxy
   // hop count so req.ip is the actual client.
   const clientIp = String(req.ip || '');
+
+  // A wrong TRUST_PROXY makes every client resolve to the same proxy address,
+  // which turns this per-IP lockout back into the global one issue #11 removed.
+  // Warn loudly (once per process) — but keep applying the lockout: dropping it
+  // in this state would be the weaker option, because a client that can reach
+  // the portal from a private address can *force* the "suspicious" verdict by
+  // forging X-Forwarded-For, and would then be brute-forcing with no lockout at
+  // all. A misconfiguration must never be a cheaper bypass than the protection.
+  warnIfProxyMismatch(req);
 
   db.prepare('DELETE FROM login_attempts WHERE attempted_at < ?').run(windowStart);
 
