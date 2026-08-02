@@ -27,6 +27,7 @@ export const PERMISSION_KEYS = [
   'can_view_audit_log',
   'can_edit_vm_hardware',
   'can_manage_websites',
+  'can_manage_public_ips',
 ];
 
 /** Permission keys granted by a role (empty set for no role). */

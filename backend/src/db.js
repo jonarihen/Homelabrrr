@@ -836,6 +836,101 @@ try { db.exec('ALTER TABLE firewall_vlan_sync ADD COLUMN workflow_run_id INTEGER
 try { db.exec('ALTER TABLE managed_vips ADD COLUMN artifacts TEXT DEFAULT NULL'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE managed_vips ADD COLUMN workflow_run_id INTEGER'); } catch { /* exists */ }
 
+// ─── Public IP pools, addresses and assignments ─────────────────────────────
+//
+// A pool is a routed public IPv4 prefix reachable through one firewall
+// interface (in the validated design: a GRE transit interface in the root
+// VDOM). Individual addresses out of that prefix can be handed to a user and
+// one of their VM/private-IP targets, which lets several users each publish the
+// same well-known port on their own public address.
+//
+// Creating these tables provisions nothing: no GRE tunnel, no route, no
+// provider configuration is created or assumed by this schema.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS public_ip_pools (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    firewall_id INTEGER NOT NULL REFERENCES firewalls(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    vdom TEXT DEFAULT 'root',
+    external_interface TEXT NOT NULL,
+    gre_gateway TEXT DEFAULT '',
+    lab_ingress_interface TEXT DEFAULT '',
+    cidr TEXT DEFAULT '',
+    mtu INTEGER,
+    tcp_mss INTEGER,
+    kill_switch_enabled INTEGER DEFAULT 1,
+    enabled INTEGER DEFAULT 1,
+    notes TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(firewall_id, name)
+  );
+  CREATE INDEX IF NOT EXISTS idx_public_ip_pools_fw ON public_ip_pools(firewall_id);
+`); } catch { /* exists */ }
+
+// firewall_id is denormalized from the pool so UNIQUE(firewall_id, address) can
+// be enforced by SQLite; a pool's firewall is immutable for exactly that reason.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS public_ips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pool_id INTEGER NOT NULL REFERENCES public_ip_pools(id) ON DELETE CASCADE,
+    firewall_id INTEGER NOT NULL,
+    address TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'available',
+    reserved_reason TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(pool_id, address),
+    UNIQUE(firewall_id, address)
+  );
+  CREATE INDEX IF NOT EXISTS idx_public_ips_pool ON public_ips(pool_id);
+  CREATE INDEX IF NOT EXISTS idx_public_ips_state ON public_ips(pool_id, state);
+`); } catch { /* exists */ }
+
+// One public address → one user → one VM/private-IP target. `node` carries the
+// portal's "<hostId>~<nodeName>" reference (see utils/nodeRef.js);
+// proxmox_host_id is the decoded host for convenience.
+//
+// The two uniqueness rules from the design are enforced as indexes: an address
+// may back at most one assignment, and a private address may egress through at
+// most one public IP per firewall. Releasing an assignment deletes the row.
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS public_ip_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_ip_id INTEGER NOT NULL REFERENCES public_ips(id) ON DELETE CASCADE,
+    firewall_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    proxmox_host_id INTEGER,
+    node TEXT DEFAULT '',
+    vmid INTEGER,
+    private_ip TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    status_detail TEXT DEFAULT '',
+    egress_enabled INTEGER DEFAULT 1,
+    provision_run_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_public_ip_assignments_ip
+    ON public_ip_assignments(public_ip_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_public_ip_assignments_egress
+    ON public_ip_assignments(firewall_id, private_ip) WHERE egress_enabled = 1;
+  CREATE INDEX IF NOT EXISTS idx_public_ip_assignments_user ON public_ip_assignments(user_id);
+`); } catch { /* exists */ }
+
+// Which public endpoint a port forward is published on. NULL keeps its historic
+// meaning — the firewall's default WAN address — so every existing row stays
+// valid and untouched, and legacy external-port conflicts keep being checked
+// against that one default endpoint.
+try { db.exec('ALTER TABLE managed_vips ADD COLUMN public_ip_id INTEGER'); } catch { /* exists */ }
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_managed_vips_public_ip ON managed_vips(public_ip_id)'); } catch { /* exists */ }
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_managed_vips_endpoint ON managed_vips(firewall_id, public_ip_id, protocol, ext_port)'); } catch { /* exists */ }
+
+// Pools, addresses and assignments are administrative; port-forward permissions
+// deliberately do not grant them.
+try { db.exec('ALTER TABLE users ADD COLUMN can_manage_public_ips INTEGER DEFAULT 0'); } catch { /* exists */ }
+
 assertSecretEncryptionKey();
 
 function migrateEncryptedColumn(table, idColumn, secretColumn, where = `${secretColumn} IS NOT NULL AND ${secretColumn} != ''`) {

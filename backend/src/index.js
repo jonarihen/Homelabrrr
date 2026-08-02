@@ -27,6 +27,7 @@ import notificationRoutes from './routes/notifications.js';
 import { pollNodeHealth } from './utils/notify.js';
 import websiteRoutes from './routes/websites.js';
 import workflowRoutes from './routes/workflows.js';
+import publicIpRoutes from './routes/publicIps.js';
 import { seedAllFirewalls } from './workflows/store.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
@@ -146,6 +147,7 @@ app.use('/api/portal', portalRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/websites', websiteRoutes);
 app.use('/api/workflows', workflowRoutes);
+app.use('/api/public-ips', publicIpRoutes);
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 // Self-diagnosis for the reverse-proxy chain: what address does the portal
