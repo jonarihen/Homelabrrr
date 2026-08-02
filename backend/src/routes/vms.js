@@ -4,7 +4,7 @@ import db from '../db.js';
 import {
   getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
-  restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM,
+  restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType,
   getLXCStatus, lxcAction, getLXCConfig, updateLXCConfig, getLXCRRD, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
   getTaskStatus, getTaskLog,
@@ -29,6 +29,7 @@ import { derivePublicKey } from '../utils/sshPublicKey.js';
 import { decryptSecret } from '../utils/secrets.js';
 import { readTaskProgress } from '../utils/taskProgress.js';
 import { parseUpid, inProgressVolids } from '../utils/backupTask.js';
+import { resolveRestoreGuestType } from '../utils/backupGuestType.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -1384,9 +1385,17 @@ router.post('/:node/:vmid/restore', async (req, res) => {
   if (!volidBelongsToVm(archive, vmid)) {
     return res.status(403).json({ error: 'Backup does not belong to this VM' });
   }
+  // A restore has to go to /nodes/{node}/qemu or /nodes/{node}/lxc — the wrong
+  // one is rejected upstream with a confusing error. The guest already at the
+  // target VMID is authoritative; the volid is a cross-check that catches
+  // restoring a container archive over a VM (and vice versa). Either can be
+  // unknown — a fresh VMID has no guest to probe, and an unrecognised volid
+  // shape tells us nothing — but if both are, refuse rather than assume qemu.
   try {
-    const vmtype = archive.includes('vzdump-lxc-') ? 'lxc' : 'qemu';
-    const upid = await restoreVMBackup(node, vmid, archive, storage, vmtype);
+    const detected = await getGuestType(node, vmid);
+    const guest = resolveRestoreGuestType({ volid: archive, detected, vmid });
+    if (guest.error) return res.status(guest.status).json({ error: guest.error });
+    const upid = await restoreVMBackup(node, vmid, archive, storage, guest.vmtype);
     logAudit(req, 'vm_restore', `${node}/${vmid}`, archive);
     res.json({ ok: true, upid });
   } catch (err) {

@@ -519,6 +519,20 @@ async function detectGuest(host, nodeName, vmid) {
   }
 }
 
+// Public form of detectGuest for callers that only need the type and must
+// tolerate the VMID not existing yet (a restore may be creating it). Returns
+// null when neither endpoint knows the VMID, or when the host can't be probed
+// at all — the caller falls back to whatever else it knows.
+export async function getGuestType(node, vmid) {
+  try {
+    const { host, nodeName } = await resolveNode(node, { vmid });
+    const { vmtype } = await detectGuest(host, nodeName, vmid);
+    return vmtype;
+  } catch {
+    return null;
+  }
+}
+
 // Scheduler-driven graceful stop: ask the guest OS to shut down and wait up to
 // `timeoutMs`; if it doesn't stop in time, fall back to a hard stop. Returns
 // `{ method }` describing what actually stopped it ('none' | 'shutdown' | 'stop').

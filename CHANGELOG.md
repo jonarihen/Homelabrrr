@@ -4,6 +4,11 @@
 
 - **Firewall permissions handed out through a role work everywhere again.** A user whose `can_manage_firewalls` came from a role — including the built-in **Administrator** role — was treated as not having it in two places, with no error to explain why. The Firewalls admin page loaded with **host, port, VDOM, WAN interface and TLS verification blank**, and port forwarding quietly dropped to the restricted path: forwards could only be created for VLANs assigned to that user personally, and deleting a forward on any other VLAN was refused. Both now honour the role
 - Permissions granted directly on the user account were never affected — only role-granted ones
+## 2026-08-02 — Restoring a container backup from Proxmox Backup Server works
+
+- **A PBS container snapshot now restores.** Homelabrrr worked out whether a backup held a container or a VM by looking for `vzdump-lxc-` in the file name — a marker that only exists on classic vzdump archives. PBS snapshots don't have it, so every container restore from a PBS datastore was sent to Proxmox's VM endpoint and rejected with a raw upstream error. Both naming schemes are now understood
+- **The guest at the restore target decides the endpoint.** If the backup and the target disagree — a container backup aimed at a VM, or the reverse — the restore is refused up front with a message saying so, instead of failing halfway through Proxmox
+- A backup in a format Homelabrrr doesn't recognise is now reported as such rather than being quietly treated as a VM
 
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
