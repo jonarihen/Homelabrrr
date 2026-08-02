@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-02 — Deploying to an overcommitted node works again
+
+- **A node with no free RAM no longer refuses new VMs.** The pre-flight check compared the request against the node's *momentarily free* memory, which on a healthy host is near zero — ZFS ARC, page cache and ballooning guests use it all. Deployments are now sized against **physical RAM × an overcommit ratio** (default 1.5), which is how a homelab actually runs
+- **The memory check is advisory by default.** A tight node produces a warning on the deployment's progress steps instead of a rejection. Admins can set it to *off*, *warn* or *block* and tune the overcommit ratio under **Admin → PVE Hosts → Capacity policy**
+- **Automatic placement explains itself.** When no host can take a cloud-image deploy, the message now lists every host and why it was skipped — out of memory budget, in maintenance, unreachable, no storage exposed — instead of a flat "contact your admin"
+- Disk space is unchanged and still a hard block: free space on a storage pool is a real limit
+
 ## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 - **Homelabrrr now understands `caddy-forticertsync`'s inspection-bundle mode.** In that mode the firewall holds a *single* multi-SAN certificate covering every published domain, instead of one certificate per site competing for the profile's 10 slots. Set the bundle's base name (e.g. `homelabrrr_inspection`) on the Caddy server under **Admin → Websites**

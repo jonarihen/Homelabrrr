@@ -22,6 +22,8 @@ import {
   getLeaseSettings, setLeaseSettings, computeLeaseView, updateLease, renewLease,
   runLeaseSweep, backfillLeases,
 } from '../utils/leases.js';
+import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.js';
+import { MEMORY_MODES } from '../utils/capacityPolicy.js';
 import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.js';
 import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.js';
 import { deriveSubnet } from '../workflows/subnet.js';
@@ -1129,6 +1131,31 @@ router.put('/settings/:key', requireAdmin, (req, res) => {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
     .run(req.params.key, String(value), String(value));
   res.json({ ok: true });
+});
+
+// ─── Capacity policy (node memory pre-check) ────────────────────────────────
+// How the provisioning pre-flight treats memory: off / warn (default) / block,
+// compared against physical RAM × the overcommit ratio. Storage is not
+// configurable — `storage.avail` is a real limit and always blocks.
+
+router.get('/capacity-settings', requireAdmin, (req, res) => {
+  res.json({ ...getCapacitySettings(), memoryModes: MEMORY_MODES });
+});
+
+router.put('/capacity-settings', requireAdmin, (req, res) => {
+  const { memoryMode, overcommitRatio } = req.body || {};
+  if (memoryMode !== undefined && memoryMode !== null && !MEMORY_MODES.includes(String(memoryMode))) {
+    return res.status(400).json({ error: `Memory mode must be one of: ${MEMORY_MODES.join(', ')}` });
+  }
+  if (overcommitRatio !== undefined && overcommitRatio !== null) {
+    const ratio = Number.parseFloat(overcommitRatio);
+    if (!Number.isFinite(ratio) || ratio <= 0) {
+      return res.status(400).json({ error: 'Overcommit ratio must be a number greater than 0' });
+    }
+  }
+  const settings = setCapacitySettings({ memoryMode, overcommitRatio });
+  logAudit(req, 'capacity_settings_update', '', `memory=${settings.memoryMode} ratio=${settings.overcommitRatio}`);
+  res.json({ ...settings, memoryModes: MEMORY_MODES });
 });
 
 // ─── VM Leases (expiry / reclaim) ────────────────────────────────────────────
