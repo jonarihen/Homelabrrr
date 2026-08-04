@@ -29,7 +29,7 @@
     "ws": "^8.21.2"
   },
   "devDependencies": {
-    "eslint": "^9.39.0",
+    "eslint": "^10.8.0",
     "globals": "^16.4.0",
     "supertest": "^7.1.4"
   }
