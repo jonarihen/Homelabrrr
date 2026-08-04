@@ -37,7 +37,9 @@ test('a delegated user can open the matching admin route', async ({ page }) => {
 test('refresh applies a permission change before protected page data is requested', async ({ page }) => {
   let canManageUsers = true;
   let usersRequests = 0;
-  await page.route('**/api/auth/me', (route) => route.fulfill({ json: user({ canManageUsers }) }));
+  // Keep one unrelated admin-area permission so revoking canManageUsers tests
+  // the per-route guard instead of the parent guard redirecting to Dashboard.
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: user({ canManageUsers, canManageHosts: true }) }));
   await page.route('**/api/admin/users', (route) => { usersRequests += 1; return route.fulfill({ json: [] }); });
   await page.goto('/admin/users');
   await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
