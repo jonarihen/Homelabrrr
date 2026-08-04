@@ -24,6 +24,7 @@ services:
       # leaving them out of .env changes nothing.
       - NODE_HEALTH_POLL_MS=${NODE_HEALTH_POLL_MS:-60000}
       - LEASE_CHECK_INTERVAL_MS=${LEASE_CHECK_INTERVAL_MS:-900000}
+      - WEBSITE_RECONCILE_INTERVAL_MS=${WEBSITE_RECONCILE_INTERVAL_MS:-300000}
       - VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS=${VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS:-120000}
       - PORT=3000
       # Explicit for clarity: this is the db_data volume mount point below.

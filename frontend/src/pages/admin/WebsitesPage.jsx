@@ -535,6 +535,9 @@ function SiteStatus({ status }) {
     live: 'text-green-400 bg-green-500/10 ring-green-500/20',
     warning: 'text-amber-400 bg-amber-500/10 ring-amber-500/20',
     blocked: 'text-orange-400 bg-orange-500/10 ring-orange-500/20',
+    // Route pushed, but a route Homelabrrr does not own matches the domain
+    // first — the site cannot serve until an operator removes that block.
+    conflict: 'text-orange-400 bg-orange-500/10 ring-orange-500/20',
     error: 'text-red-400 bg-red-500/10 ring-red-500/20',
   }[status] || 'text-blue-400 bg-blue-500/10 ring-blue-500/20';
   const inFlight = IN_FLIGHT.includes(status);
