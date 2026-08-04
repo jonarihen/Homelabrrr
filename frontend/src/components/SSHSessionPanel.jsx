@@ -207,7 +207,7 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
 
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const wsUrl = `${proto}://${window.location.host}/api/ssh`;
-      console.log('[SSH] opening WebSocket →', wsUrl, 'token:', token?.slice(0, 8));
+      console.log('[SSH] opening authenticated WebSocket');
       const ws = new WebSocket(wsUrl, ['vmmgr-shell', `vmmgr-token-${token}`]);
       wsRef.current = ws;
 

@@ -8,6 +8,7 @@ import { sanitizeError } from '../utils/sanitize.js';
 import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef } from '../utils/nodeRef.js';
 import { assertPublicDownloadUrl } from '../utils/urlGuard.js';
+import { startBackgroundWork } from '../services/backgroundWork.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -64,8 +65,8 @@ router.post('/', async (req, res) => {
   const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'iso';
 
   const row = db.prepare(
-    'INSERT INTO isos (name, url, node, storage, status) VALUES (?, ?, ?, ?, ?)'
-  ).run(name, url, node, storage, 'downloading');
+    'INSERT INTO isos (name, url, node, storage, status, request_id) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(name, url, node, storage, 'downloading', req.requestId || '');
   const id = row.lastInsertRowid;
   // ISO content: PVE requires the stored filename to carry the .iso extension.
   // The unique suffix avoids clobbering a file already on the storage.
@@ -75,10 +76,10 @@ router.post('/', async (req, res) => {
   try {
     const upid = await downloadUrlToStorage(node, storage, url, filename, checksum?.trim() || undefined, undefined, 'iso');
     db.prepare('UPDATE isos SET volid = ?, upid = ? WHERE id = ?').run(volid, upid || '', id);
-    logAudit(req, 'iso_download', name, url);
+    logAudit(req, 'iso_download', name, `storage=${storage}; requestId=${req.requestId || ''}`);
 
     // Poll in the background; the row's status is the source of truth for the UI
-    (async () => {
+    startBackgroundWork(async () => {
       const result = await waitForTask(node, upid);
       if (!result.ok) {
         setIsoStatus(id, 'error', result.exitstatus === 'timeout'
@@ -96,9 +97,10 @@ router.post('/', async (req, res) => {
         db.prepare('UPDATE isos SET status = ?, status_detail = ?, size = ? WHERE id = ?')
           .run('ready', '', vol.size || 0, id);
       } catch (err) {
-        setIsoStatus(id, 'error', `Could not verify download: ${err.message}`);
+        setIsoStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
       }
-    })().catch((err) => setIsoStatus(id, 'error', err.message));
+    }, { kind: 'iso-download', id, requestId: req.requestId })
+      .catch((err) => setIsoStatus(id, 'error', sanitizeError(err.message)));
 
     res.json({ id, status: 'downloading' });
   } catch (err) {

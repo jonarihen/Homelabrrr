@@ -27,6 +27,8 @@ import AccountPage from './pages/AccountPage.jsx';
 import ProvisionPage from './pages/ProvisionPage.jsx';
 import WebsitesPage from './pages/WebsitesPage.jsx';
 import AdminWebsitesPage from './pages/admin/WebsitesPage.jsx';
+import OperationsPage from './pages/admin/OperationsPage.jsx';
+import { adminRoutePermissions, makeCan } from './utils/navSections.js';
 
 function PrivateRoute({ children, allow2faBypass }) {
   const { user, loading } = useAuth();
@@ -47,6 +49,23 @@ function AdminRoute({ children }) {
   const p = user.permissions || {};
   const hasAnyPerm = user.isAdmin || Object.values(p).some(v => v);
   if (!hasAnyPerm) return <Navigate to="/dashboard" replace />;
+  return children;
+}
+
+function AdminPermissionRoute({ path, children }) {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  if (!user) return <Navigate to="/login" replace />;
+  const required = adminRoutePermissions(path);
+  const can = makeCan(user);
+  if (!required.length || !required.some(can)) {
+    return (
+      <div className="p-8 max-w-2xl">
+        <h1 className="text-xl font-semibold text-white">Access denied</h1>
+        <p className="text-sm text-gray-400 mt-2">Your account does not have permission to open this administration page.</p>
+      </div>
+    );
+  }
   return children;
 }
 
@@ -100,20 +119,21 @@ export default function App() {
 
             <Route path="/admin" element={<AdminRoute><AdminLayout /></AdminRoute>}>
               <Route index element={<AdminIndexRedirect />} />
-              <Route path="users" element={<UsersPage />} />
-              <Route path="roles" element={<RolesPage />} />
-              <Route path="vlans" element={<VLANsPage />} />
-              <Route path="assignments" element={<AssignmentsPage />} />
-              <Route path="hosts" element={<PVEHostsPage />} />
-              <Route path="firewalls" element={<FirewallsPage />} />
-              <Route path="workflows" element={<WorkflowsPage />} />
-              <Route path="policies" element={<PoliciesPage />} />
-              <Route path="port-forwarding" element={<PortForwardingPage />} />
-              <Route path="websites" element={<AdminWebsitesPage />} />
-              <Route path="templates" element={<TemplatesPage />} />
-              <Route path="leases" element={<LeasesPage />} />
-              <Route path="notifications" element={<NotificationsPage />} />
-              <Route path="audit-log" element={<AuditLogPage />} />
+              <Route path="users" element={<AdminPermissionRoute path="/admin/users"><UsersPage /></AdminPermissionRoute>} />
+              <Route path="roles" element={<AdminPermissionRoute path="/admin/roles"><RolesPage /></AdminPermissionRoute>} />
+              <Route path="vlans" element={<AdminPermissionRoute path="/admin/vlans"><VLANsPage /></AdminPermissionRoute>} />
+              <Route path="assignments" element={<AdminPermissionRoute path="/admin/assignments"><AssignmentsPage /></AdminPermissionRoute>} />
+              <Route path="hosts" element={<AdminPermissionRoute path="/admin/hosts"><PVEHostsPage /></AdminPermissionRoute>} />
+              <Route path="operations" element={<AdminPermissionRoute path="/admin/operations"><OperationsPage /></AdminPermissionRoute>} />
+              <Route path="firewalls" element={<AdminPermissionRoute path="/admin/firewalls"><FirewallsPage /></AdminPermissionRoute>} />
+              <Route path="workflows" element={<AdminPermissionRoute path="/admin/workflows"><WorkflowsPage /></AdminPermissionRoute>} />
+              <Route path="policies" element={<AdminPermissionRoute path="/admin/policies"><PoliciesPage /></AdminPermissionRoute>} />
+              <Route path="port-forwarding" element={<AdminPermissionRoute path="/admin/port-forwarding"><PortForwardingPage /></AdminPermissionRoute>} />
+              <Route path="websites" element={<AdminPermissionRoute path="/admin/websites"><AdminWebsitesPage /></AdminPermissionRoute>} />
+              <Route path="templates" element={<AdminPermissionRoute path="/admin/templates"><TemplatesPage /></AdminPermissionRoute>} />
+              <Route path="leases" element={<AdminPermissionRoute path="/admin/leases"><LeasesPage /></AdminPermissionRoute>} />
+              <Route path="notifications" element={<AdminPermissionRoute path="/admin/notifications"><NotificationsPage /></AdminPermissionRoute>} />
+              <Route path="audit-log" element={<AdminPermissionRoute path="/admin/audit-log"><AuditLogPage /></AdminPermissionRoute>} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

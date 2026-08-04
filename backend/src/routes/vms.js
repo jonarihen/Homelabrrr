@@ -31,6 +31,7 @@ import { readTaskProgress } from '../utils/taskProgress.js';
 import { parseUpid, inProgressVolids } from '../utils/backupTask.js';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.js';
 import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.js';
+import { validatePassword } from '../utils/validation.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -598,7 +599,7 @@ router.post('/:node/:vmid/vnc-ticket', async (req, res) => {
     }
 
     const now = Date.now();
-    console.log(`[VNC-ticket] node=${node} vmid=${vmid} type=${vmtype} port=${vncData.port} ticket=${vncData.ticket?.slice(0, 20)}...`);
+    console.log(`[VNC-ticket] node=${node} vmid=${vmid} type=${vmtype} port=${vncData.port} issued`);
 
     vncSessions.set(token, {
       userId: req.session.userId,
@@ -1087,8 +1088,9 @@ router.post('/:node/:vmid/cloudinit-credentials', async (req, res) => {
   if (!newPassword && !sshKeys) {
     return res.status(400).json({ error: 'Provide a new password and/or an SSH public key' });
   }
-  if (newPassword && newPassword.length < 8) {
-    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  if (newPassword) {
+    try { validatePassword(newPassword); }
+    catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   }
 
   try {
@@ -1456,10 +1458,10 @@ router.post('/:node/:vmid/backup', async (req, res) => {
     // showing a half-written dump as a finished backup. The completion
     // notification is fired from finalizeBackupTask once the task actually ends.
     const info = db.prepare(
-      'INSERT INTO backup_tasks (user_id, node, vmid, upid, storage, started_epoch) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO backup_tasks (user_id, node, vmid, upid, storage, started_epoch, request_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(
       req.session.userId, node, parseInt(vmid, 10), upid, storage || '',
-      parseUpid(upid)?.startTime || 0,
+      parseUpid(upid)?.startTime || 0, req.requestId || '',
     );
     res.json({ ok: true, upid, taskId: info.lastInsertRowid });
   } catch (err) {
@@ -1475,9 +1477,9 @@ router.post('/:node/:vmid/backup', async (req, res) => {
   }
 });
 
-router.delete('/:node/:vmid/backups/:storage/*', async (req, res) => {
+router.delete('/:node/:vmid/backups/:storage/*volid', async (req, res) => {
   const { node, vmid, storage } = req.params;
-  const volid = req.params[0];
+  const volid = Array.isArray(req.params.volid) ? req.params.volid.join('/') : req.params.volid;
   // Same tier as starting a dump and as snapshot deletion (issue #73): a
   // fleet operator who can fill a backup storage must be able to clean it up.
   // `see_all_vms` alone still cannot get here.
@@ -1530,9 +1532,9 @@ router.post('/:node/:vmid/restore', async (req, res) => {
 
 // ─── File-level restore (browse backup contents) ────────────────────────────
 
-router.get('/:node/:vmid/backup-files/:storage/*', async (req, res) => {
+router.get('/:node/:vmid/backup-files/:storage/*volid', async (req, res) => {
   const { node, vmid, storage } = req.params;
-  const volid = req.params[0]; // everything after storage/
+  const volid = Array.isArray(req.params.volid) ? req.params.volid.join('/') : req.params.volid;
   const { filepath = '/' } = req.query;
   if (!allowOp(req, node, vmid, 'vm.backups.browse')) {
     return res.status(403).json({ error: 'Access denied' });
@@ -1548,9 +1550,9 @@ router.get('/:node/:vmid/backup-files/:storage/*', async (req, res) => {
   }
 });
 
-router.get('/:node/:vmid/backup-download/:storage/*', async (req, res) => {
+router.get('/:node/:vmid/backup-download/:storage/*volid', async (req, res) => {
   const { node, vmid, storage } = req.params;
-  const volid = req.params[0]; // everything after storage/
+  const volid = Array.isArray(req.params.volid) ? req.params.volid.join('/') : req.params.volid;
   const { filepath } = req.query;
   if (!allowOp(req, node, vmid, 'vm.backups.browse')) {
     return res.status(403).json({ error: 'Access denied' });

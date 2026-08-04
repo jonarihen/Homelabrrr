@@ -25,6 +25,12 @@ export const NAV_SECTIONS = [
         icon: 'M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7',
       },
       {
+        to: '/admin/operations',
+        label: 'Operations',
+        perms: ['canManageHosts'],
+        icon: 'M4.5 12a7.5 7.5 0 0112.78-5.303M19.5 12a7.5 7.5 0 01-12.78 5.303M16.5 3.75v3.75h-3.75M7.5 20.25V16.5h3.75',
+      },
+      {
         to: '/admin/firewalls',
         label: 'Firewalls',
         perms: ['canManageFirewalls'],
@@ -137,4 +143,12 @@ export function visibleSections(can) {
       links: section.links.filter((link) => link.perms.some((perm) => !!allowed(perm))),
     }))
     .filter((section) => section.links.length > 0);
+}
+
+export function adminRoutePermissions(path) {
+  for (const section of NAV_SECTIONS) {
+    const link = section.links.find((entry) => entry.to === path);
+    if (link) return link.perms;
+  }
+  return [];
 }

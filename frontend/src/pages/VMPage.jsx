@@ -658,7 +658,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
       return;
     }
     if (trimmedPw && trimmedPw.length < 8) {
-      setError('Password must be at least 8 characters.');
+      setError('Password must be at least 12 characters.');
       return;
     }
     const body = { reboot };
@@ -739,6 +739,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
           <input
             id={pwId}
             type="password"
+            minLength={12}
             value={password}
             onChange={e => setPassword(e.target.value)}
             placeholder="Leave blank to keep the current password"

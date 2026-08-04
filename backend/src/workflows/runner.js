@@ -31,7 +31,7 @@ export function buildFirewallContext(fw) {
  * 'failed' run (the engine already rolled back) and re-throws the original
  * error so the caller returns the same response it did historically.
  */
-export async function runBundle({ bundle, context, client, firewall, subjectType, subjectId, subjectLabel }) {
+export async function runBundle({ bundle, context, client, firewall, subjectType, subjectId, subjectLabel, requestId = '' }) {
   const { workflow, steps } = bundle;
   try {
     const result = await runWorkflow({ steps, context, client });
@@ -46,6 +46,7 @@ export async function runBundle({ bundle, context, client, firewall, subjectType
       log: result.log,
       artifacts: result.artifacts,
       dryRun: false,
+      requestId,
     });
     return { runId, outputs: result.outputs, artifacts: result.artifacts, status: result.status };
   } catch (err) {
@@ -61,6 +62,7 @@ export async function runBundle({ bundle, context, client, firewall, subjectType
       log: failed.log,
       artifacts: failed.artifacts,
       dryRun: false,
+      requestId,
     });
     throw err;
   }

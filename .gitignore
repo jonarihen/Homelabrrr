@@ -10,8 +10,12 @@ fortigate-conf/
 
 **/node_modules/
 frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
 
 backend/data/
+backups/
+backups-offsite/
 *.db
 *.sqlite
 *.sqlite3

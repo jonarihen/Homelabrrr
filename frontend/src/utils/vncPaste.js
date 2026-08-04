@@ -10,10 +10,11 @@
 const XK_Return = 0xff0d;
 const XK_Tab = 0xff09;
 
-// Same module noVNC's own keyboard handler uses; maps a unicode codepoint to
-// the X11 keysym QEMU expects (Latin-1 is 1:1, others use lookup tables with
-// a 0x01000000|codepoint fallback).
-const keysymsPromise = import('@novnc/novnc/lib/input/keysymdef.js');
+// X11 keysyms are identical to Unicode for Latin-1; other printable codepoints
+// use the standard 0x01000000-prefixed Unicode keysym form.
+function unicodeKeysym(codepoint) {
+  return codepoint <= 0xff ? codepoint : (0x01000000 | codepoint);
+}
 
 export async function readClipboardText() {
   if (navigator.clipboard?.readText) {
@@ -33,7 +34,6 @@ export async function readClipboardText() {
 // polled between characters so callers can abort on unmount/disconnect;
 // noVNC's sendKey is itself a no-op once the connection is gone.
 export async function typeIntoVnc(rfb, text, { charDelayMs = 10, shouldStop = () => false } = {}) {
-  const { default: keysyms } = await keysymsPromise;
   let sent = 0;
 
   for (const ch of text.replace(/\r\n?/g, '\n')) {
@@ -45,7 +45,7 @@ export async function typeIntoVnc(rfb, text, { charDelayMs = 10, shouldStop = ()
     else {
       const cp = ch.codePointAt(0);
       if (cp < 0x20) continue; // other control characters have no key
-      keysym = keysyms.lookup(cp);
+      keysym = unicodeKeysym(cp);
     }
 
     rfb.sendKey(keysym, null); // press + release

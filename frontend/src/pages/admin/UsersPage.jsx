@@ -274,6 +274,7 @@ function CreateUserModal({ canCreateAdmin, onClose, onCreated }) {
         <Field label="Password">
           <input
             type="password"
+            minLength={12}
             required
             value={form.password}
             onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
@@ -780,6 +781,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                 <Field label="New Password">
                   <input
                     type="password"
+                    minLength={12}
                     required
                     value={newPw}
                     onChange={e => { setNewPw(e.target.value); setPwMsg(''); }}

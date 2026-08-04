@@ -845,13 +845,13 @@ router.post('/:node/:vmid', async (req, res) => {
     }
 
     const row = db.prepare(`
-      INSERT INTO vm_migrations (user_id, vmid, name, vmtype, source_node, target_node, target_storage, target_bridge, online, delete_source, status, upid, mode)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+      INSERT INTO vm_migrations (user_id, vmid, name, vmtype, source_node, target_node, target_storage, target_bridge, online, delete_source, status, upid, mode, request_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
     `).run(
       req.session.userId, vmid, vm.name || '', vmtype,
       sourceRef, targetNode, targetStorage || '', targetBridge,
       mode === 'remote_migrate' && vmtype === 'qemu' && running && online ? 1 : 0,
-      mode === 'adopt' ? 0 : (deleteSource ? 1 : 0), upid || '', mode
+      mode === 'adopt' ? 0 : (deleteSource ? 1 : 0), upid || '', mode, req.requestId || ''
     );
 
     if (mode === 'adopt') {

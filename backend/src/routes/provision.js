@@ -23,6 +23,8 @@ import { getRolePermissions } from '../utils/permissions.js';
 import { createLeaseForVm } from '../utils/leases.js';
 import { toPveVmName } from '../utils/vmName.js';
 import { resolveSshKeys, unusableKeysError, assertLoginPossible } from '../utils/cloudInitCredentials.js';
+import { validatePassword } from '../utils/validation.js';
+import { startBackgroundWork } from '../services/backgroundWork.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -109,10 +111,8 @@ function parseCloudInitOptions({ ciUser, ciPassword, sshKeyIds, ipMode, ipAddres
     opts.ciUser = ciUser;
   }
   if (ciPassword) {
-    if (String(ciPassword).length < 8) {
-      return { error: { status: 400, message: 'Cloud-init password must be at least 8 characters' } };
-    }
-    opts.ciPassword = String(ciPassword);
+    try { opts.ciPassword = validatePassword(String(ciPassword), 'Cloud-init password'); }
+    catch (err) { return { error: { status: 400, message: err.message } }; }
   }
   if (Array.isArray(sshKeyIds) && sshKeyIds.length > 0) {
     // Load every requested row — including the ones with no stored public key —
@@ -386,8 +386,8 @@ router.post('/clone', async (req, res) => {
       { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
     ]);
     const row = db.prepare(
-      "INSERT INTO provisioned_vms (user_id, node, vmid, name, template_id, source_type, steps, status, upid) VALUES (?, ?, ?, ?, ?, 'template', ?, 'cloning', ?)"
-    ).run(req.session.userId, template.node, newVmid, vmName, template.id, steps, upid || '');
+      "INSERT INTO provisioned_vms (user_id, node, vmid, name, template_id, source_type, steps, status, upid, request_id) VALUES (?, ?, ?, ?, ?, 'template', ?, 'cloning', ?, ?)"
+    ).run(req.session.userId, template.node, newVmid, vmName, template.id, steps, upid || '', req.requestId || '');
 
     // Assignment + lease are written by the background poller once the clone
     // actually succeeds (recordVmOwnership) — writing them here would leave
@@ -396,7 +396,7 @@ router.post('/clone', async (req, res) => {
     const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
 
     // Do config changes after clone finishes — poll in background
-    pollAndConfigure(row.lastInsertRowid, template.node, newVmid, upid, {
+    startBackgroundWork(() => pollAndConfigure(row.lastInsertRowid, template.node, newVmid, upid, {
       cores: finalCores,
       memory: finalMem,
       diskGb: finalDisk,
@@ -405,7 +405,8 @@ router.post('/clone', async (req, res) => {
       description,
       vlanTag: vlanTag ? parseInt(vlanTag) : null,
       owner: { userId: targetUser, createdBy: req.session.username },
-    }).catch((err) => console.error(`Post-clone config failed for VM ${newVmid}:`, err.message));
+    }), { kind: 'provision', id: row.lastInsertRowid, requestId: req.requestId })
+      .catch((err) => console.error(`Post-clone config failed for VM ${newVmid}:`, err.message));
 
     logAudit(req, 'vm_clone', `${template.node}/${newVmid}`, `template:${template.name}`);
     res.json({
@@ -685,19 +686,20 @@ router.post('/from-image', async (req, res) => {
       { key: 'start', label: startNow ? 'Starting VM' : 'Finalizing', status: 'pending' },
     ]);
     const row = db.prepare(
-      "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, cloud_image_id, steps, status, upid) VALUES (?, ?, ?, ?, 'cloudimage', ?, ?, 'creating', ?)"
-    ).run(req.session.userId, targetImage.node, vmid, vmName, targetImage.id, steps, upid || '');
+      "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, cloud_image_id, steps, status, upid, request_id) VALUES (?, ?, ?, ?, 'cloudimage', ?, ?, 'creating', ?, ?)"
+    ).run(req.session.userId, targetImage.node, vmid, vmName, targetImage.id, steps, upid || '', req.requestId || '');
 
     // Assignment + lease are written by the background poller once the create
     // actually succeeds (recordVmOwnership) — see /clone above.
     const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
 
-    finishImageProvision(row.lastInsertRowid, targetImage.node, vmid, upid, {
+    startBackgroundWork(() => finishImageProvision(row.lastInsertRowid, targetImage.node, vmid, upid, {
       diskGb: baseDiskGb,
       ...cloudInitOpts,
       start: startNow,
       owner: { userId: targetUser, createdBy: req.session.username },
-    }).catch((err) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message));
+    }), { kind: 'provision', id: row.lastInsertRowid, requestId: req.requestId })
+      .catch((err) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message));
 
     logAudit(req, 'vm_from_image', `${targetImage.node}/${vmid}`, `image:${targetImage.name}${user.is_admin ? '' : ' (auto-placed)'}`);
     res.json({
@@ -833,8 +835,8 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
       { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
     ]);
     const row = db.prepare(
-      "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, steps, status, upid) VALUES (?, ?, ?, ?, 'create', ?, 'creating', ?)"
-    ).run(req.session.userId, node, vmid, vmName, steps, upid || '');
+      "INSERT INTO provisioned_vms (user_id, node, vmid, name, source_type, steps, status, upid, request_id) VALUES (?, ?, ?, ?, 'create', ?, 'creating', ?, ?)"
+    ).run(req.session.userId, node, vmid, vmName, steps, upid || '', req.requestId || '');
 
     // Assign VM — admins only get an assignment if they explicitly pick a
     // target user; non-admins always self-assign (assignTo is ignored).
@@ -851,7 +853,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
 
     // Poll for completion, then stamp PVE owner/VLAN tags on the new VM
     if (upid) {
-      pollTaskCompletion(row.lastInsertRowid, node, upid)
+      startBackgroundWork(() => pollTaskCompletion(row.lastInsertRowid, node, upid)
         .then(async (ok) => {
           setStep(row.lastInsertRowid, 'create', ok ? 'done' : 'error');
           if (!ok) return;
@@ -860,12 +862,15 @@ router.post('/create', requirePermission('can_create_vms'), async (req, res) => 
           setStep(row.lastInsertRowid, 'tags', 'done');
           db.prepare("UPDATE provisioned_vms SET status = 'ready', status_detail = '' WHERE id = ?").run(row.lastInsertRowid);
           notifyDeployment(row.lastInsertRowid);
-        })
+        }), { kind: 'provision', id: row.lastInsertRowid, requestId: req.requestId })
         .catch((err) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
     } else {
       setStep(row.lastInsertRowid, 'tags', 'active');
       db.prepare("UPDATE provisioned_vms SET status = 'ready', status_detail = '' WHERE id = ?").run(row.lastInsertRowid);
-      syncVmTagsSafe(node, vmid).finally(() => setStep(row.lastInsertRowid, 'tags', 'done'));
+      startBackgroundWork(
+        () => syncVmTagsSafe(node, vmid).finally(() => setStep(row.lastInsertRowid, 'tags', 'done')),
+        { kind: 'tag-sync', id: row.lastInsertRowid, requestId: req.requestId },
+      ).catch((err) => console.error(`Post-create tag sync failed for VM ${vmid}:`, err.message));
       notifyDeployment(row.lastInsertRowid);
     }
 

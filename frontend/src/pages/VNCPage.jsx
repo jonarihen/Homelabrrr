@@ -11,7 +11,7 @@ import {
 } from '../utils/consoleStatus.js';
 
 // Preload noVNC — Proxmox VNC proxies time out quickly
-const rfbModulePromise = import('@novnc/novnc/lib/rfb.js');
+const rfbModulePromise = import('@novnc/novnc');
 
 function forceFullRefresh(rfb) {
   if (!rfb) return;

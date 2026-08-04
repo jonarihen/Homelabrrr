@@ -149,9 +149,9 @@ export function resetWorkflow(id) {
   return true;
 }
 
-export function recordRun({ workflowId, firewallId, trigger, subjectType, subjectId, subjectLabel, status, log, artifacts, dryRun }) {
+export function recordRun({ workflowId, firewallId, trigger, subjectType, subjectId, subjectLabel, status, log, artifacts, dryRun, requestId = '' }) {
   const res = db.prepare(
-    'INSERT INTO workflow_runs (workflow_id, firewall_id, trigger, subject_type, subject_id, subject_label, status, log, artifacts, dry_run) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO workflow_runs (workflow_id, firewall_id, trigger, subject_type, subject_id, subject_label, status, log, artifacts, dry_run, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(
     workflowId || null,
     firewallId || null,
@@ -162,7 +162,8 @@ export function recordRun({ workflowId, firewallId, trigger, subjectType, subjec
     status || 'pending',
     JSON.stringify(log || []),
     JSON.stringify(artifacts || []),
-    dryRun ? 1 : 0
+    dryRun ? 1 : 0,
+    requestId,
   );
   return res.lastInsertRowid;
 }

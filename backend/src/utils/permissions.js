@@ -1,5 +1,8 @@
 import db from '../db.js';
 import { resolvePermissionCheck, resolveEffectivePermissions } from './permissionRules.js';
+import { PERMISSION_KEYS } from './permissionKeys.js';
+
+export { PERMISSION_KEYS } from './permissionKeys.js';
 
 // Every granular permission the portal knows. These are simultaneously the
 // legacy per-user column names on `users` and the permission key strings
@@ -11,25 +14,6 @@ import { resolvePermissionCheck, resolveEffectivePermissions } from './permissio
 // built-in Administrator role) is treated as not having it. Always go
 // through `userHasPermission` / `effectivePermissions` below, or
 // `requirePermission` in middleware/auth.js.
-export const PERMISSION_KEYS = [
-  'see_all_vms',
-  'can_operate_all_vms',
-  'can_provision',
-  'can_create_vms',
-  'can_manage_hosts',
-  'can_manage_firewalls',
-  'can_manage_port_forwards',
-  'can_manage_vlans',
-  'can_manage_policies',
-  'can_manage_templates',
-  'can_manage_users',
-  'can_manage_assignments',
-  'can_view_audit_log',
-  'can_edit_vm_hardware',
-  'can_manage_websites',
-  'can_manage_public_ips',
-];
-
 /** Permission keys granted by a role (empty set for no role). */
 export function getRolePermissions(roleId) {
   if (!roleId) return new Set();
