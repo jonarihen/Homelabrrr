@@ -166,6 +166,31 @@ Homelabrrr can drive an **external [Caddy](https://caddyserver.com/) reverse pro
 
 The whole flow is shown as a live step-progress stepper (DNS → route pushed → cert issued → inspection wired → live), and each step's state is persisted so it survives a page refresh.
 
+### What "live" means
+
+A site is marked **live** only after Homelabrrr has made a real HTTPS request to the published domain and seen it answer. Two checks stand between "the admin API accepted the route" and that badge:
+
+- **Conflict detection.** After pushing, the live route array is read back. Caddy evaluates each server's routes in order and a `reverse_proxy` site block is `terminal`, so the *first* route matching a hostname wins — and `POST …/routes` appends. A hand-written Caddyfile block for the same hostname therefore always beats a route pushed later. When one is found, the site is marked **conflict** with the winning route's upstream named in the stepper. That foreign route is never deleted or rewritten (Homelabrrr only ever touches its own `@id`-tagged routes) — remove or rename the block on the Caddy host, reload, and hit **Retry**.
+- **Reachability probe.** One HTTPS request is sent straight to the registered Caddy server's address on `:443`, with the TLS SNI and `Host` header set to the published domain — the equivalent of `curl --resolve`. Public DNS is deliberately not used: the record points at the WAN IP, and many homelab routers don't support NAT hairpinning, so a DNS-based probe would fail from inside the network for reasons unrelated to the site. The failure modes stay separate: a 502 is *your upstream* being down, an untrusted certificate is Let's Encrypt issuance still running, a refused connection is the Caddy host. Published sites are re-probed every `WEBSITE_RECONCILE_INTERVAL_MS`, so a site that breaks later drops to **warning** on its own and returns to **live** when it recovers.
+
+### ⚠️ Route durability: admin-API routes are not persistent
+
+Routes pushed through the Caddy admin API live **only in Caddy's running config**. The stock systemd unit
+
+```
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+```
+
+rebuilds the whole config from the Caddyfile on both `systemctl restart caddy` **and** `systemctl reload caddy` — including an unattended package upgrade of Caddy. Every route Homelabrrr pushed is dropped, with no error anywhere.
+
+Two things mitigate this, and it is worth knowing which one you are relying on:
+
+- **Reconcile loop (API mode, automatic).** Every `WEBSITE_RECONCILE_INTERVAL_MS` (default 5 min) Homelabrrr re-pushes any managed route missing from the live config, and the re-push is conflict-checked exactly like a publish. **Admin → Websites** shows a drift banner, and **Sync** runs it on demand. This means published sites come back by themselves — but there is a window between the reload and the next tick during which they are down.
+- **Caddyfile snippet sync (SSH, durable).** Configure an SSH target on the Caddy server and Homelabrrr instead maintains `/etc/caddy/homelabrrr.caddy` on the Caddy host — imported once from the main Caddyfile with `import /etc/caddy/homelabrrr.caddy` — regenerating it on every publish/update/delete, running `caddy validate` (rolling back on failure), then `caddy reload`. The routes then live in a real file and survive restarts outright, so the reconcile loop skips these servers. This is the recommended mode for anything you care about.
+
+Caddy's `--resume` flag is deliberately *not* used: it makes `autosave.json` the source of truth and causes legitimate Caddyfile edits to be silently ignored on restart, which trades one silent failure for another.
+
 ### Guardrails
 
 - **Ownership** — users see and manage only their own sites; admins see all sites with the owner shown and can reassign ownership.
@@ -329,6 +354,7 @@ Example values live in [`.env.example`](.env.example).
 | `FRONTEND_BIND_ADDRESS` | Host bind address for frontend publishing (default `127.0.0.1`; set `0.0.0.0` to expose on all interfaces) |
 | `LEASE_CHECK_INTERVAL_MS` | How often the background VM-lease sweeper runs to gracefully stop expired VMs (default `900000` = 15 min; minimum `60000`). Default lease duration and grace period are set in-app on the admin VM Leases page |
 | `VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS` | How long a scheduled graceful shutdown waits before the hard-stop fallback fires (default `120000`) |
+| `WEBSITE_RECONCILE_INTERVAL_MS` | How often published websites are re-checked: admin-API routes dropped by a `caddy reload` are re-pushed, and every published site is re-probed over HTTPS (default `300000` = 5 min; minimum `60000`) — see [Route durability](#️-route-durability-admin-api-routes-are-not-persistent) |
 | `DB_PATH` | SQLite database file (default `/app/data/db.sqlite`, inside the `db_data` volume — moving it takes the database off the volume you back up) |
 
 Every variable in this table is passed into the backend container by `docker-compose.yml`, and the backend logs which ones it recognised at startup (`docker compose logs backend | grep '\[config\]'`) — so a setting that is being ignored is visible rather than silent.

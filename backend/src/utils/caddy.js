@@ -39,6 +39,144 @@ export function hostCoveredByWildcard(domain, wildcard) {
   return label.length > 0 && !label.includes('.');
 }
 
+/** Does a listen address end on `port`? Handles ':443', '10.0.0.5:443', '[::]:443'. */
+function listensOn(server, port) {
+  return (server?.listen || []).some((l) => new RegExp(`:${port}$`).test(String(l)));
+}
+
+/**
+ * Pick which http server key a top-level route should be appended to.
+ *
+ * Order matters and used to be a coin flip: the old check accepted `:443` *or*
+ * `:80` with no preference, so a Caddyfile carrying an explicit `http://` site
+ * block could produce a `:80`-only server that sorted first and swallowed every
+ * published site — no automatic HTTPS, no certificate, and `https://` never
+ * serving, with the publish still reported as successful.
+ *
+ * Returns { name, listen, tls, source } where `tls` says whether the chosen
+ * server actually terminates HTTPS, or null when there are no servers at all.
+ * `source` is 'https' | 'http' | 'fallback' — the caller decides what to do
+ * about a non-HTTPS choice; this function never guesses on the caller's behalf.
+ */
+export function pickHttpServer(servers) {
+  const names = Object.keys(servers || {});
+  if (names.length === 0) return null;
+  const describe = (name, tls, source) => ({
+    name,
+    listen: (servers[name]?.listen || []).map(String),
+    tls,
+    source,
+  });
+  const https = names.find((n) => listensOn(servers[n], 443));
+  if (https) return describe(https, true, 'https');
+  const plain = names.find((n) => listensOn(servers[n], 80));
+  if (plain) return describe(plain, false, 'http');
+  return describe(names[0], false, 'fallback');
+}
+
+/** Does a route's matcher set cover `domain` — exactly, or through a wildcard? */
+export function routeMatchesHost(match, domain) {
+  const { hosts } = hostsFromMatch(match);
+  if (hosts.length === 0) return false;
+  const d = String(domain).toLowerCase();
+  return hosts.some((h) => h === d || hostCoveredByWildcard(d, h));
+}
+
+/** What a route ultimately does, looking through any subroute nesting. */
+function summarizeHandlers(route) {
+  const kinds = new Set();
+  let upstream = '';
+  const walk = (handlers) => {
+    for (const h of handlers || []) {
+      if (h.handler === 'subroute') {
+        for (const r of h.routes || []) walk(r.handle);
+        continue;
+      }
+      if (h.handler) kinds.add(h.handler);
+      if (h.handler === 'reverse_proxy' && !upstream) upstream = String(h.upstreams?.[0]?.dial || '');
+    }
+  };
+  walk(route.handle);
+  return { kinds: [...kinds], upstream };
+}
+
+/** Compare two index paths. Negative when `a` is evaluated before `b`. */
+function comparePath(a, b) {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+/** Is `a` a proper prefix of `b` — i.e. is route `a` an ancestor of route `b`? */
+function isAncestorPath(a, b) {
+  return a.length < b.length && a.every((v, i) => v === b[i]);
+}
+
+/**
+ * Every route in the live config whose host matcher covers `domain`, tagged with
+ * its position. `path` is the index chain down from the server's `routes` array
+ * (`[10]`, `[4, 0, 1]`); comparing those lexicographically reproduces Caddy's
+ * own evaluation order, which is the whole point — a site block that matches
+ * first and is `terminal` stops evaluation, so nothing after it is ever reached.
+ *
+ * Routes with no host matcher are deliberately ignored: they match everything,
+ * so treating them as per-domain conflicts would flag ordinary catch-alls on
+ * every publish.
+ */
+export function collectHostRoutes(servers, domain) {
+  const out = [];
+  const walk = (routes, server, path) => {
+    for (let i = 0; i < (routes || []).length; i++) {
+      const route = routes[i] || {};
+      const here = [...path, i];
+      if (routeMatchesHost(route.match, domain)) {
+        out.push({
+          server,
+          path: here,
+          id: typeof route['@id'] === 'string' ? route['@id'] : '',
+          hosts: hostsFromMatch(route.match).hosts,
+          terminal: route.terminal === true,
+          ...summarizeHandlers(route),
+        });
+      }
+      const handle = route.handle || [];
+      for (let h = 0; h < handle.length; h++) {
+        if (handle[h]?.handler === 'subroute') walk(handle[h].routes, server, [...here, h]);
+      }
+    }
+  };
+  for (const name of Object.keys(servers || {})) walk(servers[name]?.routes, name, []);
+  return out;
+}
+
+/**
+ * Routes that shadow the managed route for `siteId`: they match the same domain
+ * on the same http server and Caddy reaches them first, so the site's own route
+ * is dead config no matter what the admin API said when it was pushed.
+ *
+ * This is not a race. `POST /config/apps/http/servers/<s>/routes` *appends*, and
+ * Caddyfile-derived routes are always loaded before anything appended later —
+ * so a pre-existing site block for the same hostname always wins.
+ *
+ * The site's own route and its ancestors (the wildcard block it may be nested
+ * inside, which naturally matches the domain too) are never conflicts. Nothing
+ * here mutates anything: conflicts are reported so an operator can remove the
+ * offending block, because Homelabrrr never touches a route it did not create.
+ */
+export function findShadowingRoutes(servers, domain, siteId) {
+  const ownId = managedRouteId(siteId);
+  const all = collectHostRoutes(servers, domain);
+  const own = all.find((r) => r.id === ownId);
+  return all.filter((r) => {
+    if (r.id === ownId) return false;
+    if (!own) return true;                              // our route isn't there at all
+    if (r.server !== own.server) return false;          // a different listener entirely
+    if (isAncestorPath(r.path, own.path)) return false; // the block we're nested in
+    return comparePath(r.path, own.path) < 0;           // only what Caddy reaches first
+  });
+}
+
 function splitDial(dial) {
   const s = String(dial || '');
   const idx = s.lastIndexOf(':');
@@ -175,22 +313,36 @@ export class CaddyClient {
   }
 
   /**
-   * Resolve which http server key to attach routes to. Prefers an explicitly
-   * configured name, then a server listening on :443/:80, then the first key.
+   * Resolve which http server key to attach routes to, with the reasoning kept:
+   * an explicitly configured name wins, otherwise :443 strictly before :80.
+   * Returns { name, listen, tls, source } — see pickHttpServer.
    */
-  async resolveServerName() {
-    if (this.serverName) return this.serverName;
+  async chooseServer() {
+    if (this.serverName) {
+      const servers = await this.getConfig('/apps/http/servers').catch(() => null);
+      const listen = (servers?.[this.serverName]?.listen || []).map(String);
+      return { name: this.serverName, listen, tls: listensOn({ listen }, 443), source: 'configured' };
+    }
     const servers = (await this.getConfig('/apps/http/servers')) || {};
-    const names = Object.keys(servers);
-    if (names.length === 0) {
+    const choice = pickHttpServer(servers);
+    if (!choice) {
       throw new Error('Caddy has no http servers configured — cannot attach a site route');
     }
-    const preferred = names.find((n) => {
-      const listen = servers[n]?.listen || [];
-      return listen.some((l) => /:(443|80)$/.test(String(l)));
-    });
-    this.serverName = preferred || names[0];
-    return this.serverName;
+    this.serverName = choice.name;
+    return choice;
+  }
+
+  async resolveServerName() {
+    return (await this.chooseServer()).name;
+  }
+
+  /**
+   * Read the live route array back and report every route that would be reached
+   * before this site's own. See findShadowingRoutes — nothing is mutated.
+   */
+  async findConflicts(siteId, domain) {
+    const servers = (await this.getConfig('/apps/http/servers')) || {};
+    return findShadowingRoutes(servers, domain, siteId);
   }
 
   /** GET the managed route for a site, or null if it isn't present. */
@@ -245,7 +397,9 @@ export class CaddyClient {
    * inside that block (before its catch-all) instead of appended at the top
    * level — so the block's wildcard certificate (e.g. DNS-challenge
    * `*.example.com`) serves the site and no per-domain issuance is attempted.
-   * Returns { route, wildcard } — wildcard is '' for a plain top-level route.
+   * Returns { route, wildcard, serverName } — wildcard is '' for a plain
+   * top-level route, serverName the http server key the route landed on ('' when
+   * it was nested into an existing block, which decides its own listener).
    */
   async upsertRoute(siteId, domain, upstreamHost, upstreamPort) {
     const route = buildSiteRoute(siteId, domain, upstreamHost, upstreamPort);
@@ -255,17 +409,31 @@ export class CaddyClient {
       // keep the @id in the body.
       await this.request('PATCH', `/id/${managedRouteId(siteId)}`, route);
       const slot = await this.findWildcardSlot(domain).catch(() => null);
-      return { route, wildcard: slot?.wildcard || '' };
+      return { route, wildcard: slot?.wildcard || '', serverName: '' };
     }
     const slot = await this.findWildcardSlot(domain);
     if (slot) {
       // PUT into an array inserts at the index, shifting the catch-all down.
       await this.request('PUT', `/config${slot.path}/${slot.insertIndex}`, route);
-      return { route, wildcard: slot.wildcard };
+      return { route, wildcard: slot.wildcard, serverName: '' };
     }
-    const serverName = await this.resolveServerName();
-    await this.request('POST', `/config/apps/http/servers/${encodeURIComponent(serverName)}/routes`, route);
-    return { route, wildcard: '' };
+    const choice = await this.chooseServer();
+    // A site published here is an HTTPS site: it exists to get a Let's Encrypt
+    // certificate. Landing it on a server with no :443 listener would produce a
+    // green publish and a hostname that never serves over HTTPS — say so
+    // instead, and let the admin pin the right key on the server record.
+    if (!choice.tls && choice.source !== 'configured') {
+      const err = new Error(
+        `The only Caddy http server available ("${choice.name}"`
+        + `${choice.listen.length ? `, listening on ${choice.listen.join(', ')}` : ''}) does not listen on :443, `
+        + 'so an HTTPS site published there would never serve. Add a :443 listener to Caddy, '
+        + 'or set the correct server key on the Caddy server record in Admin → Websites.',
+      );
+      err.code = 'caddy_no_https_server';
+      throw err;
+    }
+    await this.request('POST', `/config/apps/http/servers/${encodeURIComponent(choice.name)}/routes`, route);
+    return { route, wildcard: '', serverName: choice.name };
   }
 
   /** Delete the managed route for a site (no-op if it's already gone). */

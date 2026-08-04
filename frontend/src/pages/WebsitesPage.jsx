@@ -281,6 +281,13 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
   // is at its 10-certificate limit). Retry stays available — it's the right
   // action *after* freeing a slot — but the copy never implies it's the fix.
   const isBlocked = site.status === 'blocked';
+  // `conflict` is the same shape of problem: the route was pushed, but a route
+  // Homelabrrr does not own already matches the domain and Caddy reaches it
+  // first — so the site cannot serve until an operator removes that block.
+  // Homelabrrr never touches a foreign route, which is why this waits rather
+  // than fixing itself. Same "held, not failed" styling as blocked.
+  const isConflict = site.status === 'conflict';
+  const isHeld = isBlocked || isConflict;
   // Only a route Homelabrrr owns and actually reverse-proxies has an upstream to
   // edit: sites imported from the Caddyfile are managed there (the backend
   // rejects a PUT for them), and a file_server/static block has no upstream at
@@ -290,7 +297,7 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-      <div className={`h-0.5 ${isLive ? 'bg-green-500' : isError ? 'bg-red-500' : isBlocked ? 'bg-orange-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500 animate-pulse'}`} />
+      <div className={`h-0.5 ${isLive ? 'bg-green-500' : isError ? 'bg-red-500' : isHeld ? 'bg-orange-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500 animate-pulse'}`} />
       <div className="p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -306,8 +313,8 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
             {site.ownerUsername && <p className="text-[10px] text-gray-600 font-mono mt-0.5">owner: {site.ownerUsername}</p>}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {(isError || isWarning || isBlocked) && (
-              <button onClick={retry} disabled={busy} className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40 px-2 py-1 rounded hover:bg-gray-800 transition-colors" title={isBlocked ? 'Re-run the pipeline once the blocker described below is cleared' : undefined}>Retry</button>
+            {(isError || isWarning || isHeld) && (
+              <button onClick={retry} disabled={busy} className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40 px-2 py-1 rounded hover:bg-gray-800 transition-colors" title={isHeld ? 'Re-run the pipeline once the blocker described below is cleared' : undefined}>Retry</button>
             )}
             {canEdit && !inFlight && !confirmDelete && (
               <button onClick={() => { setError(''); setEditing((v) => !v); }} disabled={busy} className={`p-1.5 rounded-lg transition-colors ${editing ? 'text-orange-400 bg-gray-800' : 'text-gray-500 hover:text-white hover:bg-gray-800'} disabled:opacity-40`} aria-label="Edit website" title="Change the upstream target">
@@ -341,7 +348,7 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
         {!isLive && (
           <div className="mt-4">
             <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden mb-3">
-              <div className={`h-full transition-all duration-500 ${isError ? 'bg-red-500' : isBlocked ? 'bg-orange-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
+              <div className={`h-full transition-all duration-500 ${isError ? 'bg-red-500' : isHeld ? 'bg-orange-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
             </div>
             <ol className="space-y-1">
               {site.steps.map((s) => (
@@ -357,8 +364,8 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
           </div>
         )}
 
-        {(isWarning || isError || isBlocked) && site.statusDetail && (
-          <p className={`text-xs mt-4 rounded-xl p-3 border ${isError ? 'text-red-400 bg-red-900/20 border-red-800/30' : isBlocked ? 'text-orange-300 bg-orange-900/20 border-orange-800/30' : 'text-amber-400 bg-amber-900/20 border-amber-800/30'}`}>{site.statusDetail}</p>
+        {(isWarning || isError || isHeld) && site.statusDetail && (
+          <p className={`text-xs mt-4 rounded-xl p-3 border ${isError ? 'text-red-400 bg-red-900/20 border-red-800/30' : isHeld ? 'text-orange-300 bg-orange-900/20 border-orange-800/30' : 'text-amber-400 bg-amber-900/20 border-amber-800/30'}`}>{site.statusDetail}</p>
         )}
         {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
       </div>
@@ -440,6 +447,7 @@ function StatusPill({ status }) {
     live: 'bg-green-500/10 text-green-400 ring-green-500/20',
     warning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
     blocked: 'bg-orange-500/10 text-orange-400 ring-orange-500/20',
+    conflict: 'bg-orange-500/10 text-orange-400 ring-orange-500/20',
     error: 'bg-red-500/10 text-red-400 ring-red-500/20',
   }[status] || 'bg-blue-500/10 text-blue-400 ring-blue-500/20';
   const inFlight = IN_FLIGHT.includes(status);

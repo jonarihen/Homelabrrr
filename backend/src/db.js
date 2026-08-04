@@ -768,6 +768,15 @@ try { db.exec("ALTER TABLE caddy_sites ADD COLUMN wildcard TEXT DEFAULT ''"); } 
 // hostname through its wildcard SANs.
 try { db.exec("ALTER TABLE caddy_servers ADD COLUMN inspection_bundle_cert TEXT DEFAULT ''"); } catch { /* exists */ }
 
+// End-to-end reachability probe (see utils/caddyProbe.js). A pushed route is not
+// a serving site — these columns record what an actual HTTPS request to the
+// published domain observed, so "live" means verified rather than "the admin API
+// returned 200". probe_status holds the verdict kind ('serving' when healthy).
+try { db.exec("ALTER TABLE caddy_sites ADD COLUMN probe_status TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE caddy_sites ADD COLUMN probe_http_status INTEGER DEFAULT 0'); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_sites ADD COLUMN probe_detail TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE caddy_sites ADD COLUMN probe_at TEXT DEFAULT ''"); } catch { /* exists */ }
+
 // A publishing job left mid-flight at startup was orphaned by a crash/restart —
 // mark it so the UI stops spinning (same reasoning as provisioned_vms above).
 try {

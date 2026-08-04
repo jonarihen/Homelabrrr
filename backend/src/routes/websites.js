@@ -2,12 +2,13 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import db from '../db.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
-import { logAudit } from '../utils/audit.js';
+import { logAudit, logAuditEntry } from '../utils/audit.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { encryptSecret } from '../utils/secrets.js';
 import { createClient } from '../fortigate.js';
 import { certNameToSubject, certWildcardCovers, stripCertDateSuffix, SERVER_CERT_MAX } from '../utils/certSlots.js';
 import { createCaddyClient, managedRouteId, hostCoveredByWildcard } from '../utils/caddy.js';
+import { probeSite, probeAddressFor, PROBE_PORT } from '../utils/caddyProbe.js';
 import { sshConfigured, deploySnippet, isSafeRemotePath } from '../utils/caddySnippet.js';
 import {
   normalizeDomain, isValidDomain, isValidUpstreamHost, parsePort,
@@ -62,6 +63,83 @@ function setSiteStatus(siteId, status, detail) {
   db.prepare('UPDATE caddy_sites SET status = ?, status_detail = ? WHERE id = ?').run(status, detail ?? '', siteId);
 }
 
+// ─── Route conflicts + end-to-end verification ────────────────────────────────
+
+// Phrase a shadowing route for the stepper. It names the upstream the winning
+// route actually dials, because that single fact is what ends the investigation
+// — the symptom is a 502 mentioning an address the portal was never given.
+function conflictMessage(domain, conflict) {
+  const what = conflict.upstream
+    ? `reverse-proxies it to ${conflict.upstream}`
+    : `serves it (${conflict.kinds.join(', ') || 'unknown handler'})`;
+  return `Another route on Caddy http server "${conflict.server}" already matches ${domain}`
+    + `${conflict.hosts.length ? ` (as ${conflict.hosts.join(', ')})` : ''} and Caddy reaches it first, so it ${what} `
+    + 'and this site\'s route is never evaluated. Homelabrrr did not create that route — it is almost certainly a site '
+    + 'block in the Caddy host\'s Caddyfile — so it is left untouched. Remove or rename that block, reload Caddy, then Retry.';
+}
+
+// Read the live route array back after a push and report anything that shadows
+// us. Returns null when the config could not be read — an unverified push is
+// reported as unverified, never as verified.
+async function checkForConflicts(caddy, siteId, domain) {
+  try {
+    return await caddy.findConflicts(siteId, domain);
+  } catch {
+    return null;
+  }
+}
+
+function recordConflict(site, conflicts) {
+  const message = conflictMessage(site.domain, conflicts[0]);
+  setSiteStep(site.id, 'push', 'blocked', message);
+  setSiteStatus(site.id, 'conflict', message);
+  logAuditEntry({
+    action: 'website_route_conflict',
+    target: site.domain,
+    detail: `shadowed on caddy server "${conflicts[0].server}" by a route to ${conflicts[0].upstream || conflicts[0].kinds.join(',') || 'unknown'}`,
+  });
+  console.warn(`[websites] site ${site.id} (${site.domain}) is shadowed by a pre-existing Caddy route — ${message}`);
+}
+
+// One HTTPS request to the published domain, aimed straight at the Caddy host so
+// no hairpin-NAT-dependent DNS lookup is involved. Returns null when there is no
+// address to aim at, which the caller treats as "not verified" rather than
+// "broken" — an unprobeable server must not turn every publish into a failure.
+async function probePublishedSite(server, domain) {
+  const address = probeAddressFor(server);
+  if (!address) return null;
+  return probeSite({ address, port: PROBE_PORT, domain });
+}
+
+function recordProbe(siteId, probe) {
+  db.prepare('UPDATE caddy_sites SET probe_status = ?, probe_http_status = ?, probe_detail = ?, probe_at = datetime(\'now\') WHERE id = ?')
+    .run(probe.kind, probe.status || 0, probe.message, siteId);
+}
+
+// The single place a site becomes 'live'. It does so only after an actual
+// request to the published domain came back serving — "the route was pushed" was
+// never evidence that anyone can load the site.
+async function finishLive(siteId, site, server, detail) {
+  const probe = await probePublishedSite(server, site.domain);
+  if (!probe) {
+    setSiteStep(siteId, 'live', 'done', 'Could not verify the site end-to-end — the Caddy server has no probeable address.');
+    setSiteStatus(siteId, 'live', detail || '');
+    return;
+  }
+  recordProbe(siteId, probe);
+  if (probe.ok) {
+    setSiteStep(siteId, 'live', 'done', probe.message);
+    setSiteStatus(siteId, 'live', detail || '');
+    return;
+  }
+  // The route is in place; what failed is downstream of it. 'upstream' is the
+  // user's own service and reads as an error they can act on; the rest are
+  // waiting-on-something states.
+  setSiteStep(siteId, 'live', probe.kind === 'upstream' ? 'error' : 'blocked', probe.message);
+  setSiteStatus(siteId, 'warning', probe.message);
+  console.warn(`[websites] site ${siteId} (${site.domain}) published but not serving: ${probe.message}`);
+}
+
 // ─── Serializers ───────────────────────────────────────────────────────────────
 
 function serializeSite(row) {
@@ -85,6 +163,10 @@ function serializeSite(row) {
     managed: row.managed !== 0,
     kind: row.kind || 'reverse_proxy',
     wildcard: row.wildcard || '',
+    // What an actual HTTPS request to the domain last observed (see caddyProbe).
+    probe: row.probe_at
+      ? { status: row.probe_status || '', httpStatus: row.probe_http_status || 0, detail: row.probe_detail || '', at: row.probe_at }
+      : null,
     createdAt: row.created_at,
     url: `https://${row.domain}`,
   };
@@ -285,38 +367,93 @@ async function detectWildcard(caddy, serverId, domain) {
 
 // API mode only: re-push any managed route missing from the live config (a
 // `caddy reload` from the Caddyfile wipes admin-API routes).
+//
+// The re-push is conflict-checked exactly like the publish path. Self-healing a
+// route back into a position where it is shadowed would restore the config and
+// none of the behaviour, which is the failure this whole check exists to catch.
 async function reconcileManagedRoutes(server) {
   const sites = db.prepare(
     "SELECT * FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning', 'blocked')"
   ).all(server.id);
-  if (sites.length === 0) return { repaired: [] };
+  if (sites.length === 0) return { repaired: [], conflicted: [] };
   const caddy = createCaddyClient(server);
   const liveIds = new Set(await caddy.listManagedRouteIds());
   const repaired = [];
+  const conflicted = [];
   for (const site of sites) {
     if (liveIds.has(managedRouteId(site.id))) continue;
     const { wildcard } = await caddy.upsertRoute(site.id, site.domain, site.upstream_host, site.upstream_port);
+    const conflicts = await checkForConflicts(caddy, site.id, site.domain);
+    if (conflicts?.length) {
+      recordConflict(site, conflicts);
+      conflicted.push(site.domain);
+      continue;
+    }
     db.prepare('UPDATE caddy_sites SET wildcard = ? WHERE id = ?').run(wildcard || '', site.id);
     repaired.push(site.domain);
   }
-  return { repaired };
+  return { repaired, conflicted };
 }
 
-// Self-heal tick: every 5 minutes, API-mode servers get their missing routes
-// re-pushed (Caddyfile-sync servers need nothing — reloads read the snippet).
-const RECONCILE_MS = 5 * 60 * 1000;
-setInterval(() => {
+// Re-probe published sites so breakage surfaces here rather than in a user's
+// bug report. Only the two probe-owned states move: a live site that stops
+// serving drops to warning, and a site warned about by a previous probe returns
+// to live once it serves again. Nothing else is touched — a 'blocked' or
+// 'conflict' site is waiting on an operator, not on a probe.
+async function reprobeSites(server) {
+  const sites = db.prepare(
+    "SELECT * FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning')"
+  ).all(server.id);
+  for (const site of sites) {
+    const probe = await probePublishedSite(server, site.domain);
+    if (!probe) return;   // nothing probeable on this server at all
+    const wasFailing = !!site.probe_status && site.probe_status !== 'serving';
+    recordProbe(site.id, probe);
+    if (site.status === 'live' && !probe.ok) {
+      setSiteStep(site.id, 'live', probe.kind === 'upstream' ? 'error' : 'blocked', probe.message);
+      setSiteStatus(site.id, 'warning', probe.message);
+      console.warn(`[websites] ${site.domain} stopped serving: ${probe.message}`);
+    } else if (site.status === 'warning' && probe.ok && wasFailing) {
+      setSiteStep(site.id, 'live', 'done', probe.message);
+      setSiteStatus(site.id, 'live', '');
+      console.log(`[websites] ${site.domain} is serving again: ${probe.message}`);
+    }
+  }
+}
+
+// Background maintenance tick. API-mode servers get their missing routes
+// re-pushed (Caddyfile-sync servers need nothing — reloads read the snippet),
+// and every server's published sites get re-probed.
+//
+// The interval is configurable like every other background loop here, and the
+// timer is delayed + unref'd like the lease sweeper and tag sync: nothing useful
+// happens in the first seconds after boot, and a ticker should never be the
+// reason the process stays alive.
+const RECONCILE_MS = Math.max(
+  60_000,
+  parseInt(process.env.WEBSITE_RECONCILE_INTERVAL_MS || '300000', 10) || 300_000,
+);
+const RECONCILE_START_DELAY_MS = 45_000;
+
+async function websiteMaintenanceTick() {
   let servers = [];
   try { servers = db.prepare('SELECT * FROM caddy_servers').all(); } catch { return; }
   for (const server of servers) {
-    if (sshConfigured(server)) continue;
-    reconcileManagedRoutes(server)
-      .then(({ repaired }) => {
+    try {
+      if (!sshConfigured(server)) {
+        const { repaired, conflicted } = await reconcileManagedRoutes(server);
         if (repaired.length) console.log(`[websites] re-pushed ${repaired.length} Caddy route(s) on "${server.name}" after a config reload: ${repaired.join(', ')}`);
-      })
-      .catch(() => { /* server offline — next tick */ });
+        if (conflicted.length) console.warn(`[websites] ${conflicted.length} route(s) on "${server.name}" are shadowed by routes Homelabrrr does not own: ${conflicted.join(', ')}`);
+      }
+      await reprobeSites(server);
+    } catch { /* server offline — next tick */ }
   }
-}, RECONCILE_MS);
+}
+
+const reconcileTimer = setInterval(() => { websiteMaintenanceTick(); }, RECONCILE_MS);
+reconcileTimer.unref?.();
+const reconcileStartTimer = setTimeout(() => { websiteMaintenanceTick(); }, RECONCILE_START_DELAY_MS);
+reconcileStartTimer.unref?.();
 
 // ─── The end-to-end publish flow (runs in the background) ──────────────────────
 
@@ -355,9 +492,31 @@ async function runSiteFlow(siteId) {
       const pushed = await caddy.upsertRoute(siteId, site.domain, site.upstream_host, site.upstream_port);
       wildcard = pushed.wildcard || '';
       db.prepare('UPDATE caddy_sites SET wildcard = ? WHERE id = ?').run(wildcard, siteId);
-      setSiteStep(siteId, 'push', 'done', wildcard ? `Nested under the existing ${wildcard} block — its wildcard certificate covers this site` : undefined);
+
+      // A 2xx from the admin API only means the route was *stored*. Read the
+      // route array back: an appended route always loses to a Caddyfile-derived
+      // one for the same hostname, so a conflict here is fatal, not a race.
+      const conflicts = await checkForConflicts(caddy, siteId, site.domain);
+      if (conflicts === null) {
+        setSiteStep(siteId, 'push', 'done', 'Route pushed, but the live config could not be read back to check for conflicting routes.');
+      } else if (conflicts.length) {
+        recordConflict(site, conflicts);
+        return;
+      } else if (wildcard) {
+        setSiteStep(siteId, 'push', 'done', `Nested under the existing ${wildcard} block — its wildcard certificate covers this site`);
+      } else {
+        setSiteStep(siteId, 'push', 'done', pushed.serverName ? `Appended to Caddy http server "${pushed.serverName}" — no other route matches this domain` : 'No other route matches this domain');
+      }
     }
   } catch (err) {
+    // A plaintext-only http server is the operator's to fix on the Caddy host or
+    // the server record — retrying the same push cannot change the outcome.
+    if (err.code === 'caddy_no_https_server') {
+      setSiteStep(siteId, 'push', 'blocked', err.message);
+      setSiteStatus(siteId, 'blocked', err.message);
+      console.warn(`[websites] site ${siteId} (${site.domain}) not published: ${err.message}`);
+      return;
+    }
     setSiteStep(siteId, 'push', 'error', err.message);
     setSiteStatus(siteId, 'error', `Could not publish the route to Caddy: ${err.message}`);
     return;
@@ -370,8 +529,7 @@ async function runSiteFlow(siteId) {
   if (!fw || !profileName) {
     setSiteStep(siteId, 'cert', 'skipped', 'No FortiGate inspection profile configured for this site');
     setSiteStep(siteId, 'inspect', 'skipped', 'No FortiGate inspection profile configured for this site');
-    setSiteStep(siteId, 'live', 'done');
-    setSiteStatus(siteId, 'live', 'Route published to Caddy. Certificate issuance is handled by Caddy/Let’s Encrypt.');
+    await finishLive(siteId, site, server, 'Route published to Caddy. Certificate issuance is handled by Caddy/Let’s Encrypt.');
     return;
   }
 
@@ -394,8 +552,7 @@ async function runSiteFlow(siteId) {
         db.prepare('UPDATE caddy_sites SET cert_name = ? WHERE id = ?').run(bundleCert, siteId);
         setSiteStep(siteId, 'cert', 'done', `Covered by the ${bundleCert} inspection bundle`);
         setSiteStep(siteId, 'inspect', 'done', `Bundle already attached to "${profileName}" — no slot used`);
-        setSiteStep(siteId, 'live', 'done');
-        setSiteStatus(siteId, 'live', '');
+        await finishLive(siteId, site, server, '');
         return;
       }
       // Configured but not on the firewall yet: fall through to per-domain
@@ -425,8 +582,7 @@ async function runSiteFlow(siteId) {
     setSiteStatus(siteId, 'inspecting', '');
     const result = await client.setInspectionServerCert(profileName, certName, rootVdom, site.domain);
     setSiteStep(siteId, 'inspect', 'done', inspectNote(result, profileName));
-    setSiteStep(siteId, 'live', 'done');
-    setSiteStatus(siteId, 'live', '');
+    await finishLive(siteId, site, server, '');
   } catch (err) {
     // A full profile is terminal, not transient: FortiOS caps the inbound
     // server-cert list at SERVER_CERT_MAX and retrying the same PUT will fail
@@ -638,9 +794,10 @@ router.post('/servers/:id/sync', pWebsites, async (req, res) => {
       logAudit(req, 'website_sync_caddyfile', server.name, `${result.sites} site(s), reloaded`);
       return res.json({ mode: 'caddyfile', sites: result.sites, reloaded: result.reloaded });
     }
-    const { repaired } = await reconcileManagedRoutes(server);
-    logAudit(req, 'website_sync_routes', server.name, repaired.length ? repaired.join(', ') : 'no drift');
-    res.json({ mode: 'api', repaired });
+    const { repaired, conflicted } = await reconcileManagedRoutes(server);
+    logAudit(req, 'website_sync_routes', server.name,
+      `${repaired.length ? repaired.join(', ') : 'no drift'}${conflicted.length ? ` — shadowed: ${conflicted.join(', ')}` : ''}`);
+    res.json({ mode: 'api', repaired, conflicted });
   } catch (e) {
     res.status(500).json({ error: sanitizeError(e.message) });
   }

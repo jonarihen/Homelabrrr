@@ -85,6 +85,11 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'how often expired VM leases are swept (floored at 60000)',
   },
   {
+    name: 'WEBSITE_RECONCILE_INTERVAL_MS',
+    defaultValue: '300000',
+    effect: 'how often published websites are re-checked: admin-API routes a Caddy reload dropped are re-pushed, and every published site is re-probed (floored at 60000)',
+  },
+  {
     name: 'VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS',
     defaultValue: '120000',
     effect: 'grace period a scheduled shutdown waits before the hard-stop fallback',
