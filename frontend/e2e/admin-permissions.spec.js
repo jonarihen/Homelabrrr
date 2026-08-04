@@ -41,9 +41,12 @@ test('refresh applies a permission change before protected page data is requeste
   await page.route('**/api/admin/users', (route) => { usersRequests += 1; return route.fulfill({ json: [] }); });
   await page.goto('/admin/users');
   await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
-  expect(usersRequests).toBe(1);
+  // React StrictMode may mount the authorized page twice in development. The
+  // security assertion is that losing permission adds no request after reload.
+  const authorizedRequestCount = usersRequests;
+  expect(authorizedRequestCount).toBeGreaterThan(0);
   canManageUsers = false;
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Access denied' })).toBeVisible();
-  expect(usersRequests).toBe(1);
+  expect(usersRequests).toBe(authorizedRequestCount);
 });
