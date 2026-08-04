@@ -1,4 +1,4 @@
-FROM node:24.17.0-alpine3.24 AS builder
+FROM node:26.5.1-alpine3.24 AS builder
 
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
