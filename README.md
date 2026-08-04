@@ -59,7 +59,6 @@ This project pulls those into one interface so users can work inside guardrails 
 
 - `My VMs` — assigned VM/LXC inventory with search, filter, sort, selection, and bulk actions
 - `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and build-from-scratch (from an available ISO) for admins and users with the **Create VMs** permission, each with a live deployment progress stepper
-- `New VM` — deploy directly from a cloud image (no template needed), template-driven cloning for permitted users, and create-from-scratch for admins, each with a live deployment progress stepper
 - `Websites` — publish a domain through the homelab reverse proxy: DNS check → route pushed to Caddy → Let's Encrypt cert → cert attached to FortiGate SSL inspection, shown as a live step-progress flow; users see and manage only their own sites
 - `VM Detail` — status, power actions, performance graphs, browser VNC/SSH, SSH config, IP management, snapshots, backups, and file-level restore; backups are grouped per storage location and show encryption, verification, and protection status for PBS-backed stores. Cloud-init VMs you own also get a **Reset credentials** action to set a new password / SSH key (with an inline reboot to apply)
 - `Power Schedule` — from a VM's detail page, set an automatic stop/start window (stop time, start time, active days, timezone) so idle VMs sleep overnight; manually starting inside the off-window keeps the VM up until the next scheduled stop, and a "skip tonight" button skips just the next shutdown
@@ -80,8 +79,6 @@ This project pulls those into one interface so users can work inside guardrails 
 - `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, personal API token oversight (list/revoke), lockout unlocks, and enforced 2FA
 - `Invites` — generate one-time self-registration links (choose role/permissions, quotas, VLAN access, expiry, and optional required-2FA); copy the single-use URL, track open/used/expired/revoked invites, and revoke unused ones. Tokens are stored hashed and every generate/consume/revoke is audit-logged
 - `Websites` — register the external Caddy server (admin API URL, optional auth, TLS verify), set the homelab WAN IP (manual or auto-read from the linked FortiGate), pick the SSL/SSH inspection profile, and see every published site with its owner (with reassignment)
-- `Assignments` — VM and VLAN-to-user mapping, grouped per user with unassigned VMs listed first; unassigned VMs can be claimed for your own account (per VM, or all at once — handy for fleets that predate the portal); owner + VLAN are stamped as Proxmox tags on each VM (with a bulk "Sync PVE Tags" action) so ownership is visible in the PVE UI too
-- `Users` — accounts, role assignment (or per-user permissions when no role is set), resource quotas (max cores/memory/storage) with live usage, VM/VLAN assignments, lockout unlocks, and enforced 2FA
 - `Roles` — named permission sets (built-in Administrator/User plus custom roles); editing a role updates every user holding it
 - `VM Leases` — set the default lease duration + grace period, review every VM's lease with owner and live status, renew/adjust/extend any lease, exempt infra VMs, run the expiry sweep on demand, and backfill leases onto VMs that predate the feature; expired-past-grace VMs are highlighted as reclaimable
 - `Notifications` — add Discord webhooks, choose which event types each one receives, and send a test message; webhook URLs are encrypted at rest and all changes are audit-logged
@@ -103,7 +100,7 @@ flowchart LR
 ## Stack
 
 - Frontend: React 18, Vite 5, Tailwind CSS 3, React Router 6
-- Backend: Node.js 20 (ESM), Express, `ws`, `ssh2`, `multer`
+- Backend: Node.js 20 (ESM), Express, `ws`, `ssh2`, `busboy`
 - Database: SQLite via `better-sqlite3` (encrypted secrets at rest)
 - Auth: SQLite-backed session cookies, rate-limited login/2FA, TOTP 2FA
 - Console access: Proxmox VNC websocket proxy via noVNC, plus browser SSH via `xterm.js`
@@ -212,6 +209,13 @@ Registered Caddy credentials, like all upstream secrets, are encrypted at rest. 
 
 ## Quick Start
 
+### Prerequisites
+
+- Docker Engine with the Docker Compose plugin
+- A Proxmox VE API token and network reachability from the backend container
+- A DNS name and TLS-terminating reverse proxy for normal production use
+- FortiGate, Caddy, Discord, and Proxmox host SSH access only when using the features that depend on them
+
 ### 1. Create your environment file
 
 ```bash
@@ -220,10 +224,12 @@ cp .env.example .env
 
 Then set at least:
 
-- `SESSION_SECRET` to a long random value
-- `SECRET_ENCRYPTION_KEY` to a 32-byte base64, hex, or raw text key (used to encrypt secrets at rest)
+- `SESSION_SECRET` to a long random value, for example from `openssl rand -hex 32`
+- `SECRET_ENCRYPTION_KEY` to a separate 32-byte base64, hex, or raw text key, for example from another `openssl rand -hex 32` invocation (used to encrypt secrets at rest)
 - `ALLOWED_ORIGIN` to your public portal URL
 - `COOKIE_SECURE` only if you need to opt out: session cookies are marked `Secure` by default, set `COOKIE_SECURE=false` only for plain-HTTP dev setups
+
+Do not start with any `replace-with-...` or `change-this-...` placeholder still present.
 
 If the database is brand new and empty, also set:
 
@@ -231,6 +237,7 @@ If the database is brand new and empty, also set:
 - `INITIAL_ADMIN_PASSWORD`
 
 Those bootstrap values are only used to create the first admin account on first run.
+After the first successful sign-in, remove `INITIAL_ADMIN_PASSWORD` from `.env` and recreate the backend container so the bootstrap password is no longer present in its environment.
 
 ### 2. Build and start
 
@@ -240,6 +247,8 @@ docker compose up -d --build
 
 The frontend is published on `http://localhost:8181` by default.
 The backend health check is available through the frontend proxy at `http://localhost:8181/api/health`.
+
+That localhost URL is useful for a health check, but login cookies remain `Secure` in the production configuration. If you intentionally access the portal directly over plain HTTP for a local-only test, use `ALLOWED_ORIGIN=http://localhost:8181`, `COOKIE_SECURE=false`, and `TRUST_PROXY=1`; restore the production values before exposing it through a TLS proxy.
 
 ### 3. Put it behind a reverse proxy
 
@@ -334,6 +343,21 @@ npm run dev
 
 Vite proxies `/api` and websocket traffic to `http://localhost:3000`.
 
+## Tests and Build Checks
+
+The repository uses Node's built-in test runner. There is not yet a package-level `test` script, linter, end-to-end suite, or CI workflow, so run the checks explicitly:
+
+```bash
+cd backend
+npm ci
+node --test
+
+cd ../frontend
+npm ci
+node --test
+npm run build
+```
+
 ## Environment
 
 Example values live in [`.env.example`](.env.example).
@@ -364,7 +388,7 @@ Useful implementation defaults:
 - backend listens on port `3000` inside Docker
 - frontend nginx listens on port `80` inside Docker and publishes host port `8181`
 - SQLite data is stored in the `db_data` Docker volume at `/app/data/db.sqlite`
-- SFTP uploads are capped at 100 MB per file by the frontend nginx/backend upload path
+- SFTP uploads stream directly to the guest without an application-level size cap; available space and limits on the remote host are the effective ceiling. Other API requests are capped by nginx at 105 MB
 
 ## Security Model
 
@@ -387,11 +411,11 @@ Current hardening in the codebase includes:
 - secrets encrypted at rest with `SECRET_ENCRYPTION_KEY` (API tokens, SSH keys, TOTP secrets)
 - upstream TLS enforcement for Proxmox and FortiGate connections (with explicit break-glass override)
 - per-host Proxmox TLS verification settings
-- granular admin permissions for delegation (10 independent flags)
+- granular permissions for delegated administration and fleet access
 - user-scoped VLAN, policy, and port-forward management
 - storage pool exposure is enforced server-side on every create path (clone, from-image, from-scratch), not just hidden in the UI — a non-admin naming a hidden pool directly is rejected; pools are exposed by default so existing setups are unchanged until an admin restricts one, and every toggle is audit-logged
 - hardware editing is separately permission-gated and audit-logged
-- audit logging for all significant actions with user/IP/timestamp
+- broad audit logging for security and infrastructure actions with user/IP/timestamp
 - error message sanitization (strips internal IPs and paths from API responses)
 - CORS/websocket origin checks tied to `ALLOWED_ORIGIN` or same-origin access, plus secure cookies and nginx security headers
 
@@ -400,10 +424,16 @@ Operationally important:
 - The frontend is plain HTTP inside Docker by design.
   Put TLS at the reverse proxy.
 - The SQLite volume contains sensitive operational data encrypted at rest.
-  Back it up and protect it — see [Back up the `db_data` volume](#4-back-up-the-db_data-volume).
+  Back it up and protect it — see [Back up the `db_data` volume](#5-back-up-the-db_data-volume).
 - The backend container drops to an unprivileged user (`node`, uid 1000) before starting the API.
 - SSH private keys are stored encrypted in the application database for browser terminal access.
   Treat the DB as sensitive.
+
+## Operational Constraints
+
+- Run exactly **one backend replica**. Console/SFTP handoff tokens, VMID reservations, background-job locks, notification queues, and schedulers keep process-local state. Multiple replicas can lose console handoffs or perform the same scheduled work twice.
+- Provisioning, image/ISO downloads, migrations, and similar long-running Proxmox operations are monitored by in-process pollers. A backend restart marks interrupted portal jobs as failed even though the upstream Proxmox task may still finish. Check Proxmox before retrying so you do not create duplicate or orphaned resources.
+- Keep SQLite on the local `db_data` volume and stop the backend for the documented file-level backup. This deployment is not designed for a shared network filesystem or horizontally scaled writers.
 
 ## Reverse Proxy Notes
 
@@ -444,9 +474,9 @@ It does not roll back:
 - Proxmox-side changes already applied
 
 If you want safe rollback in practice, pair Git with database backups and network config backups.
-See [Back up the `db_data` volume](#4-back-up-the-db_data-volume) for the database half.
+See [Back up the `db_data` volume](#5-back-up-the-db_data-volume) for the database half.
 
 ## Changelog
 
 Recent changes are tracked in [`CHANGELOG.md`](CHANGELOG.md).
-Admins can also open the changelog directly from the sidebar in the UI.
+Signed-in users can also open the changelog directly from the sidebar in the UI.
