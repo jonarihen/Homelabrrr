@@ -54,6 +54,7 @@ import { startBackupScheduler, waitForBackupIdle } from './services/backupServic
 import { globalErrorHandler } from './middleware/errorHandler.js';
 import { boundedDrain } from './utils/shutdown.js';
 import { stopAcceptingBackgroundWork, waitForBackgroundWork } from './services/backgroundWork.js';
+import { enforceTwoFactorEnrollmentOnly } from './middleware/twoFactorEnrollment.js';
 
 const app = express();
 const server = createServer(app);
@@ -154,21 +155,7 @@ app.use((req, res, next) => {
 app.use(trustProxyCheck);
 app.use(auditMutations);
 
-app.use((req, res, next) => {
-  if (!req.session?.twoFactorEnrollmentOnly) return next();
-
-  const allowedPaths = new Set([
-    '/api/auth/me',
-    '/api/auth/logout',
-    '/api/auth/2fa/setup',
-    '/api/auth/2fa/enable',
-    '/api/health',
-  ]);
-
-  if (allowedPaths.has(req.path)) return next();
-
-  return res.status(403).json({ error: 'Two-factor setup is required before accessing the portal' });
-});
+app.use(enforceTwoFactorEnrollmentOnly);
 
 app.use('/api/auth',  authRoutes);
 app.use('/api/admin/operations', operationsRoutes);

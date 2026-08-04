@@ -120,11 +120,11 @@ router.post('/migration/:id/reconcile', requireRecentReauthentication, async (re
 
 router.post('/migration/:id/resolve', requireRecentReauthentication, (req, res) => {
   const status = req.body?.status;
-  if (!['done', 'error'].includes(status)) return res.status(400).json({ error: 'status must be done or error' });
+  if (!['ok', 'error'].includes(status)) return res.status(400).json({ error: 'status must be ok or error' });
   const row = db.prepare('SELECT id, status FROM vm_migrations WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Migration operation not found' });
   if (row.status !== 'needs_review') return res.status(409).json({ error: 'Only interrupted migrations awaiting review can be resolved manually' });
-  const detail = status === 'done'
+  const detail = status === 'ok'
     ? 'Manually verified by an administrator after upstream reconciliation.'
     : 'Marked failed by an administrator after upstream reconciliation.';
   db.prepare("UPDATE vm_migrations SET status = ?, status_detail = ?, finished_at = datetime('now') WHERE id = ?")

@@ -1,6 +1,6 @@
 const OPERATION_TYPES = {
   provision: { table: 'provisioned_vms', terminalStatuses: new Set(['ready', 'error', 'failed', 'timeout']) },
-  migration: { table: 'vm_migrations', terminalStatuses: new Set(['done', 'error', 'failed', 'timeout']) },
+  migration: { table: 'vm_migrations', terminalStatuses: new Set(['ok', 'error', 'failed', 'timeout']) },
 };
 
 export function operationPhase(rawSteps) {

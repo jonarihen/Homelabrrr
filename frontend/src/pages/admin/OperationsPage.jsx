@@ -107,7 +107,7 @@ export default function OperationsPage() {
                 <div className="flex gap-2">
                   {operation.upid && <button disabled={!!busy} onClick={() => act(`reconcile-${operation.type}-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/reconcile`))} className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs text-white">Check upstream</button>}
                   {operation.status === 'needs_review' && <>
-                    <button disabled={!!busy} onClick={() => act(`ready-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, { status: operation.type === 'migration' ? 'done' : 'ready' }))} className="px-3 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40 text-xs text-white">Verified ready</button>
+                    <button disabled={!!busy} onClick={() => act(`ready-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, { status: operation.type === 'migration' ? 'ok' : 'ready' }))} className="px-3 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40 text-xs text-white">Verified ready</button>
                     <button disabled={!!busy} onClick={() => act(`error-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, { status: 'error' }))} className="px-3 py-2 rounded-lg bg-red-900 hover:bg-red-800 disabled:opacity-40 text-xs text-white">Mark failed</button>
                   </>}
                 </div>
@@ -121,7 +121,7 @@ export default function OperationsPage() {
         <div className="mb-4"><h2 className="text-sm font-semibold text-white">Recent operation state</h2><p className="text-xs text-gray-500 mt-1">Local phase, last observed Proxmox state, actor/request correlation, and terminal tracking cleanup.</p></div>
         <div className="space-y-2">
           {data.operations.slice(0, 30).map((operation) => {
-            const terminal = ['ready', 'done', 'error', 'failed', 'timeout'].includes(operation.status);
+            const terminal = ['ready', 'ok', 'error', 'failed', 'timeout'].includes(operation.status);
             return (
               <div key={`history-${operation.type}-${operation.id}`} className="border border-gray-800 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
