@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "eslint": "^9.39.0",
-    "globals": "^16.4.0",
+    "globals": "^17.8.0",
     "supertest": "^7.1.4"
   }
 }
