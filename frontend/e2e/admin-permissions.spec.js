@@ -45,8 +45,8 @@ test('refresh applies a permission change before protected page data is requeste
   await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
   // React StrictMode may mount the authorized page twice in development. The
   // security assertion is that losing permission adds no request after reload.
+  await expect.poll(() => usersRequests).toBeGreaterThan(0);
   const authorizedRequestCount = usersRequests;
-  expect(authorizedRequestCount).toBeGreaterThan(0);
   canManageUsers = false;
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Access denied' })).toBeVisible();
