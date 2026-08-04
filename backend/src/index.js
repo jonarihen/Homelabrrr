@@ -25,9 +25,10 @@ import isoRoutes from './routes/isos.js';
 import portalRoutes from './routes/portal.js';
 import notificationRoutes from './routes/notifications.js';
 import { pollNodeHealth } from './utils/notify.js';
-import websiteRoutes from './routes/websites.js';
+import websiteRoutes, { stopWebsiteMaintenance } from './routes/websites.js';
 import workflowRoutes from './routes/workflows.js';
 import publicIpRoutes from './routes/publicIps.js';
+import operationsRoutes from './routes/operations.js';
 import { seedAllFirewalls } from './workflows/store.js';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.js';
 import { decryptSecret, encryptSecret } from './utils/secrets.js';
@@ -36,21 +37,51 @@ import { decodeNodeRef } from './utils/nodeRef.js';
 import { sweepExpiredMaintenance } from './utils/nodeMaintenance.js';
 import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.js';
 import { logAuditEntry } from './utils/audit.js';
-import { authenticateApiToken } from './middleware/apiToken.js';
-import { requireAuth } from './middleware/auth.js';
+import { authenticateApiToken, enforceApiTokenScope } from './middleware/apiToken.js';
+import { requireAdmin, requireAuth } from './middleware/auth.js';
 import { parseTrustProxy } from './utils/proxyChain.js';
 import { trustProxyCheck, inspectProxyChain } from './middleware/trustProxyCheck.js';
 import { buildConfigReport, formatConfigReport } from './utils/configReport.js';
-import { startScheduler } from './scheduler.js';
+import { startScheduler, stopScheduler, waitForSchedulerIdle } from './scheduler.js';
+import { sshClientError } from './utils/sshError.js';
+import { collectBoundedBody } from './utils/boundedBody.js';
+import { installConsoleRedaction, log, redactText, requestContext } from './utils/logger.js';
+import { csrfProtection } from './middleware/requestSecurity.js';
+import { liveness, metricsText, observeRequests, readiness } from './utils/observability.js';
+import { auditMutations } from './middleware/mutationAudit.js';
+import { runDatabaseMaintenance } from './services/databaseMaintenance.js';
+import { startBackupScheduler, waitForBackupIdle } from './services/backupService.js';
+import { globalErrorHandler } from './middleware/errorHandler.js';
+import { boundedDrain } from './utils/shutdown.js';
+import { stopAcceptingBackgroundWork, waitForBackgroundWork } from './services/backgroundWork.js';
+import { enforceTwoFactorEnrollmentOnly } from './middleware/twoFactorEnrollment.js';
 
 const app = express();
 const server = createServer(app);
+let shuttingDown = false;
+installConsoleRedaction();
 
 app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || null;
 
-app.use(express.json());
+app.use(requestContext);
+app.use(observeRequests);
+app.use((req, res, next) => {
+  if (!shuttingDown) return next();
+  res.set('Connection', 'close');
+  return res.status(503).json({ error: 'Server is shutting down', requestId: req.requestId });
+});
+// Probes deliberately bypass cookie/session loading. Liveness answers only
+// whether this process can serve HTTP; readiness performs the database/schema
+// checks that decide whether the instance should receive application traffic.
+app.get('/api/health', (_req, res) => res.json(liveness()));
+app.get('/api/health/live', (_req, res) => res.json(liveness()));
+app.get('/api/health/ready', (_req, res) => {
+  const status = readiness();
+  res.status(status.ok ? 200 : 503).json(status);
+});
+app.use(express.json({ limit: '1mb' }));
 if (ALLOWED_ORIGIN) {
   app.use(cors({
     origin: (origin, cb) => {
@@ -94,6 +125,8 @@ app.use((req, res, next) => {
   }
   return sessionMiddleware(req, res, next);
 });
+app.use(enforceApiTokenScope);
+app.use(csrfProtection({ allowedOrigin: ALLOWED_ORIGIN || '' }));
 
 app.use((req, res, next) => {
   if (!req.session?.userId) return next();
@@ -108,6 +141,11 @@ app.use((req, res, next) => {
 
   req.session.username = user.username;
   req.session.isAdmin = user.is_admin === 1;
+  if (!req.session.lastSeenAt || Date.now() - Number(req.session.lastSeenAt) > 5 * 60 * 1000) {
+    req.session.lastSeenAt = Date.now();
+    req.session.clientIp = String(req.ip || '').slice(0, 128);
+    req.session.userAgent = String(req.headers['user-agent'] || '').slice(0, 256);
+  }
   next();
 });
 
@@ -115,26 +153,12 @@ app.use((req, res, next) => {
 // first few authenticated requests and warn once if they disagree — a wrong
 // value silently breaks per-IP login lockout and audit attribution.
 app.use(trustProxyCheck);
+app.use(auditMutations);
 
-app.use((req, res, next) => {
-  if (!req.session?.twoFactorEnrollmentOnly) return next();
-
-  const allowedPaths = new Set([
-    '/api/auth/me',
-    '/api/auth/logout',
-    '/api/auth/2fa/setup',
-    '/api/auth/2fa/enable',
-    '/api/health',
-  ]);
-
-  if (allowedPaths.has(req.path)) return next();
-
-  return res.status(403).json({ error: 'Two-factor setup is required before accessing the portal' });
-});
-
-import { errorPayload } from './utils/httpError.js';
+app.use(enforceTwoFactorEnrollmentOnly);
 
 app.use('/api/auth',  authRoutes);
+app.use('/api/admin/operations', operationsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/vms',   vmRoutes);
 app.use('/api/ssh',   sshRoutes);
@@ -148,7 +172,12 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/websites', websiteRoutes);
 app.use('/api/workflows', workflowRoutes);
 app.use('/api/public-ips', publicIpRoutes);
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/metrics', requireAdmin, (_req, res) => {
+  res.type('text/plain; version=0.0.4').send(metricsText({
+    vncWebSockets: vncWss.clients.size,
+    sshWebSockets: sshWss.clients.size,
+  }));
+});
 
 // Self-diagnosis for the reverse-proxy chain: what address does the portal
 // actually see for *this* caller, how many X-Forwarded-For hops arrived, and
@@ -180,10 +209,7 @@ try {
 // Global error handler — the raw error stays in the log for operators; the
 // browser gets a translated payload where we recognise the failure, and the
 // sanitized string otherwise.
-app.use((err, _req, res, _next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json(errorPayload(err, 500));
-});
+app.use(globalErrorHandler);
 
 // ─── VNC WebSocket Proxy ──────────────────────────────────────────────────────
 
@@ -254,8 +280,12 @@ function loadUpgradeSession(request) {
 }
 
 server.on('upgrade', async (request, socket, head) => {
+  if (shuttingDown) {
+    rejectUpgrade(socket, 503, 'Service Unavailable');
+    return;
+  }
   const url = new URL(request.url, `http://${request.headers.host}`);
-  console.log(`[WS-upgrade] path=${url.pathname} origin=${request.headers.origin} protocols=${request.headers['sec-websocket-protocol']?.slice(0, 60)}`);
+  log('info', 'websocket_upgrade_requested', { path: url.pathname, origin: request.headers.origin || '' });
 
   if (url.pathname !== '/api/vnc' && url.pathname !== '/api/ssh') {
     console.log('[WS-upgrade] rejected: unknown path');
@@ -287,12 +317,12 @@ server.on('upgrade', async (request, socket, head) => {
     const token = extractUpgradeToken(request, url);
     const sess = vncSessions.get(token);
     if (!sess || sess.expires < Date.now() || sess._consumed) {
-      console.log(`[WS-upgrade] VNC rejected: token=${token?.slice(0, 8)} found=${!!sess} expired=${sess ? sess.expires < Date.now() : '-'} consumed=${sess?._consumed}`);
+      log('warn', 'websocket_upgrade_rejected', { path: 'vnc', reason: 'invalid_or_expired_handoff' });
       rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
     if (sess.userId !== request.session.userId || sess.sessionId !== request.sessionID) {
-      console.log(`[WS-upgrade] VNC rejected: user/session mismatch (sess.userId=${sess.userId} req.userId=${request.session.userId} sess.sessionId=${sess.sessionId?.slice(0, 8)} req.sessionId=${request.sessionID?.slice(0, 8)})`);
+      log('warn', 'websocket_upgrade_rejected', { path: 'vnc', reason: 'session_mismatch', userId: request.session.userId });
       rejectUpgrade(socket, 401, 'Unauthorized');
       return;
     }
@@ -348,7 +378,7 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   const proxmoxNode = nodeName || node;
   const elapsed = createdAt ? Date.now() - createdAt : -1;
 
-  console.log(`[VNC-ws] connecting ${proxmoxNode}/${vmtype}/${vmid} port=${port} ticketAge=${elapsed}ms ticket=${ticket?.slice(0, 20)}...`);
+  log('info', 'vnc_proxy_connecting', { node: proxmoxNode, vmtype, vmid, port, ticketAgeMs: elapsed });
 
   let pveHost;
   try {
@@ -363,7 +393,7 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   const vncUrl = `wss://${pveHost.host}:${pveHost.port}/api2/json/nodes/${proxmoxNode}/${vmtype}/${vmid}/vncwebsocket`
     + `?port=${port}&vncticket=${encodeURIComponent(ticket)}`;
 
-  console.log(`[VNC-ws] url=${vncUrl.replace(/vncticket=[^&]+/, 'vncticket=REDACTED')} verifyTls=${pveHost.verifyTls}`);
+  log('info', 'vnc_upstream_connecting', { node: proxmoxNode, vmtype, vmid, port, verifyTls: pveHost.verifyTls });
 
   const agent = new https.Agent({ rejectUnauthorized: pveHost.verifyTls });
 
@@ -392,11 +422,14 @@ vncWss.on('connection', async (clientWs, vncSession) => {
     if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
   });
 
-  proxmoxWs.on('unexpected-response', (req, res) => {
-    let body = '';
-    res.on('data', chunk => body += chunk);
-    res.on('end', () => {
-      console.error(`[VNC-ws] Proxmox rejected (${proxmoxNode}/${vmtype}/${vmid}): HTTP ${res.statusCode} body=${body} ticketAge=${createdAt ? Date.now() - createdAt : -1}ms`);
+  proxmoxWs.on('unexpected-response', async (_req, res) => {
+    const contentType = String(res.headers['content-type'] || '');
+    const body = /^(?:text\/|application\/(?:json|problem\+json))/i.test(contentType)
+      ? redactText(await collectBoundedBody(res, { maxBytes: 4096 }))
+      : '[non-text response omitted]';
+    log('error', 'vnc_upstream_rejected', {
+      node: proxmoxNode, vmtype, vmid, status: res.statusCode, body,
+      ticketAgeMs: createdAt ? Date.now() - createdAt : -1,
     });
     if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
   });
@@ -420,18 +453,18 @@ vncWss.on('connection', async (clientWs, vncSession) => {
 // ─── SSH connection handler ──────────────────────────────────────────────────
 
 sshWss.on('connection', (clientWs, sshSession) => {
-  const { host, port, username, privateKey, passphrase, hostFingerprint } = sshSession;
+  const { host, port, username, privateKey, passphrase, hostFingerprint, requestId, node, vmid } = sshSession;
   const conn = new SSHClient();
   const expectedHostFingerprint = normalizeSshHostFingerprint(hostFingerprint);
   let hostVerificationError = '';
 
   conn.on('ready', () => {
-    console.log(`SSH connected: ${username}@${host}:${port}`);
+    log('info', 'ssh_connected', { requestId, node, vmid, port });
     clientWs.send(JSON.stringify({ type: 'status', status: 'connected' }));
 
     conn.shell({ term: 'xterm-256color' }, (err, stream) => {
       if (err) {
-        clientWs.send(JSON.stringify({ type: 'error', error: err.message }));
+        clientWs.send(JSON.stringify({ type: 'error', ...sshClientError(err) }));
         clientWs.close();
         return;
       }
@@ -475,9 +508,10 @@ sshWss.on('connection', (clientWs, sshSession) => {
 
   conn.on('error', (err) => {
     const message = hostVerificationError || err.message;
-    console.error(`SSH error (${host}):`, message);
+    const clientError = sshClientError(message);
+    log('error', 'ssh_connection_failed', { code: clientError.code, errorName: err?.name || 'Error' });
     if (clientWs.readyState === 1) {
-      clientWs.send(JSON.stringify({ type: 'error', error: message }));
+      clientWs.send(JSON.stringify({ type: 'error', ...clientError }));
       clientWs.close();
     }
   });
@@ -504,9 +538,9 @@ sshWss.on('connection', (clientWs, sshSession) => {
       },
     });
   } catch (err) {
-    console.error(`SSH connect error (${host}):`, err.message);
+    log('error', 'ssh_connect_threw', { requestId, node, vmid, error: err });
     if (clientWs.readyState === 1) {
-      clientWs.send(JSON.stringify({ type: 'error', error: err.message }));
+      clientWs.send(JSON.stringify({ type: 'error', ...sshClientError(err) }));
       clientWs.close();
     }
   }
@@ -564,7 +598,7 @@ function tickMaintenance() {
   }
 }
 tickMaintenance();
-setInterval(tickMaintenance, 60_000);
+const maintenanceTimer = setInterval(tickMaintenance, 60_000);
 
 // ─── Background PVE tag auto-sync scheduler ───────────────────────────────────
 //
@@ -635,8 +669,8 @@ async function sweepLeasesSafe() {
   }
 }
 
-setTimeout(sweepLeasesSafe, 30_000);
-setInterval(sweepLeasesSafe, LEASE_CHECK_INTERVAL_MS);
+const leaseStartTimer = setTimeout(sweepLeasesSafe, 30_000);
+const leaseTimer = setInterval(sweepLeasesSafe, LEASE_CHECK_INTERVAL_MS);
 
 // ─── Node health monitor (Discord notifications for node up/down) ────────────
 // Polls the same host/node health the Overview page shows and fires
@@ -644,11 +678,21 @@ setInterval(sweepLeasesSafe, LEASE_CHECK_INTERVAL_MS);
 // and best-effort — pollNodeHealth() never throws. Disable by setting the
 // interval to 0.
 const NODE_HEALTH_POLL_MS = parseInt(process.env.NODE_HEALTH_POLL_MS || '60000');
-if (NODE_HEALTH_POLL_MS > 0) {
-  setInterval(() => { pollNodeHealth().catch(() => {}); }, NODE_HEALTH_POLL_MS);
-}
+const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
+  ? setInterval(() => { pollNodeHealth().catch(() => {}); }, NODE_HEALTH_POLL_MS)
+  : null;
 // Background enforcement of per-VM power schedules (vm_schedules).
 startScheduler();
+
+const maintenanceStartTimer = setTimeout(() => {
+  try { runDatabaseMaintenance(); } catch (err) { log('warn', 'database_maintenance_failed', { error: err }); }
+}, 5 * 60 * 1000);
+const databaseMaintenanceTimer = setInterval(() => {
+  try { runDatabaseMaintenance(); } catch (err) { log('warn', 'database_maintenance_failed', { error: err }); }
+}, 24 * 60 * 60 * 1000);
+maintenanceStartTimer.unref?.();
+databaseMaintenanceTimer.unref?.();
+const stopBackupScheduler = startBackupScheduler();
 
 // Every optional setting is read inline as `process.env.<NAME> || <default>`, so a
 // variable that never reaches the process is indistinguishable from one left at
@@ -658,5 +702,62 @@ startScheduler();
 const PORT_NUM = parseInt(process.env.PORT || '3000');
 for (const line of formatConfigReport(buildConfigReport(process.env))) console.log(line);
 server.listen(PORT_NUM, () => {
-  console.log(`Backend running on port ${PORT_NUM}`);
+  log('info', 'server_listening', { port: PORT_NUM });
 });
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log('info', 'shutdown_started', { signal });
+  stopAcceptingBackgroundWork();
+
+  clearInterval(maintenanceTimer);
+  clearInterval(tagSyncTimer);
+  clearTimeout(leaseStartTimer);
+  clearInterval(leaseTimer);
+  clearTimeout(maintenanceStartTimer);
+  clearInterval(databaseMaintenanceTimer);
+  stopBackupScheduler();
+  if (nodeHealthTimer) clearInterval(nodeHealthTimer);
+  stopScheduler();
+  stopWebsiteMaintenance();
+
+  for (const ws of [...vncWss.clients, ...sshWss.clients]) {
+    try { ws.close(1001, 'Server shutting down'); } catch { ws.terminate(); }
+  }
+  vncSessions.clear();
+  sshSessions.clear();
+
+  const closed = new Promise((resolve) => server.close(resolve));
+  const drained = await boundedDrain([
+    closed,
+    waitForSchedulerIdle(10_000),
+    waitForBackupIdle(10_000),
+    waitForBackgroundWork(),
+  ], 15_000);
+  if (drained.status === 'timeout') server.closeAllConnections?.();
+
+  try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (err) {
+    log('warn', 'shutdown_checkpoint_failed', { error: err });
+  }
+  try { db.close(); } catch { /* already closed */ }
+  log('info', 'shutdown_complete', {
+    signal,
+    forcedConnections: drained.status === 'timeout',
+  });
+}
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.once(signal, () => {
+    shutdown(signal).then(() => {
+      // better-sqlite3-session-store owns an internal expiry interval without
+      // exposing a close handle. All application drains and the final WAL
+      // checkpoint have completed above, so terminate explicitly instead of
+      // allowing that implementation-detail timer to hold the process open.
+      process.exit(0);
+    }).catch((err) => {
+      log('error', 'shutdown_failed', { signal, error: err });
+      process.exit(1);
+    });
+  });
+}

@@ -2,25 +2,36 @@
   "name": "proxmox-frontend-ui",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "eslint src",
+    "test": "node --test",
+    "e2e": "playwright test"
   },
   "dependencies": {
-    "@novnc/novnc": "^1.4.0",
+    "@novnc/novnc": "^1.7.0",
+    "@simplewebauthn/browser": "^13.3.0",
     "@xterm/xterm": "^5.5.0",
     "@xterm/addon-fit": "^0.10.0",
-    "axios": "^1.6.7",
+    "axios": "^1.19.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.22.1"
+    "react-router-dom": "7.18.2"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.2.1",
+    "@playwright/test": "^1.54.2",
+    "@vitejs/plugin-react": "^6.0.4",
     "autoprefixer": "^10.4.17",
     "postcss": "^8.4.35",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^16.4.0",
     "tailwindcss": "^3.4.1",
-    "vite": "^5.1.3"
+    "vite": "^8.1.5"
   }
 }

@@ -12,6 +12,10 @@ import { normalizeSshHostFingerprint, scanSshHostFingerprint } from '../utils/ss
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 import { derivePublicKey } from '../utils/sshPublicKey.js';
 import { logAudit } from '../utils/audit.js';
+import { sendError } from '../utils/httpError.js';
+import { authorizeSshTarget, sshConnectionRateLimited } from '../services/sshTargetPolicy.js';
+import { sshClientError } from '../utils/sshError.js';
+import { log } from '../utils/logger.js';
 
 // Convert a PPK key (any version) to OpenSSH PEM using puttygen.
 // passphrase is the PPK decryption passphrase (empty string if unencrypted).
@@ -45,6 +49,14 @@ async function ppkToOpenSSH(ppkContent, passphrase = '') {
 
 const router = Router();
 router.use(requireAuth);
+
+function sendSshError(req, res, err) {
+  if (err?.status && err.status < 500) return sendError(res, err);
+  const payload = sshClientError(err);
+  const status = payload.code === 'SSH_TIMEOUT' ? 504 : payload.code === 'SSH_CONNECTION_FAILED' ? 500 : 502;
+  log('error', 'ssh_operation_failed', { requestId: req.requestId, code: payload.code, errorName: err?.name || 'Error' });
+  return res.status(status).json({ ...payload, requestId: req.requestId });
+}
 
 // SSH session store (token → { host, port, username, privateKey, expires })
 export const sshSessions = new Map();
@@ -119,7 +131,8 @@ router.post('/keys', async (req, res) => {
     try {
       finalKey = await ppkToOpenSSH(privateKey, passphrase);
     } catch (err) {
-      return res.status(400).json({ error: `PPK conversion failed: ${err.message}` });
+      console.error('PPK conversion failed:', err);
+      return res.status(400).json({ error: 'PPK conversion failed. Verify the key format and passphrase.' });
     }
   }
 
@@ -135,6 +148,7 @@ router.post('/keys', async (req, res) => {
     const r = db.prepare(
       'INSERT INTO ssh_keys (user_id, name, private_key, public_key) VALUES (?, ?, ?, ?)'
     ).run(req.session.userId, name, encryptSecret(finalKey), finalPublicKey);
+    logAudit(req, 'ssh_key_added', String(r.lastInsertRowid), `name=${String(name).slice(0, 64)}`);
     res.json({
       id: r.lastInsertRowid,
       name,
@@ -144,7 +158,7 @@ router.post('/keys', async (req, res) => {
         : 'This key has no public key, so it can’t be used to set up key-based login when deploying VMs. Add the matching public key (.pub), or if the private key is encrypted, re-add it with its passphrase.',
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendSshError(req, res, err);
   }
 });
 
@@ -153,6 +167,7 @@ router.delete('/keys/:id', (req, res) => {
     .get(req.params.id, req.session.userId);
   if (!key) return res.status(404).json({ error: 'Key not found' });
   db.prepare('DELETE FROM ssh_keys WHERE id = ?').run(req.params.id);
+  logAudit(req, 'ssh_key_deleted', String(req.params.id), '');
   res.json({ ok: true });
 });
 
@@ -174,7 +189,7 @@ router.get('/config/:node/:vmid', (req, res) => {
   });
 });
 
-router.put('/config/:node/:vmid', (req, res) => {
+router.put('/config/:node/:vmid', async (req, res) => {
   const { node, vmid } = req.params;
   const { host, port = 22, username = 'root', hostFingerprint = '' } = req.body;
   if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.write')) {
@@ -186,12 +201,20 @@ router.put('/config/:node/:vmid', (req, res) => {
     return res.status(400).json({ error: 'SSH host fingerprint is required' });
   }
 
-  // Save host/port globally (shared across users)
+  let target;
+  try {
+    target = await authorizeSshTarget({
+      userId: req.session.userId, isAdmin: req.session.isAdmin, node, vmid, host, port,
+    });
+  } catch (err) { return sendError(res, err); }
+
+  // Save host/port globally (shared across users). Non-admin DNS names are
+  // pinned to the authorized address to prevent DNS rebinding at connect time.
   db.prepare(`
     INSERT INTO vm_ssh_configs (node, vmid, host, port, host_fingerprint, username)
     VALUES (?, ?, ?, ?, ?, '')
     ON CONFLICT(node, vmid) DO UPDATE SET host = ?, port = ?, host_fingerprint = ?
-  `).run(node, parseInt(vmid), host, port, normalizedFingerprint, host, port, normalizedFingerprint);
+  `).run(node, parseInt(vmid), target.host, target.port, normalizedFingerprint, target.host, target.port, normalizedFingerprint);
 
   // Save username per-user
   db.prepare(`
@@ -200,27 +223,14 @@ router.put('/config/:node/:vmid', (req, res) => {
     ON CONFLICT(user_id, node, vmid) DO UPDATE SET username = ?
   `).run(req.session.userId, node, parseInt(vmid), username, username);
 
+  logAudit(req, 'ssh_config_updated', `${node}/${vmid}`, `targetType=${target.resolvedAddresses.length ? 'resolved' : 'configured'}; port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
   res.json({ ok: true });
 });
 
 // The scan opens a TCP/SSH handshake to a user-supplied host/port, which could
 // be abused as an internal port probe. Legit use is a handful of scans while
 // configuring a VM — rate-limit per user and leave an audit trail.
-const scanAttempts = new Map(); // userId → [timestamps]
-const SCAN_WINDOW_MS = 60 * 1000;
 const SCAN_MAX_PER_WINDOW = 10;
-
-function scanRateLimited(userId) {
-  const now = Date.now();
-  const recent = (scanAttempts.get(userId) || []).filter((t) => now - t < SCAN_WINDOW_MS);
-  if (recent.length >= SCAN_MAX_PER_WINDOW) {
-    scanAttempts.set(userId, recent);
-    return true;
-  }
-  recent.push(now);
-  scanAttempts.set(userId, recent);
-  return false;
-}
 
 router.post('/config/:node/:vmid/scan-fingerprint', async (req, res) => {
   const { node, vmid } = req.params;
@@ -229,23 +239,25 @@ router.post('/config/:node/:vmid/scan-fingerprint', async (req, res) => {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!host) return res.status(400).json({ error: 'Host/IP required' });
-  if (scanRateLimited(req.session.userId)) {
+  if (sshConnectionRateLimited(req.session.userId, 'fingerprint', SCAN_MAX_PER_WINDOW)) {
     return res.status(429).json({ error: 'Too many fingerprint scans — try again in a minute' });
   }
 
-  logAudit(req, 'ssh_fingerprint_scan', `${node}/${vmid}`, `${host}:${port}`);
-
   try {
-    const hostFingerprint = await scanSshHostFingerprint(host, parseInt(port, 10) || 22);
+    const target = await authorizeSshTarget({
+      userId: req.session.userId, isAdmin: req.session.isAdmin, node, vmid, host, port,
+    });
+    logAudit(req, 'ssh_fingerprint_scan', `${node}/${vmid}`, `port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
+    const hostFingerprint = await scanSshHostFingerprint(target.host, target.port);
     res.json({ hostFingerprint });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendSshError(req, res, err);
   }
 });
 
 // ─── SSH Connect (create token) ──────────────────────────────────────────────
 
-router.post('/connect', (req, res) => {
+router.post('/connect', async (req, res) => {
   const { node, vmid, keyId, passphrase = '' } = req.body;
   if (!node || !vmid || !keyId) {
     return res.status(400).json({ error: 'node, vmid, and keyId are required' });
@@ -268,8 +280,19 @@ router.post('/connect', (req, res) => {
     return res.status(400).json({ error: 'SSH host fingerprint is not configured for this VM' });
   }
 
-  const host = global.host;
-  const port = global.port || 22;
+  if (sshConnectionRateLimited(req.session.userId, 'connect', 30)) {
+    return res.status(429).json({ error: 'Too many SSH connection attempts — try again in a minute' });
+  }
+
+  let target;
+  try {
+    target = await authorizeSshTarget({
+      userId: req.session.userId, isAdmin: req.session.isAdmin, node, vmid,
+      host: global.host, port: global.port || 22,
+    });
+  } catch (err) { return sendError(res, err); }
+  const host = target.host;
+  const port = target.port;
   const username = userRow?.username || 'root';
   const hostFingerprint = normalizeSshHostFingerprint(global.host_fingerprint);
 
@@ -282,12 +305,15 @@ router.post('/connect', (req, res) => {
   sshSessions.set(token, {
     userId: req.session.userId,
     sessionId: req.sessionID,
+    requestId: req.requestId || '',
+    node, vmid,
     host, port, username, hostFingerprint,
     privateKey: decryptSecret(key.private_key),
     passphrase,
     expires: Date.now() + 120_000,
   });
 
+  logAudit(req, 'ssh_session_created', `${node}/${vmid}`, `port=${port}${target.adminOverride ? '; admin override' : ''}`);
   res.json({ token });
 });
 

@@ -3,8 +3,13 @@ import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
+import crypto from 'node:crypto';
+import {
+  generateAuthenticationOptions, generateRegistrationOptions,
+  verifyAuthenticationResponse, verifyRegistrationResponse,
+} from '@simplewebauthn/server';
 import db from '../db.js';
-import { requireAuth, requireInteractiveSession } from '../middleware/auth.js';
+import { requireAuth, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.js';
 import { warnIfProxyMismatch } from '../middleware/trustProxyCheck.js';
 import { logAudit } from '../utils/audit.js';
 import { notify, portalLink } from '../utils/notify.js';
@@ -13,6 +18,12 @@ import { syncVmTagsSafe } from '../utils/vmTags.js';
 import { generateApiToken, hashApiToken } from '../utils/apiTokens.js';
 import { effectivePermissions } from '../utils/permissions.js';
 import { hashInviteToken, inviteStatus, summarizeInvitePreset, INVITE_PERMISSION_COLUMNS } from '../utils/invites.js';
+import { API_TOKEN_SCOPES } from '../utils/apiTokenScopes.js';
+import { validateObject, validatePassword, validateUsername } from '../utils/validation.js';
+import {
+  consumeRecoveryCode, hashRecoveryCode, parseStoredSession, removeWebauthnCredential,
+  resolveWebauthnConfig, revokeOtherStoredSessions, revokeStoredSession,
+} from '../utils/accountSecurity.js';
 
 const router = Router();
 
@@ -76,6 +87,11 @@ function startUserSession(req, user, { twoFactorEnrollmentOnly = false } = {}) {
   req.session.username = user.username;
   req.session.isAdmin = user.is_admin === 1;
   req.session.twoFactorEnrollmentOnly = twoFactorEnrollmentOnly;
+  req.session.reauthenticatedAt = Date.now();
+  req.session.createdAt ||= Date.now();
+  req.session.lastSeenAt = Date.now();
+  req.session.clientIp = String(req.ip || '').slice(0, 128);
+  req.session.userAgent = String(req.headers['user-agent'] || '').slice(0, 256);
 }
 
 function clearPendingAuth(req) {
@@ -124,6 +140,8 @@ function clearTwoFactorAttempts(username) {
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync('homelabrrr-timing-equalizer', 10);
 
 router.post('/login', loginLimiter, async (req, res, next) => {
+  try { validateObject(req.body, { fields: ['username', 'password'], required: ['username', 'password'] }); }
+  catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
@@ -189,7 +207,8 @@ router.post('/login', loginLimiter, async (req, res, next) => {
       req.session.pendingUserId = user.id;
       req.session.pendingUsername = user.username;
       req.session.pendingIsAdmin = user.is_admin === 1;
-      return res.json({ requiresTwoFactor: true });
+      const hasPasskey = !!db.prepare('SELECT 1 FROM webauthn_credentials WHERE user_id = ? LIMIT 1').get(user.id);
+      return res.json({ requiresTwoFactor: true, methods: ['totp', ...(hasPasskey ? ['passkey'] : []), 'recovery'] });
     }
 
     if (user.require_2fa) {
@@ -313,14 +332,15 @@ router.post('/invite/:token', inviteLimiter, async (req, res, next) => {
     return res.status(r.code).json({ error: r.error });
   }
 
-  const { username, password } = req.body;
+  let username;
+  let password;
   // Username policy identical to admin-created users (non-empty + unique);
   // password is policy-checked to a minimum length for self-registration.
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password required' });
-  }
-  if (String(password).length < 8) {
-    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  try {
+    username = validateUsername(req.body?.username);
+    password = validatePassword(req.body?.password);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, code: err.code, field: err.field });
   }
 
   const preset = parsePreset(invite);
@@ -418,8 +438,9 @@ router.get('/me', (req, res) => {
 // ─── Self-service account changes ────────────────────────────────────────
 
 router.put('/change-username', requireAuth, requireInteractiveSession, (req, res) => {
-  const { username } = req.body;
-  if (!username) return res.status(400).json({ error: 'Username required' });
+  let username;
+  try { username = validateUsername(req.body?.username); }
+  catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const previous = req.session.username;
   try {
     db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, req.session.userId);
@@ -438,9 +459,13 @@ router.put('/change-username', requireAuth, requireInteractiveSession, (req, res
 });
 
 router.put('/change-password', requireAuth, requireInteractiveSession, (req, res) => {
-  const { currentPassword, newPassword } = req.body;
-  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password required' });
-  if (newPassword.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  try { validateObject(req.body, { fields: ['currentPassword', 'newPassword'], required: ['currentPassword', 'newPassword'] }); }
+  catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
+  const { currentPassword } = req.body;
+  let newPassword;
+  if (!currentPassword || !req.body?.newPassword) return res.status(400).json({ error: 'Current and new password required' });
+  try { newPassword = validatePassword(req.body?.newPassword, 'newPassword'); }
+  catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
 
   const user = db.prepare('SELECT password FROM users WHERE id = ?').get(req.session.userId);
   if (!bcrypt.compareSync(currentPassword, user.password)) {
@@ -449,13 +474,31 @@ router.put('/change-password', requireAuth, requireInteractiveSession, (req, res
 
   const hash = bcrypt.hashSync(newPassword, 10);
   db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hash, req.session.userId);
+  req.session.reauthenticatedAt = Date.now();
   res.json({ ok: true });
+});
+
+router.post('/reauthenticate', requireAuth, requireInteractiveSession, (req, res) => {
+  try { validateObject(req.body, { fields: ['password', 'code'], required: ['password'] }); }
+  catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
+  const { password, code = '' } = req.body || {};
+  const user = db.prepare('SELECT password, totp_enabled, totp_secret FROM users WHERE id = ?').get(req.session.userId);
+  if (!user || !bcrypt.compareSync(String(password || ''), user.password)) {
+    return res.status(401).json({ error: 'Password confirmation failed' });
+  }
+  if (user.totp_enabled) {
+    const valid = authenticator.verify({ token: String(code).replace(/\s/g, ''), secret: decryptSecret(user.totp_secret) });
+    if (!valid) return res.status(401).json({ error: 'Second-factor confirmation failed' });
+  }
+  req.session.reauthenticatedAt = Date.now();
+  logAudit(req, 'session_reauthenticated', req.session.username, '');
+  res.json({ ok: true, validForSeconds: 900 });
 });
 
 // ─── 2FA management (requires existing full session) ─────────────────────────
 
 // Generate a new secret and return a QR code (does NOT enable 2FA yet)
-router.post('/2fa/setup', requireAuth, requireInteractiveSession, async (req, res) => {
+router.post('/2fa/setup', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
   const user = db.prepare('SELECT username, totp_enabled FROM users WHERE id = ?').get(req.session.userId);
   // Never let setup clobber an active second factor — otherwise a single call
   // silently disables 2FA (totp_enabled=0) even if enrollment is never finished.
@@ -478,7 +521,7 @@ router.post('/2fa/setup', requireAuth, requireInteractiveSession, async (req, re
 });
 
 // Verify code and activate 2FA
-router.post('/2fa/enable', requireAuth, requireInteractiveSession, (req, res) => {
+router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
@@ -496,7 +539,7 @@ router.post('/2fa/enable', requireAuth, requireInteractiveSession, (req, res) =>
 });
 
 // Disable 2FA (requires current TOTP code to confirm)
-router.post('/2fa/disable', requireAuth, requireInteractiveSession, (req, res) => {
+router.post('/2fa/disable', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
@@ -510,6 +553,216 @@ router.post('/2fa/disable', requireAuth, requireInteractiveSession, (req, res) =
   db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.session.userId);
   logAudit(req, '2fa_disabled', req.session.username, '');
   res.json({ ok: true });
+});
+
+// ─── Passkeys, recovery codes, and active sessions ─────────────────────────
+
+function webauthnConfig(req) {
+  return resolveWebauthnConfig({
+    configuredOrigin: process.env.WEBAUTHN_ORIGIN || '',
+    allowedOrigin: process.env.ALLOWED_ORIGIN || '',
+    protocol: req.protocol,
+    host: req.get('host'),
+    rpID: process.env.WEBAUTHN_RP_ID || '',
+    rpName: process.env.WEBAUTHN_RP_NAME || '',
+  });
+}
+
+function credentialsForUser(userId) {
+  return db.prepare(`
+    SELECT id, name, public_key, counter, transports, device_type, backed_up, created_at, last_used_at
+    FROM webauthn_credentials WHERE user_id = ? ORDER BY created_at DESC
+  `).all(userId);
+}
+
+function publicCredential(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    transports: JSON.parse(row.transports || '[]'),
+    deviceType: row.device_type,
+    backedUp: !!row.backed_up,
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+  };
+}
+
+router.get('/passkeys', requireAuth, requireInteractiveSession, (req, res) => {
+  res.json(credentialsForUser(req.session.userId).map(publicCredential));
+});
+
+router.post('/passkeys/register/options', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
+  const user = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.session.userId);
+  const { rpID, rpName } = webauthnConfig(req);
+  const options = await generateRegistrationOptions({
+    rpName,
+    rpID,
+    userName: user.username,
+    userID: new TextEncoder().encode(String(user.id)),
+    attestationType: 'none',
+    excludeCredentials: credentialsForUser(user.id).map((credential) => ({
+      id: credential.id,
+      transports: JSON.parse(credential.transports || '[]'),
+    })),
+    authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+  });
+  req.session.webauthnRegistrationChallenge = options.challenge;
+  res.json(options);
+});
+
+router.post('/passkeys/register/verify', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
+  const challenge = req.session.webauthnRegistrationChallenge;
+  if (!challenge) return res.status(400).json({ error: 'Passkey registration challenge expired' });
+  const { origin, rpID } = webauthnConfig(req);
+  const verification = await verifyRegistrationResponse({
+    response: req.body?.credential,
+    expectedChallenge: challenge,
+    expectedOrigin: origin,
+    expectedRPID: rpID,
+  });
+  delete req.session.webauthnRegistrationChallenge;
+  if (!verification.verified || !verification.registrationInfo) return res.status(400).json({ error: 'Passkey verification failed' });
+
+  const name = String(req.body?.name || 'Passkey').trim().slice(0, 64) || 'Passkey';
+  const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+  db.prepare(`
+    INSERT INTO webauthn_credentials (id, user_id, name, public_key, counter, transports, device_type, backed_up)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    credential.id,
+    req.session.userId,
+    name,
+    Buffer.from(credential.publicKey),
+    credential.counter,
+    JSON.stringify(credential.transports || []),
+    credentialDeviceType || '',
+    credentialBackedUp ? 1 : 0,
+  );
+  logAudit(req, 'passkey_registered', name, credential.id.slice(0, 12));
+  res.status(201).json(publicCredential(credentialsForUser(req.session.userId).find((row) => row.id === credential.id)));
+});
+
+router.delete('/passkeys/:id', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
+  const credential = removeWebauthnCredential(db, req.session.userId, req.params.id);
+  if (!credential) return res.status(404).json({ error: 'Passkey not found' });
+  logAudit(req, 'passkey_removed', credential.name, credential.id.slice(0, 12));
+  res.json({ ok: true });
+});
+
+router.post('/passkeys/authentication/options', async (req, res) => {
+  const userId = req.session.pendingUserId || req.session.userId;
+  if (!userId) return res.status(400).json({ error: 'No pending authentication' });
+  const credentials = credentialsForUser(userId);
+  if (!credentials.length) return res.status(400).json({ error: 'No passkey is registered for this account' });
+  const { rpID } = webauthnConfig(req);
+  const options = await generateAuthenticationOptions({
+    rpID,
+    userVerification: 'preferred',
+    allowCredentials: credentials.map((credential) => ({ id: credential.id, transports: JSON.parse(credential.transports || '[]') })),
+  });
+  req.session.webauthnAuthenticationChallenge = options.challenge;
+  res.json(options);
+});
+
+router.post('/passkeys/authentication/verify', verifyTwoFactorLimiter, async (req, res, next) => {
+  const userId = req.session.pendingUserId || req.session.userId;
+  const challenge = req.session.webauthnAuthenticationChallenge;
+  if (!userId || !challenge) return res.status(400).json({ error: 'Passkey authentication challenge expired' });
+  const response = req.body?.credential;
+  const row = db.prepare('SELECT * FROM webauthn_credentials WHERE id = ? AND user_id = ?').get(response?.id, userId);
+  if (!row) return res.status(400).json({ error: 'Passkey is not registered for this account' });
+  const { origin, rpID } = webauthnConfig(req);
+  const verification = await verifyAuthenticationResponse({
+    response,
+    expectedChallenge: challenge,
+    expectedOrigin: origin,
+    expectedRPID: rpID,
+    credential: {
+      id: row.id,
+      publicKey: new Uint8Array(row.public_key),
+      counter: row.counter,
+      transports: JSON.parse(row.transports || '[]'),
+    },
+  });
+  delete req.session.webauthnAuthenticationChallenge;
+  if (!verification.verified) return res.status(401).json({ error: 'Passkey verification failed' });
+  db.prepare("UPDATE webauthn_credentials SET counter = ?, last_used_at = datetime('now') WHERE id = ?")
+    .run(verification.authenticationInfo.newCounter, row.id);
+
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  if (req.session.pendingUserId) {
+    try {
+      await regenerateSession(req);
+      startUserSession(req, user);
+      logAudit(req, 'login', user.username, 'passkey verified');
+      return res.json(serializeUser(user));
+    } catch (err) { return next(err); }
+  }
+  req.session.reauthenticatedAt = Date.now();
+  res.json({ ok: true });
+});
+
+router.get('/recovery-codes', requireAuth, requireInteractiveSession, (req, res) => {
+  const row = db.prepare('SELECT COUNT(*) AS remaining, MAX(created_at) AS created_at FROM recovery_codes WHERE user_id = ? AND used_at IS NULL')
+    .get(req.session.userId);
+  res.json({ remaining: row.remaining, createdAt: row.created_at });
+});
+
+router.post('/recovery-codes', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
+  const codes = Array.from({ length: 10 }, () => {
+    const raw = crypto.randomBytes(8).toString('hex').toUpperCase();
+    return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}-${raw.slice(12)}`;
+  });
+  const replace = db.transaction(() => {
+    db.prepare('DELETE FROM recovery_codes WHERE user_id = ?').run(req.session.userId);
+    const insert = db.prepare('INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)');
+    for (const code of codes) insert.run(req.session.userId, hashRecoveryCode(code));
+  });
+  replace();
+  logAudit(req, 'recovery_codes_regenerated', req.session.username, '10 codes');
+  res.status(201).json({ codes });
+});
+
+router.delete('/recovery-codes', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
+  db.prepare('DELETE FROM recovery_codes WHERE user_id = ?').run(req.session.userId);
+  logAudit(req, 'recovery_codes_revoked', req.session.username, '');
+  res.json({ ok: true });
+});
+
+router.post('/verify-recovery-code', verifyTwoFactorLimiter, async (req, res, next) => {
+  const userId = req.session.pendingUserId;
+  if (!userId) return res.status(400).json({ error: 'No pending authentication' });
+  const hash = hashRecoveryCode(req.body?.code);
+  if (!consumeRecoveryCode(db, userId, hash)) return res.status(401).json({ error: 'Invalid or already-used recovery code' });
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  try {
+    await regenerateSession(req);
+    startUserSession(req, user);
+    logAudit(req, 'login', user.username, 'recovery code used');
+    return res.json(serializeUser(user));
+  } catch (err) { return next(err); }
+});
+
+router.get('/sessions', requireAuth, requireInteractiveSession, (req, res) => {
+  const sessions = db.prepare('SELECT sid, sess, expire FROM sessions').all()
+    .map((row) => parseStoredSession(row, req.sessionID))
+    .filter((row) => row?.userId === req.session.userId)
+    .map(({ userId, ...row }) => row);
+  res.json(sessions);
+});
+
+router.delete('/sessions/:id', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
+  const result = revokeStoredSession(db, req.session.userId, req.params.id, req.sessionID);
+  if (result.current) return res.status(400).json({ error: 'Use logout to end the current session' });
+  if (result.missing) return res.status(404).json({ error: 'Session not found' });
+  logAudit(req, 'session_revoked', result.session.id.slice(0, 12), '');
+  res.json({ ok: true });
+});
+
+router.delete('/sessions', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
+  const revoked = revokeOtherStoredSessions(db, req.session.userId, req.sessionID);
+  logAudit(req, 'sessions_revoked_all', req.session.username, `revoked=${revoked}`);
+  res.json({ ok: true, revoked });
 });
 
 // ─── Personal API tokens ─────────────────────────────────────────────────────
@@ -526,6 +779,7 @@ function serializeApiToken(row) {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     lastUsedAt: row.last_used_at,
+    scopes: String(row.scopes || 'read').split(',').filter(Boolean),
     expired: !!row.expires_at && new Date(row.expires_at.replace(' ', 'T') + 'Z').getTime() < Date.now(),
   };
 }
@@ -533,13 +787,13 @@ function serializeApiToken(row) {
 // List the caller's own tokens (never exposes the secret or its hash).
 router.get('/tokens', requireAuth, requireInteractiveSession, (req, res) => {
   const rows = db.prepare(
-    'SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC'
+    'SELECT id, name, scopes, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC'
   ).all(req.session.userId);
   res.json(rows.map(serializeApiToken));
 });
 
 // Create a token. The plaintext secret is returned exactly once, here.
-router.post('/tokens', requireAuth, requireInteractiveSession, (req, res) => {
+router.post('/tokens', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
   const name = String(req.body?.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Token name required' });
   if (name.length > TOKEN_NAME_MAX) return res.status(400).json({ error: `Token name must be ${TOKEN_NAME_MAX} characters or fewer` });
@@ -557,26 +811,35 @@ router.post('/tokens', requireAuth, requireInteractiveSession, (req, res) => {
   const existing = db.prepare('SELECT 1 FROM api_tokens WHERE user_id = ? AND name = ?').get(req.session.userId, name);
   if (existing) return res.status(400).json({ error: 'You already have a token with that name' });
 
+  const requestedScopes = Array.isArray(req.body?.scopes) ? [...new Set(req.body.scopes.map(String))] : ['read'];
+  if (requestedScopes.length === 0 || requestedScopes.some((scope) => !API_TOKEN_SCOPES.has(scope))) {
+    return res.status(400).json({ error: 'Invalid API token scope' });
+  }
+  if (requestedScopes.includes('admin') && !req.session.isAdmin) {
+    return res.status(403).json({ error: 'Only administrators can create an admin-scoped API token' });
+  }
+  const scopes = requestedScopes.join(',');
+
   const secret = generateApiToken();
   const tokenHash = hashApiToken(secret);
   const expiresClause = expiresInDays !== null ? `datetime('now', '+${expiresInDays} days')` : 'NULL';
 
   const result = db.prepare(
-    `INSERT INTO api_tokens (user_id, name, token_hash, expires_at) VALUES (?, ?, ?, ${expiresClause})`
-  ).run(req.session.userId, name, tokenHash);
+    `INSERT INTO api_tokens (user_id, name, token_hash, scopes, expires_at) VALUES (?, ?, ?, ?, ${expiresClause})`
+  ).run(req.session.userId, name, tokenHash, scopes);
 
   const row = db.prepare(
-    'SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE id = ?'
+    'SELECT id, name, scopes, created_at, expires_at, last_used_at FROM api_tokens WHERE id = ?'
   ).get(result.lastInsertRowid);
 
-  logAudit(req, 'api_token_created', name, expiresInDays ? `expires in ${expiresInDays} days` : 'no expiry');
+  logAudit(req, 'api_token_created', name, `${expiresInDays ? `expires in ${expiresInDays} days` : 'no expiry'}; scopes=${scopes}`);
 
   // `token` is the one and only time the plaintext is ever returned.
   res.status(201).json({ ...serializeApiToken(row), token: secret });
 });
 
 // Revoke one of the caller's own tokens.
-router.delete('/tokens/:id', requireAuth, requireInteractiveSession, (req, res) => {
+router.delete('/tokens/:id', requireAuth, requireInteractiveSession, requireRecentReauthentication, (req, res) => {
   const token = db.prepare('SELECT id, name FROM api_tokens WHERE id = ? AND user_id = ?').get(req.params.id, req.session.userId);
   if (!token) return res.status(404).json({ error: 'Token not found' });
   db.prepare('DELETE FROM api_tokens WHERE id = ?').run(token.id);

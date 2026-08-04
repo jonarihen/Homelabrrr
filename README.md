@@ -6,7 +6,7 @@
 [![Backend](https://img.shields.io/badge/backend-Node.js%20%2B%20Express-339933?style=flat-square&logo=node.js&logoColor=white)](#stack)
 [![Database](https://img.shields.io/badge/database-SQLite-003b57?style=flat-square&logo=sqlite&logoColor=white)](#stack)
 [![Deployment](https://img.shields.io/badge/deployment-Docker%20Compose-2496ed?style=flat-square&logo=docker&logoColor=white)](#quick-start)
-[![Security](https://img.shields.io/badge/security-TOTP%202FA%20%2B%20role%20controls-bf3989?style=flat-square)](#security-model)
+[![Security](https://img.shields.io/badge/security-passkeys%20%2B%20role%20controls-bf3989?style=flat-square)](#security-model)
 
 Homelabrrr is a web portal for running a self-service Proxmox environment with FortiGate-backed networking.
 Users get assigned VM/LXC access, browser VNC, browser SSH, SFTP file access, provisioning, and account management.
@@ -50,8 +50,8 @@ This project pulls those into one interface so users can work inside guardrails 
 | Admin delegation | Role-based access control: named roles bundle the granular permission flags (hosts, firewalls, port forwards, VLANs, policies, templates, users, assignments, audit log, VM hardware, provisioning, read-only VM visibility, fleet-wide VM operation). A role fully defines its holder's permissions; users without a role use per-user flags |
 | Onboarding | One-time **invite links**: generate a shareable URL preloaded with a role/permissions, quotas, VLAN access, expiry, and optional required-2FA; the invitee self-registers (username + password), enrolls 2FA if required, and lands in the portal with exactly the preset access — no manual account creation or out-of-band password handoff |
 | Notifications | Discord webhook notifications for deployments, backups, node health, notices, and security events — configured per channel with per-event routing, a send-test button, encrypted webhook URLs, and per-user opt-out |
-| API tokens | Personal `Authorization: Bearer` tokens for scripting (curl, cron, CI) with the owner's exact permissions and quotas — shown once, stored hashed, optionally expiring, revocable, and fully attributed in the audit log |
-| Security | Session auth, TOTP 2FA, login throttling, secrets encrypted at rest, upstream TLS enforcement, SSH host-key checks, audit logging |
+| API tokens | Personal `Authorization: Bearer` tokens for scripting (curl, cron, CI) with explicit least-privilege scopes, optional expiry, one-time secret display, live owner permissions, and full audit attribution |
+| Security | Session auth, TOTP plus WebAuthn/passkeys and one-time recovery codes, active-session revocation, origin/CSRF checks, login throttling, versioned encryption keys, upstream TLS enforcement, SSH target/host-key checks, and outcome-aware audit logging |
 
 ## UI Overview
 
@@ -64,7 +64,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `Power Schedule` — from a VM's detail page, set an automatic stop/start window (stop time, start time, active days, timezone) so idle VMs sleep overnight; manually starting inside the off-window keeps the VM up until the next scheduled stop, and a "skip tonight" button skips just the next shutdown
 - `Console Dock` — multiple VNC/SSH sessions that can be minimized, restored, tiled, or popped out to standalone tabs; VNC consoles have a Paste button that types the clipboard into the guest (SSH terminals take native browser paste)
 - `SSH Keys` — uploaded keys used by browser SSH and SFTP sessions
-- `Account` — password, 2FA management, personal API token management (create/list/revoke), and a notification opt-out toggle for events about your own resources
+- `Account` — password and TOTP management, named passkeys, one-time recovery codes, active-session revocation, scoped personal API tokens, and a notification opt-out toggle for events about your own resources
 
 ### Admin side
 
@@ -83,6 +83,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `VM Leases` — set the default lease duration + grace period, review every VM's lease with owner and live status, renew/adjust/extend any lease, exempt infra VMs, run the expiry sweep on demand, and backfill leases onto VMs that predate the feature; expired-past-grace VMs are highlighted as reclaimable
 - `Notifications` — add Discord webhooks, choose which event types each one receives, and send a test message; webhook URLs are encrypted at rest and all changes are audit-logged
 - `Audit Log` — change tracking with user/IP/timestamp
+- `Operations` — interrupted Proxmox task reconciliation, encrypted backup/restore-verification status, SQLite/WAL maintenance, and secret-key rotation planning
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user
 
 ## Architecture
@@ -99,10 +100,10 @@ flowchart LR
 
 ## Stack
 
-- Frontend: React 18, Vite 5, Tailwind CSS 3, React Router 6
-- Backend: Node.js 20 (ESM), Express, `ws`, `ssh2`, `busboy`
+- Frontend: React 18, Vite 8, Tailwind CSS 3, React Router 7
+- Backend: Node.js 24 LTS (ESM), Express 5, `ws`, `ssh2`, `busboy`
 - Database: SQLite via `better-sqlite3` (encrypted secrets at rest)
-- Auth: SQLite-backed session cookies, rate-limited login/2FA, TOTP 2FA
+- Auth: SQLite-backed session cookies, rate-limited login/2FA, TOTP, WebAuthn/passkeys, recovery codes, and scoped bearer tokens
 - Console access: Proxmox VNC websocket proxy via noVNC, plus browser SSH via `xterm.js`
 - File access: SFTP over `ssh2`, sharing the SSH credential and host-key verification flow
 - Integrations: Proxmox VE API (multi-host), FortiGate REST API
@@ -145,9 +146,9 @@ Use it with a standard `Authorization: Bearer` header:
 curl -H "Authorization: Bearer hlr_your_token_here" https://portal.example.com/api/vms
 ```
 
-A token carries **exactly** its owner's permissions, VM ownership, and quotas, resolved live on every request — it is never more powerful than the user, and revoking it (or the user losing a permission) takes effect immediately. Every token request is attributed in the audit log as `username (token: <name>)`.
+A token is limited twice: by its selected scopes (`read`, `vm:operate`, `infrastructure:write`, or the deliberately high-risk `admin`) and by its owner's live permissions, VM ownership, and quotas. Infrastructure writes cover cloud images/ISOs, notifications, portal notices/links, public IPs, websites, and workflow configuration; mutations below `/api/admin` always require the `admin` scope as well as the owner's matching permission. Existing pre-scope tokens migrate to `read` only. Revocation or a user permission change takes effect immediately, and every token request is attributed in the audit log as `username (token: <name>)`.
 
-Interactive-session-only endpoints reject token auth: managing API tokens, changing your password, and anything touching 2FA. The VNC/SSH console websockets also remain session-only. Admins can list and revoke any user's tokens from **Users → Manage → API Tokens**.
+Identity endpoints reject token auth regardless of scope: users, roles, permissions, invites, passwords, passkeys, recovery codes, sessions, and 2FA remain interactive-session only. Sensitive browser mutations ask for the password and current TOTP again when the 15-minute re-authentication window has expired. VNC/SSH console websockets also remain session-only. Admins can list and revoke any user's tokens from **Users → Manage → API Tokens**.
 ## Website Publishing (Caddy + FortiGate SSL inspection)
 
 Homelabrrr can drive an **external [Caddy](https://caddyserver.com/) reverse proxy** so users publish their own websites without an admin hand-editing the Caddy config. Caddy runs bare-metal on its own VM; Homelabrrr manages it entirely through the **Caddy admin API** (default `:2019`).
@@ -246,7 +247,7 @@ docker compose up -d --build
 ```
 
 The frontend is published on `http://localhost:8181` by default.
-The backend health check is available through the frontend proxy at `http://localhost:8181/api/health`.
+The liveness and readiness checks are available through the frontend proxy at `http://localhost:8181/api/health/live` and `http://localhost:8181/api/health/ready`. Container health uses readiness; liveness intentionally checks only that the process can answer HTTP.
 
 That localhost URL is useful for a health check, but login cookies remain `Secure` in the production configuration. If you intentionally access the portal directly over plain HTTP for a local-only test, use `ALLOWED_ORIGIN=http://localhost:8181`, `COOKIE_SECURE=false`, and `TRUST_PROXY=1`; restore the production values before exposing it through a TLS proxy.
 
@@ -282,40 +283,53 @@ anyone can trip for everyone.
 hop count that arrived, and whether it matches `TRUST_PROXY`. If the address shown is not your real public
 IP, the value is wrong. The same data is available at `GET /api/health/client-ip` (requires authentication),
 and the backend logs a one-time warning on startup traffic when the numbers disagree.
-### 5. Back up the `db_data` volume
+### 5. Configure encrypted, verified, off-host backups
 
-Everything Homelabrrr knows lives in one SQLite file inside the `db_data` Docker volume: every registered Proxmox host and FortiGate, every user, permission, VM assignment, lease, schedule, website, and audit entry — plus every upstream secret (PVE API tokens, FortiGate keys, SSH private keys, TOTP secrets), encrypted at rest.
+Everything Homelabrrr knows lives in one SQLite file inside `db_data`. `docker compose down` keeps that volume; `docker compose down -v` **deletes it**.
 
-Losing that volume means re-registering every host, firewall, key and user by hand. `docker compose down` keeps it; `docker compose down -v` **deletes it**.
+The backend can take an online SQLite-consistent snapshot with `better-sqlite3`'s backup API, encrypt it with AES-256-GCM, copy it to a separate destination, decrypt that copied artifact into an isolated temporary database, and run both an integrity check and schema query. No application downtime is required for the scheduled snapshot.
 
-Back it up on a schedule:
+Set these before enabling backups:
+
+```dotenv
+BACKUP_ENCRYPTION_KEY=a-separate-random-secret-at-least-32-characters
+BACKUP_RETENTION_DAYS=14
+BACKUP_INTERVAL_MS=86400000
+
+# Local staging; this may stay on the Docker host.
+BACKUP_HOST_PATH=./backups
+
+# Production: use a NAS/remote-filesystem mount or a directory continuously
+# replicated to object storage. Do not leave this on the application host.
+BACKUP_OFFSITE_HOST_PATH=/mnt/nas/homelabrrr
+```
+
+Keep `BACKUP_ENCRYPTION_KEY` in a password manager or secrets system separate from the database, staging directory, and off-host destination. Scheduled failure/success events use the existing configurable backup notification channels. **Admin → Operations** shows whether backups are configured, the last outcome/failure reason, size, and verified-restore time; it can also run one immediately.
+
+#### Disaster-recovery restore
+
+1. Secure a copy of the encrypted `.sqlite.enc` artifact and the separate backup key.
+2. Stop the writer and decrypt to a new filename; the restore command refuses to overwrite an existing file and verifies integrity/schema before returning success.
+3. Preserve the failed database, remove its stale WAL/SHM sidecars, promote the verified restore, start the backend, then check readiness and sign in.
 
 ```bash
-# Volume names are prefixed with the compose project (the directory name).
-# Confirm yours first:  docker volume ls | grep db_data
 docker compose stop backend
-docker run --rm -v homelabrrr_db_data:/data -v "$PWD:/backup" alpine \
-  tar czf "/backup/homelabrrr-db-$(date +%F).tar.gz" -C /data .
+docker compose run --rm \
+  -e BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" \
+  backend npm run restore-backup -- \
+  /app/backups-offsite/homelabrrr-YYYY-MM-DDTHH-MM-SS.sqlite.enc \
+  /app/data/db-restored.sqlite
+
+docker compose run --rm --entrypoint sh backend -c \
+  'mv /app/data/db.sqlite /app/data/db.sqlite.pre-restore && rm -f /app/data/db.sqlite-wal /app/data/db.sqlite-shm && mv /app/data/db-restored.sqlite /app/data/db.sqlite'
+
 docker compose start backend
+curl --fail http://127.0.0.1:8181/api/health/ready
 ```
 
-Stopping the backend first matters: SQLite runs with a write-ahead log, so copying the files out from under a live process can capture a torn database.
+If application validation fails, stop the backend, move the restored database aside, put `db.sqlite.pre-restore` back, and restart. Never discard the pre-restore database until users, upstream credentials, and a fresh backup have all been verified.
 
-Restore is the same trip in reverse:
-
-```bash
-docker compose down
-docker run --rm -v homelabrrr_db_data:/data -v "$PWD:/backup" alpine \
-  sh -c 'rm -rf /data/* && tar xzf /backup/homelabrrr-db-YYYY-MM-DD.tar.gz -C /data'
-docker compose up -d
-```
-
-Two things worth knowing:
-
-- **Back up `SECRET_ENCRYPTION_KEY` with it.** The database is restorable but useless without the key that decrypts the secrets inside it. Keep the key somewhere other than the same archive.
-- **The archive is as sensitive as the live volume.** It contains your infrastructure's credentials. Store it encrypted, off the Docker host.
-
-File ownership inside the volume is corrected automatically on container start, so a restore performed as root is fine.
+For an emergency raw volume archive, stop the backend first and archive the entire `db_data` volume, including any WAL/SHM files. A live file copy is not a supported SQLite-consistent backup.
 
 ## Local Development
 
@@ -345,18 +359,23 @@ Vite proxies `/api` and websocket traffic to `http://localhost:3000`.
 
 ## Tests and Build Checks
 
-The repository uses Node's built-in test runner. There is not yet a package-level `test` script, linter, end-to-end suite, or CI workflow, so run the checks explicitly:
+The repository has package-level lint/test/build scripts, Playwright coverage for route authorization, and a GitHub Actions workflow:
 
 ```bash
 cd backend
 npm ci
-node --test
+npm run lint
+npm test
 
 cd ../frontend
 npm ci
-node --test
+npm run lint
+npm test
 npm run build
+npm run e2e
 ```
+
+CI repeats those checks and builds both production images on every pull request. The supported runtime is Node.js 24 LTS. Production Docker bases are deliberately pinned to `node:24.17.0-alpine3.24` and `nginx:1.30.4-alpine3.24`; Dependabot proposes reviewed updates for npm, Docker, and GitHub Actions dependencies.
 
 ## Environment
 
@@ -366,7 +385,10 @@ Example values live in [`.env.example`](.env.example).
 | --- | --- |
 | `SESSION_SECRET` | Session signing secret |
 | `SECRET_ENCRYPTION_KEY` | 32-byte master key for encrypting secrets at rest; accepted as base64, 64-char hex, or exactly 32 bytes of raw text |
+| `SECRET_ENCRYPTION_KEY_ID` | Stable identifier embedded in new ciphertext (default `primary`); choose a new ID when rotating the key |
+| `SECRET_ENCRYPTION_PREVIOUS_KEYS` | JSON object or comma-separated `id=key` keyring used only to decrypt and transactionally rotate legacy ciphertext |
 | `ALLOWED_ORIGIN` | Exact public browser origin allowed for CORS and websocket upgrades |
+| `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGIN` | Passkey relying-party hostname and exact browser origin (normally derived from `ALLOWED_ORIGIN`) |
 | `COOKIE_SECURE` | Marks auth cookies as `Secure` (default `true`; set to `false` only for plain-HTTP local dev) |
 | `TRUST_PROXY` | Number of proxy hops in front of the backend (default `2`: external reverse proxy + bundled nginx; set `1` if clients reach port 8181 directly) — see [Counting your proxies](#4-counting-your-proxies-trust_proxy) |
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
@@ -379,6 +401,10 @@ Example values live in [`.env.example`](.env.example).
 | `LEASE_CHECK_INTERVAL_MS` | How often the background VM-lease sweeper runs to gracefully stop expired VMs (default `900000` = 15 min; minimum `60000`). Default lease duration and grace period are set in-app on the admin VM Leases page |
 | `VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS` | How long a scheduled graceful shutdown waits before the hard-stop fallback fires (default `120000`) |
 | `WEBSITE_RECONCILE_INTERVAL_MS` | How often published websites are re-checked: admin-API routes dropped by a `caddy reload` are re-pushed, and every published site is re-probed over HTTPS (default `300000` = 5 min; minimum `60000`) — see [Route durability](#️-route-durability-admin-api-routes-are-not-persistent) |
+| `AUDIT_RETENTION_DAYS` / `JOB_RETENTION_DAYS` | Retention for audit records (default 365 days) and terminal job history (default 90 days) |
+| `BACKUP_DIR` / `BACKUP_OFFSITE_DIR` / `BACKUP_ENCRYPTION_KEY` | Enables scheduled SQLite-consistent, encrypted backups whose separately copied artifact is restore-verified; keep the backup key separate from the database and both destinations |
+| `BACKUP_RETENTION_DAYS` / `BACKUP_INTERVAL_MS` | Backup retention (default 14 days) and schedule (default daily) |
+| `BACKUP_HOST_PATH` / `BACKUP_OFFSITE_HOST_PATH` | Compose host mounts for local staging and the separately mounted/replicated disaster-recovery destination |
 | `DB_PATH` | SQLite database file (default `/app/data/db.sqlite`, inside the `db_data` volume — moving it takes the database off the volume you back up) |
 
 Every variable in this table is passed into the backend container by `docker-compose.yml`, and the backend logs which ones it recognised at startup (`docker compose logs backend | grep '\[config\]'`) — so a setting that is being ignored is visible rather than silent.
@@ -390,41 +416,75 @@ Useful implementation defaults:
 - SQLite data is stored in the `db_data` Docker volume at `/app/data/db.sqlite`
 - SFTP uploads stream directly to the guest without an application-level size cap; available space and limits on the remote host are the effective ceiling. Other API requests are capped by nginx at 105 MB
 
+## Database Migrations, Retention, and Recovery
+
+Schema changes are ordered in `schema_migrations`. The legacy schema is adopted as one transactional baseline; subsequent migrations have stable increasing versions. Only SQLite's exact duplicate-column idempotency condition is tolerated while adopting an older installation. Any syntax, disk, lock, permissions, corruption, or integrity failure stops startup before the server listens. Take a verified backup before deploying a migration-bearing release and retain the pre-upgrade artifact through the validation window.
+
+Incremental maintenance deletes at most 500 eligible rows per high-growth table per run, then performs `PRAGMA optimize` and a passive WAL checkpoint—never an online full `VACUUM`. Defaults are 365 days for security audit history and 90 days for terminal provisioning, migration, backup-task, and workflow history; running/queued records are protected. Configure `AUDIT_RETENTION_DAYS` and `JOB_RETENTION_DAYS` to meet your policy. **Admin → Operations** reports database, WAL, reclaimable size, oldest retained records, and the last cleanup result.
+
+## Encryption-Key Rotation Runbook
+
+Encrypted values use `enc:v2:<key-id>:` envelopes. New writes use only `SECRET_ENCRYPTION_KEY_ID`/`SECRET_ENCRYPTION_KEY`; `SECRET_ENCRYPTION_PREVIOUS_KEYS` is a decryption-only JSON object (or comma-separated `id=key` list).
+
+1. Create and verify an off-host database backup. Record the current key ID and keep its key outside the archive.
+2. Generate a new 32-byte key, choose a new stable ID, set it as the current key, and put the old ID/key in `SECRET_ENCRYPTION_PREVIOUS_KEYS`.
+3. Restart. Open **Admin → Operations** and inspect the dry-run counts. Do not rotate if any record is undecryptable.
+4. Select **Rotate now**. Rotation is one SQLite transaction: any bad record rolls every earlier update back. Confirm the remaining count is zero and exercise Proxmox, firewall, SSH, webhook, and 2FA integrations.
+5. Keep the old key available through the rollback/backup-retention window. Then remove it from `SECRET_ENCRYPTION_PREVIOUS_KEYS`, restart, and verify readiness plus a new backup.
+
+Rollback means restoring the pre-rotation backup and restoring its keyring, or temporarily re-adding the old key ID when rollback does not require a database restore. Never log, commit, or store key material beside the backup.
+
+## Observability and Shutdown
+
+- `/api/health/live` checks process viability only. `/api/health/ready` checks SQLite access, integrity, and the applied schema version without a destructive probe.
+- Authenticated admins can read Prometheus text at `/api/metrics`: request totals/latency, upstream failures, job states, active VNC/SSH WebSockets, and SQLite/database/WAL size.
+- Backend logs are structured JSON for request and lifecycle events, return `X-Request-Id`, and centrally redact credential-shaped fields. Long-running operation rows retain their originating request ID and actor.
+- `SIGTERM`/`SIGINT` stop new HTTP and background-job admission, timers, schedulers, and website polling; close WebSockets with code 1001; give scheduler, backup, provisioning, ISO/image, template-build, and console-patch work a bounded 15-second drain; checkpoint WAL; and close SQLite. A forced drain is recorded in the shutdown log, and any unfinished durable operation is reconciled on the next start.
+
+An actionable baseline is to alert when readiness fails for two consecutive checks, any encrypted backup is unverified/failed, upstream failure counts rise continuously, `needs_review` jobs remain unresolved, or WAL size grows without returning after maintenance. Route backup failures to an operator-owned notification channel.
+
+## Module Boundaries
+
+HTTP route modules should authenticate/authorize, validate, call a domain service, and format the response. Database/upstream lifecycle logic belongs under `backend/src/services` or a focused utility, while shared error/redaction/audit behavior belongs in middleware/utilities. Large React pages should delegate independent stateful areas to components (for example account security/re-authentication) and use `navSections.js` as the single permission source for both links and route guards. Add behavior tests before moving an existing domain so refactors remain reviewable.
+
 ## Security Model
 
 Current hardening in the codebase includes:
 
 - no hardcoded default admin user on fresh install
 - optional mandatory 2FA enrollment
+- multiple named WebAuthn/passkey credentials, hashed single-use recovery codes, and user-visible active-session revocation; sensitive changes require recent password/TOTP confirmation
 - 2FA lifecycle protection: starting a new enrollment cannot silently disable an active second factor, admin 2FA resets require confirmation, and setup/enable/disable/reset are audit-logged
 - login and 2FA attempt throttling, with admin unlock support
 - invite links are single-use and rate-limited like login; only a SHA-256 hash of the token is stored (the raw token is shown to the admin once), and redemption creates the account inside a single transaction that applies the preset and marks the invite consumed atomically
-- personal API tokens are stored only as SHA-256 hashes (plaintext shown once at creation), resolve the live user on every request so they never exceed their owner's permissions, are rate-limited on failure, cannot perform interactive-only operations (token/password/2FA management), do not extend to the VNC/SSH websockets, and are attributed by token name in the audit log
+- personal API tokens are stored only as SHA-256 hashes (plaintext shown once), default to read-only scopes, resolve the live user on every request, are rate-limited on failure, cannot perform interactive identity/credential operations, do not extend to VNC/SSH websockets, and are attributed by token name in the audit log
 - assignment-aware VM access (users only see their own VMs)
 - backup browse, download, restore, and delete verify that the named backup volume actually belongs to the VM being operated on (the VMID embedded in the volid must match; unparseable volids are rejected)
 - VM reach is split across two flags: **View all VMs** (`see_all_vms`) is strictly read-only — status, config, RRD graphs, backup listings — while **Operate all VMs** (`can_operate_all_vms`) is what grants power actions, snapshots, backups, VLAN/hardware edits, DHCP reservations, and VNC/SSH/SFTP console access across the fleet. Console + SSH on every VM is effectively root on the fleet, so it is a separate, deliberately-granted permission
 - destructive operations that overwrite a VM's live state (VM deletion, backup restore, snapshot rollback, cloud-init credential reset, lease renewal, schedule edits) require strict VM ownership — neither fleet-wide flag grants them
 - cloud-init credential resets require strict VM ownership too, are only offered for VMs that actually have a cloud-init drive, and never persist or log the new password/SSH key (only the reset event is audited)
 - Proxmox node names are validated against a strict DNS-label pattern and URL-encoded before being interpolated into upstream API paths, so a crafted node name can't steer requests made with the privileged PVE API token (path injection / SSRF)
-- per-VM SSH authorization, stored destination config, and SSH host-key verification
+- non-admin SSH/SFTP targets are DNS-pinned and restricted to an address detected for the selected VM, explicitly assigned to it, or inside the user's assigned VLANs; ports are validated, attempts are durably rate-limited, and unusual admin overrides are explicit/audited
 - SFTP access reuses the same authenticated SSH session setup and host-key checks as terminal access
-- secrets encrypted at rest with `SECRET_ENCRYPTION_KEY` (API tokens, SSH keys, TOTP secrets)
+- secrets encrypted at rest with a versioned current/legacy keyring and transactional dry-run rotation workflow
 - upstream TLS enforcement for Proxmox and FortiGate connections (with explicit break-glass override)
 - per-host Proxmox TLS verification settings
 - granular permissions for delegated administration and fleet access
 - user-scoped VLAN, policy, and port-forward management
 - storage pool exposure is enforced server-side on every create path (clone, from-image, from-scratch), not just hidden in the UI — a non-admin naming a hidden pool directly is rejected; pools are exposed by default so existing setups are unchanged until an admin restricts one, and every toggle is audit-logged
 - hardware editing is separately permission-gated and audit-logged
-- broad audit logging for security and infrastructure actions with user/IP/timestamp
+- broad audit logging for security and infrastructure actions with actor, target, IP, request ID, outcome, and timestamp; a global mutation event intentionally records denied/failed authenticated writes without recording bodies or secrets
 - error message sanitization (strips internal IPs and paths from API responses)
 - CORS/websocket origin checks tied to `ALLOWED_ORIGIN` or same-origin access, plus secure cookies and nginx security headers
+
+Admin-assisted recovery policy: verify the person's identity outside the portal before resetting a password or TOTP requirement. Admin resets require recent re-authentication and are explicitly audited; after recovery, revoke exposed tokens/sessions, require TOTP re-enrollment when policy demands it, and have the user regenerate recovery codes. Passkeys are user-managed and should be removed only by the account owner after regaining access.
 
 Operationally important:
 
 - The frontend is plain HTTP inside Docker by design.
   Put TLS at the reverse proxy.
 - The SQLite volume contains sensitive operational data encrypted at rest.
-  Back it up and protect it — see [Back up the `db_data` volume](#5-back-up-the-db_data-volume).
+  Back it up and protect it — see [Configure encrypted, verified, off-host backups](#5-configure-encrypted-verified-off-host-backups).
 - The backend container drops to an unprivileged user (`node`, uid 1000) before starting the API.
 - SSH private keys are stored encrypted in the application database for browser terminal access.
   Treat the DB as sensitive.
@@ -432,8 +492,8 @@ Operationally important:
 ## Operational Constraints
 
 - Run exactly **one backend replica**. Console/SFTP handoff tokens, VMID reservations, background-job locks, notification queues, and schedulers keep process-local state. Multiple replicas can lose console handoffs or perform the same scheduled work twice.
-- Provisioning, image/ISO downloads, migrations, and similar long-running Proxmox operations are monitored by in-process pollers. A backend restart marks interrupted portal jobs as failed even though the upstream Proxmox task may still finish. Check Proxmox before retrying so you do not create duplicate or orphaned resources.
-- Keep SQLite on the local `db_data` volume and stop the backend for the documented file-level backup. This deployment is not designed for a shared network filesystem or horizontally scaled writers.
+- Provisioning and migration rows persist their Proxmox UPID, actor, phase, and request ID. A restart moves every unfinished operation—with or without an upstream task ID—to `needs_review` in **Admin → Operations** instead of guessing that it failed. **Check upstream** records the observed task state without silently changing the portal resource, while **Remove tracking only** is available only after a terminal result and never deletes the Proxmox guest. Verify the resource in Proxmox before resolving, retrying, or removing tracking. ISO/image-specific pollers still require operator review after interruption.
+- Keep live SQLite on the local `db_data` volume; this deployment is not designed for a shared network filesystem or horizontally scaled writers. Scheduled backups use SQLite's online backup API, while raw file/volume archives still require the backend to be stopped.
 
 ## Reverse Proxy Notes
 

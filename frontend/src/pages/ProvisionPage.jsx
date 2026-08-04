@@ -385,7 +385,7 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
         </div>
         <div>
           <label className="block text-xs text-gray-400 mb-1.5 font-medium">Password</label>
-          <input type="password" value={ci.password} onChange={e => setCi(c => ({ ...c, password: e.target.value }))} className={inputCls} placeholder="min. 8 characters" autoComplete="new-password" />
+          <input type="password" minLength={12} value={ci.password} onChange={e => setCi(c => ({ ...c, password: e.target.value }))} className={inputCls} placeholder="min. 12 characters" autoComplete="new-password" />
         </div>
       </div>
 

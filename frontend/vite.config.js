@@ -11,12 +11,7 @@ export default defineConfig({
     target: 'esnext',
   },
   optimizeDeps: {
-    include: ['@novnc/novnc/lib/rfb'],
-    // @novnc uses top-level await; esbuild's default dev target (es2020)
-    // rejects it. Match the build target so dev pre-bundling succeeds.
-    esbuildOptions: {
-      target: 'esnext',
-    },
+    include: ['@novnc/novnc'],
   },
   server: {
     fs: {

@@ -26,7 +26,10 @@ const SHUTDOWN_TIMEOUT_MS = Number(process.env.VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS) 
 // Guards against a slow tick overlapping the next timer fire, and against
 // issuing a duplicate action for a VM whose stop/start is still in flight.
 let ticking = false;
+let stopping = false;
 const inFlight = new Set();
+let firstRunTimer = null;
+let intervalTimer = null;
 
 // logAudit reads req.session/req.ip — synthesize a "system" actor for the loop.
 function systemAudit(action, target, detail) {
@@ -53,6 +56,7 @@ function markAction(id, action, detail) {
 // Execute a stop/start out of band so a slow graceful shutdown doesn't stall the
 // tick or other VMs. Updates bookkeeping + audit on completion.
 function runAction(schedule, action) {
+  if (stopping) return;
   const key = `${schedule.node}/${schedule.vmid}`;
   if (inFlight.has(key)) return;
   inFlight.add(key);
@@ -82,7 +86,7 @@ function runAction(schedule, action) {
 }
 
 async function tick() {
-  if (ticking) return;
+  if (ticking || stopping) return;
   ticking = true;
   try {
     // Cheap early-out before touching Proxmox.
@@ -184,9 +188,27 @@ async function tick() {
 }
 
 export function startScheduler() {
-  setTimeout(() => {
+  stopping = false;
+  firstRunTimer = setTimeout(() => {
     tick();
-    setInterval(tick, TICK_MS);
+    intervalTimer = setInterval(tick, TICK_MS);
   }, FIRST_RUN_DELAY_MS);
   console.log('[scheduler] VM power schedule loop armed');
+  return stopScheduler;
+}
+
+export function stopScheduler() {
+  stopping = true;
+  if (firstRunTimer) clearTimeout(firstRunTimer);
+  if (intervalTimer) clearInterval(intervalTimer);
+  firstRunTimer = null;
+  intervalTimer = null;
+}
+
+export async function waitForSchedulerIdle(timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while ((ticking || inFlight.size > 0) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !ticking && inFlight.size === 0;
 }

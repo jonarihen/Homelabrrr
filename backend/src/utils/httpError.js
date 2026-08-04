@@ -26,6 +26,7 @@
 // Route handlers should only ever need sendError().
 
 import { upstreamErrorPayload } from './upstreamError.js';
+import { incrementMetric } from './metricRegistry.js';
 
 const MIN_STATUS = 400;
 const MAX_STATUS = 599;
@@ -118,7 +119,12 @@ function messageOf(err) {
  */
 export function errorPayload(err, status = resolveErrorStatus(err), context) {
   if (status < 500 && isPortalAuthoredError(err)) {
-    return { error: messageOf(err) || 'Request failed' };
+    const payload = { error: messageOf(err) || 'Request failed' };
+    if (err?.name === 'ValidationError') {
+      payload.code = String(err.code || 'VALIDATION_ERROR').slice(0, 64);
+      if (err.field) payload.field = String(err.field).slice(0, 128);
+    }
+    return payload;
   }
   return upstreamErrorPayload(err, context);
 }
@@ -133,6 +139,7 @@ export function errorPayload(err, status = resolveErrorStatus(err), context) {
 export function sendError(res, err, context) {
   const status = resolveErrorStatus(err);
   const body = errorPayload(err, status, context);
+  if (status >= 500) incrementMetric('upstream_failures', 'source="external"');
   if (body.title) console.error('Upstream failure:', messageOf(err));
   return res.status(status).json(body);
 }

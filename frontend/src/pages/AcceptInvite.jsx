@@ -40,7 +40,7 @@ export default function AcceptInvite() {
   const submit = async (e) => {
     e.preventDefault();
     setError('');
-    if (form.password.length < 8) { setError('Password must be at least 8 characters'); return; }
+    if (form.password.length < 12) { setError('Password must be at least 12 characters'); return; }
     if (form.password !== form.confirm) { setError('Passwords do not match'); return; }
     setSubmitting(true);
     try {
@@ -162,10 +162,11 @@ export default function AcceptInvite() {
               />
             </div>
             <div>
-              <label htmlFor="invite-password" className={labelCls}>Password (min 8 characters)</label>
+              <label htmlFor="invite-password" className={labelCls}>Password (min 12 characters)</label>
               <input
                 id="invite-password"
                 type="password"
+                minLength={12}
                 autoComplete="new-password"
                 value={form.password}
                 onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
@@ -179,6 +180,7 @@ export default function AcceptInvite() {
               <input
                 id="invite-confirm"
                 type="password"
+                minLength={12}
                 autoComplete="new-password"
                 value={form.confirm}
                 onChange={e => setForm(f => ({ ...f, confirm: e.target.value }))}

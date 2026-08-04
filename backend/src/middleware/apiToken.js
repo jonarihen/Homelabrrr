@@ -1,5 +1,7 @@
 import db from '../db.js';
 import { hashApiToken } from '../utils/apiTokens.js';
+import { requiredScopeForRequest } from '../utils/apiTokenScopes.js';
+import { logAudit } from '../utils/audit.js';
 
 // Rate-limit failed Bearer-token authentication the same way login attempts are
 // throttled: too many bad tokens from one IP within the window get locked out.
@@ -50,7 +52,7 @@ export function authenticateApiToken(req, res, next) {
 
   const tokenHash = hashApiToken(raw);
   const token = db.prepare(
-    "SELECT id, user_id, name, expires_at FROM api_tokens WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > datetime('now'))"
+    "SELECT id, user_id, name, scopes, expires_at FROM api_tokens WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > datetime('now'))"
   ).get(tokenHash);
 
   if (!token) {
@@ -78,7 +80,25 @@ export function authenticateApiToken(req, res, next) {
     isAdmin: user.is_admin === 1,
     destroy: (cb) => { if (typeof cb === 'function') cb(); },
   };
-  req.apiToken = { id: token.id, name: token.name };
+  req.apiToken = {
+    id: token.id,
+    name: token.name,
+    scopes: new Set(String(token.scopes || 'read').split(',').map((scope) => scope.trim()).filter(Boolean)),
+  };
 
+  next();
+}
+
+export function enforceApiTokenScope(req, res, next) {
+  if (!req.apiToken) return next();
+  const required = requiredScopeForRequest(req);
+  if (!required) {
+    logAudit(req, 'api_token_scope_denied', String(req.originalUrl || req.path).split('?')[0], 'interactive session required');
+    return res.status(403).json({ error: 'This identity operation requires an interactive session' });
+  }
+  if (!req.apiToken.scopes.has(required) && !req.apiToken.scopes.has('admin')) {
+    logAudit(req, 'api_token_scope_denied', String(req.originalUrl || req.path).split('?')[0], `required=${required}`);
+    return res.status(403).json({ error: `API token requires the ${required} scope`, code: 'API_TOKEN_SCOPE_REQUIRED' });
+  }
   next();
 }

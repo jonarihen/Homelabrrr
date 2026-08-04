@@ -161,6 +161,22 @@ export default function SFTPBrowser({ token }) {
     }
   };
 
+  const renameEntry = async (name) => {
+    const nextName = window.prompt(`Rename ${name} to:`, name)?.trim();
+    if (!nextName || nextName === name) return;
+    if (nextName.includes('/') || nextName === '.' || nextName === '..') {
+      setError('The new name cannot contain a path.');
+      return;
+    }
+    setError('');
+    try {
+      await api.post('/sftp/rename', { token, path: joinPath(currentPath, name), name: nextName });
+      await loadDir(currentPath);
+    } catch (e) {
+      setError(normalizeApiError(e, 'Failed to rename'));
+    }
+  };
+
   const onDragOver = (e) => { e.preventDefault(); setDragOver(true); };
   const onDragLeave = () => setDragOver(false);
   const onDrop = (e) => {
@@ -389,6 +405,14 @@ export default function SFTPBrowser({ token }) {
                           )}
                         </button>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => renameEntry(entry.name)}
+                        className="rounded p-1 text-gray-500 hover:bg-gray-700 hover:text-white transition-colors"
+                        title="Rename"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zM19.5 7.125L16.875 4.5M18 14.25v4.125A2.625 2.625 0 0115.375 21H5.625A2.625 2.625 0 013 18.375V8.625A2.625 2.625 0 015.625 6H9.75" /></svg>
+                      </button>
                       {deleteConfirm === entry.name ? (
                         <div className="flex items-center gap-1">
                           <button

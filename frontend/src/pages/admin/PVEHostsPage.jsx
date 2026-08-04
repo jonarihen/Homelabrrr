@@ -71,8 +71,14 @@ export default function PVEHostsPage() {
   };
 
   const remove = async (id) => {
-    if (!confirm('Delete this PVE host?')) return;
     try {
+      const { data: report } = await api.get(`/admin/pve-hosts/${id}/dependencies`);
+      if (report.total > 0) {
+        const lines = report.dependencies.map((item) => `${item.label}: ${item.count}`).join('\n');
+        alert(`This host cannot be deleted while portal resources still reference it:\n\n${lines}\n\nReassign or remove those resources first.`);
+        return;
+      }
+      if (!confirm('This host has no portal dependencies. Delete it permanently?')) return;
       await api.delete(`/admin/pve-hosts/${id}`);
       load();
     } catch (e) {

@@ -4,7 +4,9 @@ import db from '../db.js';
 import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools } from '../proxmox.js';
 import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibility.js';
 import { createClient, vlanTagToSubnet } from '../fortigate.js';
-import { requireAuth, requireAdmin, requirePermission, requireInteractiveSession } from '../middleware/auth.js';
+import {
+  requireAuth, requireAdmin, requirePermission, requireInteractiveSession, requireRecentReauthentication,
+} from '../middleware/auth.js';
 import { sanitizeError } from '../utils/sanitize.js';
 import { sendError } from '../utils/httpError.js';
 import { logAudit } from '../utils/audit.js';
@@ -33,10 +35,21 @@ import { MEMORY_MODES } from '../utils/capacityPolicy.js';
 import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.js';
 import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.js';
 import { deriveSubnet } from '../workflows/subnet.js';
+import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.js';
+import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.js';
 
 const router = Router();
 // All admin routes require at least authentication
 router.use(requireAuth);
+
+// User, role, invite, and credential administration is intentionally browser
+// session only. A broadly scoped automation token must not become an identity
+// provider if it is leaked.
+router.use(['/users', '/roles', '/invites', '/tokens'], requireInteractiveSession);
+router.use(['/users', '/roles', '/invites', '/tokens'], (req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  return requireRecentReauthentication(req, res, next);
+});
 
 // Permission middleware shortcuts
 const pUsers       = requirePermission('can_manage_users');
@@ -302,9 +315,16 @@ router.get('/users', pUsers, (req, res) => {
 });
 
 router.post('/users', pUsers, (req, res) => {
-  const { username, password, isAdmin } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password required' });
+  let username;
+  let password;
+  let isAdmin;
+  try {
+    validateObject(req.body, { fields: ['username', 'password', 'isAdmin'], required: ['username', 'password'] });
+    ({ isAdmin } = req.body);
+    username = validateUsername(req.body?.username);
+    password = validatePassword(req.body?.password);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, code: err.code, field: err.field });
   }
   if (isAdmin && !req.session.isAdmin) {
     return res.status(403).json({ error: 'Only admins can create admin accounts' });
@@ -340,11 +360,12 @@ router.get('/users/:id/tokens', requireInteractiveSession, pUsers, (req, res) =>
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const rows = db.prepare(
-    'SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC'
+    'SELECT id, name, scopes, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC'
   ).all(req.params.id);
   res.json(rows.map(r => ({
     id: r.id,
     name: r.name,
+    scopes: String(r.scopes || 'read').split(',').filter(Boolean),
     createdAt: r.created_at,
     expiresAt: r.expires_at,
     lastUsedAt: r.last_used_at,
@@ -375,8 +396,9 @@ router.post('/users/:id/unlock', pUsers, (req, res) => {
 
 router.put('/users/:id/username', pUsers, (req, res) => {
   if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
-  const { username } = req.body;
-  if (!username) return res.status(400).json({ error: 'Username required' });
+  let username;
+  try { username = validateUsername(req.body?.username); }
+  catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const previous = db.prepare('SELECT username FROM users WHERE id = ?').get(req.params.id);
   try {
     db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, req.params.id);
@@ -401,8 +423,9 @@ function retagUserVms(userId, previousUsername) {
 
 router.put('/users/:id/password', pUsers, (req, res) => {
   if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
-  const { password } = req.body;
-  if (!password) return res.status(400).json({ error: 'Password required' });
+  let password;
+  try { password = validatePassword(req.body?.password); }
+  catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const hash = bcrypt.hashSync(password, 10);
   db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hash, req.params.id);
   logAudit(req, 'admin_reset_password', req.params.id, '');
@@ -1407,7 +1430,15 @@ router.get('/pve-hosts/:id/status', pHosts, async (req, res) => {
 });
 
 router.post('/pve-hosts', pHosts, (req, res) => {
-  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls = true } = req.body;
+  let name, host, port;
+  const { tokenId, tokenSecret, verifyTls = true } = req.body;
+  try {
+    name = boundedString(req.body?.name, { field: 'name', min: 1, max: 80 });
+    host = validateHost(req.body?.host);
+    port = validatePort(req.body?.port ?? 8006);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, code: err.code, field: err.field });
+  }
   if (!name || !host || !tokenId || !tokenSecret) {
     return res.status(400).json({ error: 'Name, host, tokenId and tokenSecret are required' });
   }
@@ -1427,6 +1458,7 @@ router.post('/pve-hosts', pHosts, (req, res) => {
         sshAuthType === 'password' ? 'password' : 'key', encryptSecret(sshSecret), r.lastInsertRowid
       );
     }
+    logAudit(req, 'pve_host_created', String(r.lastInsertRowid), `name=${name}; host=${host}; port=${port}; tls=${verifyTls ? 'verify' : 'insecure'}`);
     res.json({ id: r.lastInsertRowid, name, host, port });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -1434,7 +1466,17 @@ router.post('/pve-hosts', pHosts, (req, res) => {
 });
 
 router.put('/pve-hosts/:id', pHosts, (req, res) => {
-  const { name, host, port = 8006, tokenId, tokenSecret, verifyTls, sshHost, sshPort, sshUser, sshAuthType, sshSecret } = req.body;
+  let name, host, port;
+  const { tokenId, tokenSecret, verifyTls, sshHost, sshPort, sshUser, sshAuthType, sshSecret } = req.body;
+  try {
+    name = boundedString(req.body?.name, { field: 'name', min: 1, max: 80 });
+    host = validateHost(req.body?.host);
+    port = validatePort(req.body?.port ?? 8006);
+    if (sshHost) validateHost(sshHost);
+    if (sshPort !== undefined) validatePort(sshPort);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, code: err.code, field: err.field });
+  }
   if (!name || !host || !tokenId) {
     return res.status(400).json({ error: 'Name, host and tokenId are required' });
   }
@@ -1469,7 +1511,13 @@ router.put('/pve-hosts/:id', pHosts, (req, res) => {
       );
     }
   }
+  logAudit(req, 'pve_host_updated', String(req.params.id), `name=${name}; host=${host}; port=${port}; tls=${verifyTlsEnabled ? 'verify' : 'insecure'}`);
   res.json({ ok: true });
+});
+
+router.get('/pve-hosts/:id/dependencies', pHosts, (req, res) => {
+  if (!getHost(Number.parseInt(req.params.id, 10))) return res.status(404).json({ error: 'Host not found' });
+  res.json(pveHostDependencies(req.params.id));
 });
 
 router.delete('/pve-hosts/:id', pHosts, (req, res) => {
@@ -1477,8 +1525,18 @@ router.delete('/pve-hosts/:id', pHosts, (req, res) => {
   if (count.count <= 1) {
     return res.status(400).json({ error: 'Cannot delete the last host' });
   }
-  db.prepare('DELETE FROM pve_hosts WHERE id = ?').run(req.params.id);
-  res.json({ ok: true });
+  const host = getHost(Number.parseInt(req.params.id, 10));
+  if (!host) return res.status(404).json({ error: 'Host not found' });
+  try {
+    deletePveHost(req.params.id);
+    logAudit(req, 'pve_host_deleted', String(req.params.id), `name=${host.name}; host=${host.host}`);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.code === 'PVE_HOST_HAS_DEPENDENCIES') {
+      return res.status(409).json({ error: err.message, code: err.code, ...err.report });
+    }
+    throw err;
+  }
 });
 
 // ─── Storage pool exposure ───────────────────────────────────────────────────
@@ -1767,6 +1825,7 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const { runId, outputs, artifacts } = await runBundle({
           bundle, context, client, firewall: fw,
           subjectType: 'vlan', subjectId: vlan.id, subjectLabel: `VLAN ${vlan.tag} (${vlan.name})`,
+          requestId: req.requestId || '',
         });
         // Derive the legacy sync columns from step outputs generically so a
         // renamed/reordered workflow still populates them. Artifacts (stored
@@ -1977,6 +2036,7 @@ router.post('/policies', pPolicies, async (req, res) => {
       bundle, context, client, firewall: fw,
       subjectType: 'policy', subjectId: `${srcVlan.interface_name}->${dstVlan.interface_name}`,
       subjectLabel: `${srcVlan.interface_name} → ${dstVlan.interface_name}`,
+      requestId: req.requestId || '',
     });
     const policyIds = [outputs.forward?.policyId, outputs.reverse?.policyId].filter((v) => v !== undefined && v !== null);
 
@@ -2727,6 +2787,7 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
     const { runId, outputs, artifacts } = await runBundle({
       bundle, context, client, firewall: fw,
       subjectType: 'port_forward', subjectId: name, subjectLabel: name,
+      requestId: req.requestId || '',
     });
     policyId = outputs.policy_root?.policyId ?? null;
     labPolicyId = outputs.policy_lab?.policyId ?? null;

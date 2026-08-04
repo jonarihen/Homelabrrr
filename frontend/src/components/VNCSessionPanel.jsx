@@ -10,7 +10,7 @@ import {
 // Preload noVNC RFB module so it's cached before we request a VNC ticket.
 // Proxmox VNC proxies time out quickly (~10s), so the import must not delay
 // the WebSocket connection.
-const rfbModulePromise = import('@novnc/novnc/lib/rfb.js');
+const rfbModulePromise = import('@novnc/novnc');
 
 function forceFullRefresh(rfb) {
   if (!rfb) return;
@@ -60,7 +60,7 @@ export default function VNCSessionPanel({ vm, visible = true }) {
         const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
         const wsUrl = `${proto}://${window.location.host}/api/vnc`;
 
-        console.log('[VNC] creating RFB →', wsUrl, 'token:', data.token?.slice(0, 8));
+        console.log('[VNC] creating authenticated RFB session');
 
         const rfb = new RFB(containerRef.current, wsUrl, {
           credentials: { password: data.ticket },

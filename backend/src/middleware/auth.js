@@ -1,4 +1,5 @@
 import { userHasPermission } from '../utils/permissions.js';
+import { logAudit } from '../utils/audit.js';
 
 export function requireAuth(req, res, next) {
   if (!req.session?.userId) {
@@ -14,7 +15,25 @@ export function requireAuth(req, res, next) {
  */
 export function requireInteractiveSession(req, res, next) {
   if (req.apiToken) {
+    logAudit(req, 'api_token_interactive_operation_denied', String(req.originalUrl || req.path).split('?')[0], 'interactive session required');
     return res.status(403).json({ error: 'This operation requires an interactive session and cannot be performed with an API token' });
+  }
+  next();
+}
+
+export function requireRecentReauthentication(req, res, next) {
+  if (req.apiToken) {
+    logAudit(req, 'api_token_interactive_operation_denied', String(req.originalUrl || req.path).split('?')[0], 'recent reauthentication required');
+    return res.status(403).json({ error: 'This operation requires an interactive session' });
+  }
+  const maxAgeMs = 15 * 60 * 1000;
+  const reauthenticatedAt = Number(req.session?.reauthenticatedAt || 0);
+  if (!reauthenticatedAt || Date.now() - reauthenticatedAt > maxAgeMs) {
+    logAudit(req, 'recent_reauthentication_required', String(req.originalUrl || req.path).split('?')[0], 'sensitive operation denied');
+    return res.status(403).json({
+      error: 'Please confirm your password and second factor before continuing',
+      code: 'REAUTHENTICATION_REQUIRED',
+    });
   }
   next();
 }

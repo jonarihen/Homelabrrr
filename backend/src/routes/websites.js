@@ -455,6 +455,11 @@ reconcileTimer.unref?.();
 const reconcileStartTimer = setTimeout(() => { websiteMaintenanceTick(); }, RECONCILE_START_DELAY_MS);
 reconcileStartTimer.unref?.();
 
+export function stopWebsiteMaintenance() {
+  clearInterval(reconcileTimer);
+  clearTimeout(reconcileStartTimer);
+}
+
 // ─── The end-to-end publish flow (runs in the background) ──────────────────────
 
 const CERT_POLL_ATTEMPTS = 30;

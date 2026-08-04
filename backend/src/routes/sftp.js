@@ -9,8 +9,13 @@ import { nodeLookupCandidates } from '../utils/nodeRef.js';
 import { normalizeSshHostFingerprint } from '../utils/sshHostKey.js';
 import { decryptSecret } from '../utils/secrets.js';
 import { sanitizeError } from '../utils/sanitize.js';
-import { errorPayload, sendError } from '../utils/httpError.js';
+import { errorPayload } from '../utils/httpError.js';
 import { createSshConnection } from '../utils/sshConnect.js';
+import { authorizeSshTarget, sshConnectionRateLimited } from '../services/sshTargetPolicy.js';
+import { logAudit } from '../utils/audit.js';
+import { sftpClientError } from '../utils/sftpError.js';
+import { log } from '../utils/logger.js';
+import { boundedString } from '../utils/validation.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -21,9 +26,17 @@ router.use(requireAuth);
  * send. Same contract as sendError() otherwise; the raw SSH string stays in the
  * log because a translated payload no longer carries it.
  */
-function uploadFailure(err) {
-  console.error('SFTP upload failed:', err?.message || err);
-  return errorPayload(err, 500);
+function uploadFailure(req, err) {
+  const { status: _status, ...payload } = sftpClientError(err);
+  log('error', 'sftp_upload_failed', { requestId: req.requestId, code: payload.code, errorName: err?.name || 'Error' });
+  return { ...payload, requestId: req.requestId };
+}
+
+function sendSftpError(req, res, err) {
+  if (err?.status && err.status < 500) return res.status(err.status).json(errorPayload(err, err.status));
+  const { status, ...payload } = sftpClientError(err);
+  log('error', 'sftp_operation_failed', { requestId: req.requestId, code: payload.code, errorName: err?.name || 'Error' });
+  return res.status(status).json({ ...payload, requestId: req.requestId });
 }
 
 // ─── SFTP session store ─────────────────────────────────────────────────────
@@ -31,6 +44,11 @@ function uploadFailure(err) {
 export const sftpSessions = new Map();
 
 const TOKEN_TTL = 30 * 60 * 1000; // 30 minutes
+
+function pathAuditMetadata(value) {
+  const depth = String(value || '').split('/').filter(Boolean).length;
+  return `pathDepth=${Math.min(depth, 100)}`;
+}
 
 function purgeExpired() {
   const now = Date.now();
@@ -98,7 +116,7 @@ async function openSftp(sess) {
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 /** Create an SFTP session token. */
-router.post('/connect', (req, res) => {
+router.post('/connect', async (req, res) => {
   const { node, vmid, keyId, passphrase = '' } = req.body;
   if (!node || !vmid || !keyId) {
     return res.status(400).json({ error: 'node, vmid, and keyId are required' });
@@ -121,14 +139,28 @@ router.post('/connect', (req, res) => {
     return res.status(400).json({ error: 'SSH host fingerprint is not configured for this VM' });
   }
 
+  if (sshConnectionRateLimited(req.session.userId, 'sftp-connect', 30)) {
+    return res.status(429).json({ error: 'Too many SFTP connection attempts — try again in a minute' });
+  }
+
+  let target;
+  try {
+    target = await authorizeSshTarget({
+      userId: req.session.userId, isAdmin: req.session.isAdmin, node, vmid,
+      host: global.host, port: global.port || 22,
+    });
+  } catch (err) { return sendSftpError(req, res, err); }
+
   purgeExpired();
 
   const token = uuidv4();
   sftpSessions.set(token, {
     userId: req.session.userId,
     sessionId: req.sessionID,
-    host: global.host,
-    port: global.port || 22,
+    node,
+    vmid,
+    host: target.host,
+    port: target.port,
     username: userRow?.username || 'root',
     hostFingerprint: normalizeSshHostFingerprint(global.host_fingerprint),
     privateKey: decryptSecret(key.private_key),
@@ -136,6 +168,7 @@ router.post('/connect', (req, res) => {
     expires: Date.now() + TOKEN_TTL,
   });
 
+  logAudit(req, 'sftp_session_created', `${node}/${vmid}`, `port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
   res.json({ token });
 });
 
@@ -175,7 +208,7 @@ router.post('/ls', async (req, res) => {
 
     res.json({ path: resolvedPath, entries });
   } catch (err) {
-    sendError(res, err);
+    sendSftpError(req, res, err);
   } finally {
     conn?.end();
   }
@@ -212,7 +245,7 @@ router.get('/download', async (req, res) => {
 
     stream.on('error', (err) => {
       if (!res.headersSent) {
-        sendError(res, err);
+        sendSftpError(req, res, err);
       } else {
         console.error('SFTP download failed mid-stream:', err?.message || err);
       }
@@ -222,7 +255,7 @@ router.get('/download', async (req, res) => {
     stream.on('end', () => conn.end());
   } catch (err) {
     if (!res.headersSent) {
-      sendError(res, err);
+      sendSftpError(req, res, err);
     } else {
       console.error('SFTP download failed:', err?.message || err);
     }
@@ -265,6 +298,8 @@ router.post('/upload', (req, res) => {
   const succeed = (body) => settle(() => {
     conn?.end();
     conn = null;
+    const sess = resolveSession(fields.token);
+    if (sess) logAudit(req, 'sftp_upload', `${sess.node}/${sess.vmid}`, `${pathAuditMetadata(body.path)}; bytes=${body.size}`);
     if (!res.headersSent && res.writable) res.json(body);
   });
 
@@ -324,14 +359,14 @@ router.post('/upload', (req, res) => {
       // `fail` settles synchronously, so the 'close' that destroy() triggers
       // can no longer be mistaken for a completed upload.
       fileStream.on('error', (err) => {
-        fail(500, uploadFailure(err));
+        fail(500, uploadFailure(req, err));
         writeStream.destroy();
       });
-      writeStream.on('error', (err) => fail(500, uploadFailure(err)));
+      writeStream.on('error', (err) => fail(500, uploadFailure(req, err)));
       writeStream.on('close', () => succeed({ ok: true, path: remotePath, size: bytes }));
 
       fileStream.pipe(writeStream);
-    }).catch((err) => fail(500, uploadFailure(err)));
+    }).catch((err) => fail(500, uploadFailure(req, err)));
   });
 
   // A malformed multipart body — busboy's own text, not upstream, but there is
@@ -362,9 +397,10 @@ router.post('/mkdir', async (req, res) => {
       sftp.mkdir(dirPath, (err) => (err ? reject(err) : resolve()));
     });
 
+    logAudit(req, 'sftp_mkdir', `${sess.node}/${sess.vmid}`, pathAuditMetadata(dirPath));
     res.json({ ok: true });
   } catch (err) {
-    sendError(res, err);
+    sendSftpError(req, res, err);
   } finally {
     conn?.end();
   }
@@ -387,9 +423,37 @@ router.post('/delete', async (req, res) => {
       op(targetPath, (err) => (err ? reject(err) : resolve()));
     });
 
+    logAudit(req, isDirectory ? 'sftp_rmdir' : 'sftp_delete', `${sess.node}/${sess.vmid}`, pathAuditMetadata(targetPath));
     res.json({ ok: true });
   } catch (err) {
-    sendError(res, err);
+    sendSftpError(req, res, err);
+  } finally {
+    conn?.end();
+  }
+});
+
+/** Rename a remote file or directory within its current directory. */
+router.post('/rename', async (req, res) => {
+  const { token, path: sourcePath } = req.body || {};
+  const sess = resolveSession(token);
+  if (!sess) return res.status(401).json({ error: 'SFTP session expired or invalid' });
+  if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
+  let name;
+  try {
+    name = boundedString(req.body?.name, { field: 'name', min: 1, max: 255 });
+    if (name !== basename(name) || ['.', '..'].includes(name)) throw new Error('name must not contain a path');
+  } catch (err) { return res.status(400).json({ error: err.message }); }
+  if (!sourcePath) return res.status(400).json({ error: 'path is required' });
+  const targetPath = posix.join(posix.dirname(sourcePath), name);
+
+  let conn, sftp;
+  try {
+    ({ conn, sftp } = await openSftp(sess));
+    await new Promise((resolve, reject) => sftp.rename(sourcePath, targetPath, (err) => (err ? reject(err) : resolve())));
+    logAudit(req, 'sftp_rename', `${sess.node}/${sess.vmid}`, `${pathAuditMetadata(sourcePath)}; sameDirectory=true`);
+    res.json({ ok: true });
+  } catch (err) {
+    sendSftpError(req, res, err);
   } finally {
     conn?.end();
   }

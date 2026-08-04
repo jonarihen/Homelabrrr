@@ -3,6 +3,7 @@ import Layout from '../components/Layout.jsx';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
+import AccountSecuritySection from '../components/account/AccountSecuritySection.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 
@@ -45,6 +46,7 @@ export default function AccountPage() {
           </>
         )}
         <TwoFactorSection user={user} setUser={setUser} />
+        {!enrollmentOnly && <AccountSecuritySection />}
         {!enrollmentOnly && <NotificationsSection />}
         {!enrollmentOnly && <ConnectionSection />}
         {!enrollmentOnly && <ApiTokensSection />}
@@ -143,11 +145,11 @@ function PasswordSection() {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-gray-500 mb-1.5 font-medium">New Password</label>
-            <input type="password" required value={form.newPassword} onChange={e => setForm(f => ({ ...f, newPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
+            <input type="password" required minLength={12} value={form.newPassword} onChange={e => setForm(f => ({ ...f, newPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1.5 font-medium">Confirm Password</label>
-            <input type="password" required value={form.confirmPassword} onChange={e => setForm(f => ({ ...f, confirmPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
+            <input type="password" required minLength={12} value={form.confirmPassword} onChange={e => setForm(f => ({ ...f, confirmPassword: e.target.value }))} className={inputCls} autoComplete="new-password" />
           </div>
         </div>
         {msg && <p className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
@@ -480,6 +482,7 @@ function fmtDate(v) {
 }
 
 function ApiTokensSection() {
+  const { user } = useAuth();
   const [tokens, setTokens] = useState([]);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState('');
@@ -488,6 +491,7 @@ function ApiTokensSection() {
   const [newToken, setNewToken] = useState(''); // plaintext, shown once
   const [copied, setCopied] = useState(false);
   const [msg, setMsg] = useState('');
+  const [scopes, setScopes] = useState(['read']);
 
   const load = async () => {
     try {
@@ -509,10 +513,11 @@ function ApiTokensSection() {
       const { data } = await api.post('/auth/tokens', {
         name: name.trim(),
         expiresInDays: expiry === '' ? null : Number(expiry),
+        scopes,
       });
       setNewToken(data.token);
       setCopied(false);
-      setName(''); setExpiry('');
+      setName(''); setExpiry(''); setScopes(['read']);
       load();
     } catch (e) {
       setMsg('error:' + (e.response?.data?.error || 'Failed to create token'));
@@ -559,7 +564,7 @@ function ApiTokensSection() {
       </div>
 
       <p className="text-xs text-gray-500">
-        A token acts as you, with exactly your permissions and VM access. Send it as
+        A token is limited by both the scopes selected here and your live permissions. Send it as
         <code className="mx-1 px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 font-mono text-[11px]">Authorization: Bearer &lt;token&gt;</code>.
         Tokens cannot manage tokens, passwords, or 2FA.
       </p>
@@ -585,7 +590,8 @@ function ApiTokensSection() {
       )}
 
       {/* Create form */}
-      <form onSubmit={create} className="flex flex-col sm:flex-row sm:items-end gap-3 border-t border-gray-800 pt-4">
+      <form onSubmit={create} className="space-y-3 border-t border-gray-800 pt-4">
+        <div className="flex flex-col sm:flex-row sm:items-end gap-3">
         <div className="flex-1">
           <label htmlFor="token-name" className="block text-xs text-gray-500 mb-1.5 font-medium">Token name</label>
           <input
@@ -617,6 +623,16 @@ function ApiTokensSection() {
         >
           {creating ? 'Creating...' : 'Create Token'}
         </button>
+        </div>
+        <fieldset className="flex flex-wrap gap-3">
+          <legend className="text-xs text-gray-500 mb-2">Scopes</legend>
+          {[
+            ['read', 'Read data'],
+            ['vm:operate', 'Operate VMs'],
+            ['infrastructure:write', 'Infrastructure writes'],
+            ...(user?.isAdmin ? [['admin', 'Admin API']] : []),
+          ].map(([value, label]) => <label key={value} className="text-xs text-gray-300 flex items-center gap-1.5"><input type="checkbox" checked={scopes.includes(value)} disabled={value === 'read'} onChange={(event) => setScopes((current) => event.target.checked ? [...current, value] : current.filter((scope) => scope !== value))} />{label}</label>)}
+        </fieldset>
       </form>
 
       {msg && <p role={isError ? 'alert' : 'status'} aria-live={isError ? undefined : 'polite'} className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
@@ -641,6 +657,7 @@ function ApiTokensSection() {
                   <p className="text-[11px] text-gray-500 mt-0.5">
                     Created {fmtDate(t.createdAt)} · Expires {t.expiresAt ? fmtDate(t.expiresAt) : 'never'} · Last used {fmtDate(t.lastUsedAt)}
                   </p>
+                  <p className="text-[10px] text-blue-400 mt-1">{(t.scopes || ['read']).join(' · ')}</p>
                 </div>
                 <button
                   onClick={() => revoke(t)}

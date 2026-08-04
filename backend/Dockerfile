@@ -1,9 +1,12 @@
-FROM node:20-alpine
+FROM node:24.17.0-alpine3.24
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev && apk add --no-cache putty su-exec
+RUN apk add --no-cache --virtual .native-build python3 make g++ \
+ && npm ci --omit=dev \
+ && apk del .native-build \
+ && apk add --no-cache putty su-exec
 
 COPY src ./src
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

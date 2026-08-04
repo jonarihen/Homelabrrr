@@ -2,13 +2,15 @@ import db from '../db.js';
 
 // Low-level insert — used by request-scoped logAudit and by background jobs that
 // have no `req` (e.g. the tag-sync scheduler).
-export function logAuditEntry({ userId = null, username = 'system', action, target = '', detail = '', ip = '' }) {
+export function logAuditEntry({
+  userId = null, username = 'system', action, target = '', detail = '', ip = '', requestId = '', outcome = 'success',
+}) {
   db.prepare(
-    'INSERT INTO audit_log (user_id, username, action, target, ip, detail) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(userId, username, action, target, ip, detail);
+    'INSERT INTO audit_log (user_id, username, action, target, ip, detail, request_id, outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(userId, username, action, target, ip, detail, requestId, outcome);
 }
 
-export function logAudit(req, action, target = '', detail = '') {
+export function logAudit(req, action, target = '', detail = '', outcome = 'success') {
   let username = req.session?.username || 'anonymous';
   // Attribute token-authenticated requests so scripted actions are traceable
   // to the specific personal API token that made them.
@@ -22,5 +24,7 @@ export function logAudit(req, action, target = '', detail = '') {
     target,
     detail,
     ip: req.ip || req.socket?.remoteAddress || '',
+    requestId: req.requestId || '',
+    outcome,
   });
 }

@@ -8,7 +8,7 @@
 // Run with:  node --test src/utils/navSections.test.js   (from frontend/)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ADMIN_ONLY, NAV_SECTIONS, makeCan, visibleSections } from './navSections.js';
+import { ADMIN_ONLY, NAV_SECTIONS, adminRoutePermissions, makeCan, visibleSections } from './navSections.js';
 
 // Every granular permission the sidebar knows about, straight from the model.
 const ALL_PERMS = [...new Set(
@@ -35,7 +35,7 @@ test('a user with no permissions at all sees no admin sections', () => {
 test('an admin sees every section and every link, admin-only children included', () => {
   const sections = visibleSections(canFrom(user({}, true)));
   assert.deepEqual(shape(sections), [
-    ['Infrastructure', ['PVE Hosts', 'Firewalls', 'Workflows', 'Templates', 'VM Leases']],
+    ['Infrastructure', ['PVE Hosts', 'Operations', 'Firewalls', 'Workflows', 'Templates', 'VM Leases']],
     ['Networking', ['VLANs', 'Policies', 'Port Forwarding', 'Websites', 'Assignments']],
     ['Access', ['Users', 'Roles', 'Notifications', 'Audit Log']],
   ]);
@@ -51,7 +51,7 @@ test('admin-only links stay hidden from every granular grant', () => {
   assert.equal(labels.includes('Notifications'), false);
   // ...but everything else is there, in order.
   assert.deepEqual(shape(sections), [
-    ['Infrastructure', ['PVE Hosts', 'Firewalls', 'Workflows', 'Templates']],
+    ['Infrastructure', ['PVE Hosts', 'Operations', 'Firewalls', 'Workflows', 'Templates']],
     ['Networking', ['VLANs', 'Policies', 'Port Forwarding', 'Websites', 'Assignments']],
     ['Access', ['Users', 'Roles', 'Audit Log']],
   ]);
@@ -92,6 +92,11 @@ test('visibleSections does not mutate the shared model', () => {
   visibleSections(canFrom(user({ canManageUsers: true })));
   visibleSections(canFrom(user({}, true)));
   assert.equal(JSON.stringify(NAV_SECTIONS), before);
+});
+
+test('route guards use the same permission source as navigation', () => {
+  assert.deepEqual(adminRoutePermissions('/admin/operations'), ['canManageHosts']);
+  assert.deepEqual(adminRoutePermissions('/admin/users'), ['canManageUsers']);
 });
 
 // --- exhaustive invariants over every permission combination ----------------
@@ -172,7 +177,9 @@ test('behavior is unchanged except where the old section gate swallowed Port For
   let fixed = 0;
   for (const u of [...everyGrantCombination().map((p) => user(p)), user({}, true)]) {
     const legacy = legacySidebar(u);
-    const next = shape(visibleSections(makeCan(u)));
+    const next = shape(visibleSections(makeCan(u)))
+      .map(([section, links]) => [section, links.filter((label) => label !== 'Operations')])
+      .filter(([, links]) => links.length > 0);
     const p = u.permissions;
     const legacyHidNetworking = !(p.canManageVlans || p.canManagePolicies || p.canManageAssignments || p.canManageWebsites) && !u.isAdmin;
     const mayForward = !!(p.canManageFirewalls || p.canManagePortForwards);

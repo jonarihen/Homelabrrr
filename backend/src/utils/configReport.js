@@ -48,6 +48,34 @@ export const OPTIONAL_ENV_VARS = [
     unsetNote: 'CORS is not enabled and websocket upgrades fall back to same-origin checks',
   },
   {
+    name: 'SECRET_ENCRYPTION_KEY_ID',
+    defaultValue: 'primary',
+    effect: 'identifier embedded in newly encrypted secret values',
+  },
+  {
+    name: 'SECRET_ENCRYPTION_PREVIOUS_KEYS',
+    defaultValue: null,
+    effect: 'legacy decryption keyring used during key rotation',
+    secret: true,
+  },
+  {
+    name: 'WEBAUTHN_RP_ID',
+    defaultValue: null,
+    effect: 'WebAuthn relying-party hostname',
+    unsetNote: 'derived from WEBAUTHN_ORIGIN or ALLOWED_ORIGIN',
+  },
+  {
+    name: 'WEBAUTHN_ORIGIN',
+    defaultValue: null,
+    effect: 'exact browser origin accepted for passkeys',
+    unsetNote: 'falls back to ALLOWED_ORIGIN',
+  },
+  {
+    name: 'WEBAUTHN_RP_NAME',
+    defaultValue: 'Homelabrrr',
+    effect: 'display name shown by passkey authenticators',
+  },
+  {
     name: 'COOKIE_SECURE',
     defaultValue: 'true',
     effect: 'marks session cookies Secure; only set false for plain-HTTP dev',
@@ -93,6 +121,42 @@ export const OPTIONAL_ENV_VARS = [
     name: 'VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS',
     defaultValue: '120000',
     effect: 'grace period a scheduled shutdown waits before the hard-stop fallback',
+  },
+  {
+    name: 'AUDIT_RETENTION_DAYS',
+    defaultValue: '365',
+    effect: 'retention window for security audit records',
+  },
+  {
+    name: 'JOB_RETENTION_DAYS',
+    defaultValue: '90',
+    effect: 'retention window for terminal operational jobs',
+  },
+  {
+    name: 'BACKUP_DIR',
+    defaultValue: '/app/backups',
+    effect: 'directory for encrypted SQLite backups',
+  },
+  {
+    name: 'BACKUP_OFFSITE_DIR',
+    fallback: '/app/backups-offsite',
+    effect: 'separately mounted destination that receives and verifies the disaster-recovery copy',
+  },
+  {
+    name: 'BACKUP_ENCRYPTION_KEY',
+    defaultValue: null,
+    effect: 'separate passphrase for encrypted database backups',
+    secret: true,
+  },
+  {
+    name: 'BACKUP_RETENTION_DAYS',
+    defaultValue: '14',
+    effect: 'retention window for verified encrypted backups',
+  },
+  {
+    name: 'BACKUP_INTERVAL_MS',
+    defaultValue: '86400000',
+    effect: 'scheduled encrypted backup interval',
   },
   {
     name: 'INITIAL_ADMIN_USERNAME',
