@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveErrorStatus, hasHttpStatus, errorPayload, sendError, httpError, tagStatus,
+  isPortalAuthoredError,
 } from './httpError.js';
 
 const withStatusCode = (code, message = 'boom') => Object.assign(new Error(message), { statusCode: code });
@@ -87,6 +88,48 @@ test('an upstream-reflected status is never forwarded to the browser', () => {
   }
 });
 
+// ─── Authorship: the one check that decides whether text is shown verbatim ───
+
+test('an explicit 4xx marks an error as portal-authored, on either property', () => {
+  for (const status of [400, 403, 404, 409, 423, 499]) {
+    assert.equal(isPortalAuthoredError(withStatus(status)), true, `status ${status}`);
+    assert.equal(isPortalAuthoredError(withStatusCode(status)), true, `statusCode ${status}`);
+  }
+});
+
+test('the portal-side guards that already exist are recognised', () => {
+  // Exactly the shapes utils/capacity.js, utils/quota.js, utils/cpuTopology.js,
+  // utils/nodeMaintenance.js and utils/storageVisibility.js throw.
+  const shapes = [
+    Object.assign(new Error('capacity'), { status: 400 }),
+    Object.assign(new Error('quota'), { status: 403 }),
+    Object.assign(new Error('storage not exposed'), { status: 403 }),
+    Object.assign(new Error('node in maintenance'), { status: 423 }),
+    httpError(400, 'from the factory'),
+  ];
+  for (const err of shapes) assert.equal(isPortalAuthoredError(err), true, err.message);
+});
+
+test('expose:false beats a 4xx status — that is what makes statusCode safe to read', () => {
+  // fortigate.js and utils/caddy.js reflect the *remote* status onto the error.
+  // Reading statusCode is only sound because they opt out here.
+  for (const code of [400, 401, 403, 404]) {
+    const err = Object.assign(new Error('FortiGate API error'), { statusCode: code, expose: false });
+    assert.equal(isPortalAuthoredError(err), false, String(code));
+  }
+});
+
+test('nothing else counts as portal-authored', () => {
+  for (const input of [null, undefined, '', 'a string', 42, {}, new Error('plain')]) {
+    assert.equal(isPortalAuthoredError(input), false, String(input));
+  }
+  // A 5xx is upstream text until proven otherwise, and a non-status is not a status.
+  assert.equal(isPortalAuthoredError(withStatus(503)), false);
+  assert.equal(isPortalAuthoredError(withStatus('running')), false);
+  assert.equal(isPortalAuthoredError(withStatus(200)), false);
+  assert.equal(isPortalAuthoredError(withStatusCode(400.5)), false);
+});
+
 // ─── Payload building ────────────────────────────────────────────────────────
 
 test('a 4xx message keeps an IPv4 literal verbatim', () => {
@@ -96,9 +139,18 @@ test('a 4xx message keeps an IPv4 literal verbatim', () => {
   });
 });
 
-test('a 500 message still has its IPv4 literal redacted', () => {
-  const err = new Error('connect ECONNREFUSED 10.20.30.40:8006');
-  assert.deepEqual(errorPayload(err), { error: 'connect ECONNREFUSED [internal-host]' });
+test('a 500 message never carries an IPv4 literal through', () => {
+  // ECONNREFUSED is now a recognised failure, so the body is the translated
+  // shape rather than the redacted string — but the address is gone either way,
+  // which is the property that matters.
+  const body = errorPayload(new Error('connect ECONNREFUSED 10.20.30.40:8006'));
+  assert.doesNotMatch(JSON.stringify(body), /10\.20\.30\.40/);
+  assert.match(body.title, /unreachable/i);
+});
+
+test('an unrecognised 500 message still comes back as the redacted string alone', () => {
+  const err = new Error('Proxmox GET /nodes → 500: mystery at 10.20.30.40');
+  assert.deepEqual(errorPayload(err), { error: 'Proxmox GET /nodes → 500: mystery at [internal-host]' });
 });
 
 test('a 5xx message is sanitized even when explicitly tagged', () => {
@@ -151,6 +203,55 @@ test('sendError honours the status alias used by capacity/quota helpers', () => 
   sendError(res, withStatus(403, 'Quota exceeded: 8 cores requested, 2 remaining'));
   assert.equal(res.calls.status, 403);
   assert.deepEqual(res.calls.body, { error: 'Quota exceeded: 8 cores requested, 2 remaining' });
+});
+
+// ─── Composition with the translation layer (utils/upstreamError.js) ─────────
+
+test('a recognised upstream failure is answered in the portal\'s own words', () => {
+  const res = fakeRes();
+  sendError(res, new Error(
+    'Proxmox POST /nodes/pve1/qemu/105/status/start → 500: '
+    + '{"data":null,"errors":{"":"volume \'local-lvm:vm-105-disk-0\' does not exist"}}',
+  ));
+  assert.equal(res.calls.status, 500);
+  assert.match(res.calls.body.title, /disk is missing/i);
+  assert.match(res.calls.body.detail, /local-lvm/);
+  assert.equal(typeof res.calls.body.action, 'string');
+  // The legacy string field is always present for the unconverted call sites.
+  assert.equal(typeof res.calls.body.error, 'string');
+  // And the raw blob is not handed back.
+  assert.doesNotMatch(JSON.stringify(res.calls.body), /api2|\{"data"/);
+});
+
+test('status resolution and translation compose: a tagged 503 still gets translated', () => {
+  // The provisioning routes tag "globally unique VMID" failures 503; the body
+  // is still built by the translation layer, not by a second helper.
+  const err = tagStatus(new Error('Could not allocate a globally unique VMID: connect ECONNREFUSED 10.0.0.5:8006'), 503);
+  const res = fakeRes();
+  sendError(res, err);
+  assert.equal(res.calls.status, 503);
+  assert.match(res.calls.body.title, /unreachable/i);
+  assert.doesNotMatch(JSON.stringify(res.calls.body), /10\.0\.0\.5/);
+});
+
+test('translation never overrides portal-authored prose', () => {
+  // This message contains ECONNREFUSED, which the translation table matches —
+  // but the portal wrote it, so it must survive word for word.
+  const err = httpError(400, 'Your test harness reported ECONNREFUSED — check the VM, not the host');
+  assert.deepEqual(errorPayload(err), {
+    error: 'Your test harness reported ECONNREFUSED — check the VM, not the host',
+  });
+});
+
+test('the host label the Proxmox client attaches reaches the message', () => {
+  const err = Object.assign(new Error('connect ECONNREFUSED 10.0.0.5:8006'), {
+    upstreamHost: 'pve-cluster-a',
+    upstreamHref: '/admin/hosts',
+  });
+  const body = errorPayload(err);
+  assert.match(body.detail, /pve-cluster-a/);
+  assert.equal(body.href, '/admin/hosts');
+  assert.doesNotMatch(JSON.stringify(body), /10\.0\.0\.5/);
 });
 
 // ─── Factories ───────────────────────────────────────────────────────────────

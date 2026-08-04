@@ -2,12 +2,14 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import PrereqCallout from '../components/PrereqCallout.jsx';
+import ErrorCallout from '../components/ErrorCallout.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
 import { toPveVmName } from '../utils/vmName.js';
 import { isUsableKey, unusableKeyReason, cloudInitLoginMissing, NO_LOGIN_MESSAGE, NO_PUBLIC_KEY_LABEL } from '../utils/cloudInitCredentials.js';
+import { normalizeApiError } from '../utils/apiError.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-all ${active ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`;
@@ -578,7 +580,7 @@ function CloudImageForm({ onStarted }) {
       });
       onStarted({ id: r.data.id, nodeRef: routeNode(r.data), vmid: r.data.vmid, name: form.name });
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to create VM');
+      setError(normalizeApiError(e, 'Failed to create VM'));
     } finally { setSaving(false); }
   };
 
@@ -787,7 +789,7 @@ function CloudImageForm({ onStarted }) {
             Start the VM after deployment
           </label>
 
-          {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+          {error && <ErrorCallout error={error} />}
 
           <button
             type="submit"
@@ -886,7 +888,7 @@ function CloneForm({ onStarted }) {
       });
       onStarted({ id: r.data.id, nodeRef: routeNode(r.data), vmid: r.data.vmid, name: form.name });
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to create VM');
+      setError(normalizeApiError(e, 'Failed to create VM'));
     } finally { setSaving(false); }
   };
 
@@ -1057,7 +1059,7 @@ function CloneForm({ onStarted }) {
             />
           </div>
 
-          {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+          {error && <ErrorCallout error={error} />}
 
           <button
             type="submit"
@@ -1149,7 +1151,7 @@ function CreateForm({ onStarted }) {
       });
       onStarted({ id: r.data.id, nodeRef: routeNode(r.data), vmid: r.data.vmid, name: form.name });
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to create VM');
+      setError(normalizeApiError(e, 'Failed to create VM'));
     } finally { setSaving(false); }
   };
 
@@ -1303,7 +1305,7 @@ function CreateForm({ onStarted }) {
           <textarea value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} className={`${inputCls} h-16 resize-none`} placeholder="What's this VM for?" />
         </div>
 
-        {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
+        {error && <ErrorCallout error={error} />}
 
         <button type="submit" disabled={saving || !form.node || !form.name} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20">
           {saving ? 'Creating VM...' : 'Create VM'}

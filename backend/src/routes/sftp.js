@@ -9,10 +9,22 @@ import { nodeLookupCandidates } from '../utils/nodeRef.js';
 import { normalizeSshHostFingerprint } from '../utils/sshHostKey.js';
 import { decryptSecret } from '../utils/secrets.js';
 import { sanitizeError } from '../utils/sanitize.js';
+import { errorPayload, sendError } from '../utils/httpError.js';
 import { createSshConnection } from '../utils/sshConnect.js';
 
 const router = Router();
 router.use(requireAuth);
+
+/**
+ * The upload path settles its response by hand — it has to hang up rather than
+ * drain gigabytes of a rejected transfer — so it needs the body without the
+ * send. Same contract as sendError() otherwise; the raw SSH string stays in the
+ * log because a translated payload no longer carries it.
+ */
+function uploadFailure(err) {
+  console.error('SFTP upload failed:', err?.message || err);
+  return errorPayload(err, 500);
+}
 
 // ─── SFTP session store ─────────────────────────────────────────────────────
 
@@ -163,7 +175,7 @@ router.post('/ls', async (req, res) => {
 
     res.json({ path: resolvedPath, entries });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   } finally {
     conn?.end();
   }
@@ -200,7 +212,9 @@ router.get('/download', async (req, res) => {
 
     stream.on('error', (err) => {
       if (!res.headersSent) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err);
+      } else {
+        console.error('SFTP download failed mid-stream:', err?.message || err);
       }
       conn.end();
     });
@@ -208,7 +222,9 @@ router.get('/download', async (req, res) => {
     stream.on('end', () => conn.end());
   } catch (err) {
     if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
+      sendError(res, err);
+    } else {
+      console.error('SFTP download failed:', err?.message || err);
     }
     conn?.end();
   }
@@ -252,12 +268,13 @@ router.post('/upload', (req, res) => {
     if (!res.headersSent && res.writable) res.json(body);
   });
 
-  const fail = (status, message) => settle(() => {
+  // `body` is either a plain message or an already-built error payload.
+  const fail = (status, body) => settle(() => {
     if (!res.headersSent && res.writable) {
       // Hang up rather than draining the rest of an upload we have already
       // rejected — what is still on the wire may be gigabytes.
       res.set('Connection', 'close');
-      res.status(status).json({ error: message });
+      res.status(status).json(typeof body === 'string' ? { error: body } : body);
     }
     // Never leave a truncated file behind under the name the user expects.
     // Answering first keeps a stalled cleanup from hanging the request.
@@ -307,17 +324,19 @@ router.post('/upload', (req, res) => {
       // `fail` settles synchronously, so the 'close' that destroy() triggers
       // can no longer be mistaken for a completed upload.
       fileStream.on('error', (err) => {
-        fail(500, sanitizeError(err.message));
+        fail(500, uploadFailure(err));
         writeStream.destroy();
       });
-      writeStream.on('error', (err) => fail(500, sanitizeError(err.message)));
+      writeStream.on('error', (err) => fail(500, uploadFailure(err)));
       writeStream.on('close', () => succeed({ ok: true, path: remotePath, size: bytes }));
 
       fileStream.pipe(writeStream);
-    }).catch((err) => fail(500, sanitizeError(err.message)));
+    }).catch((err) => fail(500, uploadFailure(err)));
   });
 
-  bb.on('error', (err) => fail(400, err.message));
+  // A malformed multipart body — busboy's own text, not upstream, but there is
+  // no reason for it to reach the browser unfiltered either.
+  bb.on('error', (err) => fail(400, sanitizeError(err?.message)));
   bb.on('close', () => { if (!sawFile) fail(400, 'No file uploaded'); });
 
   // Tab closed or network dropped mid-transfer. The response is already gone,
@@ -345,7 +364,7 @@ router.post('/mkdir', async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   } finally {
     conn?.end();
   }
@@ -370,7 +389,7 @@ router.post('/delete', async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   } finally {
     conn?.end();
   }

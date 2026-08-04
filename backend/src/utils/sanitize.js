@@ -1,8 +1,23 @@
-export function sanitizeError(msg) {
-  if (!msg) return 'Internal server error';
-  return msg
+/**
+ * Strip the two things that must never reach a browser: the internal Proxmox
+ * API URL and any IPv4 literal. Unlike sanitizeError() this has no fallback
+ * string — empty in, empty out — so it can be used on a single untrusted value
+ * being interpolated into a message of our own (see utils/upstreamError.js).
+ */
+export function redactUpstream(text) {
+  return String(text ?? '')
     .replace(/https?:\/\/[\d.:]+\/api2\/json\S*/g, '[proxmox-api]')
     .replace(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?/g, '[internal-host]');
+}
+
+/**
+ * Browser-facing text for text that came from upstream. Always redacts —
+ * whether a message is portal-authored and may skip this is decided in one
+ * place, utils/httpError.js.
+ */
+export function sanitizeError(msg) {
+  if (!msg) return 'Internal server error';
+  return redactUpstream(msg);
 }
 
 const NAMED_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
