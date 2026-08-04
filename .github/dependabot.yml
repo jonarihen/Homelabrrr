@@ -7,30 +7,26 @@ multi-ecosystem-groups:
   monthly-maintenance:
     schedule:
       interval: monthly
+    open-pull-requests-limit: 1
 
 updates:
   - package-ecosystem: npm
     directory: /backend
     patterns: ["*"]
     multi-ecosystem-group: monthly-maintenance
-    open-pull-requests-limit: 1
   - package-ecosystem: npm
     directory: /frontend
     patterns: ["*"]
     multi-ecosystem-group: monthly-maintenance
-    open-pull-requests-limit: 1
   - package-ecosystem: docker
     directory: /backend
     patterns: ["*"]
     multi-ecosystem-group: monthly-maintenance
-    open-pull-requests-limit: 1
   - package-ecosystem: docker
     directory: /frontend
     patterns: ["*"]
     multi-ecosystem-group: monthly-maintenance
-    open-pull-requests-limit: 1
   - package-ecosystem: github-actions
     directory: /
     patterns: ["*"]
     multi-ecosystem-group: monthly-maintenance
-    open-pull-requests-limit: 1
