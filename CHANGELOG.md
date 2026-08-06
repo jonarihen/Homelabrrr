@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-06 — A website can be published without spending an SSL inspection slot
+
+- **Publishing a site no longer forces its certificate onto the FortiGate inspection profile.** A profile holds ten inbound server certificates and no more, and every published site took one. A domain the inspection bundle can't cover — its zone has no DNS-01 credentials, so `caddy-forticertsync` can't issue a wildcard for it — spent a whole slot on a single hostname. Ten of those and the profile is full: every later publish stops at **Attach cert to FortiGate SSL inspection** and stays blocked until someone frees a slot on the firewall by hand
+- **Admins get a per-site switch, at publish time and afterwards.** Unchecking *Attach the certificate to FortiGate SSL inspection* publishes the route to Caddy and leaves the firewall alone. The site still gets its Let's Encrypt certificate and still serves over HTTPS — it just isn't part of inbound deep inspection, and holds none of the profile's slots
+- **Turning it off on a live site gives the slot back.** The certificate is detached from the profile as part of saving, which is also what finally lets `caddy-forticertsync` clean the old certificate out of the FortiGate's store — FortiOS refuses to delete a certificate anything still references. Previously the only way to release a slot was to delete the site outright
+- **A site that opted out says so.** It carries a **no inspection** badge, and its skipped steps distinguish "this server has no inspection profile" from "inspection is off for this site" — the answer to why a profile isn't filling up
+
 ## 2026-08-06 — Browser SSH to a VM in your own VLAN works again
 
 - **SSH and SFTP no longer reject a VM sitting inside a VLAN assigned to you.** The target check introduced with the SSH hardening read each VLAN's subnet straight from the `subnet_cidr` column — but an ordinary managed VLAN never stores one, because its network is derived from the tag (1010 → `10.10.10.0/24`). Every non-admin therefore ended up with an empty list of allowed networks, and **Connect** and **Scan fingerprint** answered *"SSH/SFTP target is outside the VM addresses or networks assigned to you"* for a perfectly legitimate address. Admins never saw it, so it only ever hit the people it was meant to protect
