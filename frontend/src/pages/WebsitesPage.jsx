@@ -4,7 +4,7 @@ import PrereqCallout from '../components/PrereqCallout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
-import { normalizeUpstreamPort, isUpstreamDraftValid, hasUpstreamChanged } from '../utils/siteEdit.js';
+import { normalizeUpstreamPort, isUpstreamDraftValid, hasSiteChanged, isInspectionOn } from '../utils/siteEdit.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const selectCls = inputCls;
@@ -107,7 +107,7 @@ export default function WebsitesPage() {
                 </div>
               )}
               {sites.map((site) => (
-                <SiteCard key={site.id} site={site} upstream={upstream} isAdmin={!!user?.isAdmin} onChanged={load} />
+                <SiteCard key={site.id} site={site} servers={servers} upstream={upstream} isAdmin={!!user?.isAdmin} onChanged={load} />
               ))}
             </div>
           </>
@@ -124,12 +124,14 @@ function PublishForm({ servers, upstream, isAdmin, onClose, onPublished }) {
   const [domain, setDomain] = useState('');
   const [upstreamHost, setUpstreamHost] = useState('');
   const [upstreamPort, setUpstreamPort] = useState(80);
+  const [inspect, setInspect] = useState(true);
   const [dns, setDns] = useState(null); // { ok, message }
   const [checking, setChecking] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   const server = servers.find((s) => String(s.id) === String(serverId));
+  const canChooseInspection = isAdmin && !!server?.hasInspection;
 
   const checkDns = async () => {
     setError(''); setDns(null); setChecking(true);
@@ -145,7 +147,12 @@ function PublishForm({ servers, upstream, isAdmin, onClose, onPublished }) {
     e.preventDefault();
     setError(''); setSubmitting(true);
     try {
-      await api.post('/websites/sites', { serverId, domain, upstreamHost, upstreamPort });
+      await api.post('/websites/sites', {
+        serverId, domain, upstreamHost, upstreamPort,
+        // Only admins may steer the inspection wiring; everyone else gets the
+        // server's default, so the field is left off the request entirely.
+        ...(canChooseInspection ? { inspect } : {}),
+      });
       onPublished();
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to publish');
@@ -200,6 +207,8 @@ function PublishForm({ servers, upstream, isAdmin, onClose, onPublished }) {
         </div>
       </div>
 
+      {canChooseInspection && <InspectionToggle checked={inspect} onChange={setInspect} />}
+
       {!isAdmin && (
         <div className="text-xs text-gray-500 space-y-2">
           {upstream.vms?.length > 0 && (
@@ -231,9 +240,38 @@ function PublishForm({ servers, upstream, isAdmin, onClose, onPublished }) {
   );
 }
 
+// ─── SSL inspection opt-out ────────────────────────────────────────────────────
+
+// A FortiGate SSL/SSH inspection profile holds at most ten inbound server
+// certificates, and every wired-up site spends one. That supply is the scarce
+// resource here: a domain whose zone the inspection bundle cannot cover (no
+// DNS-01 credentials, so no wildcard) spends a whole slot on a single hostname,
+// and once the profile is full every later publish is blocked until someone
+// frees a slot on the firewall by hand. This is the control that avoids that.
+function InspectionToggle({ checked, onChange }) {
+  return (
+    <label className={`flex items-start gap-2.5 rounded-xl border p-3 cursor-pointer transition-colors ${checked ? 'border-gray-700/50 bg-gray-800/30 hover:border-gray-600/50' : 'border-orange-800/30 bg-orange-900/10 hover:border-orange-700/40'}`}>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-1 focus:ring-blue-500/30 shrink-0"
+      />
+      <span className="text-xs">
+        <span className="block text-gray-300 font-medium">Attach the certificate to FortiGate SSL inspection</span>
+        <span className="block text-gray-500 mt-0.5">
+          {checked
+            ? 'Takes one of the inspection profile’s ten certificate slots.'
+            : 'The route publishes to Caddy and the firewall is left alone — no slot used, and inbound deep inspection will not apply to this domain. The site still gets its Let’s Encrypt certificate.'}
+        </span>
+      </span>
+    </label>
+  );
+}
+
 // ─── Site card (with live stepper) ─────────────────────────────────────────────
 
-function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
+function SiteCard({ site: initial, servers, upstream, isAdmin, onChanged }) {
   const [site, setSite] = useState(initial);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -294,6 +332,9 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
   // all. Both fields are absent on servers that predate them, which reads as
   // "an ordinary managed reverse proxy".
   const canEdit = site.managed !== false && (!site.kind || site.kind === 'reverse_proxy');
+  // Whether this site's server has an inspection profile at all. Without one
+  // there is nothing to opt out of, and the toggle would only be confusing.
+  const serverHasInspection = !!servers?.find((s) => String(s.id) === String(site.serverId))?.hasInspection;
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
@@ -306,6 +347,9 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
               <StatusPill status={site.status} />
               {site.managed === false && <span className="text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-2 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
               {site.wildcard && <span className="text-[10px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-2 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
+              {serverHasInspection && !isInspectionOn(site) && (
+                <span className="text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-2 py-0.5 rounded-full" title="Published without FortiGate SSL inspection — this site holds none of the profile's certificate slots">no inspection</span>
+              )}
             </div>
             <p className="text-xs text-gray-500 font-mono mt-0.5">
               {site.kind && site.kind !== 'reverse_proxy' ? site.kind : `→ ${site.upstreamHost}:${site.upstreamPort}`}
@@ -339,6 +383,7 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
             site={site}
             upstream={upstream}
             isAdmin={isAdmin}
+            serverHasInspection={serverHasInspection}
             onCancel={() => setEditing(false)}
             onSaved={(updated) => { setEditing(false); setSite(updated); onChanged?.(); }}
           />
@@ -375,14 +420,16 @@ function SiteCard({ site: initial, upstream, isAdmin, onChanged }) {
 
 // ─── Edit a published site (upstream target only) ──────────────────────────────
 
-function EditUpstreamForm({ site, upstream, isAdmin, onCancel, onSaved }) {
+function EditUpstreamForm({ site, upstream, isAdmin, serverHasInspection, onCancel, onSaved }) {
   const [host, setHost] = useState(site.upstreamHost);
   const [port, setPort] = useState(String(site.upstreamPort));
+  const [inspect, setInspect] = useState(isInspectionOn(site));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  const draft = { upstreamHost: host, upstreamPort: port };
-  const canSave = isUpstreamDraftValid(draft) && hasUpstreamChanged(site, draft);
+  const canChooseInspection = isAdmin && serverHasInspection;
+  const draft = { upstreamHost: host, upstreamPort: port, ...(canChooseInspection ? { inspect } : {}) };
+  const canSave = isUpstreamDraftValid(draft) && hasSiteChanged(site, draft);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -391,6 +438,7 @@ function EditUpstreamForm({ site, upstream, isAdmin, onCancel, onSaved }) {
       const r = await api.put(`/websites/sites/${site.id}`, {
         upstreamHost: host.trim(),
         upstreamPort: normalizeUpstreamPort(port),
+        ...(canChooseInspection ? { inspect } : {}),
       });
       onSaved(r.data);
     } catch (e) {
@@ -427,6 +475,17 @@ function EditUpstreamForm({ site, upstream, isAdmin, onCancel, onSaved }) {
             ))}
           </div>
         </div>
+      )}
+
+      {canChooseInspection && (
+        <>
+          <InspectionToggle checked={inspect} onChange={setInspect} />
+          {isInspectionOn(site) && !inspect && (
+            <p className="text-xs text-orange-300/90 bg-orange-900/10 border border-orange-800/30 rounded-xl p-3">
+              Saving detaches <span className="font-mono">{site.certName || 'this site’s certificate'}</span> from the inspection profile, freeing its slot. The certificate itself stays on the FortiGate — <span className="font-mono">caddy-forticertsync</span> owns that store and can only clean it up once nothing references it.
+            </p>
+          )}
+        </>
       )}
 
       <p className="text-xs text-gray-600">Saving re-pushes the route to Caddy — the site goes back through the publish steps for a moment.</p>
