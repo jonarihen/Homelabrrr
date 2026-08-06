@@ -2,7 +2,7 @@ import { isIP } from 'net';
 import dns from 'dns/promises';
 import db from '../db.js';
 import { nodeLookupCandidates } from './nodeRef.js';
-import { vlanTagToSubnet } from '../fortigate.js';
+import { userVlanCidrs } from './vlanSubnets.js';
 
 // ─── Field validation ─────────────────────────────────────────────────────────
 // Everything a user submits is validated here before it is ever built into a
@@ -157,8 +157,7 @@ export function ipv4InCidr(ip, cidr) {
 /**
  * The concrete set of upstream targets a user is allowed to proxy to:
  *  - vmIps: IPs of VMs assigned to them (from vm_ssh_configs.host)
- *  - subnets: CIDRs of the VLANs assigned to them (subnet_cidr, or derived
- *             from the VLAN tag when subnet_cidr is empty)
+ *  - subnets: CIDRs of the VLANs assigned to them (see utils/vlanSubnets.js)
  */
 export function getUserAllowedUpstreams(userId) {
   const vmIps = new Set();
@@ -171,22 +170,7 @@ export function getUserAllowedUpstreams(userId) {
     }
   }
 
-  const subnets = [];
-  const vlans = db.prepare(`
-    SELECT v.tag, v.subnet_cidr
-    FROM user_vlans uv JOIN vlans v ON v.id = uv.vlan_id
-    WHERE uv.user_id = ?
-  `).all(userId);
-  for (const v of vlans) {
-    if (v.subnet_cidr && /\/\d+$/.test(v.subnet_cidr)) {
-      subnets.push(v.subnet_cidr);
-    } else {
-      const derived = vlanTagToSubnet(v.tag);
-      if (derived?.network) subnets.push(derived.network);
-    }
-  }
-
-  return { vmIps: [...vmIps], subnets };
+  return { vmIps: [...vmIps], subnets: userVlanCidrs(db, userId) };
 }
 
 /**

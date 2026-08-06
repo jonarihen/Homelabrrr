@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-06 — Browser SSH to a VM in your own VLAN works again
+
+- **SSH and SFTP no longer reject a VM sitting inside a VLAN assigned to you.** The target check introduced with the SSH hardening read each VLAN's subnet straight from the `subnet_cidr` column — but an ordinary managed VLAN never stores one, because its network is derived from the tag (1010 → `10.10.10.0/24`). Every non-admin therefore ended up with an empty list of allowed networks, and **Connect** and **Scan fingerprint** answered *"SSH/SFTP target is outside the VM addresses or networks assigned to you"* for a perfectly legitimate address. Admins never saw it, so it only ever hit the people it was meant to protect
+- **The address the portal suggests is now the address it accepts.** *Detect IP* offers the VM's DHCP reservation or lease, which for a VM on the automatic scheme is by definition inside its VLAN — so the two agree again instead of the form contradicting its own suggestion
+- **How a VLAN's network is determined lives in one place.** Browser SSH, public IP assignment and website publishing each had their own reading of the same question; the two that already fell back to the tag stay unchanged, and the derivation is now shared and unit-tested. A tagged-only VLAN, which the portal does not address, still grants nothing until an explicit subnet CIDR is set on it
+- Targets outside every assigned VLAN are refused exactly as before, and a host name whose addresses do not *all* pass still fails closed
+
 ## 2026-08-04 — Security, recovery, and operations hardening
 
 - **Browser and API authentication now have explicit security boundaries.** Cookie-authenticated mutations enforce same-origin/CSRF checks, personal API tokens carry least-privilege scopes and can never perform interactive identity operations, and sensitive account or administrator actions require a recent password plus TOTP confirmation. Token revocation and permission changes take effect immediately
