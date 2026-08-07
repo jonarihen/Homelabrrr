@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-08-07 — Dependency and runtime maintenance
+
+- **Six icons on the Account page are the size they were meant to be.** The tiles for Username, password, sessions, passkeys and two-factor asked for an 18px icon — a size Tailwind 3 had no class for, so the request was silently dropped and the browser sized each icon itself, overflowing its tile. The toolchain understands the value now, so they render as written
+- **Updated runtime and libraries**: Node 26, React 19, Tailwind 4, xterm 6, Express rate limiting 8 and bcryptjs 3. Stored password hashes and TOTP secrets are unaffected — existing sign-ins, two-factor codes and consoles keep working exactly as before
+
 ## 2026-08-06 — A website can be published without spending an SSL inspection slot
 
 - **Publishing a site no longer forces its certificate onto the FortiGate inspection profile.** A profile holds ten inbound server certificates and no more, and every published site took one. A domain the inspection bundle can't cover — its zone has no DNS-01 credentials, so `caddy-forticertsync` can't issue a wildcard for it — spent a whole slot on a single hostname. Ten of those and the profile is full: every later publish stops at **Attach cert to FortiGate SSL inspection** and stays blocked until someone frees a slot on the firewall by hand
