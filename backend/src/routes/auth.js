@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
-import { authenticator } from 'otplib';
+import { generateTotpSecret, totpKeyUri, verifyTotp } from '../utils/totp.js';
 import QRCode from 'qrcode';
 import crypto from 'node:crypto';
 import {
@@ -251,7 +251,7 @@ router.post('/verify-2fa', verifyTwoFactorLimiter, async (req, res, next) => {
     return res.status(400).json({ error: 'Invalid state' });
   }
 
-  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: decryptSecret(user.totp_secret) });
+  const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
   if (!isValid) {
     const attempts = recordTwoFactorFailure(pendingUsername);
     const remaining = TWO_FACTOR_MAX - attempts;
@@ -487,7 +487,7 @@ router.post('/reauthenticate', requireAuth, requireInteractiveSession, (req, res
     return res.status(401).json({ error: 'Password confirmation failed' });
   }
   if (user.totp_enabled) {
-    const valid = authenticator.verify({ token: String(code).replace(/\s/g, ''), secret: decryptSecret(user.totp_secret) });
+    const valid = verifyTotp(code, decryptSecret(user.totp_secret));
     if (!valid) return res.status(401).json({ error: 'Second-factor confirmation failed' });
   }
   req.session.reauthenticatedAt = Date.now();
@@ -505,8 +505,8 @@ router.post('/2fa/setup', requireAuth, requireInteractiveSession, requireRecentR
   if (user.totp_enabled) {
     return res.status(400).json({ error: '2FA is already enabled — disable it first to re-enroll' });
   }
-  const secret = authenticator.generateSecret();
-  const otpauth = authenticator.keyuri(user.username, 'VM Manager', secret);
+  const secret = generateTotpSecret();
+  const otpauth = totpKeyUri(user.username, secret);
 
   // Store secret temporarily — not active until /2fa/enable confirms it
   db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').run(encryptSecret(secret), req.session.userId);
@@ -529,7 +529,7 @@ router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecent
   if (!user?.totp_secret) return res.status(400).json({ error: 'Run setup first' });
   if (user.totp_enabled) return res.status(400).json({ error: '2FA is already enabled' });
 
-  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: decryptSecret(user.totp_secret) });
+  const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
   if (!isValid) return res.status(400).json({ error: 'Invalid code — try again' });
 
   db.prepare('UPDATE users SET totp_enabled = 1 WHERE id = ?').run(req.session.userId);
@@ -547,7 +547,7 @@ router.post('/2fa/disable', requireAuth, requireInteractiveSession, requireRecen
   if (!user?.totp_enabled) return res.status(400).json({ error: '2FA is not enabled' });
   if (user.require_2fa) return res.status(403).json({ error: 'Your account is required to keep 2FA enabled' });
 
-  const isValid = authenticator.verify({ token: code.replace(/\s/g, ''), secret: decryptSecret(user.totp_secret) });
+  const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
   if (!isValid) return res.status(400).json({ error: 'Invalid code' });
 
   db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.session.userId);
