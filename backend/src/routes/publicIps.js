@@ -27,7 +27,7 @@ import db from '../db.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { logAudit } from '../utils/audit.js';
 import { sanitizeError } from '../utils/sanitize.js';
-import { vlanTagToSubnet } from '../fortigate.js';
+import { userVlanCidrs } from '../utils/vlanSubnets.js';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.js';
 import { userOwnsVm } from '../utils/vmAccess.js';
 import {
@@ -85,28 +85,6 @@ function vmKnownIps(node, vmid) {
     for (const row of rows) if (row.host) ips.push(row.host);
   }
   return ips;
-}
-
-/**
- * Subnets of the VLANs assigned to a user. Explicit `subnet_cidr` wins; VLANs
- * on the automatic 10.<tag>.0/24 scheme fall back to the derived subnet so a
- * VLAN that was never given an explicit CIDR still validates.
- */
-function userVlanCidrs(userId) {
-  const rows = db.prepare(`
-    SELECT v.tag, v.subnet_cidr
-    FROM vlans v
-    JOIN user_vlans uv ON uv.vlan_id = v.id
-    WHERE uv.user_id = ?
-  `).all(userId);
-  const cidrs = [];
-  for (const row of rows) {
-    const explicit = String(row.subnet_cidr || '').trim();
-    if (explicit) { cidrs.push(explicit); continue; }
-    const derived = vlanTagToSubnet(row.tag);
-    if (derived?.network) cidrs.push(derived.network);
-  }
-  return cidrs;
 }
 
 function countForwardsForIp(publicIpId) {
@@ -492,7 +470,7 @@ router.post('/assignments', pPublicIps, (req, res) => {
     vmOwnedByUser: userOwnsVm(targetUserId, node, vmid),
     privateIp,
     vmIps: vmKnownIps(node, vmid),
-    userVlanCidrs: userVlanCidrs(targetUserId),
+    userVlanCidrs: userVlanCidrs(db, targetUserId),
     existingForIp: db.prepare('SELECT id FROM public_ip_assignments WHERE public_ip_id = ?').get(publicIpId),
     existingEgress: publicIp
       ? db.prepare('SELECT id FROM public_ip_assignments WHERE firewall_id = ? AND private_ip = ? AND egress_enabled = 1')

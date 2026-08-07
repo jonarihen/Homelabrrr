@@ -210,6 +210,20 @@ Registered Caddy credentials, like all upstream secrets, are encrypted at rest. 
 
 ## Quick Start
 
+### Automatic deployment from GitHub Actions
+
+The workflow in `.github/workflows/deploy.yml` deploys after a pull request is
+merged into `main`. It can also be started manually from the Actions tab. A
+dedicated self-hosted runner on the production server, labeled
+`homelabrrr-production`, receives jobs over an outbound connection to GitHub;
+the server does not need to expose SSH or another inbound management port.
+
+The unprivileged runner account may only invoke the root-owned
+`/usr/local/sbin/homelabrrr-deploy` command through `sudo`. That command refuses
+to overwrite tracked local changes, pulls `origin/main` with `--ff-only`, and
+runs `docker compose up -d --build`. Keep the production `.env` on the deployment
+host; the workflow does not copy or replace it.
+
 ### Prerequisites
 
 - Docker Engine with the Docker Compose plugin

@@ -5,6 +5,7 @@ import { validateHost, validatePort } from '../utils/validation.js';
 import { getLXCConfig, getVMAgentInterfaces, getVMConfig } from '../proxmox.js';
 import { parseIpConfig0 } from '../utils/detectedIps.js';
 import { allowedResolvedSshAddresses } from '../utils/sshTargetAuthorization.js';
+import { userVlanCidrs } from '../utils/vlanSubnets.js';
 
 const ATTEMPT_WINDOW_MS = 60_000;
 
@@ -19,11 +20,7 @@ export function sshConnectionRateLimited(userId, kind, limit) {
 }
 
 function assignedNetworks(userId) {
-  return db.prepare(`
-    SELECT v.subnet_cidr AS cidr
-    FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id
-    WHERE uv.user_id = ? AND TRIM(COALESCE(v.subnet_cidr, '')) != ''
-  `).all(userId).map((row) => row.cidr);
+  return userVlanCidrs(db, userId);
 }
 
 function explicitlyAssignedAddresses(userId, node, vmid) {

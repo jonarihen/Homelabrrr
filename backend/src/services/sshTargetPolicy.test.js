@@ -48,6 +48,23 @@ test('connection limits persist in SQLite and the explicit admin override still 
       assert.equal(target.adminOverride, true);
       assert.equal(target.port, 2222);
       await assert.rejects(() => authorizeSshTarget({ userId: user.id, isAdmin: true, node: '1~pve', vmid: 100, host: 'management.example.test', port: 70000 }));
+
+      // A managed VLAN stores no subnet_cidr — its network comes from the tag.
+      // Reading the column alone denied every non-admin SSH target, including a
+      // VM sitting on the DHCP range of the user's own VLAN (1010 → 10.10.10.0/24).
+      const vlan = db.prepare("INSERT INTO vlans (name, tag, mode, subnet_cidr) VALUES ('assigned', 1010, 'managed', '')").run();
+      db.prepare('INSERT INTO user_vlans (user_id, vlan_id) VALUES (?, ?)').run(user.id, vlan.lastInsertRowid);
+
+      const inVlan = await authorizeSshTarget({ userId: user.id, isAdmin: false, node: '1~pve', vmid: 101, host: '10.10.10.10', port: 22 });
+      assert.equal(inVlan.host, '10.10.10.10');
+      assert.equal(inVlan.adminOverride, false);
+      assert.deepEqual(inVlan.resolvedAddresses, ['10.10.10.10']);
+
+      // An address outside every assigned VLAN still fails closed.
+      await assert.rejects(
+        () => authorizeSshTarget({ userId: user.id, isAdmin: false, node: '1~pve', vmid: 101, host: '10.99.99.9', port: 22 }),
+        /outside the VM addresses or networks assigned to you/,
+      );
       db.close();
     `], {
       cwd: process.cwd(), encoding: 'utf8', env: {
