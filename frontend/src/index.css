@@ -1,6 +1,21 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Tailwind 4 prefers a CSS-first `@theme`, but the AARIS palette remap in
+   tailwind.config.js is what lets ~1300 stock utility classes across the app
+   render as the operator console. `@config` keeps that file authoritative. */
+@config "../tailwind.config.js";
+
+/* Tailwind 4's Preflight renders placeholders as currentColor at 50% opacity;
+   Tailwind 3 used gray-400, which the remap above resolves to --muted. Only 29
+   of the app's 127 placeholder inputs name a colour themselves, so restore the
+   old default rather than let the other ~98 drift. Utilities outrank `base`,
+   so placeholder-gray-600 and friends still win where they are spelled out. */
+@layer base {
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--muted);
+  }
+}
 
 /* ============================================================================
    AARIS DESIGN LANGUAGE — global layer
