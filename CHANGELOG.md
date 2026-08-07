@@ -4,6 +4,10 @@
 
 - **Six icons on the Account page are the size they were meant to be.** The tiles for Username, password, sessions, passkeys and two-factor asked for an 18px icon — a size Tailwind 3 had no class for, so the request was silently dropped and the browser sized each icon itself, overflowing its tile. The toolchain understands the value now, so they render as written
 - **Updated runtime and libraries**: Node 26, React 19, Tailwind 4, xterm 6, Express rate limiting 8 and bcryptjs 3. Stored password hashes and TOTP secrets are unaffected — existing sign-ins, two-factor codes and consoles keep working exactly as before
+## 2026-08-07 — The backup list on a VM page starts folded
+
+- **Backups no longer push the rest of the VM page down by default.** A VM with a long archive history turned the section into most of the page, even though the list is rarely why anyone opened the VM. The section now starts collapsed and shows how many backups exist and what they take up in total on its header — click it to fold the full list out. **New Backup** still works from the folded state; it opens the section along with the form
+- A running backup and a failed one still report themselves whether the section is folded or not, so neither an in-progress dump nor the warning about the incomplete archive it left behind can be hidden by the fold
 
 ## 2026-08-06 — A website can be published without spending an SSL inspection slot
 
