@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly deploy_path=/root/Proxmox-frontend
+
+cd "$deploy_path"
+
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  echo "Refusing to deploy: tracked files have local changes." >&2
+  exit 1
+fi
+
+git checkout main
+git pull --ff-only origin main
+docker compose up -d --build
