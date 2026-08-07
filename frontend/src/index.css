@@ -1,6 +1,9 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Tailwind 4 prefers a CSS-first `@theme`, but the AARIS palette remap in
+   tailwind.config.js is what lets ~1300 stock utility classes across the app
+   render as the operator console. `@config` keeps that file authoritative. */
+@config "../tailwind.config.js";
 
 /* ============================================================================
    AARIS DESIGN LANGUAGE — global layer
