@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-07 — Dependency and runtime maintenance
+
+- **New two-factor enrollments get a stronger secret.** A secret issued from now on is 20 bytes rather than 10, which is what the standard asks for. Nothing changes for anyone already enrolled — existing secrets keep working and there is no need to re-scan a QR code
+- **Six icons on the Account page are the size they were meant to be.** The tiles for Username, password, sessions, passkeys and two-factor asked for an 18px icon — a size the previous toolchain had no class for, so the request was silently dropped and the browser sized each icon itself, overflowing its tile. They render as written now
+- **Updated runtime and libraries**: Node 26, React 19, Tailwind 4, xterm 6, Express rate limiting 8 and bcryptjs 3. Stored password hashes and TOTP secrets are unaffected — existing sign-ins, two-factor codes and consoles keep working exactly as before
+
 ## 2026-08-07 — The backup list on a VM page starts folded
 
 - **Backups no longer push the rest of the VM page down by default.** A VM with a long archive history turned the section into most of the page, even though the list is rarely why anyone opened the VM. The section now starts collapsed and shows how many backups exist and what they take up in total on its header — click it to fold the full list out. **New Backup** still works from the folded state; it opens the section along with the form
