@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-08-07 — The backup list on a VM page starts folded
+
+- **Backups no longer push the rest of the VM page down by default.** A VM with a long archive history turned the section into most of the page, even though the list is rarely why anyone opened the VM. The section now starts collapsed and shows how many backups exist and what they take up in total on its header — click it to fold the full list out. **New Backup** still works from the folded state; it opens the section along with the form
+- A running backup and a failed one still report themselves whether the section is folded or not, so neither an in-progress dump nor the warning about the incomplete archive it left behind can be hidden by the fold
+
 ## 2026-08-04 — Security, recovery, and operations hardening
 
 - **Browser and API authentication now have explicit security boundaries.** Cookie-authenticated mutations enforce same-origin/CSRF checks, personal API tokens carry least-privilege scopes and can never perform interactive identity operations, and sensitive account or administrator actions require a recent password plus TOTP confirmation. Token revocation and permission changes take effect immediately

@@ -1175,6 +1175,9 @@ function BackupsSection({ node, vmid }) {
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState({});
+  // The archive list is long and rarely the reason someone opens a VM, so the
+  // section starts folded and only the summary line is shown until asked for.
+  const [expanded, setExpanded] = useState(false);
   // Backup tasks tracked by the backend. Proxmox lists the archive it is still
   // writing, so without these a half-written dump looks like a finished backup.
   const [tasks, setTasks] = useState([]);
@@ -1249,6 +1252,11 @@ function BackupsSection({ node, vmid }) {
       })
       .sort((a, b) => a.storage.localeCompare(b.storage));
   }, [backups, storages]);
+
+  const totalSize = useMemo(
+    () => backups.reduce((sum, b) => sum + (b.size || 0), 0),
+    [backups],
+  );
 
   const createBackup = async () => {
     setCreating(true); setError(''); setSuccess('');
@@ -1360,14 +1368,37 @@ function BackupsSection({ node, vmid }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="aaris-display text-sm text-gray-100 flex items-center gap-2">
-          <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
-          Backups
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="aaris-display text-sm text-gray-100 min-w-0">
+          <button
+            onClick={() => setExpanded(v => !v)}
+            aria-expanded={expanded}
+            className="flex items-center gap-2 min-w-0 text-left hover:text-white transition-colors"
+            title={expanded ? 'Hide backups' : 'Show backups'}
+          >
+            <svg className="w-4 h-4 text-gray-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
+            <span>Backups</span>
+            {/* Folded away, the count is the only thing telling you whether it is
+                worth opening — so it has to survive the fold. */}
+            {!expanded && (
+              <span className="text-xs text-gray-500 font-mono font-normal truncate">
+                {loading
+                  ? 'loading…'
+                  : backups.length === 0
+                    ? 'none'
+                    : `${backups.length} · ${fmtSize(totalSize)}`}
+              </span>
+            )}
+            <svg className={`w-3.5 h-3.5 text-gray-500 shrink-0 transition-transform ${expanded ? '' : '-rotate-90'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+          </button>
         </h2>
         <button
-          onClick={() => setShowForm(!showForm)}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium ring-1 bg-blue-600/15 text-blue-400 hover:bg-blue-600/25 ring-blue-500/20 transition-all"
+          onClick={() => {
+            // The form lives inside the fold, so asking for it has to open it.
+            if (!expanded) { setExpanded(true); setShowForm(true); }
+            else setShowForm(v => !v);
+          }}
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium ring-1 bg-blue-600/15 text-blue-400 hover:bg-blue-600/25 ring-blue-500/20 transition-all shrink-0"
         >
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
           New Backup
@@ -1437,7 +1468,7 @@ function BackupsSection({ node, vmid }) {
       )}
 
       {/* Create form */}
-      {showForm && (
+      {expanded && showForm && (
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
@@ -1483,7 +1514,7 @@ function BackupsSection({ node, vmid }) {
       )}
 
       {/* Restore confirmation modal */}
-      {restoreConfirm && (
+      {expanded && restoreConfirm && (
         <div className="bg-yellow-900/20 border border-yellow-800/50 rounded-2xl p-5 space-y-4">
           <div className="flex items-start gap-3">
             <svg className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
@@ -1519,7 +1550,7 @@ function BackupsSection({ node, vmid }) {
       )}
 
       {/* File browser modal */}
-      {browseBackup && (
+      {expanded && browseBackup && (
         <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
           <div className="flex items-center justify-between px-5 py-3 border-b border-gray-800">
             <div>
@@ -1611,7 +1642,7 @@ function BackupsSection({ node, vmid }) {
       )}
 
       {/* Backups grouped by storage location */}
-      {loading ? (
+      {expanded && (loading ? (
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-3">
           {[1,2].map(i => <div key={i} className="h-10 bg-gray-800 rounded-lg animate-pulse" />)}
         </div>
@@ -1755,7 +1786,7 @@ function BackupsSection({ node, vmid }) {
             );
           })}
         </div>
-      )}
+      ))}
     </div>
   );
 }
