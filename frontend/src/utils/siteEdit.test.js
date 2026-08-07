@@ -2,7 +2,7 @@
 // Run with:  node --test src/utils/siteEdit.test.js   (from frontend/)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeUpstreamPort, normalizeUpstreamHost, isUpstreamDraftValid, hasUpstreamChanged } from './siteEdit.js';
+import { normalizeUpstreamPort, normalizeUpstreamHost, isUpstreamDraftValid, hasUpstreamChanged, isInspectionOn, hasSiteChanged } from './siteEdit.js';
 
 test('port normalization matches the backend range', () => {
   assert.equal(normalizeUpstreamPort(80), 80);
@@ -44,4 +44,33 @@ test('a changed host or port is saveable', () => {
   assert.equal(hasUpstreamChanged(site, { upstreamHost: '10.11.26.6', upstreamPort: '8080' }), true);
   assert.equal(hasUpstreamChanged(site, { upstreamHost: '10.11.26.5', upstreamPort: '3000' }), true);
   assert.equal(hasUpstreamChanged(site, { upstreamHost: 'app.lan', upstreamPort: '80' }), true);
+});
+
+test('inspection is on only when the site carries a profile name', () => {
+  assert.equal(isInspectionOn({ inspectionProfile: 'inbound-deep-inspection' }), true);
+  assert.equal(isInspectionOn({ inspectionProfile: '' }), false);
+  assert.equal(isInspectionOn({ inspectionProfile: '   ' }), false);
+  assert.equal(isInspectionOn({}), false);
+  assert.equal(isInspectionOn(undefined), false);
+});
+
+test('toggling SSL inspection is saveable on its own', () => {
+  const on = { upstreamHost: '10.11.26.5', upstreamPort: 8080, inspectionProfile: 'inbound-deep-inspection' };
+  const unchanged = { upstreamHost: '10.11.26.5', upstreamPort: '8080' };
+
+  // Turning it off frees a slot on the profile — a real change with an
+  // unchanged upstream, which hasUpstreamChanged alone would call a no-op.
+  assert.equal(hasSiteChanged(on, { ...unchanged, inspect: false }), true);
+  assert.equal(hasSiteChanged(on, { ...unchanged, inspect: true }), false);
+
+  const off = { ...on, inspectionProfile: '' };
+  assert.equal(hasSiteChanged(off, { ...unchanged, inspect: true }), true);
+  assert.equal(hasSiteChanged(off, { ...unchanged, inspect: false }), false);
+});
+
+test('a form that omits the inspection flag never reads as turning it off', () => {
+  const on = { upstreamHost: '10.11.26.5', upstreamPort: 8080, inspectionProfile: 'inbound-deep-inspection' };
+  assert.equal(hasSiteChanged(on, { upstreamHost: '10.11.26.5', upstreamPort: '8080' }), false);
+  // ...but a genuine upstream edit still saves.
+  assert.equal(hasSiteChanged(on, { upstreamHost: '10.11.26.9', upstreamPort: '8080' }), true);
 });

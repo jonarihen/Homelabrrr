@@ -27,3 +27,20 @@ export function hasUpstreamChanged(site, draft) {
     normalizeUpstreamPort(draft?.upstreamPort) !== normalizeUpstreamPort(site?.upstreamPort)
   );
 }
+
+// Whether a site is wired into a FortiGate SSL/SSH inspection profile. Sites
+// carry the profile name they were published against; empty means the route is
+// served by Caddy and the firewall is left alone — which is also what keeps the
+// site out of the profile's capped server-certificate list.
+export function isInspectionOn(site) {
+  return String(site?.inspectionProfile ?? '').trim() !== '';
+}
+
+// True when the draft differs from the published site in any editable field.
+// Inspection is only compared when the draft carries the flag: the form omits
+// it for non-admins, and an absent field must not read as "turned off".
+export function hasSiteChanged(site, draft) {
+  if (hasUpstreamChanged(site, draft)) return true;
+  if (draft?.inspect === undefined) return false;
+  return !!draft.inspect !== isInspectionOn(site);
+}

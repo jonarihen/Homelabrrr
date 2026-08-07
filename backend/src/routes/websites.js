@@ -531,9 +531,16 @@ async function runSiteFlow(siteId) {
   const profileName = site.inspection_profile || '';
 
   // No inspection wiring requested → the site is already live through Caddy.
+  // Two different situations land here with an empty profile, and only one of
+  // them is a choice someone made: a server that never had inspection wired up,
+  // versus a site deliberately kept out of a profile that does exist. Say which,
+  // because the second is the answer to "why is this profile not filling up".
   if (!fw || !profileName) {
-    setSiteStep(siteId, 'cert', 'skipped', 'No FortiGate inspection profile configured for this site');
-    setSiteStep(siteId, 'inspect', 'skipped', 'No FortiGate inspection profile configured for this site');
+    const note = fw && server.inspection_profile
+      ? `SSL inspection is off for this site — it holds none of "${server.inspection_profile}"'s ${SERVER_CERT_MAX} certificate slots`
+      : 'No FortiGate inspection profile configured for this site';
+    setSiteStep(siteId, 'cert', 'skipped', note);
+    setSiteStep(siteId, 'inspect', 'skipped', note);
     await finishLive(siteId, site, server, 'Route published to Caddy. Certificate issuance is handled by Caddy/Let’s Encrypt.');
     return;
   }
@@ -1060,6 +1067,27 @@ function validateSiteInput(req, { domain, upstreamHost, upstreamPort }) {
   return { domain: d, upstreamHost, upstreamPort: port };
 }
 
+// Resolve which SSL/SSH inspection profile a site is published against.
+//
+// `''` means "push the route to Caddy and leave the FortiGate alone", and it is
+// a deliberate, supported outcome — not a misconfiguration. A profile holds at
+// most SERVER_CERT_MAX inbound server certificates, so every site wired into one
+// spends a slot. A domain the inspection bundle cannot cover (its zone has no
+// DNS-01 credentials, so `caddy-forticertsync` cannot issue a wildcard for it)
+// spends that slot on a single hostname — and once the profile is full, every
+// later publish is blocked until someone frees a slot on the firewall by hand.
+// Turning inspection off for those sites is what keeps the profile from filling.
+//
+// Only admins may override. `inspectionProfile` pins a specific profile (or ''
+// for off) and wins when supplied; `inspect` is the boolean the UI sends, where
+// false means off and true restores `onValue`.
+function resolveInspectionProfile(req, { current, onValue }) {
+  if (!req.session.isAdmin) return current;
+  if (req.body.inspectionProfile !== undefined) return String(req.body.inspectionProfile || '').trim();
+  if (req.body.inspect !== undefined) return req.body.inspect ? onValue : '';
+  return current;
+}
+
 router.post('/sites', dnsLimiter, async (req, res) => {
   const server = getServerRow(req.body.serverId);
   if (!server) return res.status(404).json({ error: 'Select a valid Caddy server' });
@@ -1096,9 +1124,10 @@ router.post('/sites', dnsLimiter, async (req, res) => {
   const fortigateId = req.session.isAdmin && req.body.fortigateId !== undefined
     ? (req.body.fortigateId || null)
     : (server.fortigate_id || null);
-  const inspectionProfile = req.session.isAdmin && req.body.inspectionProfile !== undefined
-    ? String(req.body.inspectionProfile || '')
-    : (server.inspection_profile || '');
+  const inspectionProfile = resolveInspectionProfile(req, {
+    current: server.inspection_profile || '',
+    onValue: server.inspection_profile || '',
+  });
 
   const steps = INITIAL_STEPS.map((s) => {
     if (s.key !== 'dns') return { ...s, status: 'pending' };
@@ -1141,9 +1170,27 @@ router.put('/sites/:id', dnsLimiter, async (req, res) => {
   const parsed = validateSiteInput(req, { domain: row.domain, upstreamHost: req.body.upstreamHost, upstreamPort: req.body.upstreamPort });
   if (parsed.error) return res.status(400).json({ error: parsed.error });
 
-  db.prepare('UPDATE caddy_sites SET upstream_host = ?, upstream_port = ? WHERE id = ?')
-    .run(parsed.upstreamHost, parsed.upstreamPort, row.id);
-  logAudit(req, 'website_update_site', row.domain, `${parsed.upstreamHost}:${parsed.upstreamPort}`);
+  // Admins may also flip this site's SSL-inspection wiring after the fact —
+  // turning it off is how a slot on a full profile gets freed without deleting
+  // the site (see resolveInspectionProfile).
+  const nextProfile = resolveInspectionProfile(req, {
+    current: row.inspection_profile || '',
+    onValue: row.inspection_profile || server.inspection_profile || '',
+  });
+  const inspectionChanged = nextProfile !== (row.inspection_profile || '');
+
+  // Hand the slot back before the row changes: releaseInspectionSlot reads the
+  // profile and cert name off the row it is given, so clearing them first would
+  // leave the certificate attached to the profile with nothing left to find it.
+  if (inspectionChanged && !nextProfile) {
+    await releaseInspectionSlot(row, req);
+  }
+
+  db.prepare('UPDATE caddy_sites SET upstream_host = ?, upstream_port = ?, inspection_profile = ?, cert_name = ? WHERE id = ?')
+    .run(parsed.upstreamHost, parsed.upstreamPort, nextProfile, nextProfile ? row.cert_name : '', row.id);
+  logAudit(req, 'website_update_site', row.domain,
+    `${parsed.upstreamHost}:${parsed.upstreamPort}`
+    + (inspectionChanged ? ` — SSL inspection ${nextProfile ? `→ "${nextProfile}"` : 'off'}` : ''));
 
   // Reset the pipeline and re-run so Caddy gets the new upstream.
   const steps = INITIAL_STEPS.map((s) => ({ ...s, status: s.key === 'dns' ? 'done' : 'pending' }));

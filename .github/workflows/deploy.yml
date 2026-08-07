@@ -1,0 +1,30 @@
+name: Deploy to production
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+  workflow_dispatch:
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Pull and restart Docker Compose
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - homelabrrr-production
+    environment: production
+    steps:
+      - name: Deploy
+        run: sudo /usr/local/sbin/homelabrrr-deploy
