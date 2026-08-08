@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-08 — Each disk can go to its own storage when migrating a VM
+
+- **The migrate window now asks per disk, not once for the whole VM.** Every disk in the **Disk plan** carries its own target-storage dropdown, so a boot disk can land on the SSD pool while a 2 TB data disk goes to the spinning pool. The **Target storage** select above still sets all of them at once — it is the default, and a per-disk dropdown overrides it
+- **Shared-storage migrations honour it disk by disk.** In adopt mode each previously-local disk is moved to the storage picked for it after the VM is created on the target, and a disk left on *keep on shared storage* now really stays there instead of being dragged onto the single target storage
+- **Disks that share a source storage are handled honestly.** Proxmox copies a *storage* to one target during a cross-host migration, not a disk, so two disks sitting on the same pool cannot be split by the copy itself. The portal sends the bulk of the data straight to the right place and moves the leftovers into position on the target once the copy finishes — shown as its own **Moving … to the requested storage** step. If that follow-up move fails, the migration still counts as done: the VM is up on the target host, and the message says which disk is still in the wrong pool. Containers cannot do that second move at all, so for an LXC the split is refused before anything is stopped, with the reason
+- **Free space is checked per pool.** The pre-flight used to compare only the boot-disk size against the single target storage; it now asks each pool for exactly what is going to land on it. A migration whose data disk will not fit is refused up front instead of failing partway through the copy — and the storage-format pre-check likewise now runs for every pool involved, not just the default one
+
 ## 2026-08-07 — Dependency and runtime maintenance
 
 - **New two-factor enrollments get a stronger secret.** A secret issued from now on is 20 bytes rather than 10, which is what the standard asks for. Nothing changes for anyone already enrolled — existing secrets keep working and there is no need to re-scan a QR code

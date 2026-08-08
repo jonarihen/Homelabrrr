@@ -15,6 +15,9 @@ import { logAudit } from '../utils/audit.js';
 import { decodeNodeRef, nodeLookupCandidates, isValidNodeName } from '../utils/nodeRef.js';
 import { assertNodeCapacity } from '../utils/capacity.js';
 import { planCdromDetach, checkStorageCompatibility } from '../utils/migrationPreflight.js';
+import {
+  normalizeDiskStorages, resolveDiskTargets, planStorageMapping, sizeByTargetStorage,
+} from '../utils/diskTargets.js';
 
 // Cross-host migration: move a guest between separate (non-clustered) Proxmox
 // hosts. Two modes, decided per VM:
@@ -372,6 +375,7 @@ async function runAdoptMigration(ctx) {
   const {
     id, vmid, sourceNode, targetNode, targetBridge, targetStorage,
     sharedMap, transferStorage, sourceHostName, targetHostName,
+    diskStorages = {},
   } = ctx;
   try {
     // 1. Move local disks (incl. EFI/TPM) onto the shared transfer storage
@@ -445,20 +449,28 @@ async function runAdoptMigration(ctx) {
     }
     setStep(id, 'verify', 'done');
 
-    // 4. Optionally land the previously-local disks on target-local storage
-    const sharedTargetIds = new Set([...sharedMap.values()].map((m) => m.targetId));
-    if (targetStorage && !sharedTargetIds.has(targetStorage) && movedKeys.length > 0) {
+    // 4. Optionally land the previously-local disks on target-local storage.
+    //    Each disk follows its own pick (falling back to the single target
+    //    storage); one that is already sitting where it was asked to go — i.e.
+    //    on the shared storage it was adopted onto — has nothing to move.
+    const adoptedStorageId = sharedMap.get(transferStorage)?.targetId || transferStorage;
+    const moves = movedKeys
+      // `??`, not `||`: an empty entry is the explicit "leave this one on the
+      // shared storage" answer and must not fall through to targetStorage.
+      .map((key) => ({ key, storage: diskStorages[key] ?? targetStorage ?? '' }))
+      .filter((m) => m.storage && m.storage !== adoptedStorageId);
+    if (moves.length > 0) {
       setStep(id, 'move-back', 'active');
-      for (const key of movedKeys) {
-        const note = `${key} → ${targetStorage}`;
+      for (const move of moves) {
+        const note = `${move.key} → ${move.storage}`;
         setStep(id, 'move-back', 'active', note);
-        const upid = await moveVmDisk(targetNode, vmid, key, { storage: targetStorage, delete: 1 });
+        const upid = await moveVmDisk(targetNode, vmid, move.key, { storage: move.storage, delete: 1 });
         await waitForTask(targetNode, upid, {
           onPoll: progressReader(id, targetNode, upid, { step: 'move-back', note }),
         });
         clearProgress(id);
       }
-      setStep(id, 'move-back', 'done', `${movedKeys.length} disk(s) moved to ${targetStorage}`);
+      setStep(id, 'move-back', 'done', moves.map((m) => `${m.key} → ${m.storage}`).join(', '));
     } else {
       setStep(id, 'move-back', 'skipped');
     }
@@ -501,6 +513,71 @@ async function runAdoptMigration(ctx) {
   }
 }
 
+// ─── Post-copy disk relocation ───────────────────────────────────────────────
+
+// PVE's `target-storage` maps a source STORAGE to a target storage, so two
+// disks that share a source storage always land in the same pool no matter what
+// the admin picked for each. The odd ones out are moved on the target once the
+// copy has finished — see utils/diskTargets.js for which disks those are.
+//
+// Held in memory only, deliberately: an orchestration interrupted by a restart
+// is moved to 'needs_review' at startup (db.js) for an operator to reconcile,
+// rather than resumed against a cluster whose state nobody has re-checked.
+const pendingRelocations = new Map(); // migration id → [{ key, storage }]
+const relocationsInFlight = new Set();
+
+async function relocateDisks(id, moves) {
+  const row = db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(id);
+  if (!row) return;
+  const done = [];
+  try {
+    setStep(id, 'relocate', 'active');
+    for (const move of moves) {
+      const note = `${move.key} → ${move.storage}`;
+      setStep(id, 'relocate', 'active', note);
+      const upid = await moveVmDisk(row.target_node, row.vmid, move.key, { storage: move.storage, delete: 1 });
+      await waitForTask(row.target_node, upid, {
+        onPoll: progressReader(id, row.target_node, upid, { step: 'relocate', note }),
+      });
+      clearProgress(id);
+      done.push(note);
+    }
+    setStep(id, 'relocate', 'done', done.join(', '));
+    finalizeMigration(id, true);
+  } catch (err) {
+    // The guest itself is migrated and running on the target — only the
+    // follow-up move failed. Calling that "migration failed" would be wrong, so
+    // it finishes successfully with the leftover spelled out.
+    const left = moves.slice(done.length).map((m) => `${m.key} → ${m.storage}`).join(', ');
+    setStep(id, 'relocate', 'error', err.message);
+    finalizeMigration(id, true,
+      `Migrated, but the follow-up disk move on the target failed (${left}): ${err.message}. `
+      + 'The VM is running on the target host — move those disks from Proxmox.');
+  }
+}
+
+// Single funnel for "the copy task has finished": both the in-process poller and
+// the lazy status check reach it, and only one of them may act on a migration.
+function completeRemoteMigrate(id, ok, detail = '') {
+  const moves = pendingRelocations.get(id) || [];
+  if (!ok || moves.length === 0) {
+    pendingRelocations.delete(id);
+    finalizeMigration(id, ok, detail);
+    return;
+  }
+  if (relocationsInFlight.has(id)) return; // already moving; the row stays 'running'
+  relocationsInFlight.add(id);
+  relocateDisks(id, moves)
+    .catch((err) => {
+      console.error(`[migrate] disk relocation for migration ${id} crashed:`, err.message);
+      finalizeMigration(id, true, `Migrated, but the follow-up disk move on the target crashed: ${err.message}`);
+    })
+    .finally(() => {
+      relocationsInFlight.delete(id);
+      pendingRelocations.delete(id);
+    });
+}
+
 // ─── remote_migrate background polling ───────────────────────────────────────
 
 // Migrations with a live in-process poller. Status requests skip their own task
@@ -521,16 +598,21 @@ async function pollMigration(id, sourceNode, upid, { maxAttempts = 4320 } = {}) 
       try {
         const task = await getTaskStatus(sourceNode, upid);
         if (task.status === 'stopped') {
-          finalizeMigration(id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
-          return;
+          completeRemoteMigrate(id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
+          // Disks still to be moved on the target keep the row 'running'; the
+          // next tick sees the finished task again and hits the in-flight guard.
+          if (!relocationsInFlight.has(id)) return;
+        } else {
+          await readProgress();
         }
-        await readProgress();
       } catch { /* source unreachable — keep polling */ }
     }
   } finally {
     polledInProcess.delete(id);
   }
-  finalizeMigration(id, false, 'Timed out while waiting for the migration task — check the task log in Proxmox');
+  // A relocation still running owns the outcome — the copy itself did finish.
+  if (relocationsInFlight.has(id)) return;
+  completeRemoteMigrate(id, false, 'Timed out while waiting for the migration task — check the task log in Proxmox');
 }
 
 // Re-check still-'running' remote_migrate rows against the source task.
@@ -543,7 +625,9 @@ async function refreshRunningMigrations(rows) {
     try {
       const task = await getTaskStatus(row.source_node, row.upid);
       if (task.status === 'stopped') {
-        finalizeMigration(row.id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
+        // Kicks off any post-copy disk move in the background and leaves the
+        // row 'running' — this is a request path, it must not wait for it.
+        completeRemoteMigrate(row.id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
         Object.assign(row, db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(row.id));
         continue;
       }
@@ -677,14 +761,27 @@ router.post('/:node/:vmid', async (req, res) => {
     return res.status(400).json({ error: 'Invalid VMID' });
   }
 
-  const { targetNode, targetStorage, targetBridge, online = false, deleteSource = true, fullCopy = false } = req.body;
+  const {
+    targetNode, targetStorage, targetBridge, diskStorages,
+    online = false, deleteSource = true, fullCopy = false,
+  } = req.body;
   if (!targetNode || !targetBridge) {
     return res.status(400).json({ error: 'targetNode and targetBridge are required' });
   }
   // These land in PVE parameters (`target-storage` / `target-bridge` are
-  // mapping lists, so a stray comma would smuggle extra mappings in).
+  // mapping lists, so a stray comma would smuggle extra mappings in). The
+  // storage-pair list this route builds for a per-disk migration is assembled
+  // from ids validated here and in normalizeDiskStorages — never from raw input.
   if (targetStorage && !IDENT_RE.test(String(targetStorage))) {
     return res.status(400).json({ error: 'Invalid target storage' });
+  }
+  // Per-disk overrides: { scsi0: 'ssdpool', scsi1: 'hddpool' }. Anything absent
+  // falls back to targetStorage.
+  let perDiskStorage;
+  try {
+    perDiskStorage = normalizeDiskStorages(diskStorages);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
   }
   if (!IDENT_RE.test(String(targetBridge))) {
     return res.status(400).json({ error: 'Invalid target bridge' });
@@ -715,6 +812,14 @@ router.post('/:node/:vmid', async (req, res) => {
     const mode = fullCopy ? 'remote_migrate' : plan.mode;
     const sourceRef = vm.nodeRef || req.params.node;
 
+    // Where each disk ends up. Both modes honour a per-disk pick, but they
+    // deliver it differently: adopt moves every disk itself and can simply obey,
+    // while a full copy has to express the choice through PVE's storage-pair
+    // list and move whatever that list cannot say afterwards.
+    let adoptDiskStorages = {};
+    let migrateStorage = targetStorage;
+    let relocate = [];
+
     if (mode === 'adopt') {
       if (running) {
         return res.status(400).json({ error: 'Shared-storage migration is offline only — stop the VM first' });
@@ -724,13 +829,25 @@ router.post('/:node/:vmid', async (req, res) => {
       if (snapshots.length > 0) {
         return res.status(400).json({ error: 'This VM has snapshots — remove them before a shared-storage migration' });
       }
-      // Capacity: only the previously-local disks land on target-local storage
-      const localGb = plan.disks.filter((d) => d.action === 'copy').reduce((sum, d) => sum + (d.sizeGb || 0), 0);
-      await assertNodeCapacity(targetNode, {
-        memoryMb: 0, // offline — memory is only needed at next start
-        diskGb: targetStorage ? localGb : 0,
-        storage: targetStorage || null,
+      // Only the previously-local disks land on target-local storage; the
+      // adopted ones never move, so they cost the target nothing.
+      const localDisks = plan.disks.filter((d) => d.action === 'copy');
+      const diskTargets = resolveDiskTargets(localDisks, {
+        defaultStorage: targetStorage || '',
+        diskStorages: perDiskStorage,
       });
+      // Resolved for every local disk, including the ones deliberately left on
+      // shared storage (empty target) — the job must not fall back to the
+      // single target storage for those.
+      const resolvedByKey = new Map(diskTargets.map((t) => [t.key, t.target]));
+      adoptDiskStorages = Object.fromEntries(localDisks.map((d) => [d.key, resolvedByKey.get(d.key) || '']));
+      for (const [storage, diskGb] of sizeByTargetStorage(diskTargets)) {
+        await assertNodeCapacity(targetNode, {
+          memoryMb: 0, // offline — memory is only needed at next start
+          diskGb,
+          storage,
+        });
+      }
     } else {
       if (vmtype === 'qemu' && running && !online) {
         return res.status(400).json({ error: 'VM is running — enable live migration or stop it first' });
@@ -738,29 +855,61 @@ router.post('/:node/:vmid', async (req, res) => {
       if (!targetStorage) {
         return res.status(400).json({ error: 'targetStorage is required for a full-copy migration' });
       }
+      const diskTargets = resolveDiskTargets(
+        plan.disks.filter((d) => d.action === 'copy' || d.action === 'remount'),
+        { defaultStorage: targetStorage, diskStorages: perDiskStorage },
+      );
+      const mapping = planStorageMapping(diskTargets, {
+        defaultStorage: targetStorage,
+        sourceStorages: (plan.sourceVolumes || []).map((v) => v.storage),
+      });
+      // A container's volumes cannot be re-homed after the copy: `pct
+      // move-volume` needs the container stopped, and a running rootfs cannot
+      // move at all. A split the pair list can't express has to be refused here
+      // rather than half-applied.
+      if (vmtype === 'lxc' && mapping.relocate.length > 0) {
+        return res.status(400).json({
+          code: 'unsplittable_storage',
+          error: `Container volumes that share a source storage must go to the same target storage — ${mapping.relocate.map((m) => m.key).join(', ')} would need a second move, which Proxmox cannot do for a container. Send them to the same storage.`,
+        });
+      }
+      migrateStorage = mapping.targetStorage;
+      relocate = mapping.relocate;
+
       // Pre-flight: a target storage that cannot import the source volume's
       // stream format fails deep inside the transfer — by then Proxmox has
       // already stopped the guest, so the shutdown happens for nothing. This is
       // knowable from the storage definitions, so refuse up front. Only a
       // provable incompatibility blocks; anything undeterminable is a warning.
-      const compat = checkStorageCompatibility({
-        sourceVolumes: plan.sourceVolumes,
-        targetStorageDef: (plan.targetStorageDefs || []).find((d) => d.storage === targetStorage) || null,
-        guestType: vmtype,
-      });
-      if (!compat.ok) {
-        return res.status(400).json({ code: 'incompatible_target_storage', error: compat.reason });
+      // Every storage the disks are spread across is checked against the
+      // volumes actually going there, not just the default one.
+      const targetByKey = new Map(diskTargets.map((t) => [t.key, t.target]));
+      const storageDefs = plan.targetStorageDefs || [];
+      for (const storage of new Set([targetStorage, ...diskTargets.map((t) => t.target)])) {
+        const compat = checkStorageCompatibility({
+          sourceVolumes: (plan.sourceVolumes || []).filter((v) => (targetByKey.get(v.key) || targetStorage) === storage),
+          targetStorageDef: storageDefs.find((d) => d.storage === storage) || null,
+          guestType: vmtype,
+        });
+        if (!compat.ok) {
+          return res.status(400).json({ code: 'incompatible_target_storage', error: compat.reason });
+        }
+        if (compat.severity === 'warn') {
+          console.warn(`[migrate] ${vmtype} ${vmid} → ${storage}: ${compat.reason}`);
+        }
       }
-      if (compat.severity === 'warn') {
-        console.warn(`[migrate] ${vmtype} ${vmid} → ${targetStorage}: ${compat.reason}`);
-      }
+
       // Pre-flight: skip silently if the target can't be queried (same policy
-      // as provisioning), but refuse when it clearly doesn't fit.
-      await assertNodeCapacity(targetNode, {
-        memoryMb: vm.maxmem ? Math.round(vm.maxmem / (1024 * 1024)) : 0,
-        diskGb: vm.maxdisk ? vm.maxdisk / GB : 0,
-        storage: targetStorage,
-      });
+      // as provisioning), but refuse when it clearly doesn't fit. Each pool is
+      // asked for what actually lands on it; the node's memory is one budget,
+      // so it is only counted against the first.
+      const perStorageGb = sizeByTargetStorage(diskTargets);
+      if (perStorageGb.size === 0) perStorageGb.set(targetStorage, vm.maxdisk ? vm.maxdisk / GB : 0);
+      let memoryMb = vm.maxmem ? Math.round(vm.maxmem / (1024 * 1024)) : 0;
+      for (const [storage, diskGb] of perStorageGb) {
+        await assertNodeCapacity(targetNode, { memoryMb, diskGb, storage });
+        memoryMb = 0;
+      }
     }
 
     let upid = '';
@@ -823,7 +972,9 @@ router.post('/:node/:vmid', async (req, res) => {
       }
       try {
         upid = await remoteMigrateVm(sourceRef, vmid, vmtype, targetHost, {
-          targetStorage,
+          // A bare storage id when everything lands in one pool, otherwise the
+          // `src:tgt,…` pair list that spreads the disks.
+          targetStorage: migrateStorage,
           targetBridge,
           online: vmtype === 'qemu' && running && !!online,
           restart: vmtype === 'lxc' && running,
@@ -849,7 +1000,7 @@ router.post('/:node/:vmid', async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
     `).run(
       req.session.userId, vmid, vm.name || '', vmtype,
-      sourceRef, targetNode, targetStorage || '', targetBridge,
+      sourceRef, targetNode, migrateStorage || '', targetBridge,
       mode === 'remote_migrate' && vmtype === 'qemu' && running && online ? 1 : 0,
       mode === 'adopt' ? 0 : (deleteSource ? 1 : 0), upid || '', mode, req.requestId || ''
     );
@@ -868,6 +1019,7 @@ router.post('/:node/:vmid', async (req, res) => {
         sourceNode: sourceRef, targetNode, targetBridge,
         targetStorage: targetStorage || '',
         sharedMap: plan.sharedMap, transferStorage: plan.transferStorage,
+        diskStorages: adoptDiskStorages,
         sourceHostName: sourceHost.name, targetHostName: targetHost.name,
       }).catch((err) => {
         console.error(`[migrate] adopt job crashed for VM ${vmid}:`, err.message);
@@ -887,15 +1039,24 @@ router.post('/:node/:vmid', async (req, res) => {
           note: ejected.length > 0 ? `ejected CD-ROM ${ejected.map((e) => `${e.key} (${e.volid})`).join(', ')}` : '',
         },
         { key: 'transfer', label: `Transferring ${vmtype === 'lxc' ? 'the container' : 'disks'} to ${targetHost.name}`, status: 'active' },
+        // Only present when the copy could not put every disk where it was
+        // asked to — disks sharing a source storage travel together.
+        ...(relocate.length > 0
+          ? [{ key: 'relocate', label: `Moving ${relocate.map((m) => m.key).join(', ')} to the requested storage` }]
+          : []),
         { key: 'finalize', label: 'Finalizing on the target host' },
       ]);
+      if (relocate.length > 0) pendingRelocations.set(row.lastInsertRowid, relocate);
       pollMigration(row.lastInsertRowid, sourceRef, upid)
         .catch((err) => console.error(`[migrate] polling failed for VM ${vmid}:`, err.message));
     }
 
     const cdromNote = ejected.length > 0 ? ` (ejected CD-ROM ${ejected.map((e) => `${e.key}=${e.volid}`).join(', ')})` : '';
+    const perDiskNote = Object.keys(perDiskStorage).length > 0
+      ? ` disks=${Object.entries(perDiskStorage).map(([k, s]) => `${k}→${s}`).join(',')}`
+      : '';
     logAudit(req, 'vm_remote_migrate', `${vm.node}/${vmid}`,
-      `mode=${mode} → ${targetHost.name}/${target.nodeName}${targetStorage ? ` storage=${targetStorage}` : ''} bridge=${targetBridge}${online ? ' online' : ''}${mode === 'adopt' || !deleteSource ? ' keep-source' : ''}${bootFix}${cdromNote}`);
+      `mode=${mode} → ${targetHost.name}/${target.nodeName}${migrateStorage ? ` storage=${migrateStorage}` : ''}${perDiskNote} bridge=${targetBridge}${online ? ' online' : ''}${mode === 'adopt' || !deleteSource ? ' keep-source' : ''}${bootFix}${cdromNote}`);
     res.json({
       id: row.lastInsertRowid, vmid, upid, mode, status: 'running',
       bootFix: bootFix.trim() || undefined,
