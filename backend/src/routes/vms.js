@@ -5,7 +5,7 @@ import {
   getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType,
-  getLXCStatus, lxcAction, getLXCConfig, updateLXCConfig, getLXCRRD, getLXCVNCTicket,
+  getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
   getTaskStatus, getTaskLog, getVMAgentInterfaces,
 } from '../proxmox.js';

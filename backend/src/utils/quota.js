@@ -2,7 +2,6 @@ import db from '../db.js';
 import { getAllVMs } from '../proxmox.js';
 import { httpError } from './httpError.js';
 
-const MB = 1024 ** 2;
 const GB = 1024 ** 3;
 
 const quotaError = (message) => httpError(403, message);

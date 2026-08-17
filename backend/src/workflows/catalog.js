@@ -67,7 +67,7 @@ export const ACTIONS = {
       { name: 'role', type: 'string', required: false, default: 'undefined', help: 'Interface role' },
       { name: 'skipIfExists', type: 'boolean', required: false, default: true, help: 'Skip if the interface already exists' },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{
         method: 'POST', path: 'cmdb/system/interface', scope: 'global',
         body: this._body(p, client),
@@ -87,7 +87,7 @@ export const ACTIONS = {
         ...(p.description ? { description: String(p.description) } : {}),
       };
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const name = String(p.name);
       if (p.skipIfExists !== false) {
         const existing = await client.getInterface(name);
@@ -119,7 +119,7 @@ export const ACTIONS = {
       { name: 'vdom', type: 'string', required: false, help: 'VDOM override (blank = firewall VDOM)' },
       { name: 'skipIfExists', type: 'boolean', required: false, default: true },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{ method: 'POST', path: 'cmdb/firewall/address', scope: scopeOf(client, p.vdom), body: this._body(p), summary: `Create address object ${p.name} (${p.subnet})` }];
     },
     _body(p) {
@@ -127,7 +127,7 @@ export const ACTIONS = {
       if (p.comment) body.comment = String(p.comment);
       return body;
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const name = String(p.name);
       const vdom = p.vdom ? String(p.vdom) : null;
       const effVdom = vdom || client.vdom;
@@ -166,7 +166,7 @@ export const ACTIONS = {
       { name: 'vdom', type: 'string', required: false, help: 'VDOM override (blank = firewall VDOM)' },
       { name: 'skipIfExists', type: 'boolean', required: false, default: true },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{ method: 'POST', path: 'cmdb/firewall.service/custom', scope: scopeOf(client, p.vdom), body: this._body(p), summary: `Create service ${p.name} (${p.protocol}/${p.port})` }];
     },
     _body(p) {
@@ -177,7 +177,7 @@ export const ACTIONS = {
       else body['tcp-portrange'] = String(p.port);
       return body;
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const name = String(p.name);
       const vdom = p.vdom ? String(p.vdom) : null;
       const effVdom = vdom || client.vdom;
@@ -218,10 +218,10 @@ export const ACTIONS = {
       { name: 'dedupeBySrcintf', type: 'string', required: false, help: 'Skip if a policy already has this src interface' },
       { name: 'moveAfterSameLabel', type: 'boolean', required: false, help: 'Re-order after an existing policy sharing the global-label' },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{ method: 'POST', path: 'cmdb/firewall/policy', scope: scopeOf(client, p.vdom), body: buildPolicyBody(p), summary: `Create policy "${p.name}" (${asList(p.srcintf).join(',')} → ${asList(p.dstintf).join(',')})` }];
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const vdom = p.vdom ? String(p.vdom) : null;
       const effVdom = vdom || client.vdom;
       const calls = [];
@@ -273,10 +273,10 @@ export const ACTIONS = {
       { name: 'vdom', type: 'string', required: false, help: 'VDOM (blank = firewall VDOM)' },
       { name: 'dedupeByDst', type: 'boolean', required: false, default: true, help: 'Skip if a route to this destination exists' },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{ method: 'POST', path: 'cmdb/router/static', scope: scopeOf(client, p.vdom), body: { dst: `${p.dst} ${p.netmask}`, gateway: String(p.gateway), device: String(p.device) }, summary: `Create static route ${p.dst}/${p.netmask} via ${p.gateway} dev ${p.device}` }];
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const vdom = p.vdom ? String(p.vdom) : null;
       const effVdom = vdom || client.vdom;
       const target = `${p.dst} ${p.netmask}`;
@@ -314,7 +314,7 @@ export const ACTIONS = {
       { name: 'dns2', type: 'string', required: false, default: '8.8.8.8' },
       { name: 'dedupeByInterface', type: 'boolean', required: false, default: true },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{ method: 'POST', path: 'cmdb/system.dhcp/server', scope: client.vdom, body: this._body(p), summary: `Create DHCP server on ${p.interface} (${p.startIp}–${p.endIp})` }];
     },
     _body(p) {
@@ -330,7 +330,7 @@ export const ACTIONS = {
       if (p.dns2) body['dns-server2'] = String(p.dns2);
       return body;
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const iface = String(p.interface);
       if (p.dedupeByInterface !== false) {
         const servers = await client.getDhcpServers();
@@ -366,7 +366,7 @@ export const ACTIONS = {
       { name: 'extintf', type: 'string', required: false, default: 'any' },
       { name: 'vdom', type: 'string', required: false, help: 'VDOM (blank = firewall VDOM)' },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{ method: 'POST', path: 'cmdb/firewall/vip', scope: scopeOf(client, p.vdom), body: this._body(p), summary: `Create VIP ${p.name} (${p.extport} → ${p.mappedip}:${p.mappedport})` }];
     },
     _body(p) {
@@ -382,7 +382,7 @@ export const ACTIONS = {
       if (String(p.protocol || 'tcp').toLowerCase() === 'udp') payload.protocol = 'udp';
       return payload;
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const vdom = p.vdom ? String(p.vdom) : null;
       const effVdom = vdom || client.vdom;
       const body = this._body(p);
@@ -408,10 +408,10 @@ export const ACTIONS = {
       { name: 'trunk', type: 'boolean', required: false, default: true, help: 'Add to allowed-vlans (trunk) vs access VLAN' },
       { name: 'vdom', type: 'string', required: false, help: 'VDOM (blank = firewall VDOM)' },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{ method: 'PUT', path: `cmdb/switch-controller/managed-switch/${p.serial}`, scope: scopeOf(client, p.vdom), summary: `Add ${p.vlanName} to ${p.trunk === false ? 'access VLAN on' : 'allowed-vlans on'} ${p.serial}/${p.port}` }];
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const vdom = p.vdom ? String(p.vdom) : null;
       const trunk = p.trunk !== false;
       await client.updateManagedSwitchPort(String(p.serial), String(p.port), String(p.vlanName), trunk, vdom);
@@ -435,11 +435,11 @@ export const ACTIONS = {
       { name: 'description', type: 'string', required: false },
       { name: 'vdom', type: 'string', required: false, default: 'root', help: 'VDOM (default root)' },
     ],
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       const vdom = p.vdom ? String(p.vdom) : 'root';
       return [{ method: 'POST', path: 'cmdb/switch-controller/vlan', scope: vdom, body: { name: String(p.name), vdom, 'vlan-id': Number(p.vlanId), ...(p.description ? { description: String(p.description) } : {}) }, summary: `Register switch-controller VLAN ${p.name}` }];
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       const vdom = p.vdom ? String(p.vdom) : 'root';
       const name = String(p.name);
       try {
@@ -476,7 +476,7 @@ export const ACTIONS = {
         if (Buffer.byteLength(raw) > MAX_CUSTOM_BODY_BYTES) throw new Error(`custom_api_call body exceeds ${MAX_CUSTOM_BODY_BYTES} bytes`);
       }
     },
-    plan(p, ctx, client) {
+    plan(p, _ctx, _client) {
       return [{ method: String(p.method || 'POST'), path: String(p.path || '').replace(/^\/api\/v2\//, ''), scope: scopeOf(client, p.vdom), body: this._body(p), summary: `${p.method} ${p.path}` }];
     },
     _body(p) {
@@ -486,7 +486,7 @@ export const ACTIONS = {
       }
       return p.body;
     },
-    async execute(client, p, ctx) {
+    async execute(client, p, _ctx) {
       this.validate(p);
       const vdom = p.vdom ? String(p.vdom) : null;
       const relPath = String(p.path).replace(/^\/api\/v2\//, '');
@@ -508,7 +508,7 @@ export const ACTIONS = {
       if (arts.length === 0) return [{ method: 'DELETE', path: '(recorded artifacts)', scope: '(firewall)', summary: 'Delete recorded artifacts in reverse order' }];
       return arts.slice().reverse().map((a) => ({ method: 'DELETE', path: teardownPath(a), scope: a.vdom || '(firewall vdom)', summary: `Delete ${describeArtifact(a)}` }));
     },
-    async execute(client, p, ctx) {
+    async execute(client, _p, _ctx) {
       const arts = (ctx && ctx.artifacts) || [];
       const calls = [];
       for (let i = arts.length - 1; i >= 0; i -= 1) {

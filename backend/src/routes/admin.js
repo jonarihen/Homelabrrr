@@ -59,7 +59,6 @@ const pFirewalls   = requirePermission('can_manage_firewalls');
 const pPortForwards = requirePermission('can_manage_firewalls', 'can_manage_port_forwards');
 const pVlans       = requirePermission('can_manage_vlans');
 const pPolicies    = requirePermission('can_manage_policies');
-const pTemplates   = requirePermission('can_manage_templates');
 const pAudit       = requirePermission('can_view_audit_log');
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 

@@ -184,11 +184,11 @@ router.post('/ls', async (req, res) => {
     ({ conn, sftp } = await openSftp(sess));
 
     // Resolve '.' or '~' to the actual absolute path
-    const resolvedPath = await new Promise((resolve, reject) => {
+    const resolvedPath = await new Promise((resolve) => {
       sftp.realpath(dirPath, (err, absPath) => (err ? resolve(dirPath) : resolve(absPath)));
     });
 
-    const list = await new Promise((resolve, reject) => {
+    const list = await new Promise((resolve) => {
       sftp.readdir(resolvedPath, (err, entries) => (err ? reject(err) : resolve(entries)));
     });
 
@@ -226,7 +226,7 @@ router.get('/download', async (req, res) => {
   try {
     ({ conn, sftp } = await openSftp(sess));
 
-    const stat = await new Promise((resolve, reject) => {
+    const stat = await new Promise((resolve) => {
       sftp.stat(filePath, (err, s) => (err ? reject(err) : resolve(s)));
     });
 
@@ -393,7 +393,7 @@ router.post('/mkdir', async (req, res) => {
   try {
     ({ conn, sftp } = await openSftp(sess));
 
-    await new Promise((resolve, reject) => {
+    await new Promise((resolve) => {
       sftp.mkdir(dirPath, (err) => (err ? reject(err) : resolve()));
     });
 
@@ -418,7 +418,7 @@ router.post('/delete', async (req, res) => {
   try {
     ({ conn, sftp } = await openSftp(sess));
 
-    await new Promise((resolve, reject) => {
+    await new Promise((resolve) => {
       const op = isDirectory ? sftp.rmdir.bind(sftp) : sftp.unlink.bind(sftp);
       op(targetPath, (err) => (err ? reject(err) : resolve()));
     });
