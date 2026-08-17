@@ -3,6 +3,13 @@
 This document is the contract for every module converted from synchronous better-sqlite3
 to async Drizzle/PostgreSQL. Follow it exactly; deviations belong in a review comment, not in code.
 
+## Schema property naming
+
+Schema property keys are **snake_case, identical to the column names** (`stop_time`, not
+`stopTime`). Row objects serialize directly into API responses in many routes; camelCase keys
+would silently change the frontend JSON contract. Table export names are camelCase
+(`export const vmSchedules = pgTable('vm_schedules', ...)`).
+
 ## Imports and structure
 
 - Import the database as `import { db } from '../db/client.ts'` (adjust depth). Schema tables come

@@ -42,6 +42,18 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'SQLite database file (the db_data volume mount point in Docker)',
   },
   {
+    name: 'DATABASE_URL',
+    defaultValue: null,
+    effect: 'PostgreSQL connection string (postgres://user:pass@host:5432/db)',
+    unsetNote: 'the PostgreSQL data layer refuses to start (required once the SQLite cutover lands)',
+    secret: true,
+  },
+  {
+    name: 'PG_POOL_SIZE',
+    defaultValue: '10',
+    effect: 'maximum PostgreSQL connections in the shared pool',
+  },
+  {
     name: 'ALLOWED_ORIGIN',
     defaultValue: null,
     effect: 'exact browser origin allowed for CORS and websocket upgrades',

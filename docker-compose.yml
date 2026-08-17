@@ -42,6 +42,8 @@ services:
       # Explicit for clarity: this is the db_data volume mount point below.
       # Changing it moves the database off the backed-up volume.
       - DB_PATH=${DB_PATH:-/app/data/db.sqlite}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - PG_POOL_SIZE=${PG_POOL_SIZE:-10}
     volumes:
       - db_data:/app/data
       - ${BACKUP_HOST_PATH:-./backups}:/app/backups
