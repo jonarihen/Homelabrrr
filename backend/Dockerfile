@@ -27,4 +27,4 @@ RUN mkdir -p /app/data \
 EXPOSE 3000
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["node", "src/index.js"]
+CMD ["node", "src/index.ts"]
