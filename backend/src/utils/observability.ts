@@ -1,16 +1,17 @@
-import db from '../db.ts';
+import type { Request, Response, NextFunction } from 'express';
+import { sql } from 'drizzle-orm';
+import { db, pool } from '../db/client.ts';
 import { log } from './logger.ts';
-import { statSync } from 'node:fs';
 import { metricEvents } from './metricRegistry.ts';
 
 const startedAt = Date.now();
-const counters = new Map();
-const durations = new Map();
-function keyFor(method, status) {
+const counters = new Map<string, number>();
+const durations = new Map<string, { count: number; sum: number }>();
+function keyFor(method: string, status: number) {
   return `${method}:${status}`;
 }
 
-export function observeRequests(req, res, next) {
+export function observeRequests(req: Request, res: Response, next: NextFunction): void {
   const start = process.hrtime.bigint();
   res.on('finish', () => {
     const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
@@ -21,39 +22,43 @@ export function observeRequests(req, res, next) {
     bucket.sum += durationMs;
     durations.set(req.method, bucket);
     log(res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info', 'http_request', {
-      requestId: req.requestId,
+      requestId: (req as Request & { requestId?: string }).requestId,
       method: req.method,
       path: req.originalUrl?.split('?')[0],
       status: res.statusCode,
       durationMs: Math.round(durationMs * 100) / 100,
       actor: req.session?.username || 'anonymous',
-      authType: req.apiToken ? 'api_token' : req.session?.userId ? 'session' : 'none',
+      authType: (req as Request & { apiToken?: unknown }).apiToken ? 'api_token' : req.session?.userId ? 'session' : 'none',
     });
   });
   next();
 }
 
-export function liveness() {
+export function liveness(): { ok: boolean; uptimeSeconds: number } {
   return { ok: true, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) };
 }
 
-export function readiness() {
+export async function readiness(): Promise<{ ok: boolean; database: string; schemaVersion?: number; error?: string }> {
   try {
-    const check = db.pragma('quick_check', { simple: true });
-    const migrations = db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get();
-    return { ok: check === 'ok', database: check, schemaVersion: migrations.version };
+    // Bounded so a wedged database turns into a 503 instead of a hung probe.
+    const result = await Promise.race([
+      db.execute(sql`SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations`),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000).unref?.()),
+    ]);
+    const version = Number((result.rows[0] as { version: number | string }).version);
+    return { ok: true, database: 'ok', schemaVersion: version };
   } catch {
     // Readiness is intentionally unauthenticated for container orchestrators;
-    // never reflect SQLite paths, SQL text, or other internal exception detail.
+    // never reflect connection strings, SQL text, or other internal detail.
     return { ok: false, database: 'unavailable', error: 'Database readiness check failed' };
   }
 }
 
-function safeLabel(value) {
+function safeLabel(value: unknown): string {
   return String(value || '').replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 80);
 }
 
-export function metricsText({ vncWebSockets = 0, sshWebSockets = 0 } = {}) {
+export async function metricsText({ vncWebSockets = 0, sshWebSockets = 0 } = {}): Promise<string> {
   const lines = [
     '# HELP homelabrrr_uptime_seconds Process uptime.',
     '# TYPE homelabrrr_uptime_seconds gauge',
@@ -75,19 +80,18 @@ export function metricsText({ vncWebSockets = 0, sshWebSockets = 0 } = {}) {
   }
   lines.push(`homelabrrr_websocket_connections{kind="vnc"} ${Number(vncWebSockets) || 0}`);
   lines.push(`homelabrrr_websocket_connections{kind="ssh"} ${Number(sshWebSockets) || 0}`);
+  // Connection-pool pressure: waiting > 0 sustained means the pool is too small
+  // or a query is stuck.
+  lines.push(`homelabrrr_pg_pool_clients{state="total"} ${pool.totalCount}`);
+  lines.push(`homelabrrr_pg_pool_clients{state="idle"} ${pool.idleCount}`);
+  lines.push(`homelabrrr_pg_pool_clients{state="waiting"} ${pool.waitingCount}`);
   try {
-    const pageCount = db.pragma('page_count', { simple: true });
-    const pageSize = db.pragma('page_size', { simple: true });
-    lines.push(`homelabrrr_sqlite_bytes ${Number(pageCount) * Number(pageSize)}`);
-    const freelist = db.pragma('freelist_count', { simple: true });
-    lines.push(`homelabrrr_sqlite_reclaimable_bytes ${Number(freelist) * Number(pageSize)}`);
-    let walBytes = 0;
-    try { walBytes = statSync(`${db.name}-wal`).size; } catch { /* no WAL file yet */ }
-    lines.push(`homelabrrr_sqlite_wal_bytes ${walBytes}`);
-    for (const [table, type] of [['provisioned_vms', 'provision'], ['vm_migrations', 'migration']]) {
-      const rows = db.prepare(`SELECT status, COUNT(*) AS count FROM ${table} GROUP BY status`).all();
-      for (const row of rows) {
-        lines.push(`homelabrrr_jobs{type="${type}",status="${safeLabel(row.status)}"} ${row.count}`);
+    const size = await db.execute(sql`SELECT pg_database_size(current_database()) AS bytes`);
+    lines.push(`homelabrrr_pg_database_bytes ${Number((size.rows[0] as { bytes: number | string }).bytes)}`);
+    for (const [table, type] of [['provisioned_vms', 'provision'], ['vm_migrations', 'migration']] as const) {
+      const rows = await db.execute(sql`SELECT status, COUNT(*) AS count FROM ${sql.identifier(table)} GROUP BY status`);
+      for (const row of rows.rows as { status: string; count: number | string }[]) {
+        lines.push(`homelabrrr_jobs{type="${type}",status="${safeLabel(row.status)}"} ${Number(row.count)}`);
       }
     }
   } catch { /* readiness reports database failures */ }

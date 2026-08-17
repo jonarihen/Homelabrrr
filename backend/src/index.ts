@@ -1,7 +1,10 @@
 import express from 'express';
 import session from 'express-session';
-import SqliteStore from 'better-sqlite3-session-store';
-import db from './db.ts';
+import { eq } from 'drizzle-orm';
+import { db, closeDb } from './db/client.ts';
+import { initDatabase } from './db/init.ts';
+import { DrizzleSessionStore } from './db/sessionStore.ts';
+import { users, sshKeys } from './db/schema/index.ts';
 import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -61,6 +64,12 @@ const server = createServer(app);
 let shuttingDown = false;
 installConsoleRedaction();
 
+// Migrations, secret adoption, role seeding, crash-recovery sweeps, and the
+// first-admin bootstrap all complete before any middleware or route can touch
+// the database. Nothing below (and no imported module — conventions rule M12)
+// may query at module scope.
+await initDatabase();
+
 app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || null;
@@ -77,8 +86,8 @@ app.use((req, res, next) => {
 // checks that decide whether the instance should receive application traffic.
 app.get('/api/health', (_req, res) => res.json(liveness()));
 app.get('/api/health/live', (_req, res) => res.json(liveness()));
-app.get('/api/health/ready', (_req, res) => {
-  const status = readiness();
+app.get('/api/health/ready', async (_req, res) => {
+  const status = await readiness();
   res.status(status.ok ? 200 : 503).json(status);
 });
 app.use(express.json({ limit: '1mb' }));
@@ -98,12 +107,9 @@ if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 16) {
   throw new Error('SESSION_SECRET must be set to a random string of at least 16 characters');
 }
 
-const SqliteSessionStore = SqliteStore(session);
+const sessionStore = new DrizzleSessionStore();
 const sessionMiddleware = session({
-  store: new SqliteSessionStore({
-    client: db,
-    expired: { clear: true, intervalMs: 900000 },
-  }),
+  store: sessionStore,
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
@@ -128,19 +134,23 @@ app.use((req, res, next) => {
 app.use(enforceApiTokenScope);
 app.use(csrfProtection({ allowedOrigin: ALLOWED_ORIGIN || '' }));
 
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   if (!req.session?.userId) return next();
   // Token auth already resolved the live user; don't re-hydrate (and never try
   // to destroy) the plain token session object.
   if (req.apiToken) return next();
 
-  const user = db.prepare('SELECT username, is_admin FROM users WHERE id = ?').get(req.session.userId);
+  const [user] = await db
+    .select({ username: users.username, is_admin: users.is_admin })
+    .from(users)
+    .where(eq(users.id, req.session.userId))
+    .limit(1);
   if (!user) {
     return req.session.destroy(() => next());
   }
 
   req.session.username = user.username;
-  req.session.isAdmin = user.is_admin === 1;
+  req.session.isAdmin = user.is_admin === true;
   if (!req.session.lastSeenAt || Date.now() - Number(req.session.lastSeenAt) > 5 * 60 * 1000) {
     req.session.lastSeenAt = Date.now();
     req.session.clientIp = String(req.ip || '').slice(0, 128);
@@ -172,8 +182,8 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/websites', websiteRoutes);
 app.use('/api/workflows', workflowRoutes);
 app.use('/api/public-ips', publicIpRoutes);
-app.get('/api/metrics', requireAdmin, (_req, res) => {
-  res.type('text/plain; version=0.0.4').send(metricsText({
+app.get('/api/metrics', requireAdmin, async (_req, res) => {
+  res.type('text/plain; version=0.0.4').send(await metricsText({
     vncWebSockets: vncWss.clients.size,
     sshWebSockets: sshWss.clients.size,
   }));
@@ -200,7 +210,7 @@ app.get('/api/health/client-ip', requireAuth, (req, res) => {
 // Seed built-in default workflows for every registered firewall (migration).
 // Idempotent: only inserts a workflow+steps for a (firewall, trigger) with none.
 try {
-  const count = seedAllFirewalls();
+  const count = await Promise.resolve(seedAllFirewalls());
   if (count > 0) console.log(`[workflows] Ensured default provisioning workflows for ${count} firewall(s)`);
 } catch (err) {
   console.warn('[workflows] Default workflow seeding failed:', err.message);
@@ -572,13 +582,13 @@ async function convertPpkKey(ppkContent) {
   }
 }
 
-const ppkKeys = db.prepare('SELECT id, private_key FROM ssh_keys').all();
+const ppkKeys = await db.select({ id: sshKeys.id, private_key: sshKeys.private_key }).from(sshKeys);
 for (const k of ppkKeys) {
   try {
     const privateKey = decryptSecret(k.private_key);
     if (!privateKey.startsWith('PuTTY-User-Key-File')) continue;
     const openssh = await convertPpkKey(privateKey);
-    db.prepare('UPDATE ssh_keys SET private_key = ? WHERE id = ?').run(encryptSecret(openssh), k.id);
+    await db.update(sshKeys).set({ private_key: encryptSecret(openssh) }).where(eq(sshKeys.id, k.id));
     console.log(`Migrated PPK key id=${k.id} to OpenSSH format`);
   } catch (err) {
     console.warn(`Could not auto-convert PPK key id=${k.id} (may be encrypted): ${err.message}`);
@@ -589,15 +599,15 @@ for (const k of ppkKeys) {
 // Lifts any node maintenance whose end time has passed and closes its notice.
 // Runs once at startup (catches windows that expired while the server was down)
 // then on a one-minute tick.
-function tickMaintenance() {
+async function tickMaintenance() {
   try {
-    const lifted = sweepExpiredMaintenance();
+    const lifted = await Promise.resolve(sweepExpiredMaintenance());
     if (lifted > 0) console.log(`[maintenance] auto-expired ${lifted} node maintenance window(s)`);
   } catch (err) {
     console.error('[maintenance] sweep failed:', err.message);
   }
 }
-tickMaintenance();
+await tickMaintenance();
 const maintenanceTimer = setInterval(tickMaintenance, 60_000);
 
 // ─── Background PVE tag auto-sync scheduler ───────────────────────────────────
@@ -684,12 +694,12 @@ const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
 // Background enforcement of per-VM power schedules (vm_schedules).
 startScheduler();
 
-const maintenanceStartTimer = setTimeout(() => {
-  try { runDatabaseMaintenance(); } catch (err) { log('warn', 'database_maintenance_failed', { error: err }); }
-}, 5 * 60 * 1000);
-const databaseMaintenanceTimer = setInterval(() => {
-  try { runDatabaseMaintenance(); } catch (err) { log('warn', 'database_maintenance_failed', { error: err }); }
-}, 24 * 60 * 60 * 1000);
+const runDatabaseMaintenanceSafe = () => {
+  Promise.resolve().then(() => runDatabaseMaintenance())
+    .catch((err) => { log('warn', 'database_maintenance_failed', { error: err }); });
+};
+const maintenanceStartTimer = setTimeout(runDatabaseMaintenanceSafe, 5 * 60 * 1000);
+const databaseMaintenanceTimer = setInterval(runDatabaseMaintenanceSafe, 24 * 60 * 60 * 1000);
 maintenanceStartTimer.unref?.();
 databaseMaintenanceTimer.unref?.();
 const stopBackupScheduler = startBackupScheduler();
@@ -704,6 +714,7 @@ for (const line of formatConfigReport(buildConfigReport(process.env))) console.l
 server.listen(PORT_NUM, () => {
   log('info', 'server_listening', { port: PORT_NUM });
 });
+sessionStore.startPruning();
 
 async function shutdown(signal) {
   if (shuttingDown) return;
@@ -737,10 +748,8 @@ async function shutdown(signal) {
   ], 15_000);
   if (drained.status === 'timeout') server.closeAllConnections?.();
 
-  try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (err) {
-    log('warn', 'shutdown_checkpoint_failed', { error: err });
-  }
-  try { db.close(); } catch { /* already closed */ }
+  sessionStore.stopPruning();
+  try { await closeDb(); } catch { /* pool already closed */ }
   log('info', 'shutdown_complete', {
     signal,
     forcedConnections: drained.status === 'timeout',
@@ -750,10 +759,9 @@ async function shutdown(signal) {
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.once(signal, () => {
     shutdown(signal).then(() => {
-      // better-sqlite3-session-store owns an internal expiry interval without
-      // exposing a close handle. All application drains and the final WAL
-      // checkpoint have completed above, so terminate explicitly instead of
-      // allowing that implementation-detail timer to hold the process open.
+      // All drains completed and the pool is closed. Exiting explicitly is
+      // defensive — a stray library handle (ws, ssh2) must not hold a
+      // half-shut-down process open.
       process.exit(0);
     }).catch((err) => {
       log('error', 'shutdown_failed', { signal, error: err });

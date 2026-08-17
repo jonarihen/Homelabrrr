@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 const V1_PREFIX = 'enc:v1:';
 const V2_PREFIX = 'enc:v2:';
 
-function parseSecretKey(rawValue, label = 'SECRET_ENCRYPTION_KEY') {
+function parseSecretKey(rawValue: string | undefined | null, label = 'SECRET_ENCRYPTION_KEY'): Buffer | null {
   if (!rawValue) return null;
   const raw = String(rawValue).trim();
   if (!raw) return null;
@@ -19,9 +19,9 @@ function parseSecretKey(rawValue, label = 'SECRET_ENCRYPTION_KEY') {
   throw new Error(`${label} must be 32 bytes (base64, hex, or raw text)`);
 }
 
-function parsePreviousKeys(rawValue) {
+function parsePreviousKeys(rawValue: string): Map<string, Buffer | null> {
   if (!rawValue) return new Map();
-  let entries;
+  let entries: [string, unknown][];
   try {
     const parsed = JSON.parse(rawValue);
     entries = Object.entries(parsed);
@@ -35,7 +35,7 @@ function parsePreviousKeys(rawValue) {
   return new Map(entries.map(([id, value]) => {
     const keyId = String(id || '').trim();
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(keyId)) throw new Error(`Invalid encryption key id: ${keyId}`);
-    return [keyId, parseSecretKey(value, `previous encryption key ${keyId}`)];
+    return [keyId, parseSecretKey(value as string, `previous encryption key ${keyId}`)];
   }));
 }
 
@@ -46,20 +46,20 @@ const PREVIOUS_KEYS = parsePreviousKeys(process.env.SECRET_ENCRYPTION_PREVIOUS_K
 const KEYRING = new Map(PREVIOUS_KEYS);
 if (CURRENT_KEY) KEYRING.set(CURRENT_KEY_ID, CURRENT_KEY);
 
-export function assertSecretEncryptionKey() {
+export function assertSecretEncryptionKey(): Buffer {
   if (!CURRENT_KEY) throw new Error('SECRET_ENCRYPTION_KEY must be set before the application can start');
   return CURRENT_KEY;
 }
 
-export function encryptionKeyStatus() {
+export function encryptionKeyStatus(): { currentKeyId: string; availableKeyIds: string[]; legacyKeyCount: number } {
   return { currentKeyId: CURRENT_KEY_ID, availableKeyIds: [...KEYRING.keys()], legacyKeyCount: PREVIOUS_KEYS.size };
 }
 
-export function isEncryptedSecret(value) {
+export function isEncryptedSecret(value: unknown): value is string {
   return typeof value === 'string' && (value.startsWith(V1_PREFIX) || value.startsWith(V2_PREFIX));
 }
 
-function encryptWithKey(value, key, prefix) {
+function encryptWithKey(value: string, key: Buffer, prefix: string): string {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const ciphertext = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
@@ -67,13 +67,14 @@ function encryptWithKey(value, key, prefix) {
   return `${prefix}${iv.toString('base64url')}.${tag.toString('base64url')}.${ciphertext.toString('base64url')}`;
 }
 
-export function encryptSecret(value) {
+export function encryptSecret<T extends string | null | undefined>(value: T): T;
+export function encryptSecret(value: string | null | undefined): string | null | undefined {
   if (value === null || value === undefined || value === '') return value;
   if (typeof value === 'string' && value.startsWith(`${V2_PREFIX}${CURRENT_KEY_ID}:`)) return value;
   return encryptWithKey(value, assertSecretEncryptionKey(), `${V2_PREFIX}${CURRENT_KEY_ID}:`);
 }
 
-function decryptPayload(payload, key) {
+function decryptPayload(payload: string, key: Buffer): string {
   const [ivB64, tagB64, ciphertextB64] = payload.split('.');
   if (!ivB64 || !tagB64 || !ciphertextB64) throw new Error('Encrypted secret is malformed');
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivB64, 'base64url'));
@@ -84,7 +85,8 @@ function decryptPayload(payload, key) {
   ]).toString('utf8');
 }
 
-export function decryptSecret(value) {
+export function decryptSecret<T extends string | null | undefined>(value: T): T;
+export function decryptSecret(value: string | null | undefined): string | null | undefined {
   if (value === null || value === undefined || value === '') return value;
   if (!isEncryptedSecret(value)) return value;
 
@@ -101,14 +103,14 @@ export function decryptSecret(value) {
   // v1 had no key identifier. Try the current key and then explicitly
   // configured legacy keys so an upgrade can re-encrypt it as v2.
   const payload = value.slice(V1_PREFIX.length);
-  const candidates = [CURRENT_KEY, ...PREVIOUS_KEYS.values()].filter(Boolean);
+  const candidates = [CURRENT_KEY, ...PREVIOUS_KEYS.values()].filter((k): k is Buffer => Boolean(k));
   for (const key of candidates) {
     try { return decryptPayload(payload, key); } catch { /* try the next configured key */ }
   }
   throw new Error('Encrypted v1 secret could not be decrypted with the configured keyring');
 }
 
-export function secretNeedsMigration(value) {
+export function secretNeedsMigration(value: unknown): boolean {
   if (value === null || value === undefined || value === '') return false;
   if (!isEncryptedSecret(value)) return true;
   return !String(value).startsWith(`${V2_PREFIX}${CURRENT_KEY_ID}:`);
