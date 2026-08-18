@@ -9,14 +9,23 @@ import { globalErrorHandler } from '../middleware/errorHandler.ts';
 import { csrfProtection } from '../middleware/requestSecurity.ts';
 import { requestContext } from '../utils/logger.ts';
 import { validateObject, validatePort } from '../utils/validation.ts';
+import { createTestDatabase } from '../testUtils/pgTestDb.ts';
 
 const testDirectory = mkdtempSync(join(tmpdir(), 'homelabrrr-route-integration-'));
-process.env.DB_PATH = join(testDirectory, 'integration.sqlite');
 process.env.SECRET_ENCRYPTION_KEY = '44'.repeat(32);
 process.env.INITIAL_ADMIN_USERNAME = 'integration-admin';
 process.env.INITIAL_ADMIN_PASSWORD = 'integration-password-strong';
+// The auth middleware chain imports the Drizzle client, which needs a live
+// DATABASE_URL at import time — give it a throwaway PostgreSQL database. These
+// tests exercise pure middleware (requireAuth/CSRF), so nothing queries it, but
+// the module must load.
+const integrationDb = await createTestDatabase();
+process.env.DATABASE_URL = integrationDb.url;
 const { requireAdmin, requireAuth } = await import('../middleware/auth.ts');
-test.after(() => rmSync(testDirectory, { recursive: true, force: true }));
+test.after(async () => {
+  rmSync(testDirectory, { recursive: true, force: true });
+  await integrationDb.drop();
+});
 
 function appForIntegration() {
   const app = express();

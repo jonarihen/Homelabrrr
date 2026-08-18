@@ -10,7 +10,6 @@ import {
   scanForLegacyPermissionColumnReads,
   isSanctionedColumnRead,
   unsanctionedColumnReads,
-  SANCTIONED_COLUMN_READS,
 } from './permissionColumnScan.ts';
 
 const SRC_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -122,11 +121,16 @@ test('backend/src reads no legacy permission column outside the allowlist', () =
   );
 });
 
-test('the allowlist is still live — the sanctioned read is the only match', () => {
+test('no legacy raw permission-column SQL reads remain after the Drizzle migration', () => {
+  // The scanner matches raw better-sqlite3 `SELECT can_* FROM users` text. The
+  // PostgreSQL migration replaced every such read with a Drizzle select, so the
+  // live tree now contains zero — including the formerly-sanctioned provision.ts
+  // read, which still folds the role back in (see the next test). The scanner and
+  // its allowlist mechanics stay as a regression guard against anyone
+  // reintroducing raw permission-column SQL.
   const findings = scanBackendSource();
-  assert.equal(findings.length, SANCTIONED_COLUMN_READS.length);
-  assert.equal(findings.length, 1);
-  assert.match(findings[0].file, /routes\/provision\.ts$/);
+  assert.deepEqual(unsanctionedColumnReads(findings), []);
+  assert.equal(findings.length, 0);
 });
 
 test('the sanctioned provision.js read really does fold the role back in', () => {

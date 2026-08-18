@@ -1,17 +1,15 @@
-import db from '../db.ts';
+import { eq, and, desc, inArray, count } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import type { DbOrTx } from '../db/client.ts';
+import { workflows, workflowSteps, workflowRuns, firewalls } from '../db/schema/index.ts';
 import { defaultSteps, defaultWorkflowName, TRIGGERS, TRIGGER_MAP } from './definitions.ts';
 
 /**
  * Persistence + seeding for workflows/workflow_steps/workflow_runs.
- * better-sqlite3 is synchronous — no awaits here.
+ * Async Drizzle/PostgreSQL — every DB touch is awaited.
  */
 
-function parseJson(value, fallback) {
-  if (value === undefined || value === null || value === '') return fallback;
-  try { return JSON.parse(value); } catch { return fallback; }
-}
-
-function rowToStep(row) {
+function rowToStep(row: any) {
   return {
     id: row.id,
     workflow_id: row.workflow_id,
@@ -19,169 +17,210 @@ function rowToStep(row) {
     step_key: row.step_key || '',
     action: row.action,
     label: row.label || '',
-    params: parseJson(row.params, {}),
+    // params is a jsonb column — already an object.
+    params: row.params ?? {},
     condition: row.condition || '',
     enabled: row.enabled,
     continue_on_error: row.continue_on_error,
   };
 }
 
-export function workflowSettings(workflow) {
-  return parseJson(workflow?.settings, {});
+// settings is a jsonb column — already an object.
+export function workflowSettings(workflow: any) {
+  return workflow?.settings ?? {};
 }
 
-const insertWorkflowStmt = db.prepare(
-  'INSERT INTO workflows (firewall_id, trigger, name, enabled, is_default, settings) VALUES (?, ?, ?, 1, 1, ?)'
-);
-const insertStepStmt = db.prepare(
-  'INSERT INTO workflow_steps (workflow_id, position, step_key, action, label, params, condition, enabled, continue_on_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-);
+// Insert a step list against a workflow. Runs on `db` or a transaction handle.
+async function insertSteps(executor: DbOrTx, workflowId: number, steps: any[]) {
+  if (!steps.length) return;
+  const rows = steps.map((s, idx) => ({
+    workflow_id: workflowId,
+    position: idx,
+    step_key: s.step_key || '',
+    action: s.action,
+    label: s.label || '',
+    params: s.params || {},
+    condition: s.condition || '',
+    enabled: s.enabled === undefined ? true : !!s.enabled,
+    continue_on_error: !!s.continue_on_error,
+  }));
+  await executor.insert(workflowSteps).values(rows);
+}
 
-function insertSteps(workflowId, steps) {
-  steps.forEach((s, idx) => {
-    insertStepStmt.run(
-      workflowId,
-      idx,
-      s.step_key || '',
-      s.action,
-      s.label || '',
-      JSON.stringify(s.params || {}),
-      s.condition || '',
-      s.enabled === undefined ? 1 : (s.enabled ? 1 : 0),
-      s.continue_on_error ? 1 : 0
-    );
+/** Ensure every trigger has a workflow for this firewall (idempotent). */
+export async function seedWorkflowsForFirewall(firewallId: number) {
+  await db.transaction(async (tx) => {
+    for (const meta of TRIGGERS) {
+      const [existing] = await tx
+        .select({ id: workflows.id })
+        .from(workflows)
+        .where(and(eq(workflows.firewall_id, firewallId), eq(workflows.trigger, meta.trigger)))
+        .limit(1);
+      if (existing) continue;
+      const [created] = await tx
+        .insert(workflows)
+        .values({
+          firewall_id: firewallId,
+          trigger: meta.trigger,
+          name: defaultWorkflowName(meta.trigger),
+          enabled: true,
+          is_default: true,
+          settings: {},
+        })
+        .returning({ id: workflows.id });
+      await insertSteps(tx, created.id, defaultSteps(meta.trigger));
+    }
   });
 }
 
-const seedFirewallTx = db.transaction((firewallId) => {
-  for (const meta of TRIGGERS) {
-    const existing = db.prepare('SELECT id FROM workflows WHERE firewall_id = ? AND trigger = ?').get(firewallId, meta.trigger);
-    if (existing) continue;
-    const res = insertWorkflowStmt.run(firewallId, meta.trigger, defaultWorkflowName(meta.trigger), '{}');
-    insertSteps(res.lastInsertRowid, defaultSteps(meta.trigger));
-  }
-});
-
-/** Ensure every trigger has a workflow for this firewall (idempotent). */
-export function seedWorkflowsForFirewall(firewallId) {
-  seedFirewallTx(firewallId);
-}
-
 /** Seed defaults for every registered firewall (startup migration). */
-export function seedAllFirewalls() {
-  const firewalls = db.prepare('SELECT id FROM firewalls').all();
-  for (const fw of firewalls) {
-    try { seedWorkflowsForFirewall(fw.id); }
-    catch (e) { console.warn(`[workflows] seed failed for firewall ${fw.id}: ${e.message}`); }
+export async function seedAllFirewalls() {
+  const rows = await db.select({ id: firewalls.id }).from(firewalls);
+  for (const fw of rows) {
+    try { await seedWorkflowsForFirewall(fw.id); }
+    catch (e: any) { console.warn(`[workflows] seed failed for firewall ${fw.id}: ${e.message}`); }
   }
-  return firewalls.length;
+  return rows.length;
 }
 
-export function getWorkflowRow(firewallId, trigger) {
-  return db.prepare('SELECT * FROM workflows WHERE firewall_id = ? AND trigger = ?').get(firewallId, trigger);
+export async function getWorkflowRow(firewallId: number, trigger: string) {
+  const [row] = await db
+    .select()
+    .from(workflows)
+    .where(and(eq(workflows.firewall_id, firewallId), eq(workflows.trigger, trigger)))
+    .limit(1);
+  return row;
 }
 
 /**
  * Return the executable bundle { workflow, steps } bound to (firewall, trigger),
  * auto-seeding the default if none exists yet.
  */
-export function getWorkflowBundle(firewallId, trigger) {
-  let workflow = getWorkflowRow(firewallId, trigger);
+export async function getWorkflowBundle(firewallId: number, trigger: string) {
+  let workflow = await getWorkflowRow(firewallId, trigger);
   if (!workflow) {
-    seedWorkflowsForFirewall(firewallId);
-    workflow = getWorkflowRow(firewallId, trigger);
+    await seedWorkflowsForFirewall(firewallId);
+    workflow = await getWorkflowRow(firewallId, trigger);
   }
   if (!workflow) return null;
-  const steps = db.prepare('SELECT * FROM workflow_steps WHERE workflow_id = ? ORDER BY position').all(workflow.id).map(rowToStep);
-  return { workflow, steps };
+  const stepRows = await db
+    .select()
+    .from(workflowSteps)
+    .where(eq(workflowSteps.workflow_id, workflow.id))
+    .orderBy(workflowSteps.position);
+  return { workflow, steps: stepRows.map(rowToStep) };
 }
 
-export function getWorkflowById(id) {
-  const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+export async function getWorkflowById(id: number) {
+  const [workflow] = await db.select().from(workflows).where(eq(workflows.id, id)).limit(1);
   if (!workflow) return null;
-  const steps = db.prepare('SELECT * FROM workflow_steps WHERE workflow_id = ? ORDER BY position').all(id).map(rowToStep);
-  return { workflow, steps };
+  const stepRows = await db
+    .select()
+    .from(workflowSteps)
+    .where(eq(workflowSteps.workflow_id, id))
+    .orderBy(workflowSteps.position);
+  return { workflow, steps: stepRows.map(rowToStep) };
 }
 
-export function listWorkflowsForFirewall(firewallId) {
-  seedWorkflowsForFirewall(firewallId);
-  const workflows = db.prepare('SELECT * FROM workflows WHERE firewall_id = ? ORDER BY trigger').all(firewallId);
-  return workflows.map((w) => {
-    const stepCount = db.prepare('SELECT COUNT(*) AS c FROM workflow_steps WHERE workflow_id = ?').get(w.id).c;
+export async function listWorkflowsForFirewall(firewallId: number) {
+  await seedWorkflowsForFirewall(firewallId);
+  const rows = await db
+    .select()
+    .from(workflows)
+    .where(eq(workflows.firewall_id, firewallId))
+    .orderBy(workflows.trigger);
+  if (rows.length === 0) return [];
+  // Single grouped count instead of a COUNT(*) per workflow (was an N+1 loop).
+  const ids = rows.map((w) => w.id);
+  const counts = await db
+    .select({ workflow_id: workflowSteps.workflow_id, c: count() })
+    .from(workflowSteps)
+    .where(inArray(workflowSteps.workflow_id, ids))
+    .groupBy(workflowSteps.workflow_id);
+  const countMap = new Map(counts.map((r) => [r.workflow_id, Number(r.c)]));
+  return rows.map((w) => {
     const meta = TRIGGER_MAP[w.trigger] || null;
-    return { ...w, settings: workflowSettings(w), stepCount, meta };
+    return { ...w, settings: workflowSettings(w), stepCount: countMap.get(w.id) || 0, meta };
   });
 }
 
-export function updateWorkflowMeta(id, { name, enabled, settings }) {
-  const existing = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+export async function updateWorkflowMeta(id: number, { name, enabled, settings }: any) {
+  const [existing] = await db.select().from(workflows).where(eq(workflows.id, id)).limit(1);
   if (!existing) return false;
-  db.prepare('UPDATE workflows SET name = ?, enabled = ?, settings = ? WHERE id = ?').run(
-    name !== undefined ? String(name) : existing.name,
-    enabled === undefined ? existing.enabled : (enabled ? 1 : 0),
-    settings !== undefined ? JSON.stringify(settings || {}) : existing.settings,
-    id
-  );
+  await db
+    .update(workflows)
+    .set({
+      name: name !== undefined ? String(name) : existing.name,
+      enabled: enabled === undefined ? existing.enabled : !!enabled,
+      settings: settings !== undefined ? (settings || {}) : existing.settings,
+    })
+    .where(eq(workflows.id, id));
   return true;
 }
 
-const replaceStepsTx = db.transaction((workflowId, steps) => {
-  db.prepare('DELETE FROM workflow_steps WHERE workflow_id = ?').run(workflowId);
-  insertSteps(workflowId, steps);
-  // Editing steps means it is no longer the pristine default.
-  db.prepare('UPDATE workflows SET is_default = 0 WHERE id = ?').run(workflowId);
-});
-
-export function replaceSteps(workflowId, steps) {
-  replaceStepsTx(workflowId, steps);
+export async function replaceSteps(workflowId: number, steps: any[]) {
+  await db.transaction(async (tx) => {
+    await tx.delete(workflowSteps).where(eq(workflowSteps.workflow_id, workflowId));
+    await insertSteps(tx, workflowId, steps);
+    // Editing steps means it is no longer the pristine default.
+    await tx.update(workflows).set({ is_default: false }).where(eq(workflows.id, workflowId));
+  });
 }
 
-const resetTx = db.transaction((id, trigger) => {
-  db.prepare('DELETE FROM workflow_steps WHERE workflow_id = ?').run(id);
-  insertSteps(id, defaultSteps(trigger));
-  db.prepare('UPDATE workflows SET is_default = 1, enabled = 1, settings = ?, name = ? WHERE id = ?').run('{}', defaultWorkflowName(trigger), id);
-});
-
-export function resetWorkflow(id) {
-  const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+export async function resetWorkflow(id: number) {
+  const [workflow] = await db.select().from(workflows).where(eq(workflows.id, id)).limit(1);
   if (!workflow) return false;
-  resetTx(id, workflow.trigger);
+  await db.transaction(async (tx) => {
+    await tx.delete(workflowSteps).where(eq(workflowSteps.workflow_id, id));
+    await insertSteps(tx, id, defaultSteps(workflow.trigger));
+    await tx
+      .update(workflows)
+      .set({ is_default: true, enabled: true, settings: {}, name: defaultWorkflowName(workflow.trigger) })
+      .where(eq(workflows.id, id));
+  });
   return true;
 }
 
-export function recordRun({ workflowId, firewallId, trigger, subjectType, subjectId, subjectLabel, status, log, artifacts, dryRun, requestId = '' }) {
-  const res = db.prepare(
-    'INSERT INTO workflow_runs (workflow_id, firewall_id, trigger, subject_type, subject_id, subject_label, status, log, artifacts, dry_run, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(
-    workflowId || null,
-    firewallId || null,
-    trigger || '',
-    subjectType || '',
-    subjectId != null ? String(subjectId) : '',
-    subjectLabel || '',
-    status || 'pending',
-    JSON.stringify(log || []),
-    JSON.stringify(artifacts || []),
-    dryRun ? 1 : 0,
-    requestId,
-  );
-  return res.lastInsertRowid;
+export async function recordRun({ workflowId, firewallId, trigger, subjectType, subjectId, subjectLabel, status, log, artifacts, dryRun, requestId = '' }: any) {
+  const [row] = await db
+    .insert(workflowRuns)
+    .values({
+      workflow_id: workflowId || null,
+      firewall_id: firewallId || null,
+      trigger: trigger || '',
+      subject_type: subjectType || '',
+      // subject_id is a TEXT column.
+      subject_id: subjectId != null ? String(subjectId) : '',
+      subject_label: subjectLabel || '',
+      status: status || 'pending',
+      // log + artifacts are jsonb columns — store objects directly.
+      log: log || [],
+      artifacts: artifacts || [],
+      dry_run: !!dryRun,
+      request_id: requestId,
+    })
+    .returning({ id: workflowRuns.id });
+  return row.id;
 }
 
-export function getRun(id) {
-  const row = db.prepare('SELECT * FROM workflow_runs WHERE id = ?').get(id);
+export async function getRun(id: number) {
+  const [row] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, id)).limit(1);
   if (!row) return null;
-  return { ...row, log: parseJson(row.log, []), artifacts: parseJson(row.artifacts, []) };
+  return { ...row, log: row.log ?? [], artifacts: row.artifacts ?? [] };
 }
 
-export function listRuns({ firewallId, trigger, subjectType, subjectId, limit = 50 } = {}) {
+export async function listRuns({ firewallId, trigger, subjectType, subjectId, limit = 50 }: any = {}) {
   const clauses = [];
-  const params = [];
-  if (firewallId) { clauses.push('firewall_id = ?'); params.push(firewallId); }
-  if (trigger) { clauses.push('trigger = ?'); params.push(trigger); }
-  if (subjectType) { clauses.push('subject_type = ?'); params.push(subjectType); }
-  if (subjectId != null && subjectId !== '') { clauses.push('subject_id = ?'); params.push(String(subjectId)); }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const rows = db.prepare(`SELECT * FROM workflow_runs ${where} ORDER BY created_at DESC, id DESC LIMIT ?`).all(...params, Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200));
-  return rows.map((r) => ({ ...r, log: parseJson(r.log, []), artifacts: parseJson(r.artifacts, []) }));
+  if (firewallId) clauses.push(eq(workflowRuns.firewall_id, Number(firewallId)));
+  if (trigger) clauses.push(eq(workflowRuns.trigger, trigger));
+  if (subjectType) clauses.push(eq(workflowRuns.subject_type, subjectType));
+  if (subjectId != null && subjectId !== '') clauses.push(eq(workflowRuns.subject_id, String(subjectId)));
+  const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+  const rows = await db
+    .select()
+    .from(workflowRuns)
+    .where(clauses.length ? and(...clauses) : undefined)
+    .orderBy(desc(workflowRuns.created_at), desc(workflowRuns.id))
+    .limit(lim);
+  return rows.map((r) => ({ ...r, log: r.log ?? [], artifacts: r.artifacts ?? [] }));
 }

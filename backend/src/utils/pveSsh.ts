@@ -1,5 +1,7 @@
 import { Client as SSHClient } from 'ssh2';
-import db from '../db.ts';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { pveHosts } from '../db/schema/index.ts';
 import { decryptSecret } from './secrets.ts';
 import { sshHostFingerprint } from './sshHostKey.ts';
 
@@ -62,7 +64,7 @@ export async function runNodeCommands(host, commands) {
   const { conn, fingerprint } = await connectSsh(host);
   try {
     if (!host.ssh_host_key && fingerprint) {
-      db.prepare('UPDATE pve_hosts SET ssh_host_key = ? WHERE id = ?').run(fingerprint, host.id);
+      await db.update(pveHosts).set({ ssh_host_key: fingerprint }).where(eq(pveHosts.id, host.id));
     }
     const results = [];
     for (const command of commands) {

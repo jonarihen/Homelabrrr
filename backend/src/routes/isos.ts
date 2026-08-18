@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import db from '../db.ts';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { isos } from '../db/schema/index.ts';
 import {
   downloadUrlToStorage, deleteVolume, getTaskStatus, getStorageContent,
 } from '../proxmox.ts';
@@ -17,16 +19,16 @@ router.use(requireAuth);
 // managed by the same admins who curate templates and cloud images.
 router.use(requirePermission('can_manage_templates'));
 
-function serializeIso(row) {
+function serializeIso(row: any) {
   const { nodeName, nodeRef } = decodeNodeRef(row.node);
   return { ...row, node: nodeName || row.node, nodeRef: nodeRef || row.node };
 }
 
-function setIsoStatus(id, status, detail = '') {
-  db.prepare('UPDATE isos SET status = ?, status_detail = ? WHERE id = ?').run(status, detail, id);
+async function setIsoStatus(id: number, status: string, detail = '') {
+  await db.update(isos).set({ status, status_detail: detail }).where(eq(isos.id, id));
 }
 
-async function waitForTask(node, upid, { attempts = 240, intervalMs = 5000 } = {}) {
+async function waitForTask(node: string, upid: string, { attempts = 240, intervalMs = 5000 } = {}) {
   for (let i = 0; i < attempts; i++) {
     await new Promise((r) => setTimeout(r, intervalMs));
     try {
@@ -41,8 +43,8 @@ async function waitForTask(node, upid, { attempts = 240, intervalMs = 5000 } = {
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
 
-router.get('/', (req, res) => {
-  const rows = db.prepare('SELECT * FROM isos ORDER BY name').all();
+router.get('/', async (req, res) => {
+  const rows = await db.select().from(isos).orderBy(isos.name);
   res.json(rows.map(serializeIso));
 });
 
@@ -58,16 +60,16 @@ router.post('/', async (req, res) => {
   // The PVE host fetches this URL server-side — refuse internal targets (SSRF)
   try {
     await assertPublicDownloadUrl(url);
-  } catch (err) {
+  } catch (err: any) {
     return res.status(400).json({ error: err.message });
   }
 
   const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'iso';
 
-  const row = db.prepare(
-    'INSERT INTO isos (name, url, node, storage, status, request_id) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(name, url, node, storage, 'downloading', req.requestId || '');
-  const id = row.lastInsertRowid;
+  const [inserted] = await db.insert(isos).values({
+    name, url, node, storage, status: 'downloading', request_id: req.requestId || '',
+  }).returning({ id: isos.id });
+  const id = inserted.id;
   // ISO content: PVE requires the stored filename to carry the .iso extension.
   // The unique suffix avoids clobbering a file already on the storage.
   const filename = `${slug}-iso${id}.iso`;
@@ -75,47 +77,48 @@ router.post('/', async (req, res) => {
 
   try {
     const upid = await downloadUrlToStorage(node, storage, url, filename, checksum?.trim() || undefined, undefined, 'iso');
-    db.prepare('UPDATE isos SET volid = ?, upid = ? WHERE id = ?').run(volid, upid || '', id);
-    logAudit(req, 'iso_download', name, `storage=${storage}; requestId=${req.requestId || ''}`);
+    await db.update(isos).set({ volid, upid: upid || '' }).where(eq(isos.id, id));
+    await logAudit(req, 'iso_download', name, `storage=${storage}; requestId=${req.requestId || ''}`);
 
     // Poll in the background; the row's status is the source of truth for the UI
     startBackgroundWork(async () => {
       const result = await waitForTask(node, upid);
       if (!result.ok) {
-        setIsoStatus(id, 'error', result.exitstatus === 'timeout'
+        await setIsoStatus(id, 'error', result.exitstatus === 'timeout'
           ? 'Timed out waiting for the download'
           : `Download failed: ${result.exitstatus}`);
         return;
       }
       try {
         const content = await getStorageContent(node, storage, 'iso');
-        const vol = content.find((c) => c.volid === volid);
+        const vol = content.find((c: any) => c.volid === volid);
         if (!vol) {
-          setIsoStatus(id, 'error', 'Download finished but the ISO was not found on the storage');
+          await setIsoStatus(id, 'error', 'Download finished but the ISO was not found on the storage');
           return;
         }
-        db.prepare('UPDATE isos SET status = ?, status_detail = ?, size = ? WHERE id = ?')
-          .run('ready', '', vol.size || 0, id);
-      } catch (err) {
-        setIsoStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
+        await db.update(isos).set({ status: 'ready', status_detail: '', size: vol.size || 0 }).where(eq(isos.id, id));
+      } catch (err: any) {
+        await setIsoStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
       }
     }, { kind: 'iso-download', id, requestId: req.requestId })
-      .catch((err) => setIsoStatus(id, 'error', sanitizeError(err.message)));
+      .catch((err: any) => { setIsoStatus(id, 'error', sanitizeError(err.message)).catch(() => {}); });
 
     res.json({ id, status: 'downloading' });
-  } catch (err) {
-    setIsoStatus(id, 'error', sanitizeError(err.message));
+  } catch (err: any) {
+    await setIsoStatus(id, 'error', sanitizeError(err.message));
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
 router.delete('/:id', async (req, res) => {
-  const iso = db.prepare('SELECT * FROM isos WHERE id = ?').get(req.params.id);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'ISO not found' });
+  const [iso] = await db.select().from(isos).where(eq(isos.id, id)).limit(1);
   if (!iso) return res.status(404).json({ error: 'ISO not found' });
   if (iso.volid) {
     try {
       await deleteVolume(iso.node, iso.volid);
-    } catch (err) {
+    } catch (err: any) {
       // Already gone is fine; anything else should stop the delete so we
       // don't leave an orphaned multi-GB file on the storage.
       if (!/does not exist|no such|not found/i.test(err.message)) {
@@ -123,8 +126,8 @@ router.delete('/:id', async (req, res) => {
       }
     }
   }
-  db.prepare('DELETE FROM isos WHERE id = ?').run(req.params.id);
-  logAudit(req, 'iso_delete', iso.name, iso.volid);
+  await db.delete(isos).where(eq(isos.id, id));
+  await logAudit(req, 'iso_delete', iso.name, iso.volid);
   res.json({ ok: true });
 });
 

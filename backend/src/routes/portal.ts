@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import db from '../db.ts';
+import { desc, eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { portalNotices, portalLinks } from '../db/schema/index.ts';
 import { getHosts, getHostStatus } from '../proxmox.ts';
 import { requireAuth, requireAdmin } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
@@ -13,13 +15,20 @@ router.use(requireAuth);
 
 const NOTICE_LEVELS = ['info', 'maintenance', 'warning'];
 
+// A non-numeric route id becomes null: eq(id, null) matches no rows (a 404),
+// where a raw NaN would make PostgreSQL reject the integer parameter with a 500.
+function parseId(value): number | null {
+  const n = Number.parseInt(value, 10);
+  return Number.isInteger(n) ? n : null;
+}
+
 // ─── System status ───────────────────────────────────────────────────────────
 // Every authenticated user gets the aggregate (operational/degraded/down);
 // per-host details and fleet-wide VM counts are admin-only.
 
 router.get('/status', async (req, res) => {
   try {
-    const hosts = getHosts();
+    const hosts = await getHosts();
     const statuses = await Promise.all(hosts.map(h => getHostStatus(h)));
     const online = statuses.filter(s => s.online).length;
     const overall = hosts.length === 0 ? 'unknown'
@@ -29,7 +38,7 @@ router.get('/status', async (req, res) => {
     // Active node maintenance — visible to every user (the same info is in the
     // auto-published notice). A drained node is amber "maintenance", never a red
     // "down"/"degraded" state, since the host itself is still reachable.
-    const maintenance = listMaintenance();
+    const maintenance = await listMaintenance();
 
     const payload = {
       overall,
@@ -90,34 +99,42 @@ router.get('/status', async (req, res) => {
 
 // ─── Notices ─────────────────────────────────────────────────────────────────
 
-router.get('/notices', (req, res) => {
+router.get('/notices', async (req, res) => {
   if (req.query.all === '1' && req.session.isAdmin) {
-    return res.json(db.prepare('SELECT * FROM portal_notices ORDER BY created_at DESC, id DESC').all());
+    return res.json(await db.select().from(portalNotices)
+      .orderBy(desc(portalNotices.created_at), desc(portalNotices.id)));
   }
-  res.json(db.prepare('SELECT * FROM portal_notices WHERE active = 1 ORDER BY created_at DESC, id DESC').all());
+  res.json(await db.select().from(portalNotices)
+    .where(eq(portalNotices.active, true))
+    .orderBy(desc(portalNotices.created_at), desc(portalNotices.id)));
 });
 
-router.post('/notices', requireAdmin, (req, res) => {
+router.post('/notices', requireAdmin, async (req, res) => {
   const { title, body = '', level = 'info' } = req.body;
   if (!String(title || '').trim()) return res.status(400).json({ error: 'Title is required' });
   if (!NOTICE_LEVELS.includes(level)) return res.status(400).json({ error: 'Invalid level' });
 
-  const info = db.prepare(
-    'INSERT INTO portal_notices (title, body, level, created_by) VALUES (?, ?, ?, ?)'
-  ).run(String(title).trim(), String(body || '').trim(), level, req.session.username || '');
+  const [inserted] = await db.insert(portalNotices).values({
+    title: String(title).trim(),
+    body: String(body || '').trim(),
+    level,
+    created_by: req.session.username || '',
+  }).returning({ id: portalNotices.id });
 
-  logAudit(req, 'notice_create', String(info.lastInsertRowid), String(title).trim());
-  notify('notice.published', {
+  await logAudit(req, 'notice_create', String(inserted.id), String(title).trim());
+  await notify('notice.published', {
     domain: String(title).trim(),
     status: level,
     detail: String(body || '').trim() || undefined,
     url: portalLink('/welcome'),
   });
-  res.json(db.prepare('SELECT * FROM portal_notices WHERE id = ?').get(info.lastInsertRowid));
+  const [row] = await db.select().from(portalNotices).where(eq(portalNotices.id, inserted.id)).limit(1);
+  res.json(row);
 });
 
-router.put('/notices/:id', requireAdmin, (req, res) => {
-  const existing = db.prepare('SELECT * FROM portal_notices WHERE id = ?').get(req.params.id);
+router.put('/notices/:id', requireAdmin, async (req, res) => {
+  const [existing] = await db.select().from(portalNotices)
+    .where(eq(portalNotices.id, parseId(req.params.id))).limit(1);
   if (!existing) return res.status(404).json({ error: 'Notice not found' });
   if (existing.source === 'node_maintenance') {
     return res.status(400).json({ error: 'This notice is managed by node maintenance — end maintenance on the PVE Hosts page to close it' });
@@ -126,54 +143,61 @@ router.put('/notices/:id', requireAdmin, (req, res) => {
   const title = req.body.title !== undefined ? String(req.body.title).trim() : existing.title;
   const body = req.body.body !== undefined ? String(req.body.body).trim() : existing.body;
   const level = req.body.level !== undefined ? req.body.level : existing.level;
-  const active = req.body.active !== undefined ? (req.body.active ? 1 : 0) : existing.active;
+  const active = req.body.active !== undefined ? !!req.body.active : existing.active;
 
   if (!title) return res.status(400).json({ error: 'Title is required' });
   if (!NOTICE_LEVELS.includes(level)) return res.status(400).json({ error: 'Invalid level' });
 
-  db.prepare('UPDATE portal_notices SET title = ?, body = ?, level = ?, active = ? WHERE id = ?')
-    .run(title, body, level, active, existing.id);
+  await db.update(portalNotices)
+    .set({ title, body, level, active })
+    .where(eq(portalNotices.id, existing.id));
 
-  logAudit(req, 'notice_update', String(existing.id), `${title}${active !== existing.active ? ` active=${active}` : ''}`);
-  res.json(db.prepare('SELECT * FROM portal_notices WHERE id = ?').get(existing.id));
+  await logAudit(req, 'notice_update', String(existing.id), `${title}${active !== existing.active ? ` active=${active}` : ''}`);
+  const [row] = await db.select().from(portalNotices).where(eq(portalNotices.id, existing.id)).limit(1);
+  res.json(row);
 });
 
-router.delete('/notices/:id', requireAdmin, (req, res) => {
-  const existing = db.prepare('SELECT * FROM portal_notices WHERE id = ?').get(req.params.id);
+router.delete('/notices/:id', requireAdmin, async (req, res) => {
+  const [existing] = await db.select().from(portalNotices)
+    .where(eq(portalNotices.id, parseId(req.params.id))).limit(1);
   if (!existing) return res.status(404).json({ error: 'Notice not found' });
   if (existing.source === 'node_maintenance') {
     return res.status(400).json({ error: 'This notice is managed by node maintenance — end maintenance on the PVE Hosts page to close it' });
   }
-  db.prepare('DELETE FROM portal_notices WHERE id = ?').run(existing.id);
-  logAudit(req, 'notice_delete', String(existing.id), existing.title);
+  await db.delete(portalNotices).where(eq(portalNotices.id, existing.id));
+  await logAudit(req, 'notice_delete', String(existing.id), existing.title);
   res.json({ ok: true });
 });
 
 // ─── Useful links ────────────────────────────────────────────────────────────
 
-router.get('/links', (req, res) => {
-  res.json(db.prepare('SELECT * FROM portal_links ORDER BY sort_order, id').all());
+router.get('/links', async (req, res) => {
+  res.json(await db.select().from(portalLinks).orderBy(portalLinks.sort_order, portalLinks.id));
 });
 
-router.post('/links', requireAdmin, (req, res) => {
+router.post('/links', requireAdmin, async (req, res) => {
   const { label, url, description = '' } = req.body;
   if (!String(label || '').trim()) return res.status(400).json({ error: 'Label is required' });
   const trimmedUrl = String(url || '').trim();
   if (!/^https?:\/\//i.test(trimmedUrl)) return res.status(400).json({ error: 'URL must start with http:// or https://' });
 
-  const info = db.prepare(
-    'INSERT INTO portal_links (label, url, description) VALUES (?, ?, ?)'
-  ).run(String(label).trim(), trimmedUrl, String(description || '').trim());
+  const [inserted] = await db.insert(portalLinks).values({
+    label: String(label).trim(),
+    url: trimmedUrl,
+    description: String(description || '').trim(),
+  }).returning({ id: portalLinks.id });
 
-  logAudit(req, 'portal_link_create', String(info.lastInsertRowid), trimmedUrl);
-  res.json(db.prepare('SELECT * FROM portal_links WHERE id = ?').get(info.lastInsertRowid));
+  await logAudit(req, 'portal_link_create', String(inserted.id), trimmedUrl);
+  const [row] = await db.select().from(portalLinks).where(eq(portalLinks.id, inserted.id)).limit(1);
+  res.json(row);
 });
 
-router.delete('/links/:id', requireAdmin, (req, res) => {
-  const existing = db.prepare('SELECT * FROM portal_links WHERE id = ?').get(req.params.id);
+router.delete('/links/:id', requireAdmin, async (req, res) => {
+  const [existing] = await db.select().from(portalLinks)
+    .where(eq(portalLinks.id, parseId(req.params.id))).limit(1);
   if (!existing) return res.status(404).json({ error: 'Link not found' });
-  db.prepare('DELETE FROM portal_links WHERE id = ?').run(existing.id);
-  logAudit(req, 'portal_link_delete', String(existing.id), existing.url);
+  await db.delete(portalLinks).where(eq(portalLinks.id, existing.id));
+  await logAudit(req, 'portal_link_delete', String(existing.id), existing.url);
   res.json({ ok: true });
 });
 

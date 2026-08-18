@@ -1,6 +1,8 @@
 import { isIP } from 'net';
 import dns from 'dns/promises';
-import db from '../db.ts';
+import { and, eq, inArray } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { vmAssignments, vmSshConfigs } from '../db/schema/index.ts';
 import { nodeLookupCandidates } from './nodeRef.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
 
@@ -159,18 +161,26 @@ export function ipv4InCidr(ip, cidr) {
  *  - vmIps: IPs of VMs assigned to them (from vm_ssh_configs.host)
  *  - subnets: CIDRs of the VLANs assigned to them (see utils/vlanSubnets.js)
  */
-export function getUserAllowedUpstreams(userId) {
+export async function getUserAllowedUpstreams(userId) {
   const vmIps = new Set();
-  const assignments = db.prepare('SELECT node, vmid FROM vm_assignments WHERE user_id = ?').all(userId);
-  const sshConfigStmt = db.prepare('SELECT host FROM vm_ssh_configs WHERE node = ? AND vmid = ?');
+  const assignments = await db
+    .select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
+    .from(vmAssignments)
+    .where(eq(vmAssignments.user_id, userId));
   for (const a of assignments) {
-    for (const candidate of nodeLookupCandidates(a.node)) {
-      const cfg = sshConfigStmt.get(candidate, a.vmid);
+    // Legacy rows may store the bare node name — match on every candidate.
+    const candidates = nodeLookupCandidates(a.node);
+    if (candidates.length === 0) continue;
+    const cfgs = await db
+      .select({ host: vmSshConfigs.host })
+      .from(vmSshConfigs)
+      .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, a.vmid)));
+    for (const cfg of cfgs) {
       if (cfg?.host && isIP(cfg.host)) { vmIps.add(cfg.host); break; }
     }
   }
 
-  return { vmIps: [...vmIps], subnets: userVlanCidrs(db, userId) };
+  return { vmIps: [...vmIps], subnets: await userVlanCidrs(db, userId) };
 }
 
 /**
@@ -178,7 +188,7 @@ export function getUserAllowedUpstreams(userId) {
  * Admins are exempt. Non-admins must give an IPv4 that is either one of their
  * assigned VMs' IPs or inside one of their VLAN subnets.
  */
-export function userCanReachUpstream(userId, host, isAdmin) {
+export async function userCanReachUpstream(userId, host, isAdmin) {
   if (isAdmin) return { ok: true };
   if (!isIP(host)) {
     return { ok: false, message: 'Upstream must be an IP address you own (a VM assigned to you or an address in your VLAN). Host names can only be used by admins.' };
@@ -187,7 +197,7 @@ export function userCanReachUpstream(userId, host, isAdmin) {
     // A public IP is not something we can prove the user owns.
     return { ok: false, message: 'Upstream must be a private address of a VM assigned to you or inside your VLAN subnet.' };
   }
-  const { vmIps, subnets } = getUserAllowedUpstreams(userId);
+  const { vmIps, subnets } = await getUserAllowedUpstreams(userId);
   if (vmIps.includes(host)) return { ok: true };
   if (subnets.some((cidr) => ipv4InCidr(host, cidr))) return { ok: true };
   return {

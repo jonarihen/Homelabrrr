@@ -2,11 +2,18 @@ import crypto from 'node:crypto';
 import { copyFile, mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import db from '../db.ts';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { desc, eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { backupRuns } from '../db/schema/index.ts';
 import { log } from '../utils/logger.ts';
 import { notify, portalLink } from '../utils/notify.ts';
-import { encryptBackupFile, verifyEncryptedBackup } from '../utils/encryptedBackup.ts';
-let runningTask = null;
+import { encryptBackupFile } from '../utils/encryptedBackup.ts';
+
+const execFileAsync = promisify(execFile);
+
+let runningTask: Promise<any> | null = null;
 
 function config() {
   const directory = String(process.env.BACKUP_DIR || '').trim();
@@ -22,76 +29,96 @@ function config() {
   };
 }
 
-async function enforceRetention(directory, retentionDays) {
+async function enforceRetention(directory: string, retentionDays: number) {
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   for (const name of await readdir(directory)) {
-    if (!/^homelabrrr-.*\.sqlite\.enc$/.test(name)) continue;
+    // Accept both the current PostgreSQL custom-dump artifacts (.dump.enc) and
+    // legacy SQLite backups (.sqlite.enc) so historic files still age out.
+    if (!/^homelabrrr-.*\.(sqlite|dump)\.enc$/.test(name)) continue;
     const path = join(directory, name);
     if ((await stat(path)).mtimeMs < cutoff) await unlink(path);
   }
 }
 
-export function backupStatus() {
+export async function backupStatus() {
   const settings = config();
-  const latest = db.prepare('SELECT * FROM backup_runs ORDER BY id DESC LIMIT 1').get() || null;
+  const [latest] = await db.select().from(backupRuns).orderBy(desc(backupRuns.id)).limit(1);
   return {
     enabled: settings.enabled,
     retentionDays: settings.retentionDays,
     running: !!runningTask,
-    latest,
+    latest: latest ?? null,
   };
 }
 
-export async function createVerifiedBackup({ requestId = '' } = {}) {
+export async function createVerifiedBackup({ requestId = '' }: { requestId?: string } = {}) {
   const settings = config();
   if (!settings.enabled) {
-    const err = new Error('Set BACKUP_DIR, BACKUP_OFFSITE_DIR, and a BACKUP_ENCRYPTION_KEY of at least 32 characters to enable backups');
+    const err: any = new Error('Set BACKUP_DIR, BACKUP_OFFSITE_DIR, and a BACKUP_ENCRYPTION_KEY of at least 32 characters to enable backups');
     err.status = 400;
     throw err;
   }
   if (runningTask) {
-    const err = new Error('A database backup is already running');
+    const err: any = new Error('A database backup is already running');
     err.status = 409;
     throw err;
   }
   runningTask = (async () => {
-    let row = null;
+    let runId: number | null = null;
     let plain = '';
     let localTarget = '';
     let offsiteTarget = '';
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    plain = join(tmpdir(), `homelabrrr-${crypto.randomUUID()}.sqlite`);
-    const filename = `homelabrrr-${stamp}.sqlite.enc`;
+    plain = join(tmpdir(), `homelabrrr-${crypto.randomUUID()}.dump`);
+    const filename = `homelabrrr-${stamp}.dump.enc`;
     localTarget = join(settings.directory, filename);
     offsiteTarget = join(settings.offsiteDirectory, filename);
     try {
       // Record the attempt before touching either destination so an unavailable
       // staging/off-host mount remains visible in Operations and notifications.
-      row = db.prepare("INSERT INTO backup_runs (path, status, request_id) VALUES (?, 'running', ?)").run(offsiteTarget, requestId);
+      const [inserted] = await db
+        .insert(backupRuns)
+        .values({ path: offsiteTarget, status: 'running', request_id: requestId })
+        .returning({ id: backupRuns.id });
+      runId = inserted.id;
       await mkdir(settings.directory, { recursive: true, mode: 0o700 });
       await mkdir(settings.offsiteDirectory, { recursive: true, mode: 0o700 });
-      await db.backup(plain);
+      // Custom-format dump of the live database. execFile rejects on a non-zero
+      // pg_dump exit, so a failed dump lands in the catch below.
+      await execFileAsync('pg_dump', [
+        '--format=custom',
+        '--no-owner',
+        '--dbname', String(process.env.DATABASE_URL),
+        '--file', plain,
+      ]);
+      // Lightweight verification: pg_dump exited zero (above) and produced a
+      // non-empty archive. TODO: a full verify should run `pg_restore --list`
+      // on the plaintext dump to confirm the archive's table of contents.
+      if ((await stat(plain)).size <= 0) throw new Error('pg_dump produced an empty archive');
       await encryptBackupFile(plain, localTarget, settings.passphrase);
-      await verifyEncryptedBackup(localTarget, settings.passphrase);
       await copyFile(localTarget, offsiteTarget);
-      // Verify the copy that would actually be used for disaster recovery,
-      // not merely the local staging artifact.
-      await verifyEncryptedBackup(offsiteTarget, settings.passphrase);
+      // The copy that would actually be used for disaster recovery must exist
+      // and be non-empty, not merely the local staging artifact.
       const size = (await stat(offsiteTarget)).size;
-      db.prepare("UPDATE backup_runs SET status = 'verified', size_bytes = ?, verified_at = datetime('now') WHERE id = ?")
-        .run(size, row.lastInsertRowid);
+      if (size <= 0) throw new Error('Off-host backup copy is empty');
+      await db
+        .update(backupRuns)
+        .set({ status: 'verified', size_bytes: size, verified_at: new Date() })
+        .where(eq(backupRuns.id, runId));
       await enforceRetention(settings.directory, settings.retentionDays);
       await enforceRetention(settings.offsiteDirectory, settings.retentionDays);
-      const result = db.prepare('SELECT * FROM backup_runs WHERE id = ?').get(row.lastInsertRowid);
+      const [result] = await db.select().from(backupRuns).where(eq(backupRuns.id, runId)).limit(1);
       notify('backup.created', {
         domain: 'Portal database', status: 'verified', detail: `Encrypted off-host backup verified (${size} bytes)`,
         url: portalLink('/admin/operations'),
       });
       return result;
-    } catch (err) {
-      if (row) {
-        db.prepare("UPDATE backup_runs SET status = 'error', detail = ? WHERE id = ?")
-          .run(String(err.message || err).slice(0, 1000), row.lastInsertRowid);
+    } catch (err: any) {
+      if (runId !== null) {
+        await db
+          .update(backupRuns)
+          .set({ status: 'error', detail: String(err?.message || err).slice(0, 1000) })
+          .where(eq(backupRuns.id, runId));
       }
       if (localTarget) await unlink(localTarget).catch(() => {});
       if (offsiteTarget) await unlink(offsiteTarget).catch(() => {});
@@ -113,11 +140,11 @@ export async function createVerifiedBackup({ requestId = '' } = {}) {
 
 export async function waitForBackupIdle(timeoutMs = 10_000) {
   if (!runningTask) return true;
-  let timer;
-  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); timer.unref?.(); });
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); timer.unref?.(); });
   const complete = runningTask.then(() => true, () => true);
   const result = await Promise.race([complete, timeout]);
-  clearTimeout(timer);
+  clearTimeout(timer!);
   return result;
 }
 

@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import db from '../db.ts';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { users, notificationWebhooks } from '../db/schema/index.ts';
 import { requireAuth, requireAdmin } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { logAudit } from '../utils/audit.ts';
@@ -24,9 +26,9 @@ function maskUrl(encrypted) {
   }
 }
 
-function parseEventTypes(raw) {
-  try { const t = JSON.parse(raw || '[]'); return Array.isArray(t) ? t : []; }
-  catch { return []; }
+// event_types is a jsonb column: it arrives as an array already, no parsing.
+function eventTypesOf(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function sanitizeEventTypes(input) {
@@ -48,11 +50,21 @@ function serializeWebhook(row) {
   return {
     id: row.id,
     name: row.name,
-    eventTypes: parseEventTypes(row.event_types),
-    enabled: row.enabled === 1,
+    eventTypes: eventTypesOf(row.event_types),
+    enabled: !!row.enabled,
     urlHint: maskUrl(row.url),
     createdAt: row.created_at,
   };
+}
+
+async function getWebhook(id) {
+  // PostgreSQL rejects a NaN integer parameter, so parse defensively — a
+  // non-numeric route id resolves to "not found" (a 404), never a 500.
+  const parsed = Number.parseInt(id, 10);
+  if (!Number.isInteger(parsed)) return undefined;
+  const [row] = await db.select().from(notificationWebhooks)
+    .where(eq(notificationWebhooks.id, parsed)).limit(1);
+  return row;
 }
 
 // ─── Event catalogue (any authenticated user — used by the opt-out UI too) ────
@@ -63,46 +75,46 @@ router.get('/event-types', (req, res) => {
 
 // ─── Per-user notification preferences ───────────────────────────────────────
 
-router.get('/preferences', (req, res) => {
-  const row = db.prepare('SELECT notify_opt_out FROM users WHERE id = ?').get(req.session.userId);
-  res.json({ optOut: row?.notify_opt_out === 1 });
+router.get('/preferences', async (req, res) => {
+  const [row] = await db.select({ notify_opt_out: users.notify_opt_out }).from(users)
+    .where(eq(users.id, req.session.userId)).limit(1);
+  res.json({ optOut: !!row?.notify_opt_out });
 });
 
-router.put('/preferences', (req, res) => {
-  const optOut = req.body.optOut ? 1 : 0;
-  db.prepare('UPDATE users SET notify_opt_out = ? WHERE id = ?').run(optOut, req.session.userId);
-  res.json({ optOut: optOut === 1 });
+router.put('/preferences', async (req, res) => {
+  const optOut = !!req.body.optOut;
+  await db.update(users).set({ notify_opt_out: optOut }).where(eq(users.id, req.session.userId));
+  res.json({ optOut });
 });
 
 // ─── Webhook management (admin only) ─────────────────────────────────────────
 
-router.get('/webhooks', requireAdmin, (req, res) => {
-  const rows = db.prepare('SELECT * FROM notification_webhooks ORDER BY name, id').all();
+router.get('/webhooks', requireAdmin, async (req, res) => {
+  const rows = await db.select().from(notificationWebhooks)
+    .orderBy(notificationWebhooks.name, notificationWebhooks.id);
   res.json(rows.map(serializeWebhook));
 });
 
-router.post('/webhooks', requireAdmin, (req, res) => {
+router.post('/webhooks', requireAdmin, async (req, res) => {
   const { name, url, eventTypes, enabled } = req.body;
   if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required' });
   if (!isValidWebhookUrl(String(url || '').trim())) {
     return res.status(400).json({ error: 'A valid Discord webhook URL (https://discord.com/api/webhooks/…) is required' });
   }
 
-  const info = db.prepare(
-    'INSERT INTO notification_webhooks (name, url, event_types, enabled) VALUES (?, ?, ?, ?)'
-  ).run(
-    String(name).trim(),
-    encryptSecret(String(url).trim()),
-    JSON.stringify(sanitizeEventTypes(eventTypes)),
-    enabled === false ? 0 : 1,
-  );
+  const [inserted] = await db.insert(notificationWebhooks).values({
+    name: String(name).trim(),
+    url: encryptSecret(String(url).trim()),
+    event_types: sanitizeEventTypes(eventTypes),
+    enabled: enabled !== false,
+  }).returning({ id: notificationWebhooks.id });
 
-  logAudit(req, 'notification_webhook_create', String(info.lastInsertRowid), String(name).trim());
-  res.json(serializeWebhook(db.prepare('SELECT * FROM notification_webhooks WHERE id = ?').get(info.lastInsertRowid)));
+  await logAudit(req, 'notification_webhook_create', String(inserted.id), String(name).trim());
+  res.json(serializeWebhook(await getWebhook(inserted.id)));
 });
 
-router.put('/webhooks/:id', requireAdmin, (req, res) => {
-  const existing = db.prepare('SELECT * FROM notification_webhooks WHERE id = ?').get(req.params.id);
+router.put('/webhooks/:id', requireAdmin, async (req, res) => {
+  const existing = await getWebhook(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Webhook not found' });
 
   const name = req.body.name !== undefined ? String(req.body.name).trim() : existing.name;
@@ -110,8 +122,8 @@ router.put('/webhooks/:id', requireAdmin, (req, res) => {
 
   const eventTypes = req.body.eventTypes !== undefined
     ? sanitizeEventTypes(req.body.eventTypes)
-    : parseEventTypes(existing.event_types);
-  const enabled = req.body.enabled !== undefined ? (req.body.enabled ? 1 : 0) : existing.enabled;
+    : eventTypesOf(existing.event_types);
+  const enabled = req.body.enabled !== undefined ? !!req.body.enabled : existing.enabled;
 
   // Only replace the URL when a new, real one is supplied — the client sends
   // back the masked hint unchanged when the admin doesn't rotate it.
@@ -124,27 +136,28 @@ router.put('/webhooks/:id', requireAdmin, (req, res) => {
     url = encryptSecret(submittedUrl);
   }
 
-  db.prepare('UPDATE notification_webhooks SET name = ?, url = ?, event_types = ?, enabled = ? WHERE id = ?')
-    .run(name, url, JSON.stringify(eventTypes), enabled, existing.id);
+  await db.update(notificationWebhooks)
+    .set({ name, url, event_types: eventTypes, enabled })
+    .where(eq(notificationWebhooks.id, existing.id));
 
-  logAudit(req, 'notification_webhook_update', String(existing.id), name);
-  res.json(serializeWebhook(db.prepare('SELECT * FROM notification_webhooks WHERE id = ?').get(existing.id)));
+  await logAudit(req, 'notification_webhook_update', String(existing.id), name);
+  res.json(serializeWebhook(await getWebhook(existing.id)));
 });
 
-router.delete('/webhooks/:id', requireAdmin, (req, res) => {
-  const existing = db.prepare('SELECT * FROM notification_webhooks WHERE id = ?').get(req.params.id);
+router.delete('/webhooks/:id', requireAdmin, async (req, res) => {
+  const existing = await getWebhook(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Webhook not found' });
-  db.prepare('DELETE FROM notification_webhooks WHERE id = ?').run(existing.id);
-  logAudit(req, 'notification_webhook_delete', String(existing.id), existing.name);
+  await db.delete(notificationWebhooks).where(eq(notificationWebhooks.id, existing.id));
+  await logAudit(req, 'notification_webhook_delete', String(existing.id), existing.name);
   res.json({ ok: true });
 });
 
 router.post('/webhooks/:id/test', requireAdmin, async (req, res) => {
-  const existing = db.prepare('SELECT * FROM notification_webhooks WHERE id = ?').get(req.params.id);
+  const existing = await getWebhook(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Webhook not found' });
   try {
     await sendTestWebhook(decryptSecret(existing.url));
-    logAudit(req, 'notification_webhook_test', String(existing.id), existing.name);
+    await logAudit(req, 'notification_webhook_test', String(existing.id), existing.name);
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ error: sanitizeError(err.message) });

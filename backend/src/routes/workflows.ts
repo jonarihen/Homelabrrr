@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import db from '../db.ts';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { firewalls } from '../db/schema/index.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { logAudit } from '../utils/audit.ts';
@@ -18,8 +20,9 @@ router.use(requireAuth);
 // Everything here is firewall-adjacent — gate on can_manage_firewalls.
 const pFirewalls = requirePermission('can_manage_firewalls');
 
-function getFirewall(id) {
-  return db.prepare('SELECT * FROM firewalls WHERE id = ?').get(id);
+async function getFirewall(id: any) {
+  const [row] = await db.select().from(firewalls).where(eq(firewalls.id, Number(id))).limit(1);
+  return row;
 }
 
 // Preview-only VIP naming (mirrors admin.js; display-only, never used for real runs).
@@ -99,52 +102,52 @@ router.get('/catalog', pFirewalls, (req, res) => {
 });
 
 // ─── List / read workflows ────────────────────────────────────────────────────
-router.get('/', pFirewalls, (req, res) => {
+router.get('/', pFirewalls, async (req, res) => {
   const { firewallId } = req.query;
   if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
-  const fw = getFirewall(firewallId);
+  const fw = await getFirewall(firewallId);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
-    res.json(listWorkflowsForFirewall(fw.id));
-  } catch (err) {
+    res.json(await listWorkflowsForFirewall(fw.id));
+  } catch (err: any) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
-router.get('/runs', pFirewalls, (req, res) => {
+router.get('/runs', pFirewalls, async (req, res) => {
   const { firewallId, trigger, subjectType, subjectId, limit } = req.query;
-  const runs = listRuns({ firewallId, trigger, subjectType, subjectId, limit });
+  const runs = await listRuns({ firewallId, trigger, subjectType, subjectId, limit });
   res.json(runs);
 });
 
-router.get('/runs/:id', pFirewalls, (req, res) => {
-  const run = getRun(req.params.id);
+router.get('/runs/:id', pFirewalls, async (req, res) => {
+  const run = await getRun(Number(req.params.id));
   if (!run) return res.status(404).json({ error: 'Run not found' });
   res.json(run);
 });
 
-router.get('/:id', pFirewalls, (req, res) => {
-  const bundle = getWorkflowById(req.params.id);
+router.get('/:id', pFirewalls, async (req, res) => {
+  const bundle = await getWorkflowById(Number(req.params.id));
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
   res.json({ ...bundle.workflow, settings: workflowSettings(bundle.workflow), steps: bundle.steps });
 });
 
 // ─── Update workflow meta (name, enabled, settings) ───────────────────────────
-router.put('/:id', pFirewalls, (req, res) => {
-  const bundle = getWorkflowById(req.params.id);
+router.put('/:id', pFirewalls, async (req, res) => {
+  const bundle = await getWorkflowById(Number(req.params.id));
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
   const { name, enabled, settings } = req.body;
   if (settings !== undefined && (typeof settings !== 'object' || settings === null || Array.isArray(settings))) {
     return res.status(400).json({ error: 'settings must be an object' });
   }
-  updateWorkflowMeta(bundle.workflow.id, { name, enabled, settings });
-  logAudit(req, 'workflow_update', `${bundle.workflow.trigger} (fw ${bundle.workflow.firewall_id})`, `name=${name ?? bundle.workflow.name} enabled=${enabled}`);
+  await updateWorkflowMeta(bundle.workflow.id, { name, enabled, settings });
+  await logAudit(req, 'workflow_update', `${bundle.workflow.trigger} (fw ${bundle.workflow.firewall_id})`, `name=${name ?? bundle.workflow.name} enabled=${enabled}`);
   res.json({ ok: true });
 });
 
 // ─── Replace steps ────────────────────────────────────────────────────────────
-router.put('/:id/steps', pFirewalls, (req, res) => {
-  const bundle = getWorkflowById(req.params.id);
+router.put('/:id/steps', pFirewalls, async (req, res) => {
+  const bundle = await getWorkflowById(Number(req.params.id));
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
   const { steps } = req.body;
   if (!Array.isArray(steps)) return res.status(400).json({ error: 'steps must be an array' });
@@ -172,28 +175,28 @@ router.put('/:id/steps', pFirewalls, (req, res) => {
   }
 
   try {
-    replaceSteps(bundle.workflow.id, normalized);
-    logAudit(req, 'workflow_edit_steps', `${bundle.workflow.trigger} (fw ${bundle.workflow.firewall_id})`, `${normalized.length} step(s)`);
+    await replaceSteps(bundle.workflow.id, normalized);
+    await logAudit(req, 'workflow_edit_steps', `${bundle.workflow.trigger} (fw ${bundle.workflow.firewall_id})`, `${normalized.length} step(s)`);
     res.json({ ok: true });
-  } catch (err) {
+  } catch (err: any) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
 // ─── Reset to built-in default ────────────────────────────────────────────────
-router.post('/:id/reset', pFirewalls, (req, res) => {
-  const bundle = getWorkflowById(req.params.id);
+router.post('/:id/reset', pFirewalls, async (req, res) => {
+  const bundle = await getWorkflowById(Number(req.params.id));
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
-  resetWorkflow(bundle.workflow.id);
-  logAudit(req, 'workflow_reset', `${bundle.workflow.trigger} (fw ${bundle.workflow.firewall_id})`, 'reset to default');
+  await resetWorkflow(bundle.workflow.id);
+  await logAudit(req, 'workflow_reset', `${bundle.workflow.trigger} (fw ${bundle.workflow.firewall_id})`, 'reset to default');
   res.json({ ok: true });
 });
 
 // ─── Dry-run preview ──────────────────────────────────────────────────────────
-router.post('/:id/dry-run', pFirewalls, (req, res) => {
-  const bundle = getWorkflowById(req.params.id);
+router.post('/:id/dry-run', pFirewalls, async (req, res) => {
+  const bundle = await getWorkflowById(Number(req.params.id));
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
-  const fw = getFirewall(bundle.workflow.firewall_id);
+  const fw = await getFirewall(bundle.workflow.firewall_id);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   try {
@@ -201,9 +204,9 @@ router.post('/:id/dry-run', pFirewalls, (req, res) => {
     const context = buildSampleContext(bundle.workflow.trigger, fw, req.body?.inputs || {}, settings);
     const pseudoClient = { vdom: fw.vdom || 'root' };
     const preview = previewBundle({ bundle, context, client: pseudoClient });
-    logAudit(req, 'workflow_dry_run', `${bundle.workflow.trigger} (fw ${fw.id})`, '');
+    await logAudit(req, 'workflow_dry_run', `${bundle.workflow.trigger} (fw ${fw.id})`, '');
     res.json({ context, preview });
-  } catch (err) {
+  } catch (err: any) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });

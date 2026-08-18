@@ -28,7 +28,7 @@ import isoRoutes from './routes/isos.ts';
 import portalRoutes from './routes/portal.ts';
 import notificationRoutes from './routes/notifications.ts';
 import { pollNodeHealth } from './utils/notify.ts';
-import websiteRoutes, { stopWebsiteMaintenance } from './routes/websites.ts';
+import websiteRoutes, { startWebsiteMaintenance, stopWebsiteMaintenance } from './routes/websites.ts';
 import workflowRoutes from './routes/workflows.ts';
 import publicIpRoutes from './routes/publicIps.ts';
 import operationsRoutes from './routes/operations.ts';
@@ -703,6 +703,8 @@ const databaseMaintenanceTimer = setInterval(runDatabaseMaintenanceSafe, 24 * 60
 maintenanceStartTimer.unref?.();
 databaseMaintenanceTimer.unref?.();
 const stopBackupScheduler = startBackupScheduler();
+// Background reconcile/re-probe of published Caddy sites (route drift + liveness).
+startWebsiteMaintenance();
 
 // Every optional setting is read inline as `process.env.<NAME> || <default>`, so a
 // variable that never reaches the process is indistinguishable from one left at

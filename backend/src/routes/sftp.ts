@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import Busboy from 'busboy';
 import { basename, posix } from 'path';
-import db from '../db.ts';
+import { and, eq, inArray } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { sshKeys, vmSshConfigs, vmSshUserConfigs } from '../db/schema/index.ts';
 import { requireAuth } from '../middleware/auth.ts';
 import { userCanPerformVmOp } from '../utils/vmAccess.ts';
 import { nodeLookupCandidates } from '../utils/nodeRef.ts';
@@ -57,23 +59,42 @@ function purgeExpired() {
   }
 }
 
-function getGlobalSshConfig(node, vmid) {
+async function getGlobalSshConfig(node, vmid) {
   const parsedVmid = parseInt(vmid, 10);
-  for (const candidate of nodeLookupCandidates(node)) {
-    const row = db.prepare(
-      'SELECT host, port, host_fingerprint FROM vm_ssh_configs WHERE node = ? AND vmid = ?'
-    ).get(candidate, parsedVmid);
+  const candidates = nodeLookupCandidates(node);
+  if (candidates.length === 0) return null;
+  // Legacy rows may store the bare node name — match any candidate in one query,
+  // then honour the candidate order (full ref preferred over bare name).
+  const rows = await db
+    .select({
+      node: vmSshConfigs.node,
+      host: vmSshConfigs.host,
+      port: vmSshConfigs.port,
+      host_fingerprint: vmSshConfigs.host_fingerprint,
+    })
+    .from(vmSshConfigs)
+    .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, parsedVmid)));
+  for (const candidate of candidates) {
+    const row = rows.find((r) => r.node === candidate);
     if (row) return row;
   }
   return null;
 }
 
-function getUserSshConfig(userId, node, vmid) {
+async function getUserSshConfig(userId, node, vmid) {
   const parsedVmid = parseInt(vmid, 10);
-  for (const candidate of nodeLookupCandidates(node)) {
-    const row = db.prepare(
-      'SELECT username FROM vm_ssh_user_configs WHERE user_id = ? AND node = ? AND vmid = ?'
-    ).get(userId, candidate, parsedVmid);
+  const candidates = nodeLookupCandidates(node);
+  if (candidates.length === 0) return null;
+  const rows = await db
+    .select({ node: vmSshUserConfigs.node, username: vmSshUserConfigs.username })
+    .from(vmSshUserConfigs)
+    .where(and(
+      eq(vmSshUserConfigs.user_id, userId),
+      inArray(vmSshUserConfigs.node, candidates),
+      eq(vmSshUserConfigs.vmid, parsedVmid),
+    ));
+  for (const candidate of candidates) {
+    const row = rows.find((r) => r.node === candidate);
     if (row) return row;
   }
   return null;
@@ -121,16 +142,19 @@ router.post('/connect', async (req, res) => {
   if (!node || !vmid || !keyId) {
     return res.status(400).json({ error: 'node, vmid, and keyId are required' });
   }
-  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sftp.connect')) {
+  if (!await userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sftp.connect')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
-  const key = db.prepare('SELECT private_key FROM ssh_keys WHERE id = ? AND user_id = ?')
-    .get(keyId, req.session.userId);
+  const [key] = await db
+    .select({ private_key: sshKeys.private_key })
+    .from(sshKeys)
+    .where(and(eq(sshKeys.id, parseInt(keyId, 10)), eq(sshKeys.user_id, req.session.userId)))
+    .limit(1);
   if (!key) return res.status(404).json({ error: 'SSH key not found' });
 
-  const global = getGlobalSshConfig(node, vmid);
-  const userRow = getUserSshConfig(req.session.userId, node, vmid);
+  const global = await getGlobalSshConfig(node, vmid);
+  const userRow = await getUserSshConfig(req.session.userId, node, vmid);
 
   if (!global?.host) {
     return res.status(400).json({ error: 'SSH host is not configured for this VM' });
@@ -139,7 +163,7 @@ router.post('/connect', async (req, res) => {
     return res.status(400).json({ error: 'SSH host fingerprint is not configured for this VM' });
   }
 
-  if (sshConnectionRateLimited(req.session.userId, 'sftp-connect', 30)) {
+  if (await sshConnectionRateLimited(req.session.userId, 'sftp-connect', 30)) {
     return res.status(429).json({ error: 'Too many SFTP connection attempts — try again in a minute' });
   }
 
@@ -168,7 +192,7 @@ router.post('/connect', async (req, res) => {
     expires: Date.now() + TOKEN_TTL,
   });
 
-  logAudit(req, 'sftp_session_created', `${node}/${vmid}`, `port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
+  await logAudit(req, 'sftp_session_created', `${node}/${vmid}`, `port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
   res.json({ token });
 });
 
@@ -299,7 +323,11 @@ router.post('/upload', (req, res) => {
     conn?.end();
     conn = null;
     const sess = resolveSession(fields.token);
-    if (sess) logAudit(req, 'sftp_upload', `${sess.node}/${sess.vmid}`, `${pathAuditMetadata(body.path)}; bytes=${body.size}`);
+    // Fire-and-forget: the upload has already completed and the response is
+    // being sent from a non-async stream callback, so the audit write cannot be
+    // awaited — never let an audit failure disrupt the reply (M13).
+    if (sess) logAudit(req, 'sftp_upload', `${sess.node}/${sess.vmid}`, `${pathAuditMetadata(body.path)}; bytes=${body.size}`)
+      .catch((err) => log('warn', 'sftp_upload_audit_failed', { requestId: req.requestId, error: err?.message }));
     if (!res.headersSent && res.writable) res.json(body);
   });
 
@@ -397,7 +425,7 @@ router.post('/mkdir', async (req, res) => {
       sftp.mkdir(dirPath, (err) => (err ? reject(err) : resolve()));
     });
 
-    logAudit(req, 'sftp_mkdir', `${sess.node}/${sess.vmid}`, pathAuditMetadata(dirPath));
+    await logAudit(req, 'sftp_mkdir', `${sess.node}/${sess.vmid}`, pathAuditMetadata(dirPath));
     res.json({ ok: true });
   } catch (err) {
     sendSftpError(req, res, err);
@@ -423,7 +451,7 @@ router.post('/delete', async (req, res) => {
       op(targetPath, (err) => (err ? reject(err) : resolve()));
     });
 
-    logAudit(req, isDirectory ? 'sftp_rmdir' : 'sftp_delete', `${sess.node}/${sess.vmid}`, pathAuditMetadata(targetPath));
+    await logAudit(req, isDirectory ? 'sftp_rmdir' : 'sftp_delete', `${sess.node}/${sess.vmid}`, pathAuditMetadata(targetPath));
     res.json({ ok: true });
   } catch (err) {
     sendSftpError(req, res, err);
@@ -450,7 +478,7 @@ router.post('/rename', async (req, res) => {
   try {
     ({ conn, sftp } = await openSftp(sess));
     await new Promise((resolve, reject) => sftp.rename(sourcePath, targetPath, (err) => (err ? reject(err) : resolve())));
-    logAudit(req, 'sftp_rename', `${sess.node}/${sess.vmid}`, `${pathAuditMetadata(sourcePath)}; sameDirectory=true`);
+    await logAudit(req, 'sftp_rename', `${sess.node}/${sess.vmid}`, `${pathAuditMetadata(sourcePath)}; sameDirectory=true`);
     res.json({ ok: true });
   } catch (err) {
     sendSftpError(req, res, err);

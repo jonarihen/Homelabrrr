@@ -4,7 +4,9 @@ import { execFile } from 'child_process';
 import { writeFile, readFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import db from '../db.ts';
+import { and, eq, inArray } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { sshKeys, vmSshConfigs, vmSshUserConfigs } from '../db/schema/index.ts';
 import { requireAuth } from '../middleware/auth.ts';
 import { userCanPerformVmOp } from '../utils/vmAccess.ts';
 import { nodeLookupCandidates } from '../utils/nodeRef.ts';
@@ -61,23 +63,42 @@ function sendSshError(req, res, err) {
 // SSH session store (token → { host, port, username, privateKey, expires })
 export const sshSessions = new Map();
 
-function getGlobalSshConfig(node, vmid) {
+async function getGlobalSshConfig(node, vmid) {
   const parsedVmid = parseInt(vmid, 10);
-  for (const candidate of nodeLookupCandidates(node)) {
-    const row = db.prepare(
-      'SELECT host, port, host_fingerprint FROM vm_ssh_configs WHERE node = ? AND vmid = ?'
-    ).get(candidate, parsedVmid);
+  const candidates = nodeLookupCandidates(node);
+  if (candidates.length === 0) return null;
+  // Legacy rows may store the bare node name — match any candidate in one query,
+  // then honour the candidate order (full ref preferred over bare name).
+  const rows = await db
+    .select({
+      node: vmSshConfigs.node,
+      host: vmSshConfigs.host,
+      port: vmSshConfigs.port,
+      host_fingerprint: vmSshConfigs.host_fingerprint,
+    })
+    .from(vmSshConfigs)
+    .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, parsedVmid)));
+  for (const candidate of candidates) {
+    const row = rows.find((r) => r.node === candidate);
     if (row) return row;
   }
   return null;
 }
 
-function getUserSshConfig(userId, node, vmid) {
+async function getUserSshConfig(userId, node, vmid) {
   const parsedVmid = parseInt(vmid, 10);
-  for (const candidate of nodeLookupCandidates(node)) {
-    const row = db.prepare(
-      'SELECT username FROM vm_ssh_user_configs WHERE user_id = ? AND node = ? AND vmid = ?'
-    ).get(userId, candidate, parsedVmid);
+  const candidates = nodeLookupCandidates(node);
+  if (candidates.length === 0) return null;
+  const rows = await db
+    .select({ node: vmSshUserConfigs.node, username: vmSshUserConfigs.username })
+    .from(vmSshUserConfigs)
+    .where(and(
+      eq(vmSshUserConfigs.user_id, userId),
+      inArray(vmSshUserConfigs.node, candidates),
+      eq(vmSshUserConfigs.vmid, parsedVmid),
+    ));
+  for (const candidate of candidates) {
+    const row = rows.find((r) => r.node === candidate);
     if (row) return row;
   }
   return null;
@@ -85,12 +106,21 @@ function getUserSshConfig(userId, node, vmid) {
 
 // ─── SSH Keys ────────────────────────────────────────────────────────────────
 
-router.get('/keys', (req, res) => {
-  const keys = db.prepare(
-    'SELECT id, name, private_key, public_key, created_at FROM ssh_keys WHERE user_id = ? ORDER BY name'
-  ).all(req.session.userId);
+router.get('/keys', async (req, res) => {
+  const keys = await db
+    .select({
+      id: sshKeys.id,
+      name: sshKeys.name,
+      private_key: sshKeys.private_key,
+      public_key: sshKeys.public_key,
+      created_at: sshKeys.created_at,
+    })
+    .from(sshKeys)
+    .where(eq(sshKeys.user_id, req.session.userId))
+    .orderBy(sshKeys.name);
   // Don't send private key to client — just add encrypted flag
-  res.json(keys.map(k => {
+  const result = [];
+  for (const k of keys) {
     const privateKey = decryptSecret(k.private_key);
     const encrypted = privateKey.includes('ENCRYPTED')
       || privateKey.includes('aes256-cbc')
@@ -102,18 +132,19 @@ router.get('/keys', (req, res) => {
     if (!publicKey && !encrypted) {
       const derived = derivePublicKey(privateKey);
       if (derived) {
-        db.prepare('UPDATE ssh_keys SET public_key = ? WHERE id = ?').run(derived, k.id);
+        await db.update(sshKeys).set({ public_key: derived }).where(eq(sshKeys.id, k.id));
         publicKey = derived;
       }
     }
-    return {
+    result.push({
       id: k.id,
       name: k.name,
       public_key: publicKey,
       created_at: k.created_at,
       encrypted,
-    };
-  }));
+    });
+  }
+  res.json(result);
 });
 
 router.post('/keys', async (req, res) => {
@@ -145,12 +176,18 @@ router.post('/keys', async (req, res) => {
   if (derived) finalPublicKey = derived;
 
   try {
-    const r = db.prepare(
-      'INSERT INTO ssh_keys (user_id, name, private_key, public_key) VALUES (?, ?, ?, ?)'
-    ).run(req.session.userId, name, encryptSecret(finalKey), finalPublicKey);
-    logAudit(req, 'ssh_key_added', String(r.lastInsertRowid), `name=${String(name).slice(0, 64)}`);
+    const [inserted] = await db
+      .insert(sshKeys)
+      .values({
+        user_id: req.session.userId,
+        name,
+        private_key: encryptSecret(finalKey),
+        public_key: finalPublicKey,
+      })
+      .returning({ id: sshKeys.id });
+    await logAudit(req, 'ssh_key_added', String(inserted.id), `name=${String(name).slice(0, 64)}`);
     res.json({
-      id: r.lastInsertRowid,
+      id: inserted.id,
       name,
       publicKeyDerived: !!derived,
       hasPublicKey: !!finalPublicKey,
@@ -162,24 +199,28 @@ router.post('/keys', async (req, res) => {
   }
 });
 
-router.delete('/keys/:id', (req, res) => {
-  const key = db.prepare('SELECT id FROM ssh_keys WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.session.userId);
+router.delete('/keys/:id', async (req, res) => {
+  const keyId = parseInt(req.params.id, 10);
+  const [key] = await db
+    .select({ id: sshKeys.id })
+    .from(sshKeys)
+    .where(and(eq(sshKeys.id, keyId), eq(sshKeys.user_id, req.session.userId)))
+    .limit(1);
   if (!key) return res.status(404).json({ error: 'Key not found' });
-  db.prepare('DELETE FROM ssh_keys WHERE id = ?').run(req.params.id);
-  logAudit(req, 'ssh_key_deleted', String(req.params.id), '');
+  await db.delete(sshKeys).where(eq(sshKeys.id, keyId));
+  await logAudit(req, 'ssh_key_deleted', String(req.params.id), '');
   res.json({ ok: true });
 });
 
 // ─── VM SSH Config ───────────────────────────────────────────────────────────
 
-router.get('/config/:node/:vmid', (req, res) => {
+router.get('/config/:node/:vmid', async (req, res) => {
   const { node, vmid } = req.params;
-  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.read')) {
+  if (!await userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.read')) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const global = getGlobalSshConfig(node, vmid);
-  const userRow = getUserSshConfig(req.session.userId, node, vmid);
+  const global = await getGlobalSshConfig(node, vmid);
+  const userRow = await getUserSshConfig(req.session.userId, node, vmid);
   if (!global && !userRow) return res.json(null);
   res.json({
     host: global?.host || null,
@@ -192,7 +233,7 @@ router.get('/config/:node/:vmid', (req, res) => {
 router.put('/config/:node/:vmid', async (req, res) => {
   const { node, vmid } = req.params;
   const { host, port = 22, username = 'root', hostFingerprint = '' } = req.body;
-  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.write')) {
+  if (!await userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.write')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!host) return res.status(400).json({ error: 'Host/IP required' });
@@ -210,20 +251,31 @@ router.put('/config/:node/:vmid', async (req, res) => {
 
   // Save host/port globally (shared across users). Non-admin DNS names are
   // pinned to the authorized address to prevent DNS rebinding at connect time.
-  db.prepare(`
-    INSERT INTO vm_ssh_configs (node, vmid, host, port, host_fingerprint, username)
-    VALUES (?, ?, ?, ?, ?, '')
-    ON CONFLICT(node, vmid) DO UPDATE SET host = ?, port = ?, host_fingerprint = ?
-  `).run(node, parseInt(vmid), target.host, target.port, normalizedFingerprint, target.host, target.port, normalizedFingerprint);
+  await db
+    .insert(vmSshConfigs)
+    .values({
+      node,
+      vmid: parseInt(vmid),
+      host: target.host,
+      port: target.port,
+      host_fingerprint: normalizedFingerprint,
+      username: '',
+    })
+    .onConflictDoUpdate({
+      target: [vmSshConfigs.node, vmSshConfigs.vmid],
+      set: { host: target.host, port: target.port, host_fingerprint: normalizedFingerprint },
+    });
 
   // Save username per-user
-  db.prepare(`
-    INSERT INTO vm_ssh_user_configs (user_id, node, vmid, username)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(user_id, node, vmid) DO UPDATE SET username = ?
-  `).run(req.session.userId, node, parseInt(vmid), username, username);
+  await db
+    .insert(vmSshUserConfigs)
+    .values({ user_id: req.session.userId, node, vmid: parseInt(vmid), username })
+    .onConflictDoUpdate({
+      target: [vmSshUserConfigs.user_id, vmSshUserConfigs.node, vmSshUserConfigs.vmid],
+      set: { username },
+    });
 
-  logAudit(req, 'ssh_config_updated', `${node}/${vmid}`, `targetType=${target.resolvedAddresses.length ? 'resolved' : 'configured'}; port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
+  await logAudit(req, 'ssh_config_updated', `${node}/${vmid}`, `targetType=${target.resolvedAddresses.length ? 'resolved' : 'configured'}; port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
   res.json({ ok: true });
 });
 
@@ -235,11 +287,11 @@ const SCAN_MAX_PER_WINDOW = 10;
 router.post('/config/:node/:vmid/scan-fingerprint', async (req, res) => {
   const { node, vmid } = req.params;
   const { host, port = 22 } = req.body;
-  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.scan')) {
+  if (!await userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.sshConfig.scan')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!host) return res.status(400).json({ error: 'Host/IP required' });
-  if (sshConnectionRateLimited(req.session.userId, 'fingerprint', SCAN_MAX_PER_WINDOW)) {
+  if (await sshConnectionRateLimited(req.session.userId, 'fingerprint', SCAN_MAX_PER_WINDOW)) {
     return res.status(429).json({ error: 'Too many fingerprint scans — try again in a minute' });
   }
 
@@ -247,7 +299,7 @@ router.post('/config/:node/:vmid/scan-fingerprint', async (req, res) => {
     const target = await authorizeSshTarget({
       userId: req.session.userId, isAdmin: req.session.isAdmin, node, vmid, host, port,
     });
-    logAudit(req, 'ssh_fingerprint_scan', `${node}/${vmid}`, `port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
+    await logAudit(req, 'ssh_fingerprint_scan', `${node}/${vmid}`, `port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
     const hostFingerprint = await scanSshHostFingerprint(target.host, target.port);
     res.json({ hostFingerprint });
   } catch (err) {
@@ -262,16 +314,19 @@ router.post('/connect', async (req, res) => {
   if (!node || !vmid || !keyId) {
     return res.status(400).json({ error: 'node, vmid, and keyId are required' });
   }
-  if (!userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.ssh.connect')) {
+  if (!await userCanPerformVmOp(req.session.userId, node, vmid, req.session.isAdmin, 'vm.ssh.connect')) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
-  const key = db.prepare('SELECT private_key FROM ssh_keys WHERE id = ? AND user_id = ?')
-    .get(keyId, req.session.userId);
+  const [key] = await db
+    .select({ private_key: sshKeys.private_key })
+    .from(sshKeys)
+    .where(and(eq(sshKeys.id, parseInt(keyId, 10)), eq(sshKeys.user_id, req.session.userId)))
+    .limit(1);
   if (!key) return res.status(404).json({ error: 'SSH key not found' });
 
-  const global = getGlobalSshConfig(node, vmid);
-  const userRow = getUserSshConfig(req.session.userId, node, vmid);
+  const global = await getGlobalSshConfig(node, vmid);
+  const userRow = await getUserSshConfig(req.session.userId, node, vmid);
 
   if (!global?.host) {
     return res.status(400).json({ error: 'SSH host is not configured for this VM' });
@@ -280,7 +335,7 @@ router.post('/connect', async (req, res) => {
     return res.status(400).json({ error: 'SSH host fingerprint is not configured for this VM' });
   }
 
-  if (sshConnectionRateLimited(req.session.userId, 'connect', 30)) {
+  if (await sshConnectionRateLimited(req.session.userId, 'connect', 30)) {
     return res.status(429).json({ error: 'Too many SSH connection attempts — try again in a minute' });
   }
 
@@ -313,7 +368,7 @@ router.post('/connect', async (req, res) => {
     expires: Date.now() + 120_000,
   });
 
-  logAudit(req, 'ssh_session_created', `${node}/${vmid}`, `port=${port}${target.adminOverride ? '; admin override' : ''}`);
+  await logAudit(req, 'ssh_session_created', `${node}/${vmid}`, `port=${port}${target.adminOverride ? '; admin override' : ''}`);
   res.json({ token });
 });
 

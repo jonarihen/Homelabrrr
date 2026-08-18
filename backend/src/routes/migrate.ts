@@ -1,5 +1,9 @@
 import { Router } from 'express';
-import db from '../db.ts';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import {
+  vmMigrations, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms,
+} from '../db/schema/index.ts';
 import {
   getAllVMs, getHost, getHosts, remoteMigrateVm, getTaskStatus, getTaskLog,
   getVMConfig, getVMConfigCurrent, getLXCConfig, updateVMConfig, createVM, getSnapshots,
@@ -44,66 +48,74 @@ const GB = 1024 ** 3;
 // Every table that keys rows on (node, vmid) — after a successful migration
 // these must point at the target host's node ref or the portal loses track of
 // assignments, SSH configs and templates for the moved guest.
-const NODE_KEYED_TABLES = ['vm_assignments', 'vm_ssh_configs', 'vm_ssh_user_configs', 'vm_templates', 'provisioned_vms'];
+const NODE_KEYED_TABLES: [string, any][] = [
+  ['vm_assignments', vmAssignments],
+  ['vm_ssh_configs', vmSshConfigs],
+  ['vm_ssh_user_configs', vmSshUserConfigs],
+  ['vm_templates', vmTemplates],
+  ['provisioned_vms', provisionedVms],
+];
 
 const DISK_KEY_RE = /^(?:scsi|virtio|sata|ide)\d+$|^(?:efidisk|tpmstate)\d+$/;
 const IDENT_RE = /^[a-zA-Z0-9._-]+$/;
 
-function repointVmRows(sourceNode, vmid, targetNode) {
+async function repointVmRows(sourceNode, vmid, targetNode) {
   const candidates = nodeLookupCandidates(sourceNode);
   if (candidates.length === 0) return;
-  const placeholders = candidates.map(() => '?').join(',');
-  for (const table of NODE_KEYED_TABLES) {
+  for (const [label, table] of NODE_KEYED_TABLES) {
     try {
-      db.prepare(`UPDATE ${table} SET node = ? WHERE vmid = ? AND node IN (${placeholders})`)
-        .run(targetNode, Number(vmid), ...candidates);
+      await db.update(table).set({ node: targetNode })
+        .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)));
     } catch (err) {
-      console.warn(`[migrate] failed to re-point ${table} for VM ${vmid}: ${err.message}`);
+      console.warn(`[migrate] failed to re-point ${label} for VM ${vmid}: ${err.message}`);
     }
   }
 }
 
 // Idempotent: the status transition guard means only the first caller (the
 // background job/poller or a lazy status check after a restart) finalizes.
-function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
-  const claimed = db.prepare(
-    "UPDATE vm_migrations SET status = ?, status_detail = ?, kept_source = ?, finished_at = datetime('now') WHERE id = ? AND status = 'running'"
-  ).run(ok ? 'ok' : 'error', detail, keptSource ? 1 : 0, id);
-  if (claimed.changes === 0) return;
-  const row = db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(id);
+async function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
+  // Atomic claim: only the first caller to flip a still-'running' row finalizes.
+  const claimed = await db.update(vmMigrations)
+    .set({ status: ok ? 'ok' : 'error', status_detail: detail, kept_source: keptSource, finished_at: new Date() })
+    .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
+  if (claimed.rowCount === 0) return;
+  const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
   // Adopt drives its own steps as it goes; remote_migrate only learns the
   // outcome here, so its seeded steps are resolved from the final status.
-  if (row.mode !== 'adopt') closeSteps(id, ok, detail);
+  if (row.mode !== 'adopt') await closeSteps(id, ok, detail);
   if (!ok) return;
-  repointVmRows(row.source_node, row.vmid, row.target_node);
+  await repointVmRows(row.source_node, row.vmid, row.target_node);
   console.log(`[migrate] VM ${row.vmid} migrated ${row.source_node} → ${row.target_node} (${row.mode})`);
 }
 
 // ─── Step tracking (same shape as provisioned_vms.steps) ─────────────────────
 
-function seedSteps(id, steps) {
-  db.prepare('UPDATE vm_migrations SET steps = ? WHERE id = ?')
-    .run(JSON.stringify(steps.map((s) => ({ key: s.key, label: s.label, status: s.status || 'pending', note: s.note || '' }))), id);
+async function seedSteps(id, steps) {
+  // steps is a jsonb column — store the array object directly, no JSON.stringify.
+  await db.update(vmMigrations)
+    .set({ steps: steps.map((s) => ({ key: s.key, label: s.label, status: s.status || 'pending', note: s.note || '' })) })
+    .where(eq(vmMigrations.id, id));
 }
 
-function readSteps(id) {
-  const row = db.prepare('SELECT steps FROM vm_migrations WHERE id = ?').get(id);
-  try { return row?.steps ? JSON.parse(row.steps) : []; } catch { return []; }
+async function readSteps(id) {
+  const [row] = await db.select({ steps: vmMigrations.steps }).from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
+  return Array.isArray(row?.steps) ? row.steps : [];
 }
 
-function setStep(id, key, status, note) {
-  const steps = readSteps(id);
+async function setStep(id, key, status, note) {
+  const steps = await readSteps(id);
   const step = steps.find((s) => s.key === key);
   if (!step) return;
   step.status = status;
   if (note !== undefined) step.note = note;
-  db.prepare('UPDATE vm_migrations SET steps = ? WHERE id = ?').run(JSON.stringify(steps), id);
+  await db.update(vmMigrations).set({ steps }).where(eq(vmMigrations.id, id));
 }
 
 // Resolve every unfinished step when a migration ends: all done on success, the
 // step that was running marked failed otherwise.
-function closeSteps(id, ok, detail) {
-  const steps = readSteps(id);
+async function closeSteps(id, ok, detail) {
+  const steps = await readSteps(id);
   if (steps.length === 0) return;
   for (const step of steps) {
     if (step.status === 'done' || step.status === 'skipped' || step.status === 'error') continue;
@@ -113,7 +125,7 @@ function closeSteps(id, ok, detail) {
       if (detail) step.note = detail;
     }
   }
-  db.prepare('UPDATE vm_migrations SET steps = ? WHERE id = ?').run(JSON.stringify(steps), id);
+  await db.update(vmMigrations).set({ steps }).where(eq(vmMigrations.id, id));
 }
 
 // ─── Transfer progress ───────────────────────────────────────────────────────
@@ -126,8 +138,8 @@ function closeSteps(id, ok, detail) {
 const LOG_BATCH = 512;
 const LOG_MAX_BATCHES = 20; // bounds the catch-up read of a long-running task
 
-function clearProgress(id) {
-  db.prepare("UPDATE vm_migrations SET progress = NULL, progress_detail = '' WHERE id = ?").run(id);
+async function clearProgress(id) {
+  await db.update(vmMigrations).set({ progress: null, progress_detail: '' }).where(eq(vmMigrations.id, id));
 }
 
 // Returns a function that pulls the task log once and updates the row. Set
@@ -135,12 +147,21 @@ function clearProgress(id) {
 // moves are separate tasks whose line numbers each start over, so they keep
 // their offset in the closure instead.
 function progressReader(id, node, upid, { persistOffset = false, step = null, note = '' } = {}) {
-  let offset = persistOffset
-    ? Number(db.prepare('SELECT log_offset FROM vm_migrations WHERE id = ?').get(id)?.log_offset) || 0
-    : 0;
+  // Lazily resolved on first read so the factory itself stays synchronous — it
+  // is handed to waitForTask as an onPoll callback, which expects a function.
+  let offset: number | null = null;
 
   return async function readProgress() {
     if (!upid) return;
+    if (offset === null) {
+      if (persistOffset) {
+        const [row] = await db.select({ log_offset: vmMigrations.log_offset })
+          .from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
+        offset = Number(row?.log_offset) || 0;
+      } else {
+        offset = 0;
+      }
+    }
     const read = await readTaskProgress(
       (opts) => getTaskLog(node, upid, opts),
       { start: offset, batch: LOG_BATCH, maxBatches: LOG_MAX_BATCHES },
@@ -149,14 +170,16 @@ function progressReader(id, node, upid, { persistOffset = false, step = null, no
     const latest = read.progress;
     // The migration can finish while this read is in flight — writing then
     // would resurrect a finished step as "active".
-    if (!db.prepare("SELECT 1 FROM vm_migrations WHERE id = ? AND status = 'running'").get(id)) return;
+    const [running] = await db.select({ id: vmMigrations.id }).from(vmMigrations)
+      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running'))).limit(1);
+    if (!running) return;
     if (persistOffset) {
-      db.prepare('UPDATE vm_migrations SET log_offset = ? WHERE id = ?').run(offset, id);
+      await db.update(vmMigrations).set({ log_offset: offset }).where(eq(vmMigrations.id, id));
     }
     if (!latest) return;
-    db.prepare('UPDATE vm_migrations SET progress = ?, progress_detail = ? WHERE id = ?')
-      .run(latest.percent, latest.detail, id);
-    if (step) setStep(id, step, 'active', note ? `${note} · ${latest.detail}` : latest.detail);
+    await db.update(vmMigrations).set({ progress: latest.percent, progress_detail: latest.detail })
+      .where(eq(vmMigrations.id, id));
+    if (step) await setStep(id, step, 'active', note ? `${note} · ${latest.detail}` : latest.detail);
   };
 }
 
@@ -341,12 +364,12 @@ function sanitizeBootOrder(config) {
 // non-fatal; the caller falls back to showing the manual one-liner.
 async function forgetSourceConfig({ id, vmid, sourceNode }) {
   const { hostId, nodeName } = decodeNodeRef(sourceNode);
-  const host = hostId != null ? getHost(hostId) : null;
+  const host = hostId != null ? await getHost(hostId) : null;
   if (!hostHasSsh(host)) {
-    setStep(id, 'cleanup', 'skipped', 'no SSH configured for the source host');
+    await setStep(id, 'cleanup', 'skipped', 'no SSH configured for the source host');
     return { ok: false, reason: 'Configure SSH on the source host (Admin → PVE Hosts) to remove it automatically next time.' };
   }
-  setStep(id, 'cleanup', 'active');
+  await setStep(id, 'cleanup', 'active');
   try {
     if (!isValidNodeName(nodeName)) throw new Error(`invalid source node name "${nodeName}"`);
     const status = await getVMStatus(sourceNode, vmid);
@@ -363,10 +386,10 @@ async function forgetSourceConfig({ id, vmid, sourceNode }) {
         ? `${confPath} not found on the node`
         : (failed.output || `mv exited with code ${failed.code}`));
     }
-    setStep(id, 'cleanup', 'done', `archived at ${backupPath}`);
+    await setStep(id, 'cleanup', 'done', `archived at ${backupPath}`);
     return { ok: true, backupPath };
   } catch (err) {
-    setStep(id, 'cleanup', 'error', err.message);
+    await setStep(id, 'cleanup', 'error', err.message);
     return { ok: false, reason: `Automatic removal failed: ${err.message}.` };
   }
 }
@@ -381,21 +404,21 @@ async function runAdoptMigration(ctx) {
     // 1. Move local disks (incl. EFI/TPM) onto the shared transfer storage
     const plan = buildDiskPlan(await getVMConfig(sourceNode, vmid), sharedMap);
     const movedKeys = [];
-    setStep(id, 'move-local', 'active');
+    await setStep(id, 'move-local', 'active');
     for (const disk of plan.filter((d) => d.action === 'copy')) {
       const note = `${disk.key} → ${transferStorage}`;
-      setStep(id, 'move-local', 'active', note);
+      await setStep(id, 'move-local', 'active', note);
       const upid = await moveVmDisk(sourceNode, vmid, disk.key, { storage: transferStorage, delete: 1 });
       await waitForTask(sourceNode, upid, {
         onPoll: progressReader(id, sourceNode, upid, { step: 'move-local', note }),
       });
-      clearProgress(id);
+      await clearProgress(id);
       movedKeys.push(disk.key);
     }
-    setStep(id, 'move-local', movedKeys.length ? 'done' : 'skipped', movedKeys.length ? `${movedKeys.length} disk(s) moved` : 'all disks already on shared storage');
+    await setStep(id, 'move-local', movedKeys.length ? 'done' : 'skipped', movedKeys.length ? `${movedKeys.length} disk(s) moved` : 'all disks already on shared storage');
 
     // 2. Build the target config — every disk now lives on shared storage
-    setStep(id, 'create', 'active');
+    await setStep(id, 'create', 'active');
     const config = await getVMConfig(sourceNode, vmid);
     const targetCfg = {};
     for (const [key, value] of Object.entries(config)) {
@@ -425,15 +448,15 @@ async function runAdoptMigration(ctx) {
     // validates the boot order on create and would otherwise abort.
     const fixedBoot = sanitizeBootOrder(targetCfg);
     if (fixedBoot) {
-      setStep(id, 'create', 'active', `fixed boot order (was "${targetCfg.boot}")`);
+      await setStep(id, 'create', 'active', `fixed boot order (was "${targetCfg.boot}")`);
       targetCfg.boot = fixedBoot;
     }
     const createUpid = await createVM(targetNode, vmid, targetCfg);
     if (createUpid) await waitForTask(targetNode, createUpid);
-    setStep(id, 'create', 'done');
+    await setStep(id, 'create', 'done');
 
     // 3. Verify every adopted volume is actually visible on the target
-    setStep(id, 'verify', 'active');
+    await setStep(id, 'verify', 'active');
     const toVerify = Object.entries(targetCfg)
       .filter(([k, v]) => DISK_KEY_RE.test(k) && typeof v === 'string' && !v.startsWith('none') && !v.includes('cloudinit'))
       .map(([, v]) => v.split(',')[0]);
@@ -447,7 +470,7 @@ async function runAdoptMigration(ctx) {
         throw new Error(`Volume ${volid} is not visible on the target host — is the shared storage mounted there?`);
       }
     }
-    setStep(id, 'verify', 'done');
+    await setStep(id, 'verify', 'done');
 
     // 4. Optionally land the previously-local disks on target-local storage.
     //    Each disk follows its own pick (falling back to the single target
@@ -460,24 +483,24 @@ async function runAdoptMigration(ctx) {
       .map((key) => ({ key, storage: diskStorages[key] ?? targetStorage ?? '' }))
       .filter((m) => m.storage && m.storage !== adoptedStorageId);
     if (moves.length > 0) {
-      setStep(id, 'move-back', 'active');
+      await setStep(id, 'move-back', 'active');
       for (const move of moves) {
         const note = `${move.key} → ${move.storage}`;
-        setStep(id, 'move-back', 'active', note);
+        await setStep(id, 'move-back', 'active', note);
         const upid = await moveVmDisk(targetNode, vmid, move.key, { storage: move.storage, delete: 1 });
         await waitForTask(targetNode, upid, {
           onPoll: progressReader(id, targetNode, upid, { step: 'move-back', note }),
         });
-        clearProgress(id);
+        await clearProgress(id);
       }
-      setStep(id, 'move-back', 'done', moves.map((m) => `${m.key} → ${m.storage}`).join(', '));
+      await setStep(id, 'move-back', 'done', moves.map((m) => `${m.key} → ${m.storage}`).join(', '));
     } else {
-      setStep(id, 'move-back', 'skipped');
+      await setStep(id, 'move-back', 'skipped');
     }
 
     // 5. Protect the leftover source config so nothing can destroy the shared
     // volumes through it (PVE refuses destroy while protection is set)
-    setStep(id, 'protect', 'active');
+    await setStep(id, 'protect', 'active');
     let protectWarning = '';
     try {
       const marker = `[Migrated to ${targetHostName} by Homelabrrr — this config is kept only because its disks moved with the VM. Remove it on the source host shell with: rm /etc/pve/qemu-server/${vmid}.conf]`;
@@ -485,10 +508,10 @@ async function runAdoptMigration(ctx) {
         protection: 1,
         description: `${marker}\n\n${config.description || ''}`.trim(),
       });
-      setStep(id, 'protect', 'done');
+      await setStep(id, 'protect', 'done');
     } catch (err) {
       protectWarning = ` (could not set the protection flag on the source: ${err.message})`;
-      setStep(id, 'protect', 'error', err.message);
+      await setStep(id, 'protect', 'error', err.message);
     }
 
     // 6. If the source host has SSH configured, remove the leftover config for
@@ -498,18 +521,18 @@ async function runAdoptMigration(ctx) {
     // is archived under /root/ rather than deleted, so it stays recoverable.
     const removed = await forgetSourceConfig(ctx);
     if (removed.ok) {
-      finalizeMigration(id, true,
+      await finalizeMigration(id, true,
         `Source config removed from ${sourceHostName} automatically (archived at ${removed.backupPath})${protectWarning}`,
         { keptSource: false });
       return;
     }
 
-    finalizeMigration(id, true,
+    await finalizeMigration(id, true,
       `Source VM config kept on ${sourceHostName} — its disks moved with the VM. ${removed.reason} Remove the leftover with: rm /etc/pve/qemu-server/${vmid}.conf${protectWarning}`,
       { keptSource: true });
   } catch (err) {
     console.error(`[migrate] adopt migration ${id} failed:`, err.message);
-    finalizeMigration(id, false, err.message || 'Migration failed');
+    await finalizeMigration(id, false, err.message || 'Migration failed');
   }
 }
 
@@ -527,30 +550,30 @@ const pendingRelocations = new Map(); // migration id → [{ key, storage }]
 const relocationsInFlight = new Set();
 
 async function relocateDisks(id, moves) {
-  const row = db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(id);
+  const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
   if (!row) return;
   const done = [];
   try {
-    setStep(id, 'relocate', 'active');
+    await setStep(id, 'relocate', 'active');
     for (const move of moves) {
       const note = `${move.key} → ${move.storage}`;
-      setStep(id, 'relocate', 'active', note);
+      await setStep(id, 'relocate', 'active', note);
       const upid = await moveVmDisk(row.target_node, row.vmid, move.key, { storage: move.storage, delete: 1 });
       await waitForTask(row.target_node, upid, {
         onPoll: progressReader(id, row.target_node, upid, { step: 'relocate', note }),
       });
-      clearProgress(id);
+      await clearProgress(id);
       done.push(note);
     }
-    setStep(id, 'relocate', 'done', done.join(', '));
-    finalizeMigration(id, true);
+    await setStep(id, 'relocate', 'done', done.join(', '));
+    await finalizeMigration(id, true);
   } catch (err) {
     // The guest itself is migrated and running on the target — only the
     // follow-up move failed. Calling that "migration failed" would be wrong, so
     // it finishes successfully with the leftover spelled out.
     const left = moves.slice(done.length).map((m) => `${m.key} → ${m.storage}`).join(', ');
-    setStep(id, 'relocate', 'error', err.message);
-    finalizeMigration(id, true,
+    await setStep(id, 'relocate', 'error', err.message);
+    await finalizeMigration(id, true,
       `Migrated, but the follow-up disk move on the target failed (${left}): ${err.message}. `
       + 'The VM is running on the target host — move those disks from Proxmox.');
   }
@@ -558,19 +581,21 @@ async function relocateDisks(id, moves) {
 
 // Single funnel for "the copy task has finished": both the in-process poller and
 // the lazy status check reach it, and only one of them may act on a migration.
-function completeRemoteMigrate(id, ok, detail = '') {
+async function completeRemoteMigrate(id, ok, detail = '') {
   const moves = pendingRelocations.get(id) || [];
   if (!ok || moves.length === 0) {
     pendingRelocations.delete(id);
-    finalizeMigration(id, ok, detail);
+    await finalizeMigration(id, ok, detail);
     return;
   }
   if (relocationsInFlight.has(id)) return; // already moving; the row stays 'running'
   relocationsInFlight.add(id);
+  // Deliberately not awaited: the follow-up disk moves can take a long time and
+  // the row stays 'running' while they do — callers gate on relocationsInFlight.
   relocateDisks(id, moves)
-    .catch((err) => {
+    .catch(async (err) => {
       console.error(`[migrate] disk relocation for migration ${id} crashed:`, err.message);
-      finalizeMigration(id, true, `Migrated, but the follow-up disk move on the target crashed: ${err.message}`);
+      await finalizeMigration(id, true, `Migrated, but the follow-up disk move on the target crashed: ${err.message}`);
     })
     .finally(() => {
       relocationsInFlight.delete(id);
@@ -593,12 +618,12 @@ async function pollMigration(id, sourceNode, upid, { maxAttempts = 4320 } = {}) 
   try {
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, 5000));
-      const row = db.prepare('SELECT status FROM vm_migrations WHERE id = ?').get(id);
+      const [row] = await db.select({ status: vmMigrations.status }).from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
       if (!row || row.status !== 'running') return;
       try {
         const task = await getTaskStatus(sourceNode, upid);
         if (task.status === 'stopped') {
-          completeRemoteMigrate(id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
+          await completeRemoteMigrate(id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
           // Disks still to be moved on the target keep the row 'running'; the
           // next tick sees the finished task again and hits the in-flight guard.
           if (!relocationsInFlight.has(id)) return;
@@ -612,7 +637,7 @@ async function pollMigration(id, sourceNode, upid, { maxAttempts = 4320 } = {}) 
   }
   // A relocation still running owns the outcome — the copy itself did finish.
   if (relocationsInFlight.has(id)) return;
-  completeRemoteMigrate(id, false, 'Timed out while waiting for the migration task — check the task log in Proxmox');
+  await completeRemoteMigrate(id, false, 'Timed out while waiting for the migration task — check the task log in Proxmox');
 }
 
 // Re-check still-'running' remote_migrate rows against the source task.
@@ -627,15 +652,17 @@ async function refreshRunningMigrations(rows) {
       if (task.status === 'stopped') {
         // Kicks off any post-copy disk move in the background and leaves the
         // row 'running' — this is a request path, it must not wait for it.
-        completeRemoteMigrate(row.id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
-        Object.assign(row, db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(row.id));
+        await completeRemoteMigrate(row.id, task.exitstatus === 'OK', task.exitstatus === 'OK' ? '' : task.exitstatus || 'Migration task failed');
+        const [fresh] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, row.id)).limit(1);
+        if (fresh) Object.assign(row, fresh);
         continue;
       }
       // Nothing polls in-process after a restart — re-derive the bar from the
       // task log so a reopened modal picks it back up mid-transfer.
       if (!polledInProcess.has(row.id)) {
         await progressReader(row.id, row.source_node, row.upid, { persistOffset: true, step: 'transfer' })();
-        Object.assign(row, db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(row.id));
+        const [fresh] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, row.id)).limit(1);
+        if (fresh) Object.assign(row, fresh);
       }
     } catch { /* source unreachable — leave as running */ }
   }
@@ -644,8 +671,8 @@ async function refreshRunningMigrations(rows) {
 function serializeMigration(row, hostNames) {
   const src = decodeNodeRef(row.source_node);
   const tgt = decodeNodeRef(row.target_node);
-  let steps = [];
-  try { steps = row.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
+  // steps is a jsonb column now — already an array (or null), no JSON.parse.
+  const steps = Array.isArray(row.steps) ? row.steps : [];
   const { log_offset, ...rest } = row; // internal bookkeeping, not for the UI
   return {
     ...rest,
@@ -661,16 +688,17 @@ function serializeMigration(row, hostNames) {
   };
 }
 
-function hostNameMap() {
-  return new Map(getHosts().map((h) => [h.id, h.name]));
+async function hostNameMap() {
+  const hosts = await getHosts();
+  return new Map(hosts.map((h) => [h.id, h.name]));
 }
 
 // ─── Status ──────────────────────────────────────────────────────────────────
 
 router.get('/', async (req, res) => {
-  const rows = db.prepare('SELECT * FROM vm_migrations ORDER BY id DESC LIMIT 20').all();
+  const rows = await db.select().from(vmMigrations).orderBy(desc(vmMigrations.id)).limit(20);
   await refreshRunningMigrations(rows);
-  const hostNames = hostNameMap();
+  const hostNames = await hostNameMap();
   res.json(rows.map((row) => serializeMigration(row, hostNames)));
 });
 
@@ -682,12 +710,12 @@ router.get('/plan/:node/:vmid', async (req, res) => {
     if (!target.hostId || !target.nodeName || !isValidNodeName(target.nodeName)) {
       return res.status(400).json({ error: 'target must be a host-qualified node reference' });
     }
-    const targetHost = getHost(target.hostId);
+    const targetHost = await getHost(target.hostId);
     if (!targetHost) return res.status(404).json({ error: 'Target Proxmox host not found' });
 
     const vm = await resolveVm(req.params.node, req.params.vmid);
     if (!vm) return res.status(404).json({ error: 'VM not found on the requested node' });
-    const sourceHost = getHost(vm.hostId);
+    const sourceHost = await getHost(vm.hostId);
     if (!sourceHost) return res.status(404).json({ error: 'Source Proxmox host not found' });
     if (vm.hostId === target.hostId) {
       return res.status(400).json({ error: 'Target host must be different from the source host' });
@@ -721,32 +749,33 @@ router.get('/plan/:node/:vmid', async (req, res) => {
 });
 
 router.get('/:id', async (req, res) => {
-  const row = db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(req.params.id);
+  const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, Number(req.params.id))).limit(1);
   if (!row) return res.status(404).json({ error: 'Migration not found' });
   await refreshRunningMigrations([row]);
-  res.json(serializeMigration(row, hostNameMap()));
+  res.json(serializeMigration(row, await hostNameMap()));
 });
 
 // Retroactive leftover removal: a finished adopt migration whose source config
 // was kept (no SSH configured at the time, or the cleanup failed) can be
 // cleaned up later, once the source host has SSH set up.
 router.post('/:id/cleanup-source', async (req, res) => {
-  const row = db.prepare('SELECT * FROM vm_migrations WHERE id = ?').get(req.params.id);
+  const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, Number(req.params.id))).limit(1);
   if (!row) return res.status(404).json({ error: 'Migration not found' });
   if (row.status !== 'ok' || row.mode !== 'adopt' || !row.kept_source) {
     return res.status(400).json({ error: 'This migration has no leftover source config to remove' });
   }
   const { hostId } = decodeNodeRef(row.source_node);
-  const host = hostId != null ? getHost(hostId) : null;
+  const host = hostId != null ? await getHost(hostId) : null;
   if (!hostHasSsh(host)) {
     return res.status(400).json({ error: 'Configure SSH for the source host first (Admin → PVE Hosts)' });
   }
   try {
     const removed = await forgetSourceConfig({ id: row.id, vmid: row.vmid, sourceNode: row.source_node });
     if (!removed.ok) return res.status(500).json({ error: sanitizeError(removed.reason) });
-    db.prepare('UPDATE vm_migrations SET kept_source = 0, status_detail = ? WHERE id = ?')
-      .run(`Source config removed (archived at ${removed.backupPath})`, row.id);
-    logAudit(req, 'vm_migrate_cleanup_source', `${row.source_node}/${row.vmid}`, `archived at ${removed.backupPath}`);
+    await db.update(vmMigrations)
+      .set({ kept_source: false, status_detail: `Source config removed (archived at ${removed.backupPath})` })
+      .where(eq(vmMigrations.id, row.id));
+    await logAudit(req, 'vm_migrate_cleanup_source', `${row.source_node}/${row.vmid}`, `archived at ${removed.backupPath}`);
     res.json({ ok: true, backupPath: removed.backupPath });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -791,7 +820,7 @@ router.post('/:node/:vmid', async (req, res) => {
   if (!target.hostId || !target.nodeName || !isValidNodeName(target.nodeName)) {
     return res.status(400).json({ error: 'Target node must be a host-qualified node reference' });
   }
-  const targetHost = getHost(target.hostId);
+  const targetHost = await getHost(target.hostId);
   if (!targetHost) return res.status(404).json({ error: 'Target Proxmox host not found' });
 
   try {
@@ -800,10 +829,11 @@ router.post('/:node/:vmid', async (req, res) => {
     if (vm.hostId === target.hostId) {
       return res.status(400).json({ error: 'Target host must be different from the source host' });
     }
-    const sourceHost = getHost(vm.hostId);
+    const sourceHost = await getHost(vm.hostId);
     if (!sourceHost) return res.status(404).json({ error: 'Source Proxmox host not found' });
 
-    const active = db.prepare("SELECT id FROM vm_migrations WHERE vmid = ? AND status = 'running'").get(vmid);
+    const [active] = await db.select({ id: vmMigrations.id }).from(vmMigrations)
+      .where(and(eq(vmMigrations.vmid, vmid), eq(vmMigrations.status, 'running'))).limit(1);
     if (active) return res.status(409).json({ error: 'A migration for this VM is already running' });
 
     const running = vm.status === 'running';
@@ -995,18 +1025,27 @@ router.post('/:node/:vmid', async (req, res) => {
       }
     }
 
-    const row = db.prepare(`
-      INSERT INTO vm_migrations (user_id, vmid, name, vmtype, source_node, target_node, target_storage, target_bridge, online, delete_source, status, upid, mode, request_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
-    `).run(
-      req.session.userId, vmid, vm.name || '', vmtype,
-      sourceRef, targetNode, migrateStorage || '', targetBridge,
-      mode === 'remote_migrate' && vmtype === 'qemu' && running && online ? 1 : 0,
-      mode === 'adopt' ? 0 : (deleteSource ? 1 : 0), upid || '', mode, req.requestId || ''
-    );
+    const [inserted] = await db.insert(vmMigrations).values({
+      user_id: req.session.userId,
+      vmid,
+      name: vm.name || '',
+      vmtype,
+      source_node: sourceRef,
+      target_node: targetNode,
+      target_storage: migrateStorage || '',
+      target_bridge: targetBridge,
+      // online / delete_source are real booleans now.
+      online: mode === 'remote_migrate' && vmtype === 'qemu' && running && !!online,
+      delete_source: mode === 'adopt' ? false : !!deleteSource,
+      status: 'running',
+      upid: upid || '',
+      mode,
+      request_id: req.requestId || '',
+    }).returning({ id: vmMigrations.id });
+    const migrationId = inserted.id;
 
     if (mode === 'adopt') {
-      seedSteps(row.lastInsertRowid, [
+      await seedSteps(migrationId, [
         { key: 'move-local', label: 'Moving local disks to shared storage' },
         { key: 'create', label: 'Creating VM on target (adopting shared disks)' },
         { key: 'verify', label: 'Verifying volumes on target' },
@@ -1015,21 +1054,21 @@ router.post('/:node/:vmid', async (req, res) => {
         { key: 'cleanup', label: 'Removing leftover source config' },
       ]);
       runAdoptMigration({
-        id: row.lastInsertRowid, vmid,
+        id: migrationId, vmid,
         sourceNode: sourceRef, targetNode, targetBridge,
         targetStorage: targetStorage || '',
         sharedMap: plan.sharedMap, transferStorage: plan.transferStorage,
         diskStorages: adoptDiskStorages,
         sourceHostName: sourceHost.name, targetHostName: targetHost.name,
-      }).catch((err) => {
+      }).catch(async (err) => {
         console.error(`[migrate] adopt job crashed for VM ${vmid}:`, err.message);
-        finalizeMigration(row.lastInsertRowid, false, err.message || 'Migration failed');
+        await finalizeMigration(migrationId, false, err.message || 'Migration failed');
       });
     } else {
       // The API call already returned a UPID, so the source-side preparation is
       // behind us — seeding gives the transfer a step to hang its progress bar
       // on instead of leaving this path a blank panel.
-      seedSteps(row.lastInsertRowid, [
+      await seedSteps(migrationId, [
         {
           key: 'prepare',
           label: 'Preparing migration on the source host',
@@ -1046,8 +1085,8 @@ router.post('/:node/:vmid', async (req, res) => {
           : []),
         { key: 'finalize', label: 'Finalizing on the target host' },
       ]);
-      if (relocate.length > 0) pendingRelocations.set(row.lastInsertRowid, relocate);
-      pollMigration(row.lastInsertRowid, sourceRef, upid)
+      if (relocate.length > 0) pendingRelocations.set(migrationId, relocate);
+      pollMigration(migrationId, sourceRef, upid)
         .catch((err) => console.error(`[migrate] polling failed for VM ${vmid}:`, err.message));
     }
 
@@ -1055,10 +1094,10 @@ router.post('/:node/:vmid', async (req, res) => {
     const perDiskNote = Object.keys(perDiskStorage).length > 0
       ? ` disks=${Object.entries(perDiskStorage).map(([k, s]) => `${k}→${s}`).join(',')}`
       : '';
-    logAudit(req, 'vm_remote_migrate', `${vm.node}/${vmid}`,
+    await logAudit(req, 'vm_remote_migrate', `${vm.node}/${vmid}`,
       `mode=${mode} → ${targetHost.name}/${target.nodeName}${migrateStorage ? ` storage=${migrateStorage}` : ''}${perDiskNote} bridge=${targetBridge}${online ? ' online' : ''}${mode === 'adopt' || !deleteSource ? ' keep-source' : ''}${bootFix}${cdromNote}`);
     res.json({
-      id: row.lastInsertRowid, vmid, upid, mode, status: 'running',
+      id: migrationId, vmid, upid, mode, status: 'running',
       bootFix: bootFix.trim() || undefined,
       cdromDetached: ejected.length > 0 ? ejected.map((e) => ({ key: e.key, volid: e.volid })) : undefined,
     });

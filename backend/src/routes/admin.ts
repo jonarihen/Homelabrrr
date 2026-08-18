@@ -1,6 +1,19 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import db from '../db.ts';
+import {
+  and, eq, ne, desc, inArray, sql, count, getTableColumns,
+} from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import {
+  users, roles, rolePermissions, invites, apiTokens,
+  vmAssignments, vmSshConfigs,
+  vlans, userVlans, firewalls, pveHosts,
+  firewallVlanSync, managedVips, publicIps, publicIpPools, publicIpAssignments,
+  caddyServers, caddySites, notificationWebhooks, vmTemplates, cloudImages,
+  vmLeases, auditLog, settings, loginAttempts,
+} from '../db/schema/index.ts';
+import { isUniqueViolation } from '../db/errors.ts';
+import { setSetting } from '../db/settings.ts';
 import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools } from '../proxmox.ts';
 import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibility.ts';
 import { createClient, vlanTagToSubnet } from '../fortigate.ts';
@@ -63,8 +76,10 @@ const pAudit       = requirePermission('can_view_audit_log');
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
 // Check if a non-admin user has access to a VLAN via user_vlans
-function userOwnsVlan(userId, vlanId) {
-  return !!db.prepare('SELECT 1 FROM user_vlans WHERE user_id = ? AND vlan_id = ?').get(userId, vlanId);
+async function userOwnsVlan(userId, vlanId) {
+  const [row] = await db.select({ one: sql`1` }).from(userVlans)
+    .where(and(eq(userVlans.user_id, userId), eq(userVlans.vlan_id, vlanId))).limit(1);
+  return !!row;
 }
 
 function serializeNodeIdentity(nodeValue) {
@@ -77,27 +92,27 @@ function serializeNodeIdentity(nodeValue) {
 
 // Effective check — a role that grants can_manage_firewalls counts, so never
 // read the legacy users.can_manage_firewalls column here.
-function canManageAllPortForwards(req) {
-  return !!req.session.isAdmin || userHasPermission(req.session.userId, 'can_manage_firewalls');
+async function canManageAllPortForwards(req) {
+  return !!req.session.isAdmin || await userHasPermission(req.session.userId, 'can_manage_firewalls');
 }
 
-function getScopedFirewallSyncs(userId, firewallId, unrestricted = false) {
+async function getScopedFirewallSyncs(userId, firewallId, unrestricted = false) {
+  const cols = {
+    interface_name: firewallVlanSync.interface_name,
+    vlan_id: vlans.id,
+    vlan_name: vlans.name,
+    vlan_tag: vlans.tag,
+  };
   if (unrestricted) {
-    return db.prepare(`
-      SELECT fvs.interface_name, v.id as vlan_id, v.name as vlan_name, v.tag as vlan_tag
-      FROM firewall_vlan_sync fvs
-      JOIN vlans v ON v.id = fvs.vlan_id
-      WHERE fvs.firewall_id = ?
-    `).all(firewallId);
+    return db.select(cols).from(firewallVlanSync)
+      .innerJoin(vlans, eq(vlans.id, firewallVlanSync.vlan_id))
+      .where(eq(firewallVlanSync.firewall_id, firewallId));
   }
 
-  return db.prepare(`
-    SELECT fvs.interface_name, v.id as vlan_id, v.name as vlan_name, v.tag as vlan_tag
-    FROM firewall_vlan_sync fvs
-    JOIN vlans v ON v.id = fvs.vlan_id
-    JOIN user_vlans uv ON uv.vlan_id = v.id AND uv.user_id = ?
-    WHERE fvs.firewall_id = ?
-  `).all(userId, firewallId);
+  return db.select(cols).from(firewallVlanSync)
+    .innerJoin(vlans, eq(vlans.id, firewallVlanSync.vlan_id))
+    .innerJoin(userVlans, and(eq(userVlans.vlan_id, vlans.id), eq(userVlans.user_id, userId)))
+    .where(eq(firewallVlanSync.firewall_id, firewallId));
 }
 
 // Every VM the user can see, annotated with whether it can be published through
@@ -106,27 +121,29 @@ function getScopedFirewallSyncs(userId, firewallId, unrestricted = false) {
 // The classification itself lives in utils/portForwardTargets.js so it is pure
 // and unit-testable; this function only gathers the rows it needs.
 async function getScopedPortForwardTargets(req, fw) {
-  const unrestricted = canManageAllPortForwards(req);
-  const canManageVlans = req.session.isAdmin || userHasPermission(req.session.userId, 'can_manage_vlans');
+  const unrestricted = await canManageAllPortForwards(req);
+  const canManageVlans = req.session.isAdmin || await userHasPermission(req.session.userId, 'can_manage_vlans');
 
   const vms = await getAllVMs();
-  const sshConfigs = db.prepare('SELECT node, vmid, host, port FROM vm_ssh_configs').all();
-  const vlans = db.prepare('SELECT id, name, tag FROM vlans').all();
-  const vlanSyncs = db.prepare(`
-    SELECT fvs.interface_name, v.tag AS vlan_tag
-    FROM firewall_vlan_sync fvs
-    JOIN vlans v ON v.id = fvs.vlan_id
-    WHERE fvs.firewall_id = ?
-  `).all(fw.id);
-  const userVlanTags = db.prepare(
-    'SELECT v.tag FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ?'
-  ).all(req.session.userId).map(r => r.tag);
+  const sshConfigs = await db.select({
+    node: vmSshConfigs.node, vmid: vmSshConfigs.vmid, host: vmSshConfigs.host, port: vmSshConfigs.port,
+  }).from(vmSshConfigs);
+  const vlanRows = await db.select({ id: vlans.id, name: vlans.name, tag: vlans.tag }).from(vlans);
+  const vlanSyncs = await db.select({
+    interface_name: firewallVlanSync.interface_name, vlan_tag: vlans.tag,
+  }).from(firewallVlanSync)
+    .innerJoin(vlans, eq(vlans.id, firewallVlanSync.vlan_id))
+    .where(eq(firewallVlanSync.firewall_id, fw.id));
+  const userVlanTags = (await db.select({ tag: vlans.tag }).from(vlans)
+    .innerJoin(userVlans, eq(userVlans.vlan_id, vlans.id))
+    .where(eq(userVlans.user_id, req.session.userId))).map(r => r.tag);
 
-  const accessibleVms = vms.filter(vm => {
+  const accessChecks = await Promise.all(vms.map(async (vm) => {
     if (vm.type !== 'qemu' && vm.type !== 'lxc') return false;
     if (unrestricted) return true;
     return userCanAccessVm(req.session.userId, vm.nodeRef || vm.node, vm.vmid, req.session.isAdmin);
-  });
+  }));
+  const accessibleVms = vms.filter((_vm, i) => accessChecks[i]);
   const accessibleKeys = accessibleVms.map(vm => `${vm.nodeRef || vm.node}/${vm.vmid}`);
 
   // Only VMs that already have an IP need a config fetch: a VM without one is
@@ -168,7 +185,7 @@ async function getScopedPortForwardTargets(req, fw) {
     accessibleKeys,
     sshConfigs,
     vlanTags: vlanTagMap,
-    vlans,
+    vlans: vlanRows,
     vlanSyncs,
     userVlanTags,
     unrestricted,
@@ -200,7 +217,7 @@ async function collectHostReadiness(hosts) {
     if (!status?.online) return { hostId: h.id, total: 0, exposed: 0, error: 'Host unreachable' };
     try {
       const pools = await getHostStoragePools(h);
-      const visibility = storageVisibilityMap(h.id);
+      const visibility = await storageVisibilityMap(h.id);
       // Missing visibility row ⇒ exposed (default-open), same as the picker.
       const exposed = pools.filter((p) => (visibility.has(p.storage) ? visibility.get(p.storage) : true)).length;
       return { hostId: h.id, total: pools.length, exposed };
@@ -214,46 +231,57 @@ async function collectHostReadiness(hosts) {
 
 // Users who can actually reach the New VM page — role grants and the legacy
 // per-user column both count, so this goes through effectivePermissions.
-function countProvisioners() {
-  const users = db.prepare('SELECT * FROM users').all();
-  return users.filter((u) => u.is_admin === 1 || effectivePermissions(u).can_provision).length;
+async function countProvisioners() {
+  const userRows = await db.select().from(users);
+  const perms = await Promise.all(userRows.map((u) => effectivePermissions(u)));
+  return userRows.filter((u, i) => u.is_admin || perms[i].can_provision).length;
 }
 
 router.get('/readiness', requireAdmin, async (req, res) => {
   try {
-    const hosts = getHosts();
+    const hosts = await getHosts();
     const { hostStatuses, hostStorages } = await collectHostReadiness(hosts);
 
     // Mirrors websites.js effectiveWanIp(): the manual value wins, otherwise
     // the linked FortiGate's external IP stands in.
-    const caddyServers = db.prepare(`
-      SELECT cs.id, cs.name, cs.wan_ip, f.external_ip
-      FROM caddy_servers cs
-      LEFT JOIN firewalls f ON f.id = cs.fortigate_id
-      ORDER BY cs.name
-    `).all().map((s) => ({
+    const caddyServerRows = (await db.select({
+      id: caddyServers.id, name: caddyServers.name, wan_ip: caddyServers.wan_ip, external_ip: firewalls.external_ip,
+    }).from(caddyServers)
+      .leftJoin(firewalls, eq(firewalls.id, caddyServers.fortigate_id))
+      .orderBy(caddyServers.name)).map((s) => ({
       id: s.id,
       name: s.name,
       wanIp: s.wan_ip || s.external_ip || '',
     }));
 
+    const firewallRows = (await db.select({
+      id: firewalls.id, name: firewalls.name, external_ip: firewalls.external_ip,
+    }).from(firewalls).orderBy(firewalls.name))
+      .map((f) => ({ id: f.id, name: f.name, externalIp: f.external_ip || '' }));
+    const vlanSyncCounts = await db.select({
+      firewallId: firewallVlanSync.firewall_id, count: count(),
+    }).from(firewallVlanSync).groupBy(firewallVlanSync.firewall_id);
+    const [{ c: templateCount }] = await db.select({ c: count() }).from(vmTemplates).where(eq(vmTemplates.enabled, true));
+    // Same predicate provision.js /images uses: only a ready, import-content
+    // volume can be an import-from disk source on PVE 9.
+    const [{ c: cloudImageCount }] = await db.select({ c: count() }).from(cloudImages)
+      .where(and(eq(cloudImages.status, 'ready'), ne(cloudImages.volid, ''), sql`${cloudImages.volid} NOT LIKE '%:iso/%'`));
+    const provisionUserCount = await countProvisioners();
+    const [{ c: siteCount }] = await db.select({ c: count() }).from(caddySites);
+    const [{ c: webhookCount }] = await db.select({ c: count() }).from(notificationWebhooks).where(eq(notificationWebhooks.enabled, true));
+
     const checks = evaluateReadiness({
       hosts: hosts.map((h) => ({ id: h.id, name: h.name })),
       hostStatuses,
       hostStorages,
-      firewalls: db.prepare('SELECT id, name, external_ip FROM firewalls ORDER BY name')
-        .all().map((f) => ({ id: f.id, name: f.name, externalIp: f.external_ip || '' })),
-      vlanSyncCounts: db.prepare('SELECT firewall_id AS firewallId, COUNT(*) AS count FROM firewall_vlan_sync GROUP BY firewall_id').all(),
-      templateCount: db.prepare('SELECT COUNT(*) AS c FROM vm_templates WHERE enabled = 1').get().c,
-      // Same predicate provision.js /images uses: only a ready, import-content
-      // volume can be an import-from disk source on PVE 9.
-      cloudImageCount: db.prepare(
-        "SELECT COUNT(*) AS c FROM cloud_images WHERE status = 'ready' AND volid != '' AND volid NOT LIKE '%:iso/%'"
-      ).get().c,
-      provisionUserCount: countProvisioners(),
-      caddyServers,
-      siteCount: db.prepare('SELECT COUNT(*) AS c FROM caddy_sites').get().c,
-      webhookCount: db.prepare('SELECT COUNT(*) AS c FROM notification_webhooks WHERE enabled = 1').get().c,
+      firewalls: firewallRows,
+      vlanSyncCounts,
+      templateCount,
+      cloudImageCount,
+      provisionUserCount,
+      caddyServers: caddyServerRows,
+      siteCount,
+      webhookCount,
       env: {
         secretEncryptionKey: !!process.env.SECRET_ENCRYPTION_KEY,
         sessionSecret: !!process.env.SESSION_SECRET,
@@ -274,10 +302,10 @@ router.get('/readiness', requireAdmin, async (req, res) => {
 const LOCKOUT_WINDOW_MS = 10 * 60 * 1000;
 const LOCKOUT_MAX = 10;
 
-function ensureCanManageTargetUser(req, res, userId) {
+async function ensureCanManageTargetUser(req, res, userId) {
   if (req.session.isAdmin) return true;
 
-  const target = db.prepare('SELECT is_admin FROM users WHERE id = ?').get(userId);
+  const [target] = await db.select({ is_admin: users.is_admin }).from(users).where(eq(users.id, Number(userId))).limit(1);
   if (!target) {
     res.status(404).json({ error: 'User not found' });
     return false;
@@ -289,31 +317,41 @@ function ensureCanManageTargetUser(req, res, userId) {
   return true;
 }
 
-router.get('/users', pUsers, (req, res) => {
+router.get('/users', pUsers, async (req, res) => {
   const windowStart = Date.now() - LOCKOUT_WINDOW_MS;
-  const users = db.prepare(`
-    SELECT u.id, u.username, u.is_admin, u.see_all_vms, u.can_operate_all_vms, u.can_provision, u.can_create_vms, u.totp_enabled, u.require_2fa,
-      u.can_manage_hosts, u.can_manage_firewalls, u.can_manage_port_forwards, u.can_manage_vlans, u.can_manage_policies,
-      u.can_manage_templates, u.can_manage_users, u.can_manage_assignments, u.can_view_audit_log, u.can_edit_vm_hardware,
-      u.can_manage_websites, u.can_manage_public_ips,
-      u.created_at, u.role_id, r.name AS role_name,
-      u.max_cores, u.max_memory_gb, u.max_storage_gb,
-      (SELECT COUNT(*) FROM vm_assignments WHERE user_id = u.id) as vm_count,
-      (SELECT COUNT(*) FROM login_attempts WHERE username = u.username AND attempted_at > ?) as recent_failures,
-      (SELECT COALESCE(MAX(ip_count), 0) FROM (
-        SELECT COUNT(*) AS ip_count FROM login_attempts
-        WHERE username = u.username AND attempted_at > ? GROUP BY ip
-      )) as max_ip_failures
-    FROM users u
-    LEFT JOIN roles r ON r.id = u.role_id
-    ORDER BY u.username
-  `).all(windowStart, windowStart);
+  // Correlated per-user aggregates (VM count, recent failures, worst per-IP
+  // failure streak). Computed as subquery scalars so the row shape is unchanged.
+  const la = loginAttempts;
+  const vmCountSq = sql<number>`(SELECT COUNT(*) FROM ${vmAssignments} WHERE ${vmAssignments.user_id} = ${users.id})`;
+  const recentFailuresSq = sql<number>`(SELECT COUNT(*) FROM ${la} WHERE ${la.username} = ${users.username} AND ${la.attempted_at} > ${windowStart})`;
+  const maxIpFailuresSq = sql<number>`(SELECT COALESCE(MAX(ip_count), 0) FROM (
+        SELECT COUNT(*) AS ip_count FROM ${la}
+        WHERE ${la.username} = ${users.username} AND ${la.attempted_at} > ${windowStart} GROUP BY ${la.ip}
+      ) AS s)`;
+  const rows = await db.select({
+    id: users.id, username: users.username, is_admin: users.is_admin, see_all_vms: users.see_all_vms,
+    can_operate_all_vms: users.can_operate_all_vms, can_provision: users.can_provision, can_create_vms: users.can_create_vms,
+    totp_enabled: users.totp_enabled, require_2fa: users.require_2fa,
+    can_manage_hosts: users.can_manage_hosts, can_manage_firewalls: users.can_manage_firewalls,
+    can_manage_port_forwards: users.can_manage_port_forwards, can_manage_vlans: users.can_manage_vlans,
+    can_manage_policies: users.can_manage_policies, can_manage_templates: users.can_manage_templates,
+    can_manage_users: users.can_manage_users, can_manage_assignments: users.can_manage_assignments,
+    can_view_audit_log: users.can_view_audit_log, can_edit_vm_hardware: users.can_edit_vm_hardware,
+    can_manage_websites: users.can_manage_websites, can_manage_public_ips: users.can_manage_public_ips,
+    created_at: users.created_at, role_id: users.role_id, role_name: roles.name,
+    max_cores: users.max_cores, max_memory_gb: users.max_memory_gb, max_storage_gb: users.max_storage_gb,
+    vm_count: vmCountSq,
+    recent_failures: recentFailuresSq,
+    max_ip_failures: maxIpFailuresSq,
+  }).from(users)
+    .leftJoin(roles, eq(roles.id, users.role_id))
+    .orderBy(users.username);
   // Lockout is per (username, ip) — a user counts as locked when any single
   // address has hit the limit
-  res.json(users.map(u => ({ ...u, locked: u.max_ip_failures >= LOCKOUT_MAX, twoFactorEnabled: !!u.totp_enabled, require2fa: !!u.require_2fa, canProvision: !!u.can_provision, canCreateVms: !!u.can_create_vms })));
+  res.json(rows.map(u => ({ ...u, locked: u.max_ip_failures >= LOCKOUT_MAX, twoFactorEnabled: !!u.totp_enabled, require2fa: !!u.require_2fa, canProvision: !!u.can_provision, canCreateVms: !!u.can_create_vms })));
 });
 
-router.post('/users', pUsers, (req, res) => {
+router.post('/users', pUsers, async (req, res) => {
   let username;
   let password;
   let isAdmin;
@@ -330,24 +368,22 @@ router.post('/users', pUsers, (req, res) => {
   }
   const hash = bcrypt.hashSync(password, 10);
   try {
-    const r = db.prepare(
-      'INSERT INTO users (username, password, is_admin) VALUES (?, ?, ?)'
-    ).run(username, hash, isAdmin ? 1 : 0);
-    logAudit(req, 'admin_create_user', username, '');
-    res.json({ id: r.lastInsertRowid, username, isAdmin: !!isAdmin });
+    const [r] = await db.insert(users).values({ username, password: hash, is_admin: !!isAdmin }).returning({ id: users.id });
+    await logAudit(req, 'admin_create_user', username, '');
+    res.json({ id: r.id, username, isAdmin: !!isAdmin });
   } catch (err) {
-    if (err.message.includes('UNIQUE')) {
+    if (isUniqueViolation(err)) {
       return res.status(400).json({ error: 'Username already exists' });
     }
     throw err;
   }
 });
 
-router.post('/users/:id/reset-2fa', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+router.post('/users/:id/reset-2fa', requireAdmin, async (req, res) => {
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.params.id);
-  logAudit(req, 'admin_reset_2fa', req.params.id, '');
+  await db.update(users).set({ totp_enabled: false, totp_secret: null }).where(eq(users.id, Number(req.params.id)));
+  await logAudit(req, 'admin_reset_2fa', req.params.id, '');
   res.json({ ok: true });
 });
 
@@ -355,12 +391,13 @@ router.post('/users/:id/reset-2fa', requireAdmin, (req, res) => {
 // Admins (or can_manage_users delegates) can list and revoke any user's personal
 // API tokens. Token secrets/hashes are never exposed. Interactive-session only.
 
-router.get('/users/:id/tokens', requireInteractiveSession, pUsers, (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+router.get('/users/:id/tokens', requireInteractiveSession, pUsers, async (req, res) => {
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  const rows = db.prepare(
-    'SELECT id, name, scopes, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC'
-  ).all(req.params.id);
+  const rows = await db.select({
+    id: apiTokens.id, name: apiTokens.name, scopes: apiTokens.scopes,
+    created_at: apiTokens.created_at, expires_at: apiTokens.expires_at, last_used_at: apiTokens.last_used_at,
+  }).from(apiTokens).where(eq(apiTokens.user_id, Number(req.params.id))).orderBy(desc(apiTokens.created_at));
   res.json(rows.map(r => ({
     id: r.id,
     name: r.name,
@@ -368,43 +405,42 @@ router.get('/users/:id/tokens', requireInteractiveSession, pUsers, (req, res) =>
     createdAt: r.created_at,
     expiresAt: r.expires_at,
     lastUsedAt: r.last_used_at,
-    expired: !!r.expires_at && new Date(r.expires_at.replace(' ', 'T') + 'Z').getTime() < Date.now(),
+    expired: !!r.expires_at && r.expires_at.getTime() < Date.now(),
   })));
 });
 
-router.delete('/tokens/:id', requireInteractiveSession, pUsers, (req, res) => {
-  const token = db.prepare(`
-    SELECT t.id, t.name, u.username FROM api_tokens t
-    JOIN users u ON u.id = t.user_id
-    WHERE t.id = ?
-  `).get(req.params.id);
+router.delete('/tokens/:id', requireInteractiveSession, pUsers, async (req, res) => {
+  const [token] = await db.select({ id: apiTokens.id, name: apiTokens.name, username: users.username })
+    .from(apiTokens)
+    .innerJoin(users, eq(users.id, apiTokens.user_id))
+    .where(eq(apiTokens.id, Number(req.params.id))).limit(1);
   if (!token) return res.status(404).json({ error: 'Token not found' });
-  db.prepare('DELETE FROM api_tokens WHERE id = ?').run(token.id);
-  logAudit(req, 'admin_revoke_api_token', token.name, `owner: ${token.username}`);
+  await db.delete(apiTokens).where(eq(apiTokens.id, token.id));
+  await logAudit(req, 'admin_revoke_api_token', token.name, `owner: ${token.username}`);
   res.json({ ok: true });
 });
 
-router.post('/users/:id/unlock', pUsers, (req, res) => {
-  if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
-  const user = db.prepare('SELECT username FROM users WHERE id = ?').get(req.params.id);
+router.post('/users/:id/unlock', pUsers, async (req, res) => {
+  if (!await ensureCanManageTargetUser(req, res, req.params.id)) return;
+  const [user] = await db.select({ username: users.username }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  db.prepare('DELETE FROM login_attempts WHERE username = ?').run(user.username);
-  logAudit(req, 'admin_unlock_user', req.params.id, '');
+  await db.delete(loginAttempts).where(eq(loginAttempts.username, user.username));
+  await logAudit(req, 'admin_unlock_user', req.params.id, '');
   res.json({ ok: true });
 });
 
-router.put('/users/:id/username', pUsers, (req, res) => {
-  if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
+router.put('/users/:id/username', pUsers, async (req, res) => {
+  if (!await ensureCanManageTargetUser(req, res, req.params.id)) return;
   let username;
   try { username = validateUsername(req.body?.username); }
   catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
-  const previous = db.prepare('SELECT username FROM users WHERE id = ?').get(req.params.id);
+  const [previous] = await db.select({ username: users.username }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   try {
-    db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, req.params.id);
-    retagUserVms(req.params.id, previous?.username);
+    await db.update(users).set({ username }).where(eq(users.id, Number(req.params.id)));
+    await retagUserVms(req.params.id, previous?.username);
     res.json({ ok: true });
   } catch (err) {
-    if (err.message.includes('UNIQUE')) {
+    if (isUniqueViolation(err)) {
       return res.status(400).json({ error: 'Username already taken' });
     }
     throw err;
@@ -413,68 +449,73 @@ router.put('/users/:id/username', pUsers, (req, res) => {
 
 // Re-stamp the PVE owner tag on a user's VMs after a rename; the old
 // username no longer exists in the users table, so pass it as retired.
-function retagUserVms(userId, previousUsername) {
-  const vms = db.prepare('SELECT node, vmid FROM vm_assignments WHERE user_id = ?').all(userId);
+async function retagUserVms(userId, previousUsername) {
+  const vms = await db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
+    .from(vmAssignments).where(eq(vmAssignments.user_id, Number(userId)));
   for (const vm of vms) {
-    syncVmTagsSafe(vm.node, vm.vmid, { retired: [previousUsername].filter(Boolean) });
+    await syncVmTagsSafe(vm.node, vm.vmid, { retired: [previousUsername].filter(Boolean) });
   }
 }
 
-router.put('/users/:id/password', pUsers, (req, res) => {
-  if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
+router.put('/users/:id/password', pUsers, async (req, res) => {
+  if (!await ensureCanManageTargetUser(req, res, req.params.id)) return;
   let password;
   try { password = validatePassword(req.body?.password); }
   catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const hash = bcrypt.hashSync(password, 10);
-  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hash, req.params.id);
-  logAudit(req, 'admin_reset_password', req.params.id, '');
+  await db.update(users).set({ password: hash }).where(eq(users.id, Number(req.params.id)));
+  await logAudit(req, 'admin_reset_password', req.params.id, '');
   res.json({ ok: true });
 });
 
-router.put('/users/:id/require-2fa', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+router.put('/users/:id/require-2fa', requireAdmin, async (req, res) => {
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { enabled } = req.body;
-  db.prepare('UPDATE users SET require_2fa = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
+  await db.update(users).set({ require_2fa: !!enabled }).where(eq(users.id, Number(req.params.id)));
   res.json({ ok: true });
 });
 
-router.put('/users/:id/see-all-vms', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+router.put('/users/:id/see-all-vms', requireAdmin, async (req, res) => {
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { enabled } = req.body;
-  db.prepare('UPDATE users SET see_all_vms = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
+  await db.update(users).set({ see_all_vms: !!enabled }).where(eq(users.id, Number(req.params.id)));
   res.json({ ok: true });
 });
 
-router.put('/users/:id/can-provision', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+router.put('/users/:id/can-provision', requireAdmin, async (req, res) => {
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { enabled } = req.body;
-  db.prepare('UPDATE users SET can_provision = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
+  await db.update(users).set({ can_provision: !!enabled }).where(eq(users.id, Number(req.params.id)));
   res.json({ ok: true });
 });
 
-router.put('/users/:id/can-create-vms', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+router.put('/users/:id/can-create-vms', requireAdmin, async (req, res) => {
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { enabled } = req.body;
-  db.prepare('UPDATE users SET can_create_vms = ? WHERE id = ?').run(enabled ? 1 : 0, req.params.id);
-  logAudit(req, 'admin_toggle_permission', req.params.id, `can_create_vms=${enabled ? 1 : 0}`);
+  await db.update(users).set({ can_create_vms: !!enabled }).where(eq(users.id, Number(req.params.id)));
+  await logAudit(req, 'admin_toggle_permission', req.params.id, `can_create_vms=${enabled ? 1 : 0}`);
   res.json({ ok: true });
 });
 
 // Permission toggle endpoint for all granular permissions
-router.put('/users/:id/permission', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+const TOGGLEABLE_PERMISSIONS = ['can_operate_all_vms', 'can_manage_hosts', 'can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log', 'can_edit_vm_hardware', 'can_manage_websites', 'can_manage_public_ips'] as const;
+
+router.put('/users/:id/permission', requireAdmin, async (req, res) => {
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { permission, enabled } = req.body;
-  const validPerms = ['can_operate_all_vms', 'can_manage_hosts', 'can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_vlans', 'can_manage_policies', 'can_manage_templates', 'can_manage_users', 'can_manage_assignments', 'can_view_audit_log', 'can_edit_vm_hardware', 'can_manage_websites', 'can_manage_public_ips'];
-  if (!validPerms.includes(permission)) {
+  if (!TOGGLEABLE_PERMISSIONS.includes(permission)) {
     return res.status(400).json({ error: `Invalid permission: ${permission}` });
   }
-  db.prepare(`UPDATE users SET ${permission} = ? WHERE id = ?`).run(enabled ? 1 : 0, req.params.id);
-  logAudit(req, 'admin_toggle_permission', req.params.id, `${permission}=${enabled ? 1 : 0}`);
+  // `permission` is whitelisted above and the schema property keys equal the
+  // column names, so a computed-key set targets exactly that boolean column —
+  // no raw identifier is ever interpolated into SQL text.
+  await db.update(users).set({ [permission]: !!enabled } as any).where(eq(users.id, Number(req.params.id)));
+  await logAudit(req, 'admin_toggle_permission', req.params.id, `${permission}=${enabled ? 1 : 0}`);
   res.json({ ok: true });
 });
 
@@ -486,8 +527,8 @@ function parseQuotaValue(value) {
   return Number.isInteger(n) && n >= 0 ? n : undefined; // undefined = invalid
 }
 
-router.put('/users/:id/quotas', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.params.id);
+router.put('/users/:id/quotas', requireAdmin, async (req, res) => {
+  const [user] = await db.select({ id: users.id, username: users.username }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   const maxCores = parseQuotaValue(req.body.maxCores);
@@ -497,9 +538,9 @@ router.put('/users/:id/quotas', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
   }
 
-  db.prepare('UPDATE users SET max_cores = ?, max_memory_gb = ?, max_storage_gb = ? WHERE id = ?')
-    .run(maxCores, maxMemoryGb, maxStorageGb, user.id);
-  logAudit(req, 'admin_set_quotas', user.username,
+  await db.update(users).set({ max_cores: maxCores, max_memory_gb: maxMemoryGb, max_storage_gb: maxStorageGb })
+    .where(eq(users.id, user.id));
+  await logAudit(req, 'admin_set_quotas', user.username,
     `cores=${maxCores ?? '∞'} memory=${maxMemoryGb ?? '∞'}GB storage=${maxStorageGb ?? '∞'}GB`);
   res.json({ ok: true });
 });
@@ -508,7 +549,7 @@ router.put('/users/:id/quotas', requireAdmin, (req, res) => {
 // covers every user, so this stays cheap even with many accounts.
 router.get('/user-usage', pUsers, async (req, res) => {
   try {
-    const assignments = db.prepare('SELECT user_id, vmid FROM vm_assignments').all();
+    const assignments = await db.select({ user_id: vmAssignments.user_id, vmid: vmAssignments.vmid }).from(vmAssignments);
     const byUser = new Map();
     for (const a of assignments) {
       if (!byUser.has(a.user_id)) byUser.set(a.user_id, new Set());
@@ -544,13 +585,15 @@ router.get('/user-usage', pUsers, async (req, res) => {
 // holder, same weight class as the per-user permission toggles). Reading is
 // pUsers so the Users page can render role names.
 
-function serializeRole(role) {
+async function serializeRole(role) {
+  const perms = await db.select({ permission: rolePermissions.permission }).from(rolePermissions)
+    .where(eq(rolePermissions.role_id, role.id));
+  const [uc] = await db.select({ c: count() }).from(users).where(eq(users.role_id, role.id));
   return {
     ...role,
-    builtIn: role.built_in === 1,
-    permissions: db.prepare('SELECT permission FROM role_permissions WHERE role_id = ?')
-      .all(role.id).map((r) => r.permission),
-    userCount: db.prepare('SELECT COUNT(*) AS c FROM users WHERE role_id = ?').get(role.id).c,
+    builtIn: role.built_in === true,
+    permissions: perms.map((r) => r.permission),
+    userCount: uc.c,
   };
 }
 
@@ -561,18 +604,21 @@ function validatePermissionList(permissions) {
   return unique;
 }
 
-const setRolePermissions = db.transaction((roleId, permissions) => {
-  db.prepare('DELETE FROM role_permissions WHERE role_id = ?').run(roleId);
-  const ins = db.prepare('INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)');
-  for (const p of permissions) ins.run(roleId, p);
+async function setRolePermissions(roleId, permissions) {
+  await db.transaction(async (tx) => {
+    await tx.delete(rolePermissions).where(eq(rolePermissions.role_id, roleId));
+    if (permissions.length > 0) {
+      await tx.insert(rolePermissions).values(permissions.map((p) => ({ role_id: roleId, permission: p })));
+    }
+  });
+}
+
+router.get('/roles', pUsers, async (req, res) => {
+  const roleRows = await db.select().from(roles).orderBy(desc(roles.built_in), roles.name);
+  res.json({ roles: await Promise.all(roleRows.map(serializeRole)), permissionKeys: PERMISSION_KEYS });
 });
 
-router.get('/roles', pUsers, (req, res) => {
-  const roles = db.prepare('SELECT * FROM roles ORDER BY built_in DESC, name').all();
-  res.json({ roles: roles.map(serializeRole), permissionKeys: PERMISSION_KEYS });
-});
-
-router.post('/roles', requireAdmin, (req, res) => {
+router.post('/roles', requireAdmin, async (req, res) => {
   const { name, description = '', permissions = [] } = req.body;
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Role name required' });
   const perms = validatePermissionList(permissions);
@@ -584,19 +630,22 @@ router.post('/roles', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
   }
   try {
-    const r = db.prepare('INSERT INTO roles (name, description, max_cores, max_memory_gb, max_storage_gb) VALUES (?, ?, ?, ?, ?)')
-      .run(String(name).trim(), String(description), maxCores, maxMemoryGb, maxStorageGb);
-    setRolePermissions(r.lastInsertRowid, perms);
-    logAudit(req, 'admin_create_role', String(name).trim(), perms.join(','));
-    res.json(serializeRole(db.prepare('SELECT * FROM roles WHERE id = ?').get(r.lastInsertRowid)));
+    const [r] = await db.insert(roles).values({
+      name: String(name).trim(), description: String(description),
+      max_cores: maxCores, max_memory_gb: maxMemoryGb, max_storage_gb: maxStorageGb,
+    }).returning({ id: roles.id });
+    await setRolePermissions(r.id, perms);
+    await logAudit(req, 'admin_create_role', String(name).trim(), perms.join(','));
+    const [created] = await db.select().from(roles).where(eq(roles.id, r.id)).limit(1);
+    res.json(await serializeRole(created));
   } catch (err) {
-    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Role name already exists' });
+    if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
     throw err;
   }
 });
 
-router.put('/roles/:id', requireAdmin, (req, res) => {
-  const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id);
+router.put('/roles/:id', requireAdmin, async (req, res) => {
+  const [role] = await db.select().from(roles).where(eq(roles.id, Number(req.params.id))).limit(1);
   if (!role) return res.status(404).json({ error: 'Role not found' });
 
   const { name, description, permissions } = req.body;
@@ -604,19 +653,19 @@ router.put('/roles/:id', requireAdmin, (req, res) => {
   if (!role.built_in && name !== undefined) {
     if (!String(name).trim()) return res.status(400).json({ error: 'Role name required' });
     try {
-      db.prepare('UPDATE roles SET name = ? WHERE id = ?').run(String(name).trim(), role.id);
+      await db.update(roles).set({ name: String(name).trim() }).where(eq(roles.id, role.id));
     } catch (err) {
-      if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Role name already exists' });
+      if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
       throw err;
     }
   }
   if (!role.built_in && description !== undefined) {
-    db.prepare('UPDATE roles SET description = ? WHERE id = ?').run(String(description), role.id);
+    await db.update(roles).set({ description: String(description) }).where(eq(roles.id, role.id));
   }
   if (permissions !== undefined) {
     const perms = validatePermissionList(permissions);
     if (!perms) return res.status(400).json({ error: 'Invalid permission list' });
-    setRolePermissions(role.id, perms);
+    await setRolePermissions(role.id, perms);
   }
   // Quotas are editable on every role, including built-ins (like permissions)
   if ('maxCores' in req.body || 'maxMemoryGb' in req.body || 'maxStorageGb' in req.body) {
@@ -626,37 +675,38 @@ router.put('/roles/:id', requireAdmin, (req, res) => {
     if (maxCores === undefined || maxMemoryGb === undefined || maxStorageGb === undefined) {
       return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
     }
-    db.prepare('UPDATE roles SET max_cores = ?, max_memory_gb = ?, max_storage_gb = ? WHERE id = ?')
-      .run(maxCores, maxMemoryGb, maxStorageGb, role.id);
+    await db.update(roles).set({ max_cores: maxCores, max_memory_gb: maxMemoryGb, max_storage_gb: maxStorageGb })
+      .where(eq(roles.id, role.id));
   }
-  logAudit(req, 'admin_update_role', role.name, Array.isArray(permissions) ? permissions.join(',') : '');
-  res.json(serializeRole(db.prepare('SELECT * FROM roles WHERE id = ?').get(role.id)));
+  await logAudit(req, 'admin_update_role', role.name, Array.isArray(permissions) ? permissions.join(',') : '');
+  const [updated] = await db.select().from(roles).where(eq(roles.id, role.id)).limit(1);
+  res.json(await serializeRole(updated));
 });
 
-router.delete('/roles/:id', requireAdmin, (req, res) => {
-  const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id);
+router.delete('/roles/:id', requireAdmin, async (req, res) => {
+  const [role] = await db.select().from(roles).where(eq(roles.id, Number(req.params.id))).limit(1);
   if (!role) return res.status(404).json({ error: 'Role not found' });
   if (role.built_in) return res.status(400).json({ error: 'Built-in roles cannot be deleted' });
   // Unassign holders first, then delete (role_permissions cascade away)
-  db.prepare('UPDATE users SET role_id = NULL WHERE role_id = ?').run(role.id);
-  db.prepare('DELETE FROM roles WHERE id = ?').run(role.id);
-  logAudit(req, 'admin_delete_role', role.name, '');
+  await db.update(users).set({ role_id: null }).where(eq(users.role_id, role.id));
+  await db.delete(roles).where(eq(roles.id, role.id));
+  await logAudit(req, 'admin_delete_role', role.name, '');
   res.json({ ok: true });
 });
 
-router.put('/users/:id/role', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.params.id);
+router.put('/users/:id/role', requireAdmin, async (req, res) => {
+  const [user] = await db.select({ id: users.id, username: users.username }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { roleId } = req.body;
   if (roleId === null || roleId === undefined || roleId === '') {
-    db.prepare('UPDATE users SET role_id = NULL WHERE id = ?').run(user.id);
-    logAudit(req, 'admin_assign_role', user.username, 'none');
+    await db.update(users).set({ role_id: null }).where(eq(users.id, user.id));
+    await logAudit(req, 'admin_assign_role', user.username, 'none');
     return res.json({ ok: true });
   }
-  const role = db.prepare('SELECT id, name FROM roles WHERE id = ?').get(roleId);
+  const [role] = await db.select({ id: roles.id, name: roles.name }).from(roles).where(eq(roles.id, Number(roleId))).limit(1);
   if (!role) return res.status(400).json({ error: 'Role not found' });
-  db.prepare('UPDATE users SET role_id = ? WHERE id = ?').run(role.id, user.id);
-  logAudit(req, 'admin_assign_role', user.username, role.name);
+  await db.update(users).set({ role_id: role.id }).where(eq(users.id, user.id));
+  await logAudit(req, 'admin_assign_role', user.username, role.name);
   res.json({ ok: true });
 });
 
@@ -664,11 +714,11 @@ router.put('/users/:id/role', requireAdmin, (req, res) => {
 // Managed by can_manage_users. Generate returns the raw token exactly once (the
 // DB only ever holds its hash); the admin UI turns it into a shareable URL.
 
-router.get('/invites', pUsers, (req, res) => {
-  const rows = db.prepare('SELECT * FROM invites ORDER BY created_at DESC').all();
-  res.json(rows.map((row) => {
-    let preset = {};
-    try { preset = JSON.parse(row.preset || '{}'); } catch { preset = {}; }
+router.get('/invites', pUsers, async (req, res) => {
+  const rows = await db.select().from(invites).orderBy(desc(invites.created_at));
+  res.json(await Promise.all(rows.map(async (row) => {
+    // preset is a jsonb column — already an object.
+    const preset = row.preset || {};
     return {
       id: row.id,
       status: inviteStatus(row),
@@ -679,73 +729,76 @@ router.get('/invites', pUsers, (req, res) => {
       usedBy: row.used_by_username,
       revokedAt: row.revoked_at,
       requires2fa: !!row.require_2fa,
-      preset: summarizeInvitePreset(preset),
+      preset: await summarizeInvitePreset(preset),
     };
-  }));
+  })));
 });
 
-router.post('/invites', pUsers, (req, res) => {
-  const { preset, error } = normalizeInvitePreset(req.body, {
+router.post('/invites', pUsers, async (req, res) => {
+  const result = await normalizeInvitePreset(req.body, {
     allowAdmin: !!req.session.isAdmin,
     allowPrivileges: !!req.session.isAdmin,
   });
-  if (error) return res.status(400).json({ error });
+  if ('error' in result) return res.status(400).json({ error: result.error });
+  const { preset } = result;
 
   // Expiry: positive number of days, or empty/omitted for "never expires".
-  let expiresAt = null;
+  let expiresAt: Date | null = null;
   const rawExpiry = req.body.expiresInDays;
   if (rawExpiry !== undefined && rawExpiry !== null && rawExpiry !== '') {
     const days = parseInt(rawExpiry, 10);
     if (!Number.isInteger(days) || days <= 0) {
       return res.status(400).json({ error: 'Expiry must be a positive number of days (empty = never)' });
     }
-    expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
   }
 
   const require2fa = req.body.require2fa ? 1 : 0;
   const token = generateInviteToken();
   const tokenHash = hashInviteToken(token);
 
-  const r = db.prepare(`
-    INSERT INTO invites (token_hash, created_by, created_by_username, preset, require_2fa, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(tokenHash, req.session.userId, req.session.username, JSON.stringify(preset), require2fa, expiresAt);
+  // preset is a jsonb column — pass the object directly.
+  const [r] = await db.insert(invites).values({
+    token_hash: tokenHash, created_by: req.session.userId, created_by_username: req.session.username,
+    preset, require_2fa: !!require2fa, expires_at: expiresAt,
+  }).returning({ id: invites.id });
 
-  logAudit(req, 'admin_create_invite', `invite #${r.lastInsertRowid}`, `role=${preset.roleId ?? 'none'} require2fa=${require2fa}`);
+  await logAudit(req, 'admin_create_invite', `invite #${r.id}`, `role=${(preset as any).roleId ?? 'none'} require2fa=${require2fa}`);
 
   // Raw token returned ONCE — never persisted, never retrievable again.
   res.json({
-    id: r.lastInsertRowid,
+    id: r.id,
     token,
     expiresAt,
     requires2fa: !!require2fa,
-    preset: summarizeInvitePreset(preset),
+    preset: await summarizeInvitePreset(preset),
   });
 });
 
-router.delete('/invites/:id', pUsers, (req, res) => {
-  const invite = db.prepare('SELECT * FROM invites WHERE id = ?').get(req.params.id);
+router.delete('/invites/:id', pUsers, async (req, res) => {
+  const [invite] = await db.select().from(invites).where(eq(invites.id, Number(req.params.id))).limit(1);
   if (!invite) return res.status(404).json({ error: 'Invite not found' });
   if (invite.used_at) return res.status(400).json({ error: 'Invite has already been used' });
   if (invite.revoked_at) return res.status(400).json({ error: 'Invite is already revoked' });
-  db.prepare('UPDATE invites SET revoked_at = ? WHERE id = ?').run(new Date().toISOString(), invite.id);
-  logAudit(req, 'admin_revoke_invite', `invite #${invite.id}`, '');
+  await db.update(invites).set({ revoked_at: new Date() }).where(eq(invites.id, invite.id));
+  await logAudit(req, 'admin_revoke_invite', `invite #${invite.id}`, '');
   res.json({ ok: true });
 });
 
 router.delete('/users/:id', pUsers, async (req, res) => {
-  if (!ensureCanManageTargetUser(req, res, req.params.id)) return;
+  if (!await ensureCanManageTargetUser(req, res, req.params.id)) return;
   if (parseInt(req.params.id) === req.session.userId) {
     return res.status(400).json({ error: 'Cannot delete yourself' });
   }
   // Assignments cascade away with the user — capture them (and the username,
   // which won't exist anymore) so the owner tags get cleared from PVE.
-  const target = db.prepare('SELECT username FROM users WHERE id = ?').get(req.params.id);
-  const orphanedVms = db.prepare('SELECT node, vmid FROM vm_assignments WHERE user_id = ?').all(req.params.id);
-  db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
-  logAudit(req, 'admin_delete_user', req.params.id, '');
+  const [target] = await db.select({ username: users.username }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
+  const orphanedVms = await db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
+    .from(vmAssignments).where(eq(vmAssignments.user_id, Number(req.params.id)));
+  await db.delete(users).where(eq(users.id, Number(req.params.id)));
+  await logAudit(req, 'admin_delete_user', req.params.id, '');
   for (const vm of orphanedVms) {
-    syncVmTagsSafe(vm.node, vm.vmid, { retired: [target?.username].filter(Boolean) });
+    await syncVmTagsSafe(vm.node, vm.vmid, { retired: [target?.username].filter(Boolean) });
   }
   res.json({ ok: true });
 });
@@ -755,10 +808,10 @@ router.delete('/users/:id', pUsers, async (req, res) => {
 router.get('/vms', pAssignments, async (req, res) => {
   try {
     const vms = await getAllVMs();
-    const assignments = db.prepare(`
-      SELECT va.*, u.username FROM vm_assignments va
-      JOIN users u ON u.id = va.user_id
-    `).all();
+    const assignments = await db.select({
+      id: vmAssignments.id, user_id: vmAssignments.user_id, node: vmAssignments.node, vmid: vmAssignments.vmid,
+      username: users.username,
+    }).from(vmAssignments).innerJoin(users, eq(users.id, vmAssignments.user_id));
     const rawVmCounts = new Map();
     vms.forEach(vm => {
       const key = `${vm.node}-${vm.vmid}`;
@@ -787,12 +840,11 @@ router.get('/vms', pAssignments, async (req, res) => {
 
 // ─── VM Assignments ───────────────────────────────────────────────────────────
 
-router.get('/assignments', pAssignments, (req, res) => {
-  const rows = db.prepare(`
-    SELECT va.*, u.username FROM vm_assignments va
-    JOIN users u ON u.id = va.user_id
-    ORDER BY u.username
-  `).all();
+router.get('/assignments', pAssignments, async (req, res) => {
+  const rows = await db.select({
+    id: vmAssignments.id, user_id: vmAssignments.user_id, node: vmAssignments.node, vmid: vmAssignments.vmid,
+    username: users.username,
+  }).from(vmAssignments).innerJoin(users, eq(users.id, vmAssignments.user_id)).orderBy(users.username);
   res.json(rows.map(row => ({ ...row, ...serializeNodeIdentity(row.node) })));
 });
 
@@ -802,13 +854,12 @@ router.post('/assignments', pAssignments, async (req, res) => {
     return res.status(400).json({ error: 'userId, node and vmid required' });
   }
   try {
-    const r = db.prepare(
-      'INSERT INTO vm_assignments (user_id, node, vmid) VALUES (?, ?, ?)'
-    ).run(userId, node, parseInt(vmid));
+    const [r] = await db.insert(vmAssignments).values({ user_id: userId, node, vmid: parseInt(vmid) })
+      .returning({ id: vmAssignments.id });
     await syncVmTagsSafe(node, vmid);
-    res.json({ id: r.lastInsertRowid });
+    res.json({ id: r.id });
   } catch (err) {
-    if (err.message.includes('UNIQUE')) {
+    if (isUniqueViolation(err)) {
       return res.status(400).json({ error: 'VM already assigned to a user' });
     }
     throw err;
@@ -816,8 +867,9 @@ router.post('/assignments', pAssignments, async (req, res) => {
 });
 
 router.delete('/assignments/:id', pAssignments, async (req, res) => {
-  const assignment = db.prepare('SELECT node, vmid FROM vm_assignments WHERE id = ?').get(req.params.id);
-  db.prepare('DELETE FROM vm_assignments WHERE id = ?').run(req.params.id);
+  const [assignment] = await db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
+    .from(vmAssignments).where(eq(vmAssignments.id, Number(req.params.id))).limit(1);
+  await db.delete(vmAssignments).where(eq(vmAssignments.id, Number(req.params.id)));
   if (assignment) await syncVmTagsSafe(assignment.node, assignment.vmid);
   res.json({ ok: true });
 });
@@ -827,9 +879,9 @@ router.delete('/assignments/:id', pAssignments, async (req, res) => {
 // Snapshot of the auto-sync state for the Assignments status card: whether
 // auto-sync is armed or paused (and by whom/when), the interval, whether a run
 // is in flight right now (with live progress), and last-run stats/failures.
-router.get('/tag-sync/status', pAssignments, (req, res) => {
+router.get('/tag-sync/status', pAssignments, async (req, res) => {
   try {
-    const settings = getTagSyncSettings();
+    const settings = await getTagSyncSettings();
     res.json({
       ...settings,
       running: isTagSyncRunning(),
@@ -842,33 +894,33 @@ router.get('/tag-sync/status', pAssignments, (req, res) => {
 
 // Pause the background scheduler. Persisted to `settings`, so it survives a
 // backend restart; records who paused it and when for provenance.
-router.post('/tag-sync/pause', pAssignments, (req, res) => {
+router.post('/tag-sync/pause', pAssignments, async (req, res) => {
   try {
-    setTagSyncPaused(true, req.session?.username);
-    logAudit(req, 'vm_tags_sync_pause', 'all', 'auto-sync paused');
-    res.json({ ...getTagSyncSettings(), running: isTagSyncRunning(), progress: getTagSyncProgress() });
+    await setTagSyncPaused(true, req.session?.username);
+    await logAudit(req, 'vm_tags_sync_pause', 'all', 'auto-sync paused');
+    res.json({ ...(await getTagSyncSettings()), running: isTagSyncRunning(), progress: getTagSyncProgress() });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
 // Re-arm the background scheduler.
-router.post('/tag-sync/resume', pAssignments, (req, res) => {
+router.post('/tag-sync/resume', pAssignments, async (req, res) => {
   try {
-    setTagSyncPaused(false, req.session?.username);
-    logAudit(req, 'vm_tags_sync_resume', 'all', 'auto-sync resumed');
-    res.json({ ...getTagSyncSettings(), running: isTagSyncRunning(), progress: getTagSyncProgress() });
+    await setTagSyncPaused(false, req.session?.username);
+    await logAudit(req, 'vm_tags_sync_resume', 'all', 'auto-sync resumed');
+    res.json({ ...(await getTagSyncSettings()), running: isTagSyncRunning(), progress: getTagSyncProgress() });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
 // Change the auto-sync interval (hours).
-router.post('/tag-sync/interval', pAssignments, (req, res) => {
+router.post('/tag-sync/interval', pAssignments, async (req, res) => {
   try {
-    const hours = setTagSyncIntervalHours(req.body?.intervalHours);
-    logAudit(req, 'vm_tags_sync_interval', 'all', `interval set to ${hours}h`);
-    res.json({ ...getTagSyncSettings(), running: isTagSyncRunning(), progress: getTagSyncProgress() });
+    const hours = await setTagSyncIntervalHours(req.body?.intervalHours);
+    await logAudit(req, 'vm_tags_sync_interval', 'all', `interval set to ${hours}h`);
+    res.json({ ...(await getTagSyncSettings()), running: isTagSyncRunning(), progress: getTagSyncProgress() });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -884,7 +936,7 @@ router.post('/sync-vm-tags', pAssignments, async (req, res) => {
   }
   try {
     const summary = await runFullTagSync({ trigger: 'manual' });
-    logAudit(req, 'vm_tags_sync', 'all', `${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed`);
+    await logAudit(req, 'vm_tags_sync', 'all', `${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed`);
     res.json({ checked: summary.checked, updated: summary.updated, failed: summary.failed, failures: summary.failures });
   } catch (err) {
     if (err.code === 'TAG_SYNC_BUSY') {
@@ -896,14 +948,15 @@ router.post('/sync-vm-tags', pAssignments, async (req, res) => {
 
 // ─── VLANs ───────────────────────────────────────────────────────────────────
 
-function findNextAvailableVlanTag() {
+async function findNextAvailableVlanTag() {
   const usedTags = new Set(
-    db.prepare('SELECT tag FROM vlans ORDER BY tag').all()
+    (await db.select({ tag: vlans.tag }).from(vlans).orderBy(vlans.tag))
       .map(row => parseInt(row.tag, 10))
       .filter(Number.isInteger)
   );
 
-  const ranges = db.prepare('SELECT vlan_range_start, vlan_range_end FROM firewalls ORDER BY vlan_range_start, vlan_range_end').all()
+  const ranges = (await db.select({ vlan_range_start: firewalls.vlan_range_start, vlan_range_end: firewalls.vlan_range_end })
+    .from(firewalls).orderBy(firewalls.vlan_range_start, firewalls.vlan_range_end))
     .map(row => ({
       start: row.vlan_range_start || 1001,
       end: row.vlan_range_end || 1999,
@@ -950,31 +1003,33 @@ function serializeVlanSubnet(vlan) {
 
 // VLANs read also needed by policies page and assignments page
 // Non-admins only see VLANs assigned to them via user_vlans
-router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies', 'can_manage_assignments'), (req, res) => {
+router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies', 'can_manage_assignments'), async (req, res) => {
   const isAdmin = req.session.isAdmin;
-  const vlans = isAdmin
-    ? db.prepare('SELECT * FROM vlans ORDER BY tag').all()
-    : db.prepare(`
-        SELECT v.* FROM vlans v
-        JOIN user_vlans uv ON uv.vlan_id = v.id
-        WHERE uv.user_id = ?
-        ORDER BY v.tag
-      `).all(req.session.userId);
-  const syncs = db.prepare(`
-    SELECT fvs.vlan_id, fvs.firewall_id, fvs.interface_name, f.name as firewall_name
-    FROM firewall_vlan_sync fvs
-    JOIN firewalls f ON f.id = fvs.firewall_id
-  `).all();
+  const vlanRows = isAdmin
+    ? await db.select().from(vlans).orderBy(vlans.tag)
+    : await db.select({
+        id: vlans.id, name: vlans.name, tag: vlans.tag, mode: vlans.mode,
+        subnet_cidr: vlans.subnet_cidr, description: vlans.description, created_at: vlans.created_at,
+      }).from(vlans)
+        .innerJoin(userVlans, eq(userVlans.vlan_id, vlans.id))
+        .where(eq(userVlans.user_id, req.session.userId))
+        .orderBy(vlans.tag);
+  const syncs = await db.select({
+    vlan_id: firewallVlanSync.vlan_id, firewall_id: firewallVlanSync.firewall_id,
+    interface_name: firewallVlanSync.interface_name, firewall_name: firewalls.name,
+  }).from(firewallVlanSync).innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id));
   const syncMap = {};
   syncs.forEach(s => {
     if (!syncMap[s.vlan_id]) syncMap[s.vlan_id] = [];
     syncMap[s.vlan_id].push({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name });
   });
-  const fwRanges = db.prepare('SELECT id, name, vlan_range_start, vlan_range_end FROM firewalls').all();
-  res.json(vlans.map(v => ({ ...v, firewallSync: syncMap[v.id] || [], subnet: serializeVlanSubnet(v), firewallRanges: fwRanges })));
+  const fwRanges = await db.select({
+    id: firewalls.id, name: firewalls.name, vlan_range_start: firewalls.vlan_range_start, vlan_range_end: firewalls.vlan_range_end,
+  }).from(firewalls);
+  res.json(vlanRows.map(v => ({ ...v, firewallSync: syncMap[v.id] || [], subnet: serializeVlanSubnet(v), firewallRanges: fwRanges })));
 });
 
-router.post('/vlans', pVlans, (req, res) => {
+router.post('/vlans', pVlans, async (req, res) => {
   const { name, tag, description, mode = 'managed', subnetCidr = '' } = req.body;
   if (!name) {
     return res.status(400).json({ error: 'Name is required' });
@@ -1001,42 +1056,40 @@ router.post('/vlans', pVlans, (req, res) => {
     }
     vlanTag = parseInt(tag, 10);
   } else {
-    vlanTag = findNextAvailableVlanTag();
+    vlanTag = await findNextAvailableVlanTag();
     if (!vlanTag) {
       return res.status(409).json({ error: 'No VLAN tags are available in the configured firewall pools' });
     }
   }
 
   try {
-    const r = db.prepare(
-      'INSERT INTO vlans (name, tag, mode, subnet_cidr, description) VALUES (?, ?, ?, ?, ?)'
-    ).run(name, vlanTag, mode, mode === 'tagged_only' ? trimmedSubnetCidr : '', description || '');
+    const [r] = await db.insert(vlans).values({
+      name, tag: vlanTag, mode, subnet_cidr: mode === 'tagged_only' ? trimmedSubnetCidr : '', description: description || '',
+    }).returning({ id: vlans.id });
 
     // Auto-assign to creating non-admin so they can immediately see and manage it
     if (!req.session.isAdmin) {
-      try {
-        db.prepare('INSERT INTO user_vlans (user_id, vlan_id) VALUES (?, ?)').run(req.session.userId, r.lastInsertRowid);
-      } catch { /* ignore duplicate */ }
+      await db.insert(userVlans).values({ user_id: req.session.userId, vlan_id: r.id }).onConflictDoNothing();
     }
 
-    res.json({ id: r.lastInsertRowid, name, tag: vlanTag, mode, subnet_cidr: mode === 'tagged_only' ? trimmedSubnetCidr : '', description: description || '' });
+    res.json({ id: r.id, name, tag: vlanTag, mode, subnet_cidr: mode === 'tagged_only' ? trimmedSubnetCidr : '', description: description || '' });
   } catch (err) {
-    if (err.message.includes('UNIQUE')) {
+    if (isUniqueViolation(err)) {
       return res.status(400).json({ error: 'VLAN tag already exists' });
     }
     throw err;
   }
 });
 
-router.put('/vlans/:id', pVlans, (req, res) => {
+router.put('/vlans/:id', pVlans, async (req, res) => {
   const { name, tag, description, mode, subnetCidr } = req.body;
   if (!name) {
     return res.status(400).json({ error: 'Name is required' });
   }
 
-  const existing = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
+  const [existing] = await db.select().from(vlans).where(eq(vlans.id, Number(req.params.id))).limit(1);
   if (!existing) return res.status(404).json({ error: 'VLAN not found' });
-  if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, existing.id)) {
+  if (!req.session.isAdmin && !await userOwnsVlan(req.session.userId, existing.id)) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -1056,7 +1109,7 @@ router.put('/vlans/:id', pVlans, (req, res) => {
     return res.status(403).json({ error: 'Only admins can change VLAN subnets' });
   }
 
-  const syncCount = db.prepare('SELECT COUNT(*) as count FROM firewall_vlan_sync WHERE vlan_id = ?').get(req.params.id).count;
+  const [{ count: syncCount }] = await db.select({ count: count() }).from(firewallVlanSync).where(eq(firewallVlanSync.vlan_id, Number(req.params.id)));
   if (syncCount > 0 && nextMode !== existing.mode) {
     return res.status(400).json({ error: 'Unsync this VLAN from firewalls before changing its type' });
   }
@@ -1072,12 +1125,12 @@ router.put('/vlans/:id', pVlans, (req, res) => {
   }
 
   try {
-    db.prepare(
-      'UPDATE vlans SET name = ?, tag = ?, mode = ?, subnet_cidr = ?, description = ? WHERE id = ?'
-    ).run(name, requestedTag, nextMode, nextSubnetCidr, description || '', req.params.id);
+    await db.update(vlans).set({
+      name, tag: requestedTag, mode: nextMode, subnet_cidr: nextSubnetCidr, description: description || '',
+    }).where(eq(vlans.id, Number(req.params.id)));
     res.json({ ok: true });
   } catch (err) {
-    if (err.message.includes('UNIQUE')) {
+    if (isUniqueViolation(err)) {
       return res.status(400).json({ error: 'VLAN tag already exists' });
     }
     throw err;
@@ -1085,28 +1138,34 @@ router.put('/vlans/:id', pVlans, (req, res) => {
 });
 
 router.delete('/vlans/:id', pVlans, async (req, res) => {
-  const vlan = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
+  const [vlan] = await db.select().from(vlans).where(eq(vlans.id, Number(req.params.id))).limit(1);
   if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
-  if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, vlan.id)) {
+  if (!req.session.isAdmin && !await userOwnsVlan(req.session.userId, vlan.id)) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
-  const syncs = db.prepare(`
-    SELECT fvs.*, f.id as fw_id, f.name as fw_name, f.host, f.port, f.api_key, f.vdom, f.verify_tls,
-           f.root_vdom, f.root_wan_zone, f.root_vdom_link, f.trunk_switch_serial, f.trunk_switch_port
-    FROM firewall_vlan_sync fvs
-    JOIN firewalls f ON f.id = fvs.firewall_id
-    WHERE fvs.vlan_id = ?
-  `).all(req.params.id);
+  const syncs = await db.select({
+    // firewall_vlan_sync columns (was fvs.*)
+    id: firewallVlanSync.id, firewall_id: firewallVlanSync.firewall_id, vlan_id: firewallVlanSync.vlan_id,
+    interface_name: firewallVlanSync.interface_name, policy_ids: firewallVlanSync.policy_ids,
+    dhcp_server_id: firewallVlanSync.dhcp_server_id, synced_at: firewallVlanSync.synced_at,
+    artifacts: firewallVlanSync.artifacts, workflow_run_id: firewallVlanSync.workflow_run_id,
+    // firewall fields the FortiGate client needs
+    fw_id: firewalls.id, fw_name: firewalls.name, host: firewalls.host, port: firewalls.port,
+    api_key: firewalls.api_key, vdom: firewalls.vdom, verify_tls: firewalls.verify_tls,
+    root_vdom: firewalls.root_vdom, root_wan_zone: firewalls.root_wan_zone, root_vdom_link: firewalls.root_vdom_link,
+    trunk_switch_serial: firewalls.trunk_switch_serial, trunk_switch_port: firewalls.trunk_switch_port,
+  }).from(firewallVlanSync)
+    .innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id))
+    .where(eq(firewallVlanSync.vlan_id, Number(req.params.id)));
 
   const fwResults = [];
 
   // 1. Clean up port forwards that target this VLAN's interface
   for (const sync of syncs) {
     const vlanIfaceName = sync.interface_name; // e.g. vlan1008
-    const portForwards = db.prepare(
-      'SELECT * FROM managed_vips WHERE firewall_id = ? AND vlan_interface = ?'
-    ).all(sync.fw_id, vlanIfaceName);
+    const portForwards = await db.select().from(managedVips)
+      .where(and(eq(managedVips.firewall_id, sync.fw_id), eq(managedVips.vlan_interface, vlanIfaceName)));
 
     if (portForwards.length > 0) {
       console.log(`[delete-vlan] Cleaning up ${portForwards.length} port forward(s) on ${sync.fw_name} for ${vlanIfaceName}`);
@@ -1143,12 +1202,12 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
             catch (e) { console.warn(`[delete-vlan] Lab address ${labAddressName} cleanup:`, e.message); }
           }
           // Remove DB record
-          db.prepare('DELETE FROM managed_vips WHERE id = ?').run(pf.id);
+          await db.delete(managedVips).where(eq(managedVips.id, pf.id));
           console.log(`[delete-vlan] Cleaned up port forward "${pf.vip_name}"`);
         } catch (e) {
           console.warn(`[delete-vlan] Failed to fully clean port forward "${pf.vip_name}":`, e.message);
           // Still remove from DB — the FortiGate objects are best-effort
-          db.prepare('DELETE FROM managed_vips WHERE id = ?').run(pf.id);
+          await db.delete(managedVips).where(eq(managedVips.id, pf.id));
         }
       }
     }
@@ -1162,10 +1221,12 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
       let errors;
       if (sync.artifacts) {
         // Artifact-based teardown of exactly what the sync run created.
-        ({ errors } = await teardownArtifacts(client, JSON.parse(sync.artifacts)));
+        // artifacts is a jsonb column — already an object.
+        ({ errors } = await teardownArtifacts(client, sync.artifacts));
       } else {
         // Legacy row — original live-query deprovision path.
-        const policyIds = JSON.parse(sync.policy_ids || '[]');
+        // policy_ids is a jsonb column — already an array.
+        const policyIds = sync.policy_ids || [];
         ({ errors } = await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
           rootVdom: sync.root_vdom || 'root',
           trunkSwitchSerial: sync.trunk_switch_serial || '',
@@ -1177,7 +1238,7 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
         fwResults.push({ firewall: sync.fw_name, status: 'partial', errors });
       } else {
         console.log(`[delete-vlan] Successfully removed from ${sync.fw_name}`);
-        db.prepare('DELETE FROM firewall_vlan_sync WHERE firewall_id = ? AND vlan_id = ?').run(sync.firewall_id, vlan.id);
+        await db.delete(firewallVlanSync).where(and(eq(firewallVlanSync.firewall_id, sync.firewall_id), eq(firewallVlanSync.vlan_id, vlan.id)));
         fwResults.push({ firewall: sync.fw_name, status: 'ok' });
       }
     } catch (err) {
@@ -1188,7 +1249,7 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
 
   const failedCleanup = fwResults.filter(result => result.status !== 'ok');
   if (failedCleanup.length > 0) {
-    logAudit(
+    await logAudit(
       req,
       'admin_delete_vlan_blocked',
       `VLAN ${vlan.tag}`,
@@ -1201,62 +1262,62 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
   }
 
   // 3. Delete the VLAN from DB (CASCADE removes user_vlans and firewall_vlan_sync)
-  db.prepare('DELETE FROM vlans WHERE id = ?').run(req.params.id);
-  logAudit(req, 'admin_delete_vlan', `VLAN ${vlan.tag}`, fwResults.length ? `FW cleanup: ${fwResults.map(r => `${r.firewall}=${r.status}`).join(', ')}` : '');
+  await db.delete(vlans).where(eq(vlans.id, Number(req.params.id)));
+  await logAudit(req, 'admin_delete_vlan', `VLAN ${vlan.tag}`, fwResults.length ? `FW cleanup: ${fwResults.map(r => `${r.firewall}=${r.status}`).join(', ')}` : '');
   res.json({ ok: true, firewallCleanup: fwResults });
 });
 
 // ─── User VLAN assignments ────────────────────────────────────────────────────
 
-router.get('/users/:id/vlans', pAssignments, (req, res) => {
-  const vlans = db.prepare(`
-    SELECT v.* FROM vlans v
-    JOIN user_vlans uv ON uv.vlan_id = v.id
-    WHERE uv.user_id = ?
-    ORDER BY v.tag
-  `).all(req.params.id);
-  res.json(vlans);
+router.get('/users/:id/vlans', pAssignments, async (req, res) => {
+  const rows = await db.select({
+    id: vlans.id, name: vlans.name, tag: vlans.tag, mode: vlans.mode,
+    subnet_cidr: vlans.subnet_cidr, description: vlans.description, created_at: vlans.created_at,
+  }).from(vlans)
+    .innerJoin(userVlans, eq(userVlans.vlan_id, vlans.id))
+    .where(eq(userVlans.user_id, Number(req.params.id)))
+    .orderBy(vlans.tag);
+  res.json(rows);
 });
 
-router.post('/users/:id/vlans', pAssignments, (req, res) => {
+router.post('/users/:id/vlans', pAssignments, async (req, res) => {
   const { vlanId } = req.body;
   if (!vlanId) return res.status(400).json({ error: 'vlanId required' });
   try {
-    db.prepare('INSERT INTO user_vlans (user_id, vlan_id) VALUES (?, ?)').run(req.params.id, vlanId);
+    await db.insert(userVlans).values({ user_id: Number(req.params.id), vlan_id: vlanId });
     res.json({ ok: true });
   } catch (err) {
-    if (err.message.includes('UNIQUE')) {
+    if (isUniqueViolation(err)) {
       return res.status(400).json({ error: 'VLAN already assigned to this user' });
     }
     throw err;
   }
 });
 
-router.delete('/users/:id/vlans/:vlanId', pAssignments, (req, res) => {
-  db.prepare('DELETE FROM user_vlans WHERE user_id = ? AND vlan_id = ?').run(req.params.id, req.params.vlanId);
+router.delete('/users/:id/vlans/:vlanId', pAssignments, async (req, res) => {
+  await db.delete(userVlans).where(and(eq(userVlans.user_id, Number(req.params.id)), eq(userVlans.vlan_id, Number(req.params.vlanId))));
   res.json({ ok: true });
 });
 
 // ─── User VM assignments ──────────────────────────────────────────────────────
 
-router.get('/users/:id/vms', pAssignments, (req, res) => {
-  const rows = db.prepare('SELECT * FROM vm_assignments WHERE user_id = ? ORDER BY vmid').all(req.params.id);
+router.get('/users/:id/vms', pAssignments, async (req, res) => {
+  const rows = await db.select().from(vmAssignments).where(eq(vmAssignments.user_id, Number(req.params.id))).orderBy(vmAssignments.vmid);
   res.json(rows.map(row => ({ ...row, ...serializeNodeIdentity(row.node) })));
 });
 
 // ─── Settings ───────────────────────────────────────────────────────────────
 
-router.get('/settings', requireAdmin, (req, res) => {
-  const rows = db.prepare('SELECT * FROM settings').all();
-  const settings = {};
-  rows.forEach(r => { settings[r.key] = r.value; });
-  res.json(settings);
+router.get('/settings', requireAdmin, async (req, res) => {
+  const rows = await db.select().from(settings);
+  const result = {};
+  rows.forEach(r => { result[r.key] = r.value; });
+  res.json(result);
 });
 
-router.put('/settings/:key', requireAdmin, (req, res) => {
+router.put('/settings/:key', requireAdmin, async (req, res) => {
   const { value } = req.body;
-  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
-    .run(req.params.key, String(value), String(value));
+  await setSetting(req.params.key, String(value));
   res.json({ ok: true });
 });
 
@@ -1265,11 +1326,11 @@ router.put('/settings/:key', requireAdmin, (req, res) => {
 // compared against physical RAM × the overcommit ratio. Storage is not
 // configurable — `storage.avail` is a real limit and always blocks.
 
-router.get('/capacity-settings', requireAdmin, (req, res) => {
-  res.json({ ...getCapacitySettings(), memoryModes: MEMORY_MODES });
+router.get('/capacity-settings', requireAdmin, async (req, res) => {
+  res.json({ ...(await getCapacitySettings()), memoryModes: MEMORY_MODES });
 });
 
-router.put('/capacity-settings', requireAdmin, (req, res) => {
+router.put('/capacity-settings', requireAdmin, async (req, res) => {
   const { memoryMode, overcommitRatio } = req.body || {};
   if (memoryMode !== undefined && memoryMode !== null && !MEMORY_MODES.includes(String(memoryMode))) {
     return res.status(400).json({ error: `Memory mode must be one of: ${MEMORY_MODES.join(', ')}` });
@@ -1280,9 +1341,9 @@ router.put('/capacity-settings', requireAdmin, (req, res) => {
       return res.status(400).json({ error: 'Overcommit ratio must be a number greater than 0' });
     }
   }
-  const settings = setCapacitySettings({ memoryMode, overcommitRatio });
-  logAudit(req, 'capacity_settings_update', '', `memory=${settings.memoryMode} ratio=${settings.overcommitRatio}`);
-  res.json({ ...settings, memoryModes: MEMORY_MODES });
+  const capacity = await setCapacitySettings({ memoryMode, overcommitRatio });
+  await logAudit(req, 'capacity_settings_update', '', `memory=${capacity.memoryMode} ratio=${capacity.overcommitRatio}`);
+  res.json({ ...capacity, memoryModes: MEMORY_MODES });
 });
 
 // ─── VM Leases (expiry / reclaim) ────────────────────────────────────────────
@@ -1290,21 +1351,23 @@ router.put('/capacity-settings', requireAdmin, (req, res) => {
 // live VM state and owner, exempt/adjust/extend/renew any lease, a reclaimable
 // view, a manual sweep, and a backfill for pre-feature VMs.
 
-router.get('/lease-settings', requireAdmin, (req, res) => {
-  res.json(getLeaseSettings());
+router.get('/lease-settings', requireAdmin, async (req, res) => {
+  res.json(await getLeaseSettings());
 });
 
-router.put('/lease-settings', requireAdmin, (req, res) => {
+router.put('/lease-settings', requireAdmin, async (req, res) => {
   const { defaultDays, graceDays } = req.body || {};
-  const settings = setLeaseSettings({ defaultDays, graceDays });
-  logAudit(req, 'lease_settings_update', '', `default=${settings.defaultDays}d grace=${settings.graceDays}d`);
-  res.json(settings);
+  const leaseSettings = await setLeaseSettings({ defaultDays, graceDays });
+  await logAudit(req, 'lease_settings_update', '', `default=${leaseSettings.defaultDays}d grace=${leaseSettings.graceDays}d`);
+  res.json(leaseSettings);
 });
 
 router.get('/leases', requireAdmin, async (req, res) => {
   try {
-    const { graceDays } = getLeaseSettings();
-    const rows = db.prepare('SELECT * FROM vm_leases ORDER BY (expires_at IS NULL), expires_at ASC').all();
+    const leaseSettings = await getLeaseSettings();
+    const graceDays = leaseSettings.graceDays;
+    const rows = await db.select().from(vmLeases)
+      .orderBy(sql`(${vmLeases.expires_at} IS NULL), ${vmLeases.expires_at} ASC`);
 
     // Live VM name/status/type + owner from assignments (best-effort — the
     // cluster may be briefly unreachable, in which case we still return leases).
@@ -1316,17 +1379,18 @@ router.get('/leases', requireAdmin, async (req, res) => {
       if (v.node) vmByKey.set(`${v.node}#${v.vmid}`, v);
     }
 
-    const leases = rows.map((row) => {
-      const view = computeLeaseView(row, graceDays);
+    const leases = await Promise.all(rows.map(async (row) => {
+      const view = await computeLeaseView(row, graceDays);
       const identity = serializeNodeIdentity(row.node);
       const live = vmByKey.get(`${row.node}#${row.vmid}`)
         || vmByKey.get(`${identity.node}#${row.vmid}`)
         || null;
       const ownerCandidates = nodeLookupCandidates(row.node);
-      const owner = db.prepare(`
-        SELECT u.username FROM vm_assignments a JOIN users u ON u.id = a.user_id
-        WHERE a.vmid = ? AND a.node IN (${ownerCandidates.map(() => '?').join(', ')}) LIMIT 1
-      `).get(row.vmid, ...ownerCandidates);
+      const [owner] = ownerCandidates.length === 0 ? [] : await db.select({ username: users.username })
+        .from(vmAssignments)
+        .innerJoin(users, eq(users.id, vmAssignments.user_id))
+        .where(and(eq(vmAssignments.vmid, row.vmid), inArray(vmAssignments.node, ownerCandidates)))
+        .limit(1);
 
       return {
         ...view,
@@ -1339,39 +1403,39 @@ router.get('/leases', requireAdmin, async (req, res) => {
         owner: owner?.username || null,
         createdBy: row.created_by || '',
       };
-    });
+    }));
 
-    res.json({ settings: getLeaseSettings(), leases });
+    res.json({ settings: leaseSettings, leases });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
-router.put('/leases/:node/:vmid', requireAdmin, (req, res) => {
+router.put('/leases/:node/:vmid', requireAdmin, async (req, res) => {
   const { node, vmid } = req.params;
   const { exempt, leaseDays, extendDays } = req.body || {};
   try {
-    const lease = updateLease(node, vmid, { exempt, leaseDays, extendDays, createdBy: req.session.username });
+    const lease = await updateLease(node, vmid, { exempt, leaseDays, extendDays, createdBy: req.session.username });
     if (!lease) return res.status(400).json({ error: 'Could not update lease' });
     const detail = [
       exempt !== undefined ? `exempt=${exempt ? 1 : 0}` : null,
       leaseDays !== undefined && leaseDays !== null ? `leaseDays=${leaseDays}` : null,
       extendDays !== undefined && extendDays !== null ? `extendDays=${extendDays}` : null,
     ].filter(Boolean).join(' ');
-    logAudit(req, 'lease_adjust', `${node}/${vmid}`, detail);
-    res.json({ ok: true, lease: computeLeaseView(lease) });
+    await logAudit(req, 'lease_adjust', `${node}/${vmid}`, detail);
+    res.json({ ok: true, lease: await computeLeaseView(lease) });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
-router.post('/leases/:node/:vmid/renew', requireAdmin, (req, res) => {
+router.post('/leases/:node/:vmid/renew', requireAdmin, async (req, res) => {
   const { node, vmid } = req.params;
   try {
-    const lease = renewLease(node, vmid, { createdBy: req.session.username });
+    const lease = await renewLease(node, vmid, { createdBy: req.session.username });
     if (!lease) return res.status(404).json({ error: 'This VM has no lease to renew' });
-    logAudit(req, 'lease_renew', `${node}/${vmid}`, `admin renewal #${lease.renewal_count}`);
-    res.json({ ok: true, lease: computeLeaseView(lease) });
+    await logAudit(req, 'lease_renew', `${node}/${vmid}`, `admin renewal #${lease.renewal_count}`);
+    res.json({ ok: true, lease: await computeLeaseView(lease) });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
@@ -1380,17 +1444,17 @@ router.post('/leases/:node/:vmid/renew', requireAdmin, (req, res) => {
 router.post('/leases/sweep', requireAdmin, async (req, res) => {
   try {
     const result = await runLeaseSweep();
-    logAudit(req, 'lease_sweep', 'all', `checked=${result.checked} stopped=${result.stopped}`);
+    await logAudit(req, 'lease_sweep', 'all', `checked=${result.checked} stopped=${result.stopped}`);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
-router.post('/leases/backfill', requireAdmin, (req, res) => {
+router.post('/leases/backfill', requireAdmin, async (req, res) => {
   try {
-    const created = backfillLeases({ createdBy: req.session.username });
-    logAudit(req, 'lease_backfill', 'all', `created=${created}`);
+    const created = await backfillLeases({ createdBy: req.session.username });
+    await logAudit(req, 'lease_backfill', 'all', `created=${created}`);
     res.json({ ok: true, created });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -1399,8 +1463,8 @@ router.post('/leases/backfill', requireAdmin, (req, res) => {
 
 // ─── PVE Hosts ──────────────────────────────────────────────────────────────
 
-router.get('/pve-hosts', pHosts, (req, res) => {
-  const hosts = getHosts().map(h => ({
+router.get('/pve-hosts', pHosts, async (req, res) => {
+  const hosts = (await getHosts()).map(h => ({
     id: h.id, name: h.name, host: h.host, port: h.port,
     token_id: h.token_id, verify_tls: h.verify_tls, created_at: h.created_at,
     // Don't send token_secret / ssh_secret to frontend
@@ -1412,12 +1476,12 @@ router.get('/pve-hosts', pHosts, (req, res) => {
 });
 
 router.get('/pve-hosts/:id/status', pHosts, async (req, res) => {
-  const host = getHost(parseInt(req.params.id));
+  const host = await getHost(parseInt(req.params.id));
   if (!host) return res.status(404).json({ error: 'Host not found' });
   const status = await getHostStatus(host);
   // Annotate each node with its maintenance state (amber, not down) so the
   // PVE Hosts page can render the drain and offer the per-node toggle.
-  const maint = listMaintenance();
+  const maint = await listMaintenance();
   if (Array.isArray(status.nodes)) {
     status.nodes = status.nodes.map((n) => {
       const nodeRef = encodeNodeRef(host.id, n.node);
@@ -1428,7 +1492,7 @@ router.get('/pve-hosts/:id/status', pHosts, async (req, res) => {
   res.json(status);
 });
 
-router.post('/pve-hosts', pHosts, (req, res) => {
+router.post('/pve-hosts', pHosts, async (req, res) => {
   let name, host, port;
   const { tokenId, tokenSecret, verifyTls = true } = req.body;
   try {
@@ -1445,26 +1509,25 @@ router.post('/pve-hosts', pHosts, (req, res) => {
     return res.status(400).json({ error: 'Disabling Proxmox TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
   }
   try {
-    const r = db.prepare(
-      'INSERT INTO pve_hosts (name, host, port, token_id, token_secret, verify_tls) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(name, host, port, tokenId, encryptSecret(tokenSecret), verifyTls ? 1 : 0);
+    const [r] = await db.insert(pveHosts).values({
+      name, host, port, token_id: tokenId, token_secret: encryptSecret(tokenSecret), verify_tls: !!verifyTls,
+    }).returning({ id: pveHosts.id });
     const { sshHost, sshPort, sshUser, sshAuthType, sshSecret } = req.body;
     if (String(sshHost || '').trim() && sshSecret) {
-      db.prepare(
-        'UPDATE pve_hosts SET ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_auth_type = ?, ssh_secret = ? WHERE id = ?'
-      ).run(
-        String(sshHost).trim(), parseInt(sshPort, 10) || 22, String(sshUser || 'root').trim() || 'root',
-        sshAuthType === 'password' ? 'password' : 'key', encryptSecret(sshSecret), r.lastInsertRowid
-      );
+      await db.update(pveHosts).set({
+        ssh_host: String(sshHost).trim(), ssh_port: parseInt(sshPort, 10) || 22,
+        ssh_user: String(sshUser || 'root').trim() || 'root',
+        ssh_auth_type: sshAuthType === 'password' ? 'password' : 'key', ssh_secret: encryptSecret(sshSecret),
+      }).where(eq(pveHosts.id, r.id));
     }
-    logAudit(req, 'pve_host_created', String(r.lastInsertRowid), `name=${name}; host=${host}; port=${port}; tls=${verifyTls ? 'verify' : 'insecure'}`);
-    res.json({ id: r.lastInsertRowid, name, host, port });
+    await logAudit(req, 'pve_host_created', String(r.id), `name=${name}; host=${host}; port=${port}; tls=${verifyTls ? 'verify' : 'insecure'}`);
+    res.json({ id: r.id, name, host, port });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
-router.put('/pve-hosts/:id', pHosts, (req, res) => {
+router.put('/pve-hosts/:id', pHosts, async (req, res) => {
   let name, host, port;
   const { tokenId, tokenSecret, verifyTls, sshHost, sshPort, sshUser, sshAuthType, sshSecret } = req.body;
   try {
@@ -1479,18 +1542,18 @@ router.put('/pve-hosts/:id', pHosts, (req, res) => {
   if (!name || !host || !tokenId) {
     return res.status(400).json({ error: 'Name, host and tokenId are required' });
   }
-  const existing = getHost(parseInt(req.params.id));
+  const existing = await getHost(parseInt(req.params.id));
   if (!existing) return res.status(404).json({ error: 'Host not found' });
 
   // If tokenSecret is empty, keep the existing one
   const secret = tokenSecret ? encryptSecret(tokenSecret) : existing.token_secret;
-  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== 0 : !!verifyTls;
+  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
   if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {
     return res.status(400).json({ error: 'Disabling Proxmox TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
   }
-  db.prepare(
-    'UPDATE pve_hosts SET name = ?, host = ?, port = ?, token_id = ?, token_secret = ?, verify_tls = ? WHERE id = ?'
-  ).run(name, host, port, tokenId, secret, verifyTlsEnabled ? 1 : 0, req.params.id);
+  await db.update(pveHosts).set({
+    name, host, port, token_id: tokenId, token_secret: secret, verify_tls: verifyTlsEnabled,
+  }).where(eq(pveHosts.id, Number(req.params.id)));
 
   // Optional root SSH (used only for post-migration source-config cleanup).
   // Empty sshHost clears the whole SSH config; an empty sshSecret keeps the
@@ -1498,37 +1561,36 @@ router.put('/pve-hosts/:id', pHosts, (req, res) => {
   if (sshHost !== undefined) {
     const newSshHost = String(sshHost || '').trim();
     if (!newSshHost) {
-      db.prepare("UPDATE pve_hosts SET ssh_host = '', ssh_secret = '', ssh_host_key = '' WHERE id = ?").run(req.params.id);
+      await db.update(pveHosts).set({ ssh_host: '', ssh_secret: '', ssh_host_key: '' }).where(eq(pveHosts.id, Number(req.params.id)));
     } else {
       const sshSecretStored = sshSecret ? encryptSecret(sshSecret) : (existing.ssh_secret || '');
       const hostKey = newSshHost === (existing.ssh_host || '') ? (existing.ssh_host_key || '') : '';
-      db.prepare(
-        'UPDATE pve_hosts SET ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_auth_type = ?, ssh_secret = ?, ssh_host_key = ? WHERE id = ?'
-      ).run(
-        newSshHost, parseInt(sshPort, 10) || 22, String(sshUser || 'root').trim() || 'root',
-        sshAuthType === 'password' ? 'password' : 'key', sshSecretStored, hostKey, req.params.id
-      );
+      await db.update(pveHosts).set({
+        ssh_host: newSshHost, ssh_port: parseInt(sshPort, 10) || 22,
+        ssh_user: String(sshUser || 'root').trim() || 'root',
+        ssh_auth_type: sshAuthType === 'password' ? 'password' : 'key', ssh_secret: sshSecretStored, ssh_host_key: hostKey,
+      }).where(eq(pveHosts.id, Number(req.params.id)));
     }
   }
-  logAudit(req, 'pve_host_updated', String(req.params.id), `name=${name}; host=${host}; port=${port}; tls=${verifyTlsEnabled ? 'verify' : 'insecure'}`);
+  await logAudit(req, 'pve_host_updated', String(req.params.id), `name=${name}; host=${host}; port=${port}; tls=${verifyTlsEnabled ? 'verify' : 'insecure'}`);
   res.json({ ok: true });
 });
 
-router.get('/pve-hosts/:id/dependencies', pHosts, (req, res) => {
-  if (!getHost(Number.parseInt(req.params.id, 10))) return res.status(404).json({ error: 'Host not found' });
-  res.json(pveHostDependencies(req.params.id));
+router.get('/pve-hosts/:id/dependencies', pHosts, async (req, res) => {
+  if (!await getHost(Number.parseInt(req.params.id, 10))) return res.status(404).json({ error: 'Host not found' });
+  res.json(await pveHostDependencies(req.params.id));
 });
 
-router.delete('/pve-hosts/:id', pHosts, (req, res) => {
-  const count = db.prepare('SELECT COUNT(*) as count FROM pve_hosts').get();
-  if (count.count <= 1) {
+router.delete('/pve-hosts/:id', pHosts, async (req, res) => {
+  const [{ count: hostCount }] = await db.select({ count: count() }).from(pveHosts);
+  if (hostCount <= 1) {
     return res.status(400).json({ error: 'Cannot delete the last host' });
   }
-  const host = getHost(Number.parseInt(req.params.id, 10));
+  const host = await getHost(Number.parseInt(req.params.id, 10));
   if (!host) return res.status(404).json({ error: 'Host not found' });
   try {
-    deletePveHost(req.params.id);
-    logAudit(req, 'pve_host_deleted', String(req.params.id), `name=${host.name}; host=${host.host}`);
+    await deletePveHost(req.params.id);
+    await logAudit(req, 'pve_host_deleted', String(req.params.id), `name=${host.name}; host=${host.host}`);
     res.json({ ok: true });
   } catch (err) {
     if (err.code === 'PVE_HOST_HAS_DEPENDENCIES') {
@@ -1545,11 +1607,11 @@ router.delete('/pve-hosts/:id', pHosts, (req, res) => {
 
 router.get('/pve-hosts/:id/storages', pHosts, async (req, res) => {
   const hostId = parseInt(req.params.id, 10);
-  const host = getHost(hostId);
+  const host = await getHost(hostId);
   if (!host) return res.status(404).json({ error: 'Host not found' });
   try {
     const pools = await getHostStoragePools(host);
-    const visibility = storageVisibilityMap(hostId);
+    const visibility = await storageVisibilityMap(hostId);
     const rows = pools
       .map((p) => ({
         storage: p.storage,
@@ -1565,17 +1627,17 @@ router.get('/pve-hosts/:id/storages', pHosts, async (req, res) => {
   }
 });
 
-router.put('/pve-hosts/:id/storages/:storage', pHosts, (req, res) => {
+router.put('/pve-hosts/:id/storages/:storage', pHosts, async (req, res) => {
   const hostId = parseInt(req.params.id, 10);
-  const host = getHost(hostId);
+  const host = await getHost(hostId);
   if (!host) return res.status(404).json({ error: 'Host not found' });
   const storage = String(req.params.storage || '').trim();
   if (!storage || !/^[a-zA-Z0-9._-]+$/.test(storage)) {
     return res.status(400).json({ error: 'Invalid storage identifier' });
   }
   const exposed = req.body?.exposed !== false && req.body?.exposed !== 0;
-  setStorageExposed(hostId, storage, exposed);
-  logAudit(req, 'storage_visibility_change', `${host.name}/${storage}`, exposed ? 'exposed' : 'hidden');
+  await setStorageExposed(hostId, storage, exposed);
+  await logAudit(req, 'storage_visibility_change', `${host.name}/${storage}`, exposed ? 'exposed' : 'hidden');
   res.json({ ok: true, storage, exposed });
 });
 
@@ -1584,28 +1646,28 @@ router.put('/pve-hosts/:id/storages/:storage', pHosts, (req, res) => {
 // blocked, a notice is auto-published, and Overview health renders it amber.
 // Running VMs are untouched.
 
-router.get('/node-maintenance', pHosts, (req, res) => {
+router.get('/node-maintenance', pHosts, async (req, res) => {
   try {
-    res.json(listMaintenance());
+    res.json(await listMaintenance());
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
-router.post('/node-maintenance', pHosts, (req, res) => {
+router.post('/node-maintenance', pHosts, async (req, res) => {
   const { node, reason = '', until = null } = req.body;
   if (!node) return res.status(400).json({ error: 'A node is required' });
   try {
-    const row = enterMaintenance({ node, reason, until, req });
+    const row = await enterMaintenance({ node, reason, until, req });
     res.json(row);
   } catch (err) {
     sendError(res, err);
   }
 });
 
-router.delete('/node-maintenance/:id', pHosts, (req, res) => {
+router.delete('/node-maintenance/:id', pHosts, async (req, res) => {
   try {
-    const ok = exitMaintenanceById(parseInt(req.params.id, 10), req);
+    const ok = await exitMaintenanceById(parseInt(req.params.id, 10), req);
     if (!ok) return res.status(404).json({ error: 'Maintenance entry not found' });
     res.json({ ok: true });
   } catch (err) {
@@ -1616,12 +1678,12 @@ router.delete('/node-maintenance/:id', pHosts, (req, res) => {
 // ─── Firewalls ─────────────────────────────────────────────────────────────
 
 // Firewalls read also needed by policies page and vlans page
-router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_policies', 'can_manage_vlans'), (req, res) => {
-  const firewalls = db.prepare('SELECT * FROM firewalls ORDER BY name').all();
+router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_port_forwards', 'can_manage_policies', 'can_manage_vlans'), async (req, res) => {
+  const firewallRows = await db.select().from(firewalls).orderBy(firewalls.name);
   const canSeeSensitiveFields = req.session.isAdmin
-    || userHasPermission(req.session.userId, 'can_manage_firewalls');
+    || await userHasPermission(req.session.userId, 'can_manage_firewalls');
   // Don't expose api_key to frontend
-  res.json(firewalls.map(f => ({
+  res.json(firewallRows.map(f => ({
     id: f.id,
     name: f.name,
     type: f.type,
@@ -1648,7 +1710,7 @@ router.get('/firewalls', requirePermission('can_manage_firewalls', 'can_manage_p
 });
 
 router.get('/firewalls/:id/status', pFirewalls, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
@@ -1669,7 +1731,7 @@ router.get('/firewalls/:id/status', pFirewalls, async (req, res) => {
 });
 
 router.get('/firewalls/:id/switches', pFirewalls, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
@@ -1690,7 +1752,7 @@ router.get('/firewalls/:id/switches', pFirewalls, async (req, res) => {
   }
 });
 
-router.post('/firewalls', pFirewalls, (req, res) => {
+router.post('/firewalls', pFirewalls, async (req, res) => {
   const { name, type = 'fortigate', host, port = 443, apiKey, vdom = 'root', parentInterface = 'fortilink', wanInterface = 'wan1', vlanRangeStart = 1001, vlanRangeEnd = 1999, labVdomLink = 'lab-root0', rootVdom = 'root', rootVdomLink = 'lab-root1', routeGateway = '10.255.254.2', trunkSwitchSerial = '', trunkSwitchPort = '', verifyTls = true, externalIp = '', rootWanZone = 'underlay' } = req.body;
   if (!name || !host || !apiKey) {
     return res.status(400).json({ error: 'Name, host, and API key are required' });
@@ -1702,25 +1764,29 @@ router.post('/firewalls', pFirewalls, (req, res) => {
     return res.status(400).json({ error: 'Invalid VLAN range (must be 1–4094, start < end)' });
   }
   try {
-    const r = db.prepare(
-      'INSERT INTO firewalls (name, type, host, port, api_key, vdom, parent_interface, wan_interface, vlan_range_start, vlan_range_end, lab_vdom_link, root_vdom, root_vdom_link, route_gateway, trunk_switch_serial, trunk_switch_port, verify_tls, external_ip, root_wan_zone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(name, type, host, port, encryptSecret(apiKey), vdom, parentInterface, wanInterface, vlanRangeStart, vlanRangeEnd, labVdomLink, rootVdom, rootVdomLink, routeGateway, trunkSwitchSerial, trunkSwitchPort, verifyTls ? 1 : 0, externalIp, rootWanZone);
+    const [r] = await db.insert(firewalls).values({
+      name, type, host, port, api_key: encryptSecret(apiKey), vdom, parent_interface: parentInterface,
+      wan_interface: wanInterface, vlan_range_start: vlanRangeStart, vlan_range_end: vlanRangeEnd,
+      lab_vdom_link: labVdomLink, root_vdom: rootVdom, root_vdom_link: rootVdomLink, route_gateway: routeGateway,
+      trunk_switch_serial: trunkSwitchSerial, trunk_switch_port: trunkSwitchPort, verify_tls: !!verifyTls,
+      external_ip: externalIp, root_wan_zone: rootWanZone,
+    }).returning({ id: firewalls.id });
     // Seed the built-in default provisioning workflows for the new firewall so
     // it works out of the box; admins can then customize per trigger.
-    try { seedWorkflowsForFirewall(r.lastInsertRowid); } catch (e) { console.warn('[workflows] seed on firewall create failed:', e.message); }
-    logAudit(req, 'admin_create_firewall', name, `${host}:${port} vdom=${vdom}`);
-    res.json({ id: r.lastInsertRowid, name, host, port });
+    try { await seedWorkflowsForFirewall(r.id); } catch (e) { console.warn('[workflows] seed on firewall create failed:', e.message); }
+    await logAudit(req, 'admin_create_firewall', name, `${host}:${port} vdom=${vdom}`);
+    res.json({ id: r.id, name, host, port });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
-router.put('/firewalls/:id', pFirewalls, (req, res) => {
+router.put('/firewalls/:id', pFirewalls, async (req, res) => {
   const { name, host, port = 443, apiKey, vdom, parentInterface, wanInterface, verifyTls } = req.body;
   if (!name || !host) {
     return res.status(400).json({ error: 'Name and host are required' });
   }
-  const existing = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const existing = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!existing) return res.status(404).json({ error: 'Firewall not found' });
 
   const key = apiKey ? encryptSecret(apiKey) : existing.api_key;
@@ -1732,7 +1798,7 @@ router.put('/firewalls/:id', pFirewalls, (req, res) => {
   const routeGw       = req.body.routeGateway   || existing.route_gateway   || '10.255.254.2';
   const trunkSerial   = req.body.trunkSwitchSerial ?? existing.trunk_switch_serial ?? '';
   const trunkPort     = req.body.trunkSwitchPort   ?? existing.trunk_switch_port   ?? '';
-  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== 0 : !!verifyTls;
+  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
   const extIp       = req.body.externalIp   ?? existing.external_ip   ?? '';
   const wanZone     = req.body.rootWanZone  ?? existing.root_wan_zone ?? 'underlay';
   if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {
@@ -1741,40 +1807,45 @@ router.put('/firewalls/:id', pFirewalls, (req, res) => {
   if (rangeStart >= rangeEnd || rangeStart < 1 || rangeEnd > 4094) {
     return res.status(400).json({ error: 'Invalid VLAN range (must be 1–4094, start < end)' });
   }
-  db.prepare(
-    'UPDATE firewalls SET name = ?, host = ?, port = ?, api_key = ?, vdom = ?, parent_interface = ?, wan_interface = ?, vlan_range_start = ?, vlan_range_end = ?, lab_vdom_link = ?, root_vdom = ?, root_vdom_link = ?, route_gateway = ?, trunk_switch_serial = ?, trunk_switch_port = ?, verify_tls = ?, external_ip = ?, root_wan_zone = ? WHERE id = ?'
-  ).run(name, host, port, key, vdom || existing.vdom, parentInterface || existing.parent_interface, wanInterface || existing.wan_interface, rangeStart, rangeEnd, labLink, rootVd, rootLink, routeGw, trunkSerial, trunkPort, verifyTlsEnabled ? 1 : 0, extIp, wanZone, req.params.id);
-  logAudit(req, 'admin_update_firewall', name, `${host}:${port}`);
+  await db.update(firewalls).set({
+    name, host, port, api_key: key, vdom: vdom || existing.vdom,
+    parent_interface: parentInterface || existing.parent_interface, wan_interface: wanInterface || existing.wan_interface,
+    vlan_range_start: rangeStart, vlan_range_end: rangeEnd, lab_vdom_link: labLink, root_vdom: rootVd,
+    root_vdom_link: rootLink, route_gateway: routeGw, trunk_switch_serial: trunkSerial, trunk_switch_port: trunkPort,
+    verify_tls: verifyTlsEnabled, external_ip: extIp, root_wan_zone: wanZone,
+  }).where(eq(firewalls.id, Number(req.params.id)));
+  await logAudit(req, 'admin_update_firewall', name, `${host}:${port}`);
   res.json({ ok: true });
 });
 
-router.delete('/firewalls/:id', pFirewalls, (req, res) => {
-  const fw = db.prepare('SELECT name FROM firewalls WHERE id = ?').get(req.params.id);
-  db.prepare('DELETE FROM firewalls WHERE id = ?').run(req.params.id);
-  logAudit(req, 'admin_delete_firewall', fw?.name || req.params.id, '');
+router.delete('/firewalls/:id', pFirewalls, async (req, res) => {
+  const [fw] = await db.select({ name: firewalls.name }).from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1);
+  await db.delete(firewalls).where(eq(firewalls.id, Number(req.params.id)));
+  await logAudit(req, 'admin_delete_firewall', fw?.name || req.params.id, '');
   res.json({ ok: true });
 });
 
 // ─── VLAN ↔ Firewall Sync ─────────────────────────────────────────────────
 
-router.get('/vlans/:id/sync', pVlans, (req, res) => {
-  if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, req.params.id)) {
+router.get('/vlans/:id/sync', pVlans, async (req, res) => {
+  if (!req.session.isAdmin && !await userOwnsVlan(req.session.userId, req.params.id)) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const syncs = db.prepare(`
-    SELECT fvs.*, f.name as firewall_name, f.host as firewall_host
-    FROM firewall_vlan_sync fvs
-    JOIN firewalls f ON f.id = fvs.firewall_id
-    WHERE fvs.vlan_id = ?
-  `).all(req.params.id);
+  const syncs = await db.select({
+    ...getTableColumns(firewallVlanSync),
+    firewall_name: firewalls.name,
+    firewall_host: firewalls.host,
+  }).from(firewallVlanSync)
+    .innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id))
+    .where(eq(firewallVlanSync.vlan_id, Number(req.params.id)));
   res.json(syncs);
 });
 
 router.post('/vlans/:id/sync', pVlans, async (req, res) => {
   try {
-    const vlan = db.prepare('SELECT * FROM vlans WHERE id = ?').get(req.params.id);
+    const [vlan] = await db.select().from(vlans).where(eq(vlans.id, Number(req.params.id))).limit(1);
     if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
-    if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, vlan.id)) {
+    if (!req.session.isAdmin && !await userOwnsVlan(req.session.userId, vlan.id)) {
       return res.status(403).json({ error: 'Access denied' });
     }
     if (vlan.mode === 'tagged_only') {
@@ -1783,8 +1854,8 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
 
     const { firewallId, allowInternet = true, enableDhcp = true } = req.body;
     const fwRows = firewallId
-      ? [db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId)]
-      : db.prepare('SELECT * FROM firewalls').all();
+      ? [(await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0]]
+      : await db.select().from(firewalls);
 
     console.log(`[sync] VLAN ${vlan.tag} → ${fwRows.length} firewall(s), allowInternet=${allowInternet}, enableDhcp=${enableDhcp}`);
 
@@ -1792,7 +1863,8 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
     for (const fw of fwRows) {
       if (!fw) continue;
       // Skip if already synced
-      const existing = db.prepare('SELECT id FROM firewall_vlan_sync WHERE firewall_id = ? AND vlan_id = ?').get(fw.id, vlan.id);
+      const [existing] = await db.select({ id: firewallVlanSync.id }).from(firewallVlanSync)
+        .where(and(eq(firewallVlanSync.firewall_id, fw.id), eq(firewallVlanSync.vlan_id, vlan.id))).limit(1);
       if (existing) { results.push({ firewall: fw.name, status: 'already_synced' }); continue; }
 
       // Validate VLAN tag is within this firewall's allowed range
@@ -1836,10 +1908,12 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const staticRouteId = outVals.find((o) => o?.routeId)?.routeId ?? null;
         const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet };
         console.log(`[sync] Success:`, JSON.stringify(result));
-        db.prepare(
-          'INSERT INTO firewall_vlan_sync (firewall_id, vlan_id, interface_name, policy_ids, dhcp_server_id, artifacts, workflow_run_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(fw.id, vlan.id, interfaceName, JSON.stringify(policyIds), dhcpServerId, JSON.stringify(artifacts), runId);
-        logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
+        // policy_ids and artifacts are jsonb columns — pass objects directly.
+        await db.insert(firewallVlanSync).values({
+          firewall_id: fw.id, vlan_id: vlan.id, interface_name: interfaceName,
+          policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
+        });
+        await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
         results.push({ firewall: fw.name, status: 'ok', ...result });
       } catch (err) {
         console.error(`[sync] Error provisioning VLAN ${vlan.tag} on ${fw.name}:`, err.message);
@@ -1854,22 +1928,34 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
 });
 
 router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
-  if (!req.session.isAdmin && !userOwnsVlan(req.session.userId, req.params.id)) {
+  if (!req.session.isAdmin && !await userOwnsVlan(req.session.userId, req.params.id)) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const sync = db.prepare(
-    'SELECT fvs.*, f.* FROM firewall_vlan_sync fvs JOIN firewalls f ON f.id = fvs.firewall_id WHERE fvs.vlan_id = ? AND fvs.firewall_id = ?'
-  ).get(req.params.id, req.params.firewallId);
+  // Mirrors the old `fvs.*, f.*` shape: firewall columns win on name collisions
+  // (id becomes the firewall id), plus the firewall_vlan_sync fields the
+  // teardown path needs.
+  const [sync] = await db.select({
+    ...getTableColumns(firewalls),
+    interface_name: firewallVlanSync.interface_name,
+    policy_ids: firewallVlanSync.policy_ids,
+    dhcp_server_id: firewallVlanSync.dhcp_server_id,
+    artifacts: firewallVlanSync.artifacts,
+  }).from(firewallVlanSync)
+    .innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id))
+    .where(and(eq(firewallVlanSync.vlan_id, Number(req.params.id)), eq(firewallVlanSync.firewall_id, Number(req.params.firewallId))))
+    .limit(1);
   if (!sync) return res.status(404).json({ error: 'Sync record not found' });
 
   try {
     const client = createClient(sync);
     if (sync.artifacts) {
       // Artifact-based teardown: delete exactly what this run created (reverse order).
-      await teardownArtifacts(client, JSON.parse(sync.artifacts));
+      // artifacts is a jsonb column — already an object.
+      await teardownArtifacts(client, sync.artifacts);
     } else {
       // Legacy row (synced before the workflow engine) — original live-query path.
-      const policyIds = JSON.parse(sync.policy_ids || '[]');
+      // policy_ids is a jsonb column — already an array.
+      const policyIds = sync.policy_ids || [];
       await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
         rootVdom: sync.root_vdom || 'root',
         trunkSwitchSerial: sync.trunk_switch_serial || '',
@@ -1880,8 +1966,8 @@ router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
     console.error('Deprovision warning:', err.message);
   }
 
-  db.prepare('DELETE FROM firewall_vlan_sync WHERE vlan_id = ? AND firewall_id = ?').run(req.params.id, req.params.firewallId);
-  logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${req.params.id}`, `Firewall ${req.params.firewallId}`);
+  await db.delete(firewallVlanSync).where(and(eq(firewallVlanSync.vlan_id, Number(req.params.id)), eq(firewallVlanSync.firewall_id, Number(req.params.firewallId))));
+  await logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${req.params.id}`, `Firewall ${req.params.firewallId}`);
   res.json({ ok: true });
 });
 
@@ -1891,7 +1977,7 @@ router.get('/policies', pPolicies, async (req, res) => {
   const { firewallId } = req.query;
   if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
 
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   try {
@@ -1900,20 +1986,18 @@ router.get('/policies', pPolicies, async (req, res) => {
 
     // Get synced VLANs for this firewall (non-admins only see their assigned VLANs)
     const isAdmin = req.session.isAdmin;
+    const syncCols = {
+      interface_name: firewallVlanSync.interface_name,
+      vlan_id: vlans.id, vlan_name: vlans.name, vlan_tag: vlans.tag,
+    };
     const syncs = isAdmin
-      ? db.prepare(`
-          SELECT fvs.interface_name, v.id as vlan_id, v.name as vlan_name, v.tag as vlan_tag
-          FROM firewall_vlan_sync fvs
-          JOIN vlans v ON v.id = fvs.vlan_id
-          WHERE fvs.firewall_id = ?
-        `).all(firewallId)
-      : db.prepare(`
-          SELECT fvs.interface_name, v.id as vlan_id, v.name as vlan_name, v.tag as vlan_tag
-          FROM firewall_vlan_sync fvs
-          JOIN vlans v ON v.id = fvs.vlan_id
-          JOIN user_vlans uv ON uv.vlan_id = v.id AND uv.user_id = ?
-          WHERE fvs.firewall_id = ?
-        `).all(req.session.userId, firewallId);
+      ? await db.select(syncCols).from(firewallVlanSync)
+          .innerJoin(vlans, eq(vlans.id, firewallVlanSync.vlan_id))
+          .where(eq(firewallVlanSync.firewall_id, Number(firewallId)))
+      : await db.select(syncCols).from(firewallVlanSync)
+          .innerJoin(vlans, eq(vlans.id, firewallVlanSync.vlan_id))
+          .innerJoin(userVlans, and(eq(userVlans.vlan_id, vlans.id), eq(userVlans.user_id, req.session.userId)))
+          .where(eq(firewallVlanSync.firewall_id, Number(firewallId)));
     const vlanInterfaces = new Set(syncs.map(s => s.interface_name));
     const vlanMap = {};
     syncs.forEach(s => { vlanMap[s.interface_name] = s; });
@@ -1963,19 +2047,24 @@ router.post('/policies', pPolicies, async (req, res) => {
     return res.status(400).json({ error: 'Source and destination VLANs must be different' });
   }
 
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   // Resolve VLANs
-  const srcVlan = db.prepare('SELECT v.*, fvs.interface_name FROM vlans v JOIN firewall_vlan_sync fvs ON fvs.vlan_id = v.id WHERE v.tag = ? AND fvs.firewall_id = ?').get(srcVlanTag, firewallId);
-  const dstVlan = db.prepare('SELECT v.*, fvs.interface_name FROM vlans v JOIN firewall_vlan_sync fvs ON fvs.vlan_id = v.id WHERE v.tag = ? AND fvs.firewall_id = ?').get(dstVlanTag, firewallId);
+  const vlanWithIfaceCols = { ...getTableColumns(vlans), interface_name: firewallVlanSync.interface_name };
+  const [srcVlan] = await db.select(vlanWithIfaceCols).from(vlans)
+    .innerJoin(firewallVlanSync, eq(firewallVlanSync.vlan_id, vlans.id))
+    .where(and(eq(vlans.tag, Number(srcVlanTag)), eq(firewallVlanSync.firewall_id, Number(firewallId)))).limit(1);
+  const [dstVlan] = await db.select(vlanWithIfaceCols).from(vlans)
+    .innerJoin(firewallVlanSync, eq(firewallVlanSync.vlan_id, vlans.id))
+    .where(and(eq(vlans.tag, Number(dstVlanTag)), eq(firewallVlanSync.firewall_id, Number(firewallId)))).limit(1);
   if (!srcVlan) return res.status(400).json({ error: `Source VLAN ${srcVlanTag} not synced to this firewall` });
   if (!dstVlan) return res.status(400).json({ error: `Destination VLAN ${dstVlanTag} not synced to this firewall` });
 
   // Non-admins must have both VLANs assigned to them
   if (!req.session.isAdmin) {
-    const hasSrc = db.prepare('SELECT 1 FROM user_vlans WHERE user_id = ? AND vlan_id = ?').get(req.session.userId, srcVlan.id);
-    const hasDst = db.prepare('SELECT 1 FROM user_vlans WHERE user_id = ? AND vlan_id = ?').get(req.session.userId, dstVlan.id);
+    const hasSrc = await userOwnsVlan(req.session.userId, srcVlan.id);
+    const hasDst = await userOwnsVlan(req.session.userId, dstVlan.id);
     if (!hasSrc) return res.status(403).json({ error: `You do not have access to source VLAN ${srcVlanTag}` });
     if (!hasDst) return res.status(403).json({ error: `You do not have access to destination VLAN ${dstVlanTag}` });
   }
@@ -2044,7 +2133,7 @@ router.post('/policies', pPolicies, async (req, res) => {
     await joinSequenceGroup(client, outputs.forward?.policyId, `${srcVlan.name} (${srcVlan.interface_name})`);
     await joinSequenceGroup(client, outputs.reverse?.policyId, `${dstVlan.name} (${dstVlan.interface_name})`);
 
-    logAudit(req, 'admin_create_policy', `${srcVlan.interface_name} → ${dstVlan.interface_name}`, `services: ${services.join(',')} action: ${action}${bidirectional ? ' (bidirectional)' : ''}`);
+    await logAudit(req, 'admin_create_policy', `${srcVlan.interface_name} → ${dstVlan.interface_name}`, `services: ${services.join(',')} action: ${action}${bidirectional ? ' (bidirectional)' : ''}`);
     res.json({ policyIds });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2055,7 +2144,7 @@ router.delete('/policies/:policyId', pPolicies, async (req, res) => {
   const { firewallId } = req.query;
   if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
 
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   try {
@@ -2070,11 +2159,9 @@ router.delete('/policies/:policyId', pPolicies, async (req, res) => {
           ...((policy.dstintf || []).map(i => i.name)),
         ];
         // Get user's VLAN interfaces on this firewall
-        const userSyncs = db.prepare(`
-          SELECT fvs.interface_name FROM firewall_vlan_sync fvs
-          JOIN user_vlans uv ON uv.vlan_id = fvs.vlan_id AND uv.user_id = ?
-          WHERE fvs.firewall_id = ?
-        `).all(req.session.userId, firewallId);
+        const userSyncs = await db.select({ interface_name: firewallVlanSync.interface_name }).from(firewallVlanSync)
+          .innerJoin(userVlans, and(eq(userVlans.vlan_id, firewallVlanSync.vlan_id), eq(userVlans.user_id, req.session.userId)))
+          .where(eq(firewallVlanSync.firewall_id, Number(firewallId)));
         const userIntfs = new Set(userSyncs.map(s => s.interface_name));
         const hasAccess = policyIntfs.some(i => userIntfs.has(i));
         if (!hasAccess) {
@@ -2084,7 +2171,7 @@ router.delete('/policies/:policyId', pPolicies, async (req, res) => {
     }
 
     await client.deletePolicy(req.params.policyId);
-    logAudit(req, 'admin_delete_policy', `Policy ${req.params.policyId}`, `Firewall: ${fw.name}`);
+    await logAudit(req, 'admin_delete_policy', `Policy ${req.params.policyId}`, `Firewall: ${fw.name}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2096,7 +2183,7 @@ router.delete('/policies/:policyId', pPolicies, async (req, res) => {
 router.get('/objects/addresses', requireAdmin, async (req, res) => {
   const { firewallId } = req.query;
   if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
@@ -2117,7 +2204,7 @@ router.get('/objects/addresses', requireAdmin, async (req, res) => {
 router.post('/objects/addresses', requireAdmin, async (req, res) => {
   const { firewallId, name, type = 'ipmask', subnet, fqdn, comment } = req.body;
   if (!firewallId || !name) return res.status(400).json({ error: 'firewallId and name required' });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
@@ -2126,7 +2213,7 @@ router.post('/objects/addresses', requireAdmin, async (req, res) => {
     if (type === 'fqdn' && fqdn) data.fqdn = fqdn;
     if (comment) data.comment = comment;
     await client.createAddressObject(data);
-    logAudit(req, 'admin_create_address_object', name, `type=${type} ${subnet || fqdn || ''}`);
+    await logAudit(req, 'admin_create_address_object', name, `type=${type} ${subnet || fqdn || ''}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2136,7 +2223,7 @@ router.post('/objects/addresses', requireAdmin, async (req, res) => {
 router.put('/objects/addresses/:name', requireAdmin, async (req, res) => {
   const { firewallId, subnet, fqdn, comment } = req.body;
   if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
@@ -2145,7 +2232,7 @@ router.put('/objects/addresses/:name', requireAdmin, async (req, res) => {
     if (fqdn) data.fqdn = fqdn;
     if (comment !== undefined) data.comment = comment;
     await client.updateAddressObject(req.params.name, data);
-    logAudit(req, 'admin_update_address_object', req.params.name, JSON.stringify(data));
+    await logAudit(req, 'admin_update_address_object', req.params.name, JSON.stringify(data));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2155,12 +2242,12 @@ router.put('/objects/addresses/:name', requireAdmin, async (req, res) => {
 router.delete('/objects/addresses/:name', requireAdmin, async (req, res) => {
   const { firewallId } = req.query;
   if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
     await client.deleteAddressObject(req.params.name);
-    logAudit(req, 'admin_delete_address_object', req.params.name, `Firewall: ${fw.name}`);
+    await logAudit(req, 'admin_delete_address_object', req.params.name, `Firewall: ${fw.name}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2170,7 +2257,7 @@ router.delete('/objects/addresses/:name', requireAdmin, async (req, res) => {
 router.get('/objects/services', requireAdmin, async (req, res) => {
   const { firewallId } = req.query;
   if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
@@ -2192,7 +2279,7 @@ router.post('/objects/services', requireAdmin, async (req, res) => {
   const { firewallId, name, protocol = 'TCP/UDP/SCTP', tcpPortrange, udpPortrange, comment } = req.body;
   if (!firewallId || !name) return res.status(400).json({ error: 'firewallId and name required' });
   if (!tcpPortrange && !udpPortrange) return res.status(400).json({ error: 'At least one port range required' });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
@@ -2201,7 +2288,7 @@ router.post('/objects/services', requireAdmin, async (req, res) => {
     if (udpPortrange) data['udp-portrange'] = udpPortrange;
     if (comment) data.comment = comment;
     await client.createServiceObject(data);
-    logAudit(req, 'admin_create_service_object', name, `tcp=${tcpPortrange || ''} udp=${udpPortrange || ''}`);
+    await logAudit(req, 'admin_create_service_object', name, `tcp=${tcpPortrange || ''} udp=${udpPortrange || ''}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2211,12 +2298,12 @@ router.post('/objects/services', requireAdmin, async (req, res) => {
 router.delete('/objects/services/:name', requireAdmin, async (req, res) => {
   const { firewallId } = req.query;
   if (!firewallId) return res.status(400).json({ error: 'firewallId required' });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(firewallId);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(firewallId))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const client = createClient(fw);
     await client.deleteServiceObject(req.params.name);
-    logAudit(req, 'admin_delete_service_object', req.params.name, `Firewall: ${fw.name}`);
+    await logAudit(req, 'admin_delete_service_object', req.params.name, `Firewall: ${fw.name}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2274,27 +2361,25 @@ function managedVipAddressMatches(address, mappedIp) {
 // owning user, so it's obvious who has what open. FortiGate's GUI shows one
 // group only when same-label policies are also adjacent — creation and the
 // regroup endpoint both keep them contiguous.
-function portForwardOwnerUsername(vmid, mappedIp) {
+async function portForwardOwnerUsername(vmid, mappedIp) {
   if (vmid) {
-    const byVmid = db.prepare(
-      'SELECT u.username FROM vm_assignments va JOIN users u ON u.id = va.user_id WHERE va.vmid = ? LIMIT 1'
-    ).get(parseInt(vmid, 10));
+    const [byVmid] = await db.select({ username: users.username }).from(vmAssignments)
+      .innerJoin(users, eq(users.id, vmAssignments.user_id))
+      .where(eq(vmAssignments.vmid, parseInt(vmid, 10))).limit(1);
     if (byVmid) return byVmid.username;
   }
   if (mappedIp) {
-    const byIp = db.prepare(`
-      SELECT u.username FROM vm_ssh_configs c
-      JOIN vm_assignments va ON va.vmid = c.vmid
-      JOIN users u ON u.id = va.user_id
-      WHERE c.host = ? LIMIT 1
-    `).get(mappedIp);
+    const [byIp] = await db.select({ username: users.username }).from(vmSshConfigs)
+      .innerJoin(vmAssignments, eq(vmAssignments.vmid, vmSshConfigs.vmid))
+      .innerJoin(users, eq(users.id, vmAssignments.user_id))
+      .where(eq(vmSshConfigs.host, mappedIp)).limit(1);
     if (byIp) return byIp.username;
   }
   return '';
 }
 
-function portForwardGroupLabel(vmid, mappedIp) {
-  const username = portForwardOwnerUsername(vmid, mappedIp);
+async function portForwardGroupLabel(vmid, mappedIp) {
+  const username = await portForwardOwnerUsername(vmid, mappedIp);
   return username ? `Port Forwarding - ${username}` : 'Port Forwarding (VM Manager)';
 }
 
@@ -2399,7 +2484,7 @@ async function regroupAdjacent(client, vdom, labelFor, warnings) {
 // is preserved; a policy outside any group can end up crossed by group
 // members consolidating past it — review custom deny rules after running.
 router.post('/firewalls/:id/regroup-policies', pFirewalls, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   try {
@@ -2409,11 +2494,11 @@ router.post('/firewalls/:id/regroup-policies', pFirewalls, async (req, res) => {
     const summary = { rootRelabeled: 0, rootMoved: 0, labRelabeled: 0, labMoved: 0, warnings: [] };
 
     // ── Root VDOM: port forwards grouped per owning user ─────────────────────
-    const managed = db.prepare('SELECT * FROM managed_vips WHERE firewall_id = ?').all(fw.id);
+    const managed = await db.select().from(managedVips).where(eq(managedVips.firewall_id, fw.id));
     const desiredRootLabels = new Map(); // policyid → label
     for (const vip of managed) {
       if (!vip.policy_id) continue;
-      desiredRootLabels.set(String(vip.policy_id), portForwardGroupLabel(null, vip.mapped_ip));
+      desiredRootLabels.set(String(vip.policy_id), await portForwardGroupLabel(null, vip.mapped_ip));
     }
     const rootLabelFor = (p) => desiredRootLabels.get(String(p.policyid)) || null;
 
@@ -2422,12 +2507,11 @@ router.post('/firewalls/:id/regroup-policies', pFirewalls, async (req, res) => {
     summary.rootMoved = rootResult.moved;
 
     // ── Lab VDOM: VLAN policies grouped per source interface ─────────────────
-    const syncs = db.prepare(`
-      SELECT fvs.interface_name, v.name AS vlan_name
-      FROM firewall_vlan_sync fvs
-      JOIN vlans v ON v.id = fvs.vlan_id
-      WHERE fvs.firewall_id = ?
-    `).all(fw.id);
+    const syncs = await db.select({
+      interface_name: firewallVlanSync.interface_name, vlan_name: vlans.name,
+    }).from(firewallVlanSync)
+      .innerJoin(vlans, eq(vlans.id, firewallVlanSync.vlan_id))
+      .where(eq(firewallVlanSync.firewall_id, fw.id));
     const ifaceLabels = new Map(syncs.map((s) => [s.interface_name, `${s.vlan_name} (${s.interface_name})`]));
     const labLabelFor = (p) => {
       const src = (p.srcintf || [])[0]?.name || '';
@@ -2442,7 +2526,7 @@ router.post('/firewalls/:id/regroup-policies', pFirewalls, async (req, res) => {
     summary.labRelabeled = labResult.relabeled;
     summary.labMoved = labResult.moved;
 
-    logAudit(req, 'admin_regroup_policies', fw.name,
+    await logAudit(req, 'admin_regroup_policies', fw.name,
       `root: ${summary.rootRelabeled} relabeled/${summary.rootMoved} moved; lab: ${summary.labRelabeled} relabeled/${summary.labMoved} moved${summary.warnings.length ? `; ${summary.warnings.length} warnings` : ''}`);
     res.json(summary);
   } catch (err) {
@@ -2451,29 +2535,31 @@ router.post('/firewalls/:id/regroup-policies', pFirewalls, async (req, res) => {
 });
 
 // Update WAN config (external IP + WAN zone) from the port forwarding page
-router.put('/firewalls/:id/wan-config', pFirewalls, (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+router.put('/firewalls/:id/wan-config', pFirewalls, async (req, res) => {
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   const { externalIp, rootWanZone } = req.body;
-  db.prepare('UPDATE firewalls SET external_ip = ?, root_wan_zone = ? WHERE id = ?')
-    .run(externalIp ?? fw.external_ip ?? '', rootWanZone ?? fw.root_wan_zone ?? 'underlay', req.params.id);
-  logAudit(req, 'admin_update_wan_config', fw.name, `extIp=${externalIp} wanZone=${rootWanZone}`);
+  await db.update(firewalls).set({
+    external_ip: externalIp ?? fw.external_ip ?? '', root_wan_zone: rootWanZone ?? fw.root_wan_zone ?? 'underlay',
+  }).where(eq(firewalls.id, Number(req.params.id)));
+  await logAudit(req, 'admin_update_wan_config', fw.name, `extIp=${externalIp} wanZone=${rootWanZone}`);
   res.json({ ok: true });
 });
 
 // List all VIPs from root VDOM with managed/unmanaged status
 router.get('/firewalls/:id/vips', pPortForwards, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const { client, rootVdom } = getRootClient(fw);
     const allVips = await client.getVips(rootVdom);
-    const unrestricted = canManageAllPortForwards(req);
-    const managedRows = db.prepare('SELECT vip_name, vlan_interface FROM managed_vips WHERE firewall_id = ?').all(fw.id);
+    const unrestricted = await canManageAllPortForwards(req);
+    const managedRows = await db.select({ vip_name: managedVips.vip_name, vlan_interface: managedVips.vlan_interface })
+      .from(managedVips).where(eq(managedVips.firewall_id, fw.id));
     const managedMap = new Map(managedRows.map(row => [row.vip_name, row]));
     const allowedInterfaces = unrestricted
       ? null
-      : new Set(getScopedFirewallSyncs(req.session.userId, fw.id, false).map(sync => sync.interface_name));
+      : new Set((await getScopedFirewallSyncs(req.session.userId, fw.id, false)).map(sync => sync.interface_name));
 
     const vips = allVips
       .filter(v => {
@@ -2507,7 +2593,7 @@ router.get('/firewalls/:id/vips', pPortForwards, async (req, res) => {
 
 // Root VDOM interfaces for destination zone dropdown
 router.get('/firewalls/:id/root-interfaces', pFirewalls, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const { client, rootVdom } = getRootClient(fw);
@@ -2539,7 +2625,7 @@ router.get('/firewalls/:id/root-interfaces', pFirewalls, async (req, res) => {
 
 // Root VDOM address objects + groups for source restriction dropdown
 router.get('/firewalls/:id/root-addresses', pFirewalls, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const { client, rootVdom } = getRootClient(fw);
@@ -2558,7 +2644,7 @@ router.get('/firewalls/:id/root-addresses', pFirewalls, async (req, res) => {
 
 // VM targets for port forwarding — returns VMs with their SSH IPs, VLAN tags, and resolved interfaces
 router.get('/firewalls/:id/vm-targets', pPortForwards, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
   try {
     const targets = await getScopedPortForwardTargets(req, fw);
@@ -2570,7 +2656,7 @@ router.get('/firewalls/:id/vm-targets', pPortForwards, async (req, res) => {
 
 // Create a new port forward (VIP + firewall policy in root VDOM)
 router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   let { name, protocol = 'tcp', extPort, mappedIp, mappedPort, dstInterface, vlanInterface, srcAddresses = ['all'], node, vmid } = req.body;
@@ -2579,7 +2665,7 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
   // the address, interface and gateway are always resolved server-side from the
   // stored pool, never taken from the client.
   const publicIpId = req.body.publicIpId ?? req.body.public_ip_id ?? null;
-  const unrestricted = canManageAllPortForwards(req);
+  const unrestricted = await canManageAllPortForwards(req);
   protocol = normalizePortForwardProtocol(protocol);
   extPort = parsePortForwardPort(extPort);
   mappedPort = parsePortForwardPort(mappedPort);
@@ -2634,9 +2720,9 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
       return res.status(400).json({ error: 'mappedIp and dstInterface are required' });
     }
 
-    const duplicateMappedPort = db.prepare(
-      'SELECT vip_name FROM managed_vips WHERE firewall_id = ? AND mapped_ip = ? AND mapped_port = ? AND protocol = ?'
-    ).get(fw.id, mappedIp, mappedPort, protocol);
+    const [duplicateMappedPort] = await db.select({ vip_name: managedVips.vip_name }).from(managedVips)
+      .where(and(eq(managedVips.firewall_id, fw.id), eq(managedVips.mapped_ip, mappedIp),
+        eq(managedVips.mapped_port, mappedPort), eq(managedVips.protocol, protocol))).limit(1);
     if (duplicateMappedPort) {
       return res.status(409).json({
         error: `Internal port ${mappedIp}:${mappedPort}/${protocol.toUpperCase()} is already published by "${duplicateMappedPort.vip_name}"`
@@ -2651,11 +2737,11 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
     let publicPool = null;
     let publicAssignment = null;
     if (publicIpId !== null && publicIpId !== undefined && publicIpId !== '') {
-      publicIp = db.prepare('SELECT * FROM public_ips WHERE id = ? AND firewall_id = ?')
-        .get(publicIpId, fw.id);
-      publicPool = publicIp ? db.prepare('SELECT * FROM public_ip_pools WHERE id = ?').get(publicIp.pool_id) : null;
+      publicIp = (await db.select().from(publicIps)
+        .where(and(eq(publicIps.id, Number(publicIpId)), eq(publicIps.firewall_id, fw.id))).limit(1))[0] || null;
+      publicPool = publicIp ? (await db.select().from(publicIpPools).where(eq(publicIpPools.id, publicIp.pool_id)).limit(1))[0] || null : null;
       publicAssignment = publicIp
-        ? db.prepare('SELECT * FROM public_ip_assignments WHERE public_ip_id = ?').get(publicIp.id)
+        ? (await db.select().from(publicIpAssignments).where(eq(publicIpAssignments.public_ip_id, publicIp.id)).limit(1))[0] || null
         : null;
       const denial = checkPublicIpUsage({
         isAdmin: req.session.isAdmin,
@@ -2696,12 +2782,12 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
 
     // Managed forwards first: the portal's own records give the friendliest
     // error and stay correct even when FortiGate is temporarily unreachable.
-    const managedEndpoints = db.prepare(`
-      SELECT mv.vip_name, mv.protocol, mv.ext_port, mv.public_ip_id, pi.address AS public_address
-      FROM managed_vips mv
-      LEFT JOIN public_ips pi ON pi.id = mv.public_ip_id
-      WHERE mv.firewall_id = ?
-    `).all(fw.id).map(row => ({
+    const managedEndpoints = (await db.select({
+      vip_name: managedVips.vip_name, protocol: managedVips.protocol, ext_port: managedVips.ext_port,
+      public_ip_id: managedVips.public_ip_id, public_address: publicIps.address,
+    }).from(managedVips)
+      .leftJoin(publicIps, eq(publicIps.id, managedVips.public_ip_id))
+      .where(eq(managedVips.firewall_id, fw.id))).map(row => ({
       firewallId: fw.id,
       publicIpId: row.public_ip_id,
       // A NULL public_ip_id still means the default WAN endpoint.
@@ -2795,17 +2881,21 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
     // target VLAN's port-forward group in the lab VDOM. The workflow engine
     // appends policies at the bottom with a default label, so park them
     // afterwards — cosmetic, never fails the port forward.
-    await joinSequenceGroup(client, policyId, portForwardGroupLabel(vmid, mappedIp), rootVdom);
+    await joinSequenceGroup(client, policyId, await portForwardGroupLabel(vmid, mappedIp), rootVdom);
     if (vlanInterface) {
       await joinSequenceGroup(client, labPolicyId, `Port Forwarding (${vlanInterface})`, labVdom);
     }
 
-    // Track in DB (with recorded artifacts for artifact-based teardown on delete)
-    db.prepare(
-      'INSERT INTO managed_vips (firewall_id, vip_name, policy_id, service_name, protocol, ext_port, mapped_ip, mapped_port, dst_interface, lab_policy_id, vlan_interface, artifacts, workflow_run_id, public_ip_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(fw.id, name, policyId, serviceName, protocol, extPort, mappedIp, mappedPort, dstInterface, labPolicyId, vlanInterface || '', JSON.stringify(artifacts), runId, publicIp?.id ?? null);
+    // Track in DB (with recorded artifacts for artifact-based teardown on delete).
+    // artifacts is a jsonb column — pass the object directly.
+    await db.insert(managedVips).values({
+      firewall_id: fw.id, vip_name: name, policy_id: policyId, service_name: serviceName, protocol,
+      ext_port: extPort, mapped_ip: mappedIp, mapped_port: mappedPort, dst_interface: dstInterface,
+      lab_policy_id: labPolicyId, vlan_interface: vlanInterface || '', artifacts, workflow_run_id: runId,
+      public_ip_id: publicIp?.id ?? null,
+    });
 
-    logAudit(req, 'admin_create_port_forward', name, `${protocol}/${externalIp}:${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}/${vlanInterface}`);
+    await logAudit(req, 'admin_create_port_forward', name, `${protocol}/${externalIp}:${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}/${vlanInterface}`);
     res.json({
       ok: true, vipName: name, policyId, labPolicyId, serviceName, externalIp,
       publicIpId: publicIp?.id ?? null,
@@ -2825,16 +2915,17 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
 
 // Delete a managed port forward (VIP + policy)
 router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(req.params.id);
+  const fw = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   const vipName = req.params.name;
-  const managed = db.prepare('SELECT * FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').get(fw.id, vipName);
+  const [managed] = await db.select().from(managedVips)
+    .where(and(eq(managedVips.firewall_id, fw.id), eq(managedVips.vip_name, vipName))).limit(1);
   if (!managed) {
     return res.status(403).json({ error: 'Cannot delete unmanaged VIPs. This was not created through VM Manager.' });
   }
-  if (!canManageAllPortForwards(req)) {
-    const allowedInterfaces = new Set(getScopedFirewallSyncs(req.session.userId, fw.id, false).map(sync => sync.interface_name));
+  if (!await canManageAllPortForwards(req)) {
+    const allowedInterfaces = new Set((await getScopedFirewallSyncs(req.session.userId, fw.id, false)).map(sync => sync.interface_name));
     if (!managed.vlan_interface || !allowedInterfaces.has(managed.vlan_interface)) {
       return res.status(403).json({ error: 'You do not have access to this port forward' });
     }
@@ -2846,7 +2937,8 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
     if (managed.artifacts) {
       // Artifact-based teardown: delete exactly what the create run recorded,
       // in reverse order (lab policy → root policy → VIP → lab address → services).
-      await teardownArtifacts(client, JSON.parse(managed.artifacts));
+      // artifacts is a jsonb column — already an object.
+      await teardownArtifacts(client, managed.artifacts);
     } else {
       // Legacy row (created before the workflow engine) — original delete path.
       // Delete lab VDOM policy first
@@ -2906,9 +2998,9 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
     }
 
     // Remove from DB
-    db.prepare('DELETE FROM managed_vips WHERE firewall_id = ? AND vip_name = ?').run(fw.id, vipName);
+    await db.delete(managedVips).where(and(eq(managedVips.firewall_id, fw.id), eq(managedVips.vip_name, vipName)));
 
-    logAudit(req, 'admin_delete_port_forward', vipName, `Firewall: ${fw.name}`);
+    await logAudit(req, 'admin_delete_port_forward', vipName, `Firewall: ${fw.name}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2924,20 +3016,19 @@ router.get('/vlans/subnet/:tag', pVlans, (req, res) => {
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────
 
-router.get('/audit-log', pAudit, (req, res) => {
+router.get('/audit-log', pAudit, async (req, res) => {
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.max(Math.min(parseInt(req.query.limit, 10) || 50, 200), 1);
   const offset = (page - 1) * limit;
   const action = req.query.action || '';
 
-  const where = action ? 'WHERE action = ?' : '';
-  const params = action ? [action] : [];
-
-  const { count } = db.prepare(`SELECT COUNT(*) as count FROM audit_log ${where}`).get(...params);
-  const rows = db.prepare(
-    `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
-  ).all(...params, limit, offset);
-  res.json({ rows, total: count, page, limit });
+  // Optional action filter, then a stable created_at DESC page. User input
+  // (action/limit/offset) is bound as parameters, never interpolated into SQL.
+  const whereClause = action ? eq(auditLog.action, action) : undefined;
+  const [{ total }] = await db.select({ total: count() }).from(auditLog).where(whereClause);
+  const rows = await db.select().from(auditLog).where(whereClause)
+    .orderBy(desc(auditLog.created_at)).limit(limit).offset(offset);
+  res.json({ rows, total, page, limit });
 });
 
 export default router;

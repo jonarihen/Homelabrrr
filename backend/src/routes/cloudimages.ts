@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import db from '../db.ts';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { cloudImages, pveHosts, vmTemplates } from '../db/schema/index.ts';
 import {
   downloadUrlToStorage, deleteVolume, convertToTemplate,
   getTaskStatus, getStorageContent, withFreshVmid, createVM, resizeVMDisk, getHost,
@@ -17,18 +19,18 @@ const router = Router();
 router.use(requireAuth);
 router.use(requirePermission('can_manage_templates'));
 
-function serializeImage(row) {
+function serializeImage(row: any) {
   const { nodeName, nodeRef } = decodeNodeRef(row.node);
-  let defaultStorageMap = {};
-  try { defaultStorageMap = row.default_storage_map ? JSON.parse(row.default_storage_map) : {}; } catch { defaultStorageMap = {}; }
+  // default_storage_map is a jsonb column — it arrives as an object already.
+  const defaultStorageMap = row.default_storage_map || {};
   return { ...row, node: nodeName || row.node, nodeRef: nodeRef || row.node, defaultStorageMap };
 }
 
-function setImageStatus(id, status, detail = '') {
-  db.prepare('UPDATE cloud_images SET status = ?, status_detail = ? WHERE id = ?').run(status, detail, id);
+async function setImageStatus(id: number, status: string, detail = '') {
+  await db.update(cloudImages).set({ status, status_detail: detail }).where(eq(cloudImages.id, id));
 }
 
-async function waitForTask(node, upid, { attempts = 240, intervalMs = 5000 } = {}) {
+async function waitForTask(node: string, upid: string, { attempts = 240, intervalMs = 5000 } = {}) {
   for (let i = 0; i < attempts; i++) {
     await new Promise((r) => setTimeout(r, intervalMs));
     try {
@@ -44,15 +46,16 @@ async function waitForTask(node, upid, { attempts = 240, intervalMs = 5000 } = {
 // ─── Catalog ──────────────────────────────────────────────────────────────────
 
 router.get('/', async (req, res) => {
-  const rows = db.prepare('SELECT * FROM cloud_images ORDER BY name').all();
-  const hostNames = new Map(db.prepare('SELECT id, name FROM pve_hosts').all().map((h) => [h.id, h.name]));
+  const rows = await db.select().from(cloudImages).orderBy(cloudImages.name);
+  const hostRows = await db.select({ id: pveHosts.id, name: pveHosts.name }).from(pveHosts);
+  const hostNames = new Map(hostRows.map((h) => [h.id, h.name]));
   const out = [];
   for (const row of rows) {
-    const img = serializeImage(row);
+    const img: any = serializeImage(row);
     // Deploy targets (own host + shared-storage peers) power the per-host
     // default-storage editor. Only meaningful for ready, disk-usable images.
     if (row.status === 'ready' && row.volid && !row.volid.includes(':iso/')) {
-      img.deployTargets = (await imageDeployTargets(row)).map((t) => ({
+      img.deployTargets = (await imageDeployTargets(row)).map((t: any) => ({
         hostId: t.hostId, nodeRef: t.nodeRef, node: t.node, hostName: hostNames.get(t.hostId) || '',
       }));
     } else {
@@ -79,21 +82,23 @@ router.post('/', async (req, res) => {
   }
   // Seed the per-host default map with the download host's choice. Other hosts
   // (for shared-storage images) are set later from the Default storage editor.
+  // default_storage_map is jsonb — store the object directly (null when empty).
   const { hostId: dlHostId } = decodeNodeRef(node);
-  const defStoreMap = defStore && dlHostId != null ? JSON.stringify({ [dlHostId]: defStore }) : '';
+  const defStoreMap = defStore && dlHostId != null ? { [dlHostId]: defStore } : null;
   // The PVE host fetches this URL server-side — refuse internal targets (SSRF)
   try {
     await assertPublicDownloadUrl(url);
-  } catch (err) {
+  } catch (err: any) {
     return res.status(400).json({ error: err.message });
   }
 
   const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'cloud-image';
 
-  const row = db.prepare(
-    'INSERT INTO cloud_images (name, url, node, storage, default_storage, default_storage_map, status, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(name, url, node, storage, defStore, defStoreMap, 'downloading', req.requestId || '');
-  const id = row.lastInsertRowid;
+  const [inserted] = await db.insert(cloudImages).values({
+    name, url, node, storage, default_storage: defStore, default_storage_map: defStoreMap,
+    status: 'downloading', request_id: req.requestId || '',
+  }).returning({ id: cloudImages.id });
+  const id = inserted.id;
   // Stored as `import` content; the unique suffix avoids clobbering an
   // existing file. PVE derives the disk format from the extension, and
   // distro ".img" cloud images are qcow2 inside, so they are stored as
@@ -104,44 +109,47 @@ router.post('/', async (req, res) => {
 
   try {
     const upid = await downloadUrlToStorage(node, storage, url, filename, checksum?.trim() || undefined);
-    db.prepare('UPDATE cloud_images SET volid = ?, upid = ? WHERE id = ?').run(volid, upid || '', id);
-    logAudit(req, 'cloud_image_download', name, `storage=${storage}; requestId=${req.requestId || ''}`);
+    await db.update(cloudImages).set({ volid, upid: upid || '' }).where(eq(cloudImages.id, id));
+    await logAudit(req, 'cloud_image_download', name, `storage=${storage}; requestId=${req.requestId || ''}`);
 
     // Poll in the background; the row's status is the source of truth for the UI
     startBackgroundWork(async () => {
       const result = await waitForTask(node, upid);
       if (!result.ok) {
-        setImageStatus(id, 'error', result.exitstatus === 'timeout'
+        await setImageStatus(id, 'error', result.exitstatus === 'timeout'
           ? 'Timed out waiting for the download'
           : `Download failed: ${result.exitstatus}`);
         return;
       }
       try {
         const content = await getStorageContent(node, storage, 'import');
-        const vol = content.find((c) => c.volid === volid);
+        const vol = content.find((c: any) => c.volid === volid);
         if (!vol) {
-          setImageStatus(id, 'error', 'Download finished but the image was not found on the storage');
+          await setImageStatus(id, 'error', 'Download finished but the image was not found on the storage');
           return;
         }
-        db.prepare('UPDATE cloud_images SET status = ?, status_detail = ?, size = ? WHERE id = ?')
-          .run('ready', '', vol.size || 0, id);
-      } catch (err) {
-        setImageStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
+        await db.update(cloudImages)
+          .set({ status: 'ready', status_detail: '', size: vol.size || 0 })
+          .where(eq(cloudImages.id, id));
+      } catch (err: any) {
+        await setImageStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
       }
     }, { kind: 'cloud-image-download', id, requestId: req.requestId })
-      .catch((err) => setImageStatus(id, 'error', sanitizeError(err.message)));
+      .catch((err: any) => { setImageStatus(id, 'error', sanitizeError(err.message)).catch(() => {}); });
 
     res.json({ id, status: 'downloading' });
-  } catch (err) {
-    setImageStatus(id, 'error', sanitizeError(err.message));
+  } catch (err: any) {
+    await setImageStatus(id, 'error', sanitizeError(err.message));
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
 // Update an image's default *target* storage (used to pre-select/fall back the
 // disk target when deploying a VM directly from this image). Empty clears it.
-router.put('/:id', (req, res) => {
-  const image = db.prepare('SELECT * FROM cloud_images WHERE id = ?').get(req.params.id);
+router.put('/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Image not found' });
+  const [image] = await db.select().from(cloudImages).where(eq(cloudImages.id, id)).limit(1);
   if (!image) return res.status(404).json({ error: 'Image not found' });
 
   // Per-host default map: { hostId: storageId }. Validate ids and pool names;
@@ -152,7 +160,7 @@ router.put('/:id', (req, res) => {
     if (typeof incoming !== 'object' || Array.isArray(incoming)) {
       return res.status(400).json({ error: 'defaultStorageMap must be an object' });
     }
-    const clean = {};
+    const clean: Record<string, string> = {};
     for (const [hostId, store] of Object.entries(incoming)) {
       if (!/^\d+$/.test(String(hostId))) return res.status(400).json({ error: 'Invalid host id' });
       const s = String(store || '').trim();
@@ -161,10 +169,12 @@ router.put('/:id', (req, res) => {
       clean[hostId] = s;
     }
     const { hostId: ownHostId } = decodeNodeRef(image.node);
-    const legacy = (ownHostId != null && clean[ownHostId]) || '';
-    db.prepare('UPDATE cloud_images SET default_storage_map = ?, default_storage = ? WHERE id = ?')
-      .run(Object.keys(clean).length ? JSON.stringify(clean) : '', legacy, req.params.id);
-    logAudit(req, 'cloud_image_update', image.name, `default_storage_map=${JSON.stringify(clean)}`);
+    const legacy = (ownHostId != null && clean[ownHostId as any]) || '';
+    await db.update(cloudImages).set({
+      default_storage_map: Object.keys(clean).length ? clean : null,
+      default_storage: legacy,
+    }).where(eq(cloudImages.id, id));
+    await logAudit(req, 'cloud_image_update', image.name, `default_storage_map=${JSON.stringify(clean)}`);
     return res.json({ ok: true });
   }
 
@@ -174,19 +184,21 @@ router.put('/:id', (req, res) => {
     return res.status(400).json({ error: 'Invalid default storage' });
   }
   const { hostId: ownHostId } = decodeNodeRef(image.node);
-  let map = {};
-  try { map = image.default_storage_map ? JSON.parse(image.default_storage_map) : {}; } catch { map = {}; }
+  // default_storage_map is jsonb — mutate the object directly, no JSON.parse.
+  const map: Record<string, string> = image.default_storage_map || {};
   if (ownHostId != null) {
-    if (defStore) map[ownHostId] = defStore; else delete map[ownHostId];
+    if (defStore) map[ownHostId as any] = defStore; else delete map[ownHostId as any];
   }
-  db.prepare('UPDATE cloud_images SET default_storage = ?, default_storage_map = ? WHERE id = ?')
-    .run(defStore, Object.keys(map).length ? JSON.stringify(map) : '', req.params.id);
-  logAudit(req, 'cloud_image_update', image.name, `default_storage=${defStore || '(none)'}`);
+  await db.update(cloudImages).set({
+    default_storage: defStore,
+    default_storage_map: Object.keys(map).length ? map : null,
+  }).where(eq(cloudImages.id, id));
+  await logAudit(req, 'cloud_image_update', image.name, `default_storage=${defStore || '(none)'}`);
   res.json({ ok: true });
 });
 
 // Single-quote a string for safe embedding in a POSIX shell command.
-function shq(s) {
+function shq(s: any) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
@@ -205,7 +217,9 @@ const OSC_GUEST_CMD = 'f=/usr/lib/systemd/profile.d/80-systemd-osc-context.sh; '
 // libguestfs-tools must be installed on the host). Background — the UI polls the
 // image's console_patch_status.
 router.post('/:id/patch-console', async (req, res) => {
-  const image = db.prepare('SELECT * FROM cloud_images WHERE id = ?').get(req.params.id);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Image not found' });
+  const [image] = await db.select().from(cloudImages).where(eq(cloudImages.id, id)).limit(1);
   if (!image) return res.status(404).json({ error: 'Image not found' });
   if (image.status !== 'ready' || !image.volid || image.volid.includes(':iso/')) {
     return res.status(400).json({ error: 'Image is not a ready disk image' });
@@ -214,7 +228,7 @@ router.post('/:id/patch-console', async (req, res) => {
     return res.status(409).json({ error: 'Already patching this image' });
   }
   const { hostId } = decodeNodeRef(image.node);
-  const host = hostId != null ? getHost(hostId) : null;
+  const host = hostId != null ? await getHost(hostId) : null;
   if (!hostHasSsh(host)) {
     return res.status(400).json({ error: "Configure SSH for this image's host (Admin → PVE Hosts) — patching runs virt-customize on the host" });
   }
@@ -228,8 +242,10 @@ router.post('/:id/patch-console', async (req, res) => {
   }
   const imgPath = `/mnt/pve/${storageId}/${rel}`;
 
-  db.prepare("UPDATE cloud_images SET console_patch_status = 'patching', console_patch_detail = '' WHERE id = ?").run(image.id);
-  logAudit(req, 'cloud_image_patch_console', image.name, `storage=${storageId}; requestId=${req.requestId || ''}`);
+  await db.update(cloudImages)
+    .set({ console_patch_status: 'patching', console_patch_detail: '' })
+    .where(eq(cloudImages.id, image.id));
+  await logAudit(req, 'cloud_image_patch_console', image.name, `storage=${storageId}; requestId=${req.requestId || ''}`);
 
   startBackgroundWork(async () => {
     const script = [
@@ -249,22 +265,27 @@ router.post('/:id/patch-console', async (req, res) => {
       else if (out.includes('HL_ALREADY')) { status = 'patched'; detail = 'already patched'; }
       else if (out.includes('HL_NOT_NEEDED')) { status = 'patched'; detail = 'not needed — image has no systemd OSC drop-in'; }
       else detail = (out.trim().split('\n').pop() || `virt-customize exited with ${result?.code}`).slice(0, 300);
-    } catch (err) {
+    } catch (err: any) {
       detail = String(err.message || 'patch failed').slice(0, 300);
     }
-    db.prepare('UPDATE cloud_images SET console_patch_status = ?, console_patch_detail = ? WHERE id = ?')
-      .run(status, detail, image.id);
+    await db.update(cloudImages)
+      .set({ console_patch_status: status, console_patch_detail: detail })
+      .where(eq(cloudImages.id, image.id));
   }, { kind: 'cloud-image-console-patch', id: image.id, requestId: req.requestId })
-    .catch((err) => {
-      db.prepare('UPDATE cloud_images SET console_patch_status = ?, console_patch_detail = ? WHERE id = ?')
-        .run('error', sanitizeError(err.message), image.id);
+    .catch((err: any) => {
+      db.update(cloudImages)
+        .set({ console_patch_status: 'error', console_patch_detail: sanitizeError(err.message) })
+        .where(eq(cloudImages.id, image.id))
+        .catch(() => {});
     });
 
   res.json({ ok: true, status: 'patching' });
 });
 
 router.delete('/:id', async (req, res) => {
-  const image = db.prepare('SELECT * FROM cloud_images WHERE id = ?').get(req.params.id);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Image not found' });
+  const [image] = await db.select().from(cloudImages).where(eq(cloudImages.id, id)).limit(1);
   if (!image) return res.status(404).json({ error: 'Image not found' });
   if (image.status === 'templating') {
     return res.status(400).json({ error: 'A template is being created from this image — wait for it to finish' });
@@ -272,7 +293,7 @@ router.delete('/:id', async (req, res) => {
   if (image.volid) {
     try {
       await deleteVolume(image.node, image.volid);
-    } catch (err) {
+    } catch (err: any) {
       // Already gone is fine; anything else should stop the delete so we
       // don't leave an orphaned multi-GB file on the storage.
       if (!/does not exist|no such|not found/i.test(err.message)) {
@@ -280,8 +301,8 @@ router.delete('/:id', async (req, res) => {
       }
     }
   }
-  db.prepare('DELETE FROM cloud_images WHERE id = ?').run(req.params.id);
-  logAudit(req, 'cloud_image_delete', image.name, image.volid);
+  await db.delete(cloudImages).where(eq(cloudImages.id, id));
+  await logAudit(req, 'cloud_image_delete', image.name, image.volid);
   res.json({ ok: true });
 });
 
@@ -293,7 +314,9 @@ router.delete('/:id', async (req, res) => {
 // registers it in vm_templates so the normal clone flow picks it up.
 
 router.post('/:id/template', async (req, res) => {
-  const image = db.prepare('SELECT * FROM cloud_images WHERE id = ?').get(req.params.id);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Image not found' });
+  const [image] = await db.select().from(cloudImages).where(eq(cloudImages.id, id)).limit(1);
   if (!image) return res.status(404).json({ error: 'Image not found' });
   if (image.status !== 'ready') {
     return res.status(400).json({ error: `Image is not ready (status: ${image.status})` });
@@ -319,8 +342,8 @@ router.post('/:id/template', async (req, res) => {
   try {
     // The VMID is reserved for the duration of the create and handed back if it
     // fails, so a template build can't collide with a concurrent VM deploy.
-    const { vmid, result: upid } = await withFreshVmid((id) => createVM(image.node, id, {
-      name: String(name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || `cloud-template-${id}`,
+    const { vmid, result: upid } = await withFreshVmid((freshId: number) => createVM(image.node, freshId, {
+      name: String(name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || `cloud-template-${freshId}`,
       cpu: 'host',
       cores: parseInt(cores, 10) || 2,
       memory: memoryMb,
@@ -336,44 +359,47 @@ router.post('/:id/template', async (req, res) => {
       description: `Cloud-init template built from ${image.name} (${image.url})`,
     }));
 
-    setImageStatus(image.id, 'templating', `Creating template "${name}" (VMID ${vmid})…`);
-    logAudit(req, 'cloud_image_template', `${image.node}/${vmid}`, `image:${image.name} name:${name}`);
+    await setImageStatus(image.id, 'templating', `Creating template "${name}" (VMID ${vmid})…`);
+    await logAudit(req, 'cloud_image_template', `${image.node}/${vmid}`, `image:${image.name} name:${name}`);
 
     startBackgroundWork(async () => {
       const result = await waitForTask(image.node, upid);
       if (!result.ok) {
-        setImageStatus(image.id, 'ready', `Template creation failed (VMID ${vmid}): ${result.exitstatus}`);
+        await setImageStatus(image.id, 'ready', `Template creation failed (VMID ${vmid}): ${result.exitstatus}`);
         return;
       }
       const warnings = [];
       try {
         await resizeVMDisk(image.node, vmid, 'scsi0', `${baseDiskGb}G`);
-      } catch (err) {
+      } catch (err: any) {
         warnings.push(`disk resize failed: ${sanitizeError(err.message)}`);
       }
       try {
         await convertToTemplate(image.node, vmid);
-      } catch (err) {
-        setImageStatus(image.id, 'ready', `VM ${vmid} imported but template conversion failed: ${sanitizeError(err.message)}`);
+      } catch (err: any) {
+        await setImageStatus(image.id, 'ready', `VM ${vmid} imported but template conversion failed: ${sanitizeError(err.message)}`);
         return;
       }
-      db.prepare(`
-        INSERT INTO vm_templates (name, description, node, vmid, default_cores, default_memory, default_disk_gb, default_storage, cloud_init, enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
-      `).run(
+      await db.insert(vmTemplates).values({
         name,
-        `Cloud-init template from ${image.name}`,
-        image.node, vmid,
-        parseInt(cores, 10) || 2, memoryMb, baseDiskGb, storage,
-      );
-      setImageStatus(image.id, 'ready', warnings.length
+        description: `Cloud-init template from ${image.name}`,
+        node: image.node,
+        vmid,
+        default_cores: parseInt(cores, 10) || 2,
+        default_memory: memoryMb,
+        default_disk_gb: baseDiskGb,
+        default_storage: storage,
+        cloud_init: true,
+        enabled: true,
+      });
+      await setImageStatus(image.id, 'ready', warnings.length
         ? `Template "${name}" (VMID ${vmid}) created — ${warnings.join('; ')}`
         : `Template "${name}" (VMID ${vmid}) created`);
     }, { kind: 'cloud-image-template', id: image.id, requestId: req.requestId })
-      .catch((err) => setImageStatus(image.id, 'ready', `Template creation failed: ${sanitizeError(err.message)}`));
+      .catch((err: any) => { setImageStatus(image.id, 'ready', `Template creation failed: ${sanitizeError(err.message)}`).catch(() => {}); });
 
     res.json({ vmid, status: 'templating' });
-  } catch (err) {
+  } catch (err: any) {
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });

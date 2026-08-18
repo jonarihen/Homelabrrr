@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import db from '../db.ts';
+import { and, eq, ne, inArray, count, desc } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { caddyServers, caddySites, firewalls, users, vmAssignments, vmSshConfigs } from '../db/schema/index.ts';
+import { isUniqueViolation } from '../db/errors.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { logAudit, logAuditEntry } from '../utils/audit.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
@@ -44,23 +47,23 @@ const INITIAL_STEPS = [
   { key: 'live',    label: 'Site live' },
 ];
 
+// steps is a jsonb column now — store the array of objects directly.
 function stepList(steps) {
-  return JSON.stringify(steps.map((s) => ({ key: s.key, label: s.label, status: s.status || 'pending', note: s.note || '' })));
+  return steps.map((s) => ({ key: s.key, label: s.label, status: s.status || 'pending', note: s.note || '' }));
 }
 
-function setSiteStep(siteId, key, status, note) {
-  const row = db.prepare('SELECT steps FROM caddy_sites WHERE id = ?').get(siteId);
-  let steps = [];
-  try { steps = row?.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
+async function setSiteStep(siteId, key, status, note) {
+  const [row] = await db.select({ steps: caddySites.steps }).from(caddySites).where(eq(caddySites.id, siteId)).limit(1);
+  const steps = Array.isArray(row?.steps) ? row.steps : [];
   const step = steps.find((s) => s.key === key);
   if (!step) return;
   step.status = status;
   if (note !== undefined) step.note = note;
-  db.prepare('UPDATE caddy_sites SET steps = ? WHERE id = ?').run(JSON.stringify(steps), siteId);
+  await db.update(caddySites).set({ steps }).where(eq(caddySites.id, siteId));
 }
 
-function setSiteStatus(siteId, status, detail) {
-  db.prepare('UPDATE caddy_sites SET status = ?, status_detail = ? WHERE id = ?').run(status, detail ?? '', siteId);
+async function setSiteStatus(siteId, status, detail) {
+  await db.update(caddySites).set({ status, status_detail: detail ?? '' }).where(eq(caddySites.id, siteId));
 }
 
 // ─── Route conflicts + end-to-end verification ────────────────────────────────
@@ -89,11 +92,11 @@ async function checkForConflicts(caddy, siteId, domain) {
   }
 }
 
-function recordConflict(site, conflicts) {
+async function recordConflict(site, conflicts) {
   const message = conflictMessage(site.domain, conflicts[0]);
-  setSiteStep(site.id, 'push', 'blocked', message);
-  setSiteStatus(site.id, 'conflict', message);
-  logAuditEntry({
+  await setSiteStep(site.id, 'push', 'blocked', message);
+  await setSiteStatus(site.id, 'conflict', message);
+  await logAuditEntry({
     action: 'website_route_conflict',
     target: site.domain,
     detail: `shadowed on caddy server "${conflicts[0].server}" by a route to ${conflicts[0].upstream || conflicts[0].kinds.join(',') || 'unknown'}`,
@@ -111,9 +114,10 @@ async function probePublishedSite(server, domain) {
   return probeSite({ address, port: PROBE_PORT, domain });
 }
 
-function recordProbe(siteId, probe) {
-  db.prepare('UPDATE caddy_sites SET probe_status = ?, probe_http_status = ?, probe_detail = ?, probe_at = datetime(\'now\') WHERE id = ?')
-    .run(probe.kind, probe.status || 0, probe.message, siteId);
+async function recordProbe(siteId, probe) {
+  await db.update(caddySites)
+    .set({ probe_status: probe.kind, probe_http_status: probe.status || 0, probe_detail: probe.message, probe_at: new Date() })
+    .where(eq(caddySites.id, siteId));
 }
 
 // The single place a site becomes 'live'. It does so only after an actual
@@ -122,29 +126,29 @@ function recordProbe(siteId, probe) {
 async function finishLive(siteId, site, server, detail) {
   const probe = await probePublishedSite(server, site.domain);
   if (!probe) {
-    setSiteStep(siteId, 'live', 'done', 'Could not verify the site end-to-end — the Caddy server has no probeable address.');
-    setSiteStatus(siteId, 'live', detail || '');
+    await setSiteStep(siteId, 'live', 'done', 'Could not verify the site end-to-end — the Caddy server has no probeable address.');
+    await setSiteStatus(siteId, 'live', detail || '');
     return;
   }
-  recordProbe(siteId, probe);
+  await recordProbe(siteId, probe);
   if (probe.ok) {
-    setSiteStep(siteId, 'live', 'done', probe.message);
-    setSiteStatus(siteId, 'live', detail || '');
+    await setSiteStep(siteId, 'live', 'done', probe.message);
+    await setSiteStatus(siteId, 'live', detail || '');
     return;
   }
   // The route is in place; what failed is downstream of it. 'upstream' is the
   // user's own service and reads as an error they can act on; the rest are
   // waiting-on-something states.
-  setSiteStep(siteId, 'live', probe.kind === 'upstream' ? 'error' : 'blocked', probe.message);
-  setSiteStatus(siteId, 'warning', probe.message);
+  await setSiteStep(siteId, 'live', probe.kind === 'upstream' ? 'error' : 'blocked', probe.message);
+  await setSiteStatus(siteId, 'warning', probe.message);
   console.warn(`[websites] site ${siteId} (${site.domain}) published but not serving: ${probe.message}`);
 }
 
 // ─── Serializers ───────────────────────────────────────────────────────────────
 
 function serializeSite(row) {
-  let steps = [];
-  try { steps = row.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
+  // steps is a jsonb column — already an array of objects.
+  const steps = Array.isArray(row.steps) ? row.steps : [];
   return {
     id: row.id,
     serverId: row.server_id,
@@ -160,7 +164,7 @@ function serializeSite(row) {
     fortigateId: row.fortigate_id,
     inspectionProfile: row.inspection_profile || '',
     certName: row.cert_name || '',
-    managed: row.managed !== 0,
+    managed: !!row.managed,
     kind: row.kind || 'reverse_proxy',
     wildcard: row.wildcard || '',
     // What an actual HTTPS request to the domain last observed (see caddyProbe).
@@ -172,8 +176,9 @@ function serializeSite(row) {
   };
 }
 
-function serializeServer(row) {
-  const fw = row.fortigate_id ? db.prepare('SELECT name, external_ip, wan_interface, root_vdom FROM firewalls WHERE id = ?').get(row.fortigate_id) : null;
+// `siteCount` and `firewall` are supplied by the caller (batched, so listing
+// servers is not an N+1) — `firewall` is the linked FortiGate row or null.
+function serializeServer(row, siteCount, firewall) {
   return {
     id: row.id,
     name: row.name,
@@ -181,11 +186,11 @@ function serializeServer(row) {
     authType: row.auth_type || 'none',
     hasAuth: !!row.auth_secret,
     serverName: row.server_name || '',
-    verifyTls: row.verify_tls !== 0,
-    wanIp: effectiveWanIp(row),
+    verifyTls: !!row.verify_tls,
+    wanIp: wanIpFor(row, firewall),
     wanIpManual: row.wan_ip || '',
     fortigateId: row.fortigate_id || null,
-    fortigateName: fw?.name || null,
+    fortigateName: firewall?.name || null,
     inspectionProfile: row.inspection_profile || '',
     inspectionBundleCert: row.inspection_bundle_cert || '',
     mode: sshConfigured(row) ? 'caddyfile' : 'api',
@@ -198,37 +203,75 @@ function serializeServer(row) {
     snippetPath: row.snippet_path || '/etc/caddy/homelabrrr.caddy',
     caddyfilePath: row.caddyfile_path || '/etc/caddy/Caddyfile',
     createdAt: row.created_at,
-    siteCount: db.prepare('SELECT COUNT(*) AS c FROM caddy_sites WHERE server_id = ?').get(row.id).c,
+    siteCount,
   };
 }
 
 // ─── Lookups ───────────────────────────────────────────────────────────────────
 
-function getServerRow(id) {
-  return db.prepare('SELECT * FROM caddy_servers WHERE id = ?').get(id);
+async function getServerRow(id) {
+  const [row] = await db.select().from(caddyServers).where(eq(caddyServers.id, Number(id))).limit(1);
+  return row;
+}
+
+// WAN IP from a server row + its (already-loaded) FortiGate row: the explicit
+// manual value wins; otherwise fall back to the linked FortiGate's stored IP.
+function wanIpFor(server, firewall) {
+  if (server.wan_ip) return server.wan_ip;
+  if (firewall?.external_ip) return firewall.external_ip;
+  return '';
 }
 
 // WAN IP used for DNS validation: the explicit manual value wins; otherwise fall
-// back to the linked FortiGate's stored external IP.
-function effectiveWanIp(server) {
+// back to the linked FortiGate's stored external IP (fetched on demand).
+async function effectiveWanIp(server) {
   if (server.wan_ip) return server.wan_ip;
   if (server.fortigate_id) {
-    const fw = db.prepare('SELECT external_ip FROM firewalls WHERE id = ?').get(server.fortigate_id);
+    const [fw] = await db.select({ external_ip: firewalls.external_ip })
+      .from(firewalls).where(eq(firewalls.id, server.fortigate_id)).limit(1);
     if (fw?.external_ip) return fw.external_ip;
   }
   return '';
 }
 
-// A site row joined with its owner + server name, scoped for reads.
-const SITE_SELECT = `
-  SELECT s.*, u.username AS owner_username, cs.name AS server_name, cs.server_name AS caddy_server_name
-  FROM caddy_sites s
-  LEFT JOIN users u ON u.id = s.owner_user_id
-  LEFT JOIN caddy_servers cs ON cs.id = s.server_id
-`;
+// A site row joined with its owner + server name, scoped for reads. Replaces the
+// old interpolated SITE_SELECT fragment with a shared drizzle column map.
+const SITE_COLUMNS = {
+  id: caddySites.id,
+  server_id: caddySites.server_id,
+  domain: caddySites.domain,
+  upstream_host: caddySites.upstream_host,
+  upstream_port: caddySites.upstream_port,
+  owner_user_id: caddySites.owner_user_id,
+  status: caddySites.status,
+  status_detail: caddySites.status_detail,
+  steps: caddySites.steps,
+  fortigate_id: caddySites.fortigate_id,
+  inspection_profile: caddySites.inspection_profile,
+  cert_name: caddySites.cert_name,
+  created_at: caddySites.created_at,
+  managed: caddySites.managed,
+  kind: caddySites.kind,
+  wildcard: caddySites.wildcard,
+  probe_status: caddySites.probe_status,
+  probe_http_status: caddySites.probe_http_status,
+  probe_detail: caddySites.probe_detail,
+  probe_at: caddySites.probe_at,
+  owner_username: users.username,
+  server_name: caddyServers.name,
+  caddy_server_name: caddyServers.server_name,
+};
 
-function loadSiteForUser(req, id) {
-  const row = db.prepare(`${SITE_SELECT} WHERE s.id = ?`).get(id);
+// Fresh builder each call: caddy_sites LEFT JOIN owner + server (the old SITE_SELECT).
+function siteQuery() {
+  return db.select(SITE_COLUMNS)
+    .from(caddySites)
+    .leftJoin(users, eq(users.id, caddySites.owner_user_id))
+    .leftJoin(caddyServers, eq(caddyServers.id, caddySites.server_id));
+}
+
+async function loadSiteForUser(req, id) {
+  const [row] = await siteQuery().where(eq(caddySites.id, Number(id))).limit(1);
   if (!row) return { row: null };
   const owns = req.session.isAdmin || row.owner_user_id === req.session.userId;
   return { row, owns };
@@ -336,17 +379,17 @@ async function findBundleCert(fwClient, rootVdom, baseName) {
 // Everything Homelabrrr owns on a server, in the shape the snippet needs.
 // Error'd rows are left out (their DNS/upstream may be wrong); anything mid-
 // flight or live is included so a sync mid-publish can't drop a site.
-function managedSitesForSnippet(serverId) {
-  return db.prepare(
-    "SELECT * FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status != 'error' ORDER BY domain"
-  ).all(serverId);
+async function managedSitesForSnippet(serverId) {
+  return db.select().from(caddySites)
+    .where(and(eq(caddySites.server_id, serverId), eq(caddySites.managed, true), ne(caddySites.status, 'error')))
+    .orderBy(caddySites.domain);
 }
 
 // Regenerate + push the snippet, pinning the SSH host key on first use.
 async function syncServerSnippet(server) {
-  const result = await deploySnippet(server, managedSitesForSnippet(server.id));
+  const result = await deploySnippet(server, await managedSitesForSnippet(server.id));
   if (!server.ssh_host_key && result.fingerprint) {
-    db.prepare('UPDATE caddy_servers SET ssh_host_key = ? WHERE id = ?').run(result.fingerprint, server.id);
+    await db.update(caddyServers).set({ ssh_host_key: result.fingerprint }).where(eq(caddyServers.id, server.id));
   }
   return result;
 }
@@ -358,9 +401,9 @@ async function detectWildcard(caddy, serverId, domain) {
     const slot = await caddy.findWildcardSlot(domain);
     if (slot?.wildcard) return slot.wildcard;
   } catch { /* admin API unreachable — fall back to what we know */ }
-  const known = db.prepare(
-    "SELECT DISTINCT wildcard FROM caddy_sites WHERE server_id = ? AND wildcard != ''"
-  ).all(serverId);
+  const known = await db.selectDistinct({ wildcard: caddySites.wildcard })
+    .from(caddySites)
+    .where(and(eq(caddySites.server_id, serverId), ne(caddySites.wildcard, '')));
   const hit = known.find((r) => hostCoveredByWildcard(domain, r.wildcard));
   return hit ? hit.wildcard : '';
 }
@@ -372,9 +415,9 @@ async function detectWildcard(caddy, serverId, domain) {
 // route back into a position where it is shadowed would restore the config and
 // none of the behaviour, which is the failure this whole check exists to catch.
 async function reconcileManagedRoutes(server) {
-  const sites = db.prepare(
-    "SELECT * FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning', 'blocked')"
-  ).all(server.id);
+  const sites = await db.select().from(caddySites)
+    .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
+      inArray(caddySites.status, ['live', 'warning', 'blocked'])));
   if (sites.length === 0) return { repaired: [], conflicted: [] };
   const caddy = createCaddyClient(server);
   const liveIds = new Set(await caddy.listManagedRouteIds());
@@ -385,11 +428,11 @@ async function reconcileManagedRoutes(server) {
     const { wildcard } = await caddy.upsertRoute(site.id, site.domain, site.upstream_host, site.upstream_port);
     const conflicts = await checkForConflicts(caddy, site.id, site.domain);
     if (conflicts?.length) {
-      recordConflict(site, conflicts);
+      await recordConflict(site, conflicts);
       conflicted.push(site.domain);
       continue;
     }
-    db.prepare('UPDATE caddy_sites SET wildcard = ? WHERE id = ?').run(wildcard || '', site.id);
+    await db.update(caddySites).set({ wildcard: wildcard || '' }).where(eq(caddySites.id, site.id));
     repaired.push(site.domain);
   }
   return { repaired, conflicted };
@@ -401,21 +444,21 @@ async function reconcileManagedRoutes(server) {
 // to live once it serves again. Nothing else is touched — a 'blocked' or
 // 'conflict' site is waiting on an operator, not on a probe.
 async function reprobeSites(server) {
-  const sites = db.prepare(
-    "SELECT * FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning')"
-  ).all(server.id);
+  const sites = await db.select().from(caddySites)
+    .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
+      inArray(caddySites.status, ['live', 'warning'])));
   for (const site of sites) {
     const probe = await probePublishedSite(server, site.domain);
     if (!probe) return;   // nothing probeable on this server at all
     const wasFailing = !!site.probe_status && site.probe_status !== 'serving';
-    recordProbe(site.id, probe);
+    await recordProbe(site.id, probe);
     if (site.status === 'live' && !probe.ok) {
-      setSiteStep(site.id, 'live', probe.kind === 'upstream' ? 'error' : 'blocked', probe.message);
-      setSiteStatus(site.id, 'warning', probe.message);
+      await setSiteStep(site.id, 'live', probe.kind === 'upstream' ? 'error' : 'blocked', probe.message);
+      await setSiteStatus(site.id, 'warning', probe.message);
       console.warn(`[websites] ${site.domain} stopped serving: ${probe.message}`);
     } else if (site.status === 'warning' && probe.ok && wasFailing) {
-      setSiteStep(site.id, 'live', 'done', probe.message);
-      setSiteStatus(site.id, 'live', '');
+      await setSiteStep(site.id, 'live', 'done', probe.message);
+      await setSiteStatus(site.id, 'live', '');
       console.log(`[websites] ${site.domain} is serving again: ${probe.message}`);
     }
   }
@@ -437,7 +480,7 @@ const RECONCILE_START_DELAY_MS = 45_000;
 
 async function websiteMaintenanceTick() {
   let servers = [];
-  try { servers = db.prepare('SELECT * FROM caddy_servers').all(); } catch { return; }
+  try { servers = await db.select().from(caddyServers); } catch { return; }
   for (const server of servers) {
     try {
       if (!sshConfigured(server)) {
@@ -450,14 +493,22 @@ async function websiteMaintenanceTick() {
   }
 }
 
-const reconcileTimer = setInterval(() => { websiteMaintenanceTick(); }, RECONCILE_MS);
-reconcileTimer.unref?.();
-const reconcileStartTimer = setTimeout(() => { websiteMaintenanceTick(); }, RECONCILE_START_DELAY_MS);
-reconcileStartTimer.unref?.();
+// Timers are registered from index.ts after the DB is ready, never at import
+// time (conventions rule S1 — no module-scope timers).
+let reconcileTimer = null;
+let reconcileStartTimer = null;
+
+export function startWebsiteMaintenance() {
+  if (reconcileTimer) return;
+  reconcileTimer = setInterval(() => { websiteMaintenanceTick(); }, RECONCILE_MS);
+  reconcileTimer.unref?.();
+  reconcileStartTimer = setTimeout(() => { websiteMaintenanceTick(); }, RECONCILE_START_DELAY_MS);
+  reconcileStartTimer.unref?.();
+}
 
 export function stopWebsiteMaintenance() {
-  clearInterval(reconcileTimer);
-  clearTimeout(reconcileStartTimer);
+  if (reconcileTimer) { clearInterval(reconcileTimer); reconcileTimer = null; }
+  if (reconcileStartTimer) { clearTimeout(reconcileStartTimer); reconcileStartTimer = null; }
 }
 
 // ─── The end-to-end publish flow (runs in the background) ──────────────────────
@@ -466,14 +517,14 @@ const CERT_POLL_ATTEMPTS = 30;
 const CERT_POLL_MS = 6000;
 
 async function runSiteFlow(siteId) {
-  const site = db.prepare('SELECT * FROM caddy_sites WHERE id = ?').get(siteId);
+  const [site] = await db.select().from(caddySites).where(eq(caddySites.id, siteId)).limit(1);
   if (!site) return;
   // Imported sites mirror routes owned by the Caddyfile — never push for them.
-  if (site.managed === 0) return;
-  const server = getServerRow(site.server_id);
+  if (!site.managed) return;
+  const server = await getServerRow(site.server_id);
   if (!server) {
-    setSiteStep(siteId, 'push', 'error', 'Caddy server no longer registered');
-    setSiteStatus(siteId, 'error', 'The Caddy server for this site was removed.');
+    await setSiteStep(siteId, 'push', 'error', 'Caddy server no longer registered');
+    await setSiteStatus(siteId, 'error', 'The Caddy server for this site was removed.');
     return;
   }
 
@@ -481,53 +532,55 @@ async function runSiteFlow(siteId) {
   // Caddyfile-sync servers get the snippet regenerated + a validated reload
   // (persistent across the user's own reloads); API-mode servers get an
   // admin-API route (re-pushed by the reconcile tick if a reload drops it).
-  setSiteStep(siteId, 'push', 'active');
-  setSiteStatus(siteId, 'pushing', '');
+  await setSiteStep(siteId, 'push', 'active');
+  await setSiteStatus(siteId, 'pushing', '');
   let wildcard = '';
   try {
     const caddy = createCaddyClient(server);
     if (sshConfigured(server)) {
       wildcard = await detectWildcard(caddy, server.id, site.domain);
-      db.prepare('UPDATE caddy_sites SET wildcard = ? WHERE id = ?').run(wildcard, siteId);
+      await db.update(caddySites).set({ wildcard }).where(eq(caddySites.id, siteId));
       await syncServerSnippet(server);
-      setSiteStep(siteId, 'push', 'done', wildcard
+      await setSiteStep(siteId, 'push', 'done', wildcard
         ? `Caddyfile snippet updated & Caddy reloaded — the ${wildcard} wildcard certificate covers this site`
         : 'Caddyfile snippet updated & Caddy reloaded');
     } else {
       const pushed = await caddy.upsertRoute(siteId, site.domain, site.upstream_host, site.upstream_port);
       wildcard = pushed.wildcard || '';
-      db.prepare('UPDATE caddy_sites SET wildcard = ? WHERE id = ?').run(wildcard, siteId);
+      await db.update(caddySites).set({ wildcard }).where(eq(caddySites.id, siteId));
 
       // A 2xx from the admin API only means the route was *stored*. Read the
       // route array back: an appended route always loses to a Caddyfile-derived
       // one for the same hostname, so a conflict here is fatal, not a race.
       const conflicts = await checkForConflicts(caddy, siteId, site.domain);
       if (conflicts === null) {
-        setSiteStep(siteId, 'push', 'done', 'Route pushed, but the live config could not be read back to check for conflicting routes.');
+        await setSiteStep(siteId, 'push', 'done', 'Route pushed, but the live config could not be read back to check for conflicting routes.');
       } else if (conflicts.length) {
-        recordConflict(site, conflicts);
+        await recordConflict(site, conflicts);
         return;
       } else if (wildcard) {
-        setSiteStep(siteId, 'push', 'done', `Nested under the existing ${wildcard} block — its wildcard certificate covers this site`);
+        await setSiteStep(siteId, 'push', 'done', `Nested under the existing ${wildcard} block — its wildcard certificate covers this site`);
       } else {
-        setSiteStep(siteId, 'push', 'done', pushed.serverName ? `Appended to Caddy http server "${pushed.serverName}" — no other route matches this domain` : 'No other route matches this domain');
+        await setSiteStep(siteId, 'push', 'done', pushed.serverName ? `Appended to Caddy http server "${pushed.serverName}" — no other route matches this domain` : 'No other route matches this domain');
       }
     }
   } catch (err) {
     // A plaintext-only http server is the operator's to fix on the Caddy host or
     // the server record — retrying the same push cannot change the outcome.
     if (err.code === 'caddy_no_https_server') {
-      setSiteStep(siteId, 'push', 'blocked', err.message);
-      setSiteStatus(siteId, 'blocked', err.message);
+      await setSiteStep(siteId, 'push', 'blocked', err.message);
+      await setSiteStatus(siteId, 'blocked', err.message);
       console.warn(`[websites] site ${siteId} (${site.domain}) not published: ${err.message}`);
       return;
     }
-    setSiteStep(siteId, 'push', 'error', err.message);
-    setSiteStatus(siteId, 'error', `Could not publish the route to Caddy: ${err.message}`);
+    await setSiteStep(siteId, 'push', 'error', err.message);
+    await setSiteStatus(siteId, 'error', `Could not publish the route to Caddy: ${err.message}`);
     return;
   }
 
-  const fw = site.fortigate_id ? db.prepare('SELECT * FROM firewalls WHERE id = ?').get(site.fortigate_id) : null;
+  const [fw] = site.fortigate_id
+    ? await db.select().from(firewalls).where(eq(firewalls.id, site.fortigate_id)).limit(1)
+    : [null];
   const profileName = site.inspection_profile || '';
 
   // No inspection wiring requested → the site is already live through Caddy.
@@ -539,15 +592,15 @@ async function runSiteFlow(siteId) {
     const note = fw && server.inspection_profile
       ? `SSL inspection is off for this site — it holds none of "${server.inspection_profile}"'s ${SERVER_CERT_MAX} certificate slots`
       : 'No FortiGate inspection profile configured for this site';
-    setSiteStep(siteId, 'cert', 'skipped', note);
-    setSiteStep(siteId, 'inspect', 'skipped', note);
+    await setSiteStep(siteId, 'cert', 'skipped', note);
+    await setSiteStep(siteId, 'inspect', 'skipped', note);
     await finishLive(siteId, site, server, 'Route published to Caddy. Certificate issuance is handled by Caddy/Let’s Encrypt.');
     return;
   }
 
   // ── Wait for the synced certificate, then attach it to the profile ──────────
-  setSiteStep(siteId, 'cert', 'active');
-  setSiteStatus(siteId, 'issuing', '');
+  await setSiteStep(siteId, 'cert', 'active');
+  await setSiteStatus(siteId, 'issuing', '');
   const rootVdom = fw.root_vdom || 'root';
   let certName = null;
   try {
@@ -561,9 +614,9 @@ async function runSiteFlow(siteId) {
     if (server.inspection_bundle_cert) {
       const bundleCert = await findBundleCert(client, rootVdom, server.inspection_bundle_cert).catch(() => null);
       if (bundleCert) {
-        db.prepare('UPDATE caddy_sites SET cert_name = ? WHERE id = ?').run(bundleCert, siteId);
-        setSiteStep(siteId, 'cert', 'done', `Covered by the ${bundleCert} inspection bundle`);
-        setSiteStep(siteId, 'inspect', 'done', `Bundle already attached to "${profileName}" — no slot used`);
+        await db.update(caddySites).set({ cert_name: bundleCert }).where(eq(caddySites.id, siteId));
+        await setSiteStep(siteId, 'cert', 'done', `Covered by the ${bundleCert} inspection bundle`);
+        await setSiteStep(siteId, 'inspect', 'done', `Bundle already attached to "${profileName}" — no slot used`);
         await finishLive(siteId, site, server, '');
         return;
       }
@@ -579,21 +632,21 @@ async function runSiteFlow(siteId) {
     }
 
     if (!certName) {
-      setSiteStep(siteId, 'cert', 'skipped', 'Certificate not synced to the FortiGate yet — retry once Let’s Encrypt has issued it');
-      setSiteStep(siteId, 'inspect', 'skipped', 'Waiting on the certificate');
-      setSiteStep(siteId, 'live', 'done');
-      setSiteStatus(siteId, 'warning', 'Site is served by Caddy, but the certificate has not synced to the FortiGate yet. Use Retry after a minute to wire up SSL inspection.');
+      await setSiteStep(siteId, 'cert', 'skipped', 'Certificate not synced to the FortiGate yet — retry once Let’s Encrypt has issued it');
+      await setSiteStep(siteId, 'inspect', 'skipped', 'Waiting on the certificate');
+      await setSiteStep(siteId, 'live', 'done');
+      await setSiteStatus(siteId, 'warning', 'Site is served by Caddy, but the certificate has not synced to the FortiGate yet. Use Retry after a minute to wire up SSL inspection.');
       return;
     }
 
-    setSiteStep(siteId, 'cert', 'done');
-    db.prepare('UPDATE caddy_sites SET cert_name = ? WHERE id = ?').run(certName, siteId);
+    await setSiteStep(siteId, 'cert', 'done');
+    await db.update(caddySites).set({ cert_name: certName }).where(eq(caddySites.id, siteId));
 
     // ── Attach the cert to the SSL/SSH inspection profile ─────────────────────
-    setSiteStep(siteId, 'inspect', 'active');
-    setSiteStatus(siteId, 'inspecting', '');
+    await setSiteStep(siteId, 'inspect', 'active');
+    await setSiteStatus(siteId, 'inspecting', '');
     const result = await client.setInspectionServerCert(profileName, certName, rootVdom, site.domain);
-    setSiteStep(siteId, 'inspect', 'done', inspectNote(result, profileName));
+    await setSiteStep(siteId, 'inspect', 'done', inspectNote(result, profileName));
     await finishLive(siteId, site, server, '');
   } catch (err) {
     // A full profile is terminal, not transient: FortiOS caps the inbound
@@ -601,14 +654,14 @@ async function runSiteFlow(siteId) {
     // identically until a slot is freed on the firewall. Say so instead of
     // offering a Retry that cannot succeed.
     if (err.code === 'server_cert_limit') {
-      setSiteStep(siteId, 'inspect', 'blocked', err.message);
-      setSiteStep(siteId, 'live', 'done');
-      setSiteStatus(siteId, 'blocked', `Route is live in Caddy, but SSL inspection could not be wired up: ${err.message}`);
+      await setSiteStep(siteId, 'inspect', 'blocked', err.message);
+      await setSiteStep(siteId, 'live', 'done');
+      await setSiteStatus(siteId, 'blocked', `Route is live in Caddy, but SSL inspection could not be wired up: ${err.message}`);
       console.warn(`[websites] site ${siteId} (${site.domain}) blocked — inspection profile "${profileName}" is at its ${SERVER_CERT_MAX}-certificate limit`);
       return;
     }
-    setSiteStep(siteId, 'inspect', 'error', err.message);
-    setSiteStatus(siteId, 'warning', `Route is live in Caddy, but attaching the certificate to SSL inspection failed: ${err.message}. You can retry.`);
+    await setSiteStep(siteId, 'inspect', 'error', err.message);
+    await setSiteStatus(siteId, 'warning', `Route is live in Caddy, but attaching the certificate to SSL inspection failed: ${err.message}. You can retry.`);
   }
 }
 
@@ -632,7 +685,7 @@ function startSiteFlow(siteId) {
   // Fire-and-forget; the UI polls status. Failures are captured onto the row.
   runSiteFlow(siteId).catch((err) => {
     console.error(`[websites] site ${siteId} flow crashed:`, err.message);
-    try { setSiteStatus(siteId, 'error', sanitizeError(err.message)); } catch { /* ignore */ }
+    setSiteStatus(siteId, 'error', sanitizeError(err.message)).catch(() => { /* ignore */ });
   });
 }
 
@@ -640,10 +693,27 @@ function startSiteFlow(siteId) {
 //  ADMIN — Caddy server registration
 // ════════════════════════════════════════════════════════════════════════════
 
-router.get('/servers', pWebsites, (req, res) => {
-  const rows = db.prepare('SELECT * FROM caddy_servers ORDER BY name').all();
-  res.json(rows.map(serializeServer));
+router.get('/servers', pWebsites, async (req, res) => {
+  const rows = await db.select().from(caddyServers).orderBy(caddyServers.name);
+  // Batch the per-server site counts + linked FortiGate rows so listing servers
+  // is not an N+1 (one grouped count, one IN-list for the firewalls).
+  const counts = await db.select({ server_id: caddySites.server_id, c: count() })
+    .from(caddySites).groupBy(caddySites.server_id);
+  const countMap = new Map(counts.map((r) => [r.server_id, r.c]));
+  const fwMap = await firewallsByIds(rows.map((r) => r.fortigate_id));
+  res.json(rows.map((s) => serializeServer(s, countMap.get(s.id) || 0, fwMap.get(s.fortigate_id) || null)));
 });
+
+// Load the FortiGate rows for a set of (possibly null/duplicate) ids, keyed by id.
+async function firewallsByIds(ids) {
+  const uniq = [...new Set(ids.filter(Boolean))];
+  const map = new Map();
+  if (uniq.length === 0) return map;
+  const rows = await db.select({ id: firewalls.id, name: firewalls.name, external_ip: firewalls.external_ip })
+    .from(firewalls).where(inArray(firewalls.id, uniq));
+  for (const f of rows) map.set(f.id, f);
+  return map;
+}
 
 function validateServerBody(body) {
   const { name, apiUrl } = body;
@@ -679,37 +749,36 @@ router.post('/servers', pWebsites, async (req, res) => {
     snippetPath = '/etc/caddy/homelabrrr.caddy', caddyfilePath = '/etc/caddy/Caddyfile',
   } = req.body;
   try {
-    const r = db.prepare(`
-      INSERT INTO caddy_servers (name, api_url, auth_type, auth_secret, server_name, verify_tls, wan_ip, fortigate_id, inspection_profile, inspection_bundle_cert,
-                                 ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_secret, snippet_path, caddyfile_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      name, apiUrl, authType,
-      authSecret ? encryptSecret(authSecret) : '',
-      serverName, verifyTls ? 1 : 0, wanIp,
-      fortigateId || null, inspectionProfile, String(inspectionBundleCert || '').trim(),
-      String(sshHost).trim(), parseInt(sshPort, 10) || 22, String(sshUser).trim(), sshAuthType,
-      sshSecret ? encryptSecret(sshSecret) : '',
-      snippetPath || '/etc/caddy/homelabrrr.caddy', caddyfilePath || '/etc/caddy/Caddyfile',
-    );
-    logAudit(req, 'website_create_caddy_server', name, apiUrl);
+    const [{ id: newId }] = await db.insert(caddyServers).values({
+      name, api_url: apiUrl, auth_type: authType,
+      auth_secret: authSecret ? encryptSecret(authSecret) : '',
+      server_name: serverName, verify_tls: !!verifyTls, wan_ip: wanIp,
+      fortigate_id: fortigateId || null, inspection_profile: inspectionProfile,
+      inspection_bundle_cert: String(inspectionBundleCert || '').trim(),
+      ssh_host: String(sshHost).trim(), ssh_port: parseInt(sshPort, 10) || 22,
+      ssh_user: String(sshUser).trim(), ssh_auth_type: sshAuthType,
+      ssh_secret: sshSecret ? encryptSecret(sshSecret) : '',
+      snippet_path: snippetPath || '/etc/caddy/homelabrrr.caddy',
+      caddyfile_path: caddyfilePath || '/etc/caddy/Caddyfile',
+    }).returning({ id: caddyServers.id });
+    await logAudit(req, 'website_create_caddy_server', name, apiUrl);
 
     // Caddyfile sync configured: create the snippet right away so the admin
     // can add the `import` line to the Caddyfile without breaking a reload.
     let syncWarning = '';
-    const created = getServerRow(r.lastInsertRowid);
+    const created = await getServerRow(newId);
     if (sshConfigured(created)) {
       try { await syncServerSnippet(created); }
       catch (e) { syncWarning = `Server saved, but the first Caddyfile sync failed: ${sanitizeError(e.message)}`; }
     }
-    res.json({ id: r.lastInsertRowid, syncWarning });
+    res.json({ id: newId, syncWarning });
   } catch (e) {
     res.status(500).json({ error: sanitizeError(e.message) });
   }
 });
 
 router.put('/servers/:id', pWebsites, async (req, res) => {
-  const existing = getServerRow(req.params.id);
+  const existing = await getServerRow(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Caddy server not found' });
   const merged = {
     ...req.body,
@@ -731,7 +800,7 @@ router.put('/servers/:id', pWebsites, async (req, res) => {
   // Empty authSecret keeps the current one (matches the firewall/PVE pattern).
   const authSecret = req.body.authSecret ? encryptSecret(req.body.authSecret) : existing.auth_secret;
   const serverName = req.body.serverName ?? existing.server_name;
-  const verifyTls = req.body.verifyTls === undefined ? existing.verify_tls !== 0 : !!req.body.verifyTls;
+  const verifyTls = req.body.verifyTls === undefined ? !!existing.verify_tls : !!req.body.verifyTls;
   const wanIp = req.body.wanIp ?? existing.wan_ip;
   const fortigateId = req.body.fortigateId === undefined ? existing.fortigate_id : (req.body.fortigateId || null);
   const inspectionProfile = req.body.inspectionProfile ?? existing.inspection_profile;
@@ -746,15 +815,17 @@ router.put('/servers/:id', pWebsites, async (req, res) => {
   const snippetPath = merged.snippetPath || '/etc/caddy/homelabrrr.caddy';
   const caddyfilePath = merged.caddyfilePath || '/etc/caddy/Caddyfile';
 
-  db.prepare(`
-    UPDATE caddy_servers SET name = ?, api_url = ?, auth_type = ?, auth_secret = ?, server_name = ?, verify_tls = ?, wan_ip = ?, fortigate_id = ?, inspection_profile = ?, inspection_bundle_cert = ?,
-                             ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_auth_type = ?, ssh_secret = ?, ssh_host_key = ?, snippet_path = ?, caddyfile_path = ? WHERE id = ?
-  `).run(name, apiUrl, authType, authSecret, serverName, verifyTls ? 1 : 0, wanIp, fortigateId, inspectionProfile, inspectionBundleCert,
-    sshHost, sshPort, sshUser, sshAuthType, sshSecret, sshHostKey, snippetPath, caddyfilePath, req.params.id);
-  logAudit(req, 'website_update_caddy_server', name, apiUrl);
+  await db.update(caddyServers).set({
+    name, api_url: apiUrl, auth_type: authType, auth_secret: authSecret, server_name: serverName,
+    verify_tls: !!verifyTls, wan_ip: wanIp, fortigate_id: fortigateId, inspection_profile: inspectionProfile,
+    inspection_bundle_cert: inspectionBundleCert, ssh_host: sshHost, ssh_port: sshPort, ssh_user: sshUser,
+    ssh_auth_type: sshAuthType, ssh_secret: sshSecret, ssh_host_key: sshHostKey,
+    snippet_path: snippetPath, caddyfile_path: caddyfilePath,
+  }).where(eq(caddyServers.id, Number(req.params.id)));
+  await logAudit(req, 'website_update_caddy_server', name, apiUrl);
 
   let syncWarning = '';
-  const updated = getServerRow(req.params.id);
+  const updated = await getServerRow(req.params.id);
   if (sshConfigured(updated)) {
     try { await syncServerSnippet(updated); }
     catch (e) { syncWarning = `Saved, but the Caddyfile sync failed: ${sanitizeError(e.message)}`; }
@@ -762,20 +833,21 @@ router.put('/servers/:id', pWebsites, async (req, res) => {
   res.json({ ok: true, syncWarning });
 });
 
-router.delete('/servers/:id', pWebsites, (req, res) => {
-  const server = getServerRow(req.params.id);
+router.delete('/servers/:id', pWebsites, async (req, res) => {
+  const server = await getServerRow(req.params.id);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
-  const siteCount = db.prepare('SELECT COUNT(*) AS c FROM caddy_sites WHERE server_id = ?').get(req.params.id).c;
+  const [{ c: siteCount }] = await db.select({ c: count() }).from(caddySites)
+    .where(eq(caddySites.server_id, Number(req.params.id)));
   if (siteCount > 0) {
     return res.status(400).json({ error: `Remove the ${siteCount} published site(s) on this server first.` });
   }
-  db.prepare('DELETE FROM caddy_servers WHERE id = ?').run(req.params.id);
-  logAudit(req, 'website_delete_caddy_server', server.name, '');
+  await db.delete(caddyServers).where(eq(caddyServers.id, Number(req.params.id)));
+  await logAudit(req, 'website_delete_caddy_server', server.name, '');
   res.json({ ok: true });
 });
 
 router.get('/servers/:id/status', pWebsites, async (req, res) => {
-  const server = getServerRow(req.params.id);
+  const server = await getServerRow(req.params.id);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
   const mode = sshConfigured(server) ? 'caddyfile' : 'api';
   try {
@@ -785,9 +857,11 @@ router.get('/servers/:id/status', pWebsites, async (req, res) => {
     if (mode === 'api') {
       // Surface drift: managed sites whose admin-API route a reload wiped.
       const liveIds = new Set(await caddy.listManagedRouteIds().catch(() => []));
-      info.missingRoutes = db.prepare(
-        "SELECT id, domain FROM caddy_sites WHERE server_id = ? AND managed != 0 AND status IN ('live', 'warning', 'blocked')"
-      ).all(server.id).filter((s) => !liveIds.has(managedRouteId(s.id))).map((s) => s.domain);
+      const managedSites = await db.select({ id: caddySites.id, domain: caddySites.domain })
+        .from(caddySites)
+        .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
+          inArray(caddySites.status, ['live', 'warning', 'blocked'])));
+      info.missingRoutes = managedSites.filter((s) => !liveIds.has(managedRouteId(s.id))).map((s) => s.domain);
     }
     res.json(info);
   } catch (e) {
@@ -798,16 +872,16 @@ router.get('/servers/:id/status', pWebsites, async (req, res) => {
 // Manual sync: Caddyfile mode regenerates the snippet + reloads; API mode
 // re-pushes any managed routes missing from the live config right now.
 router.post('/servers/:id/sync', pWebsites, async (req, res) => {
-  const server = getServerRow(req.params.id);
+  const server = await getServerRow(req.params.id);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
   try {
     if (sshConfigured(server)) {
       const result = await syncServerSnippet(server);
-      logAudit(req, 'website_sync_caddyfile', server.name, `${result.sites} site(s), reloaded`);
+      await logAudit(req, 'website_sync_caddyfile', server.name, `${result.sites} site(s), reloaded`);
       return res.json({ mode: 'caddyfile', sites: result.sites, reloaded: result.reloaded });
     }
     const { repaired, conflicted } = await reconcileManagedRoutes(server);
-    logAudit(req, 'website_sync_routes', server.name,
+    await logAudit(req, 'website_sync_routes', server.name,
       `${repaired.length ? repaired.join(', ') : 'no drift'}${conflicted.length ? ` — shadowed: ${conflicted.join(', ')}` : ''}`);
     res.json({ mode: 'api', repaired, conflicted });
   } catch (e) {
@@ -818,10 +892,10 @@ router.post('/servers/:id/sync', pWebsites, async (req, res) => {
 // Auto-read the WAN IP from the linked FortiGate (stored external IP, else the
 // live WAN interface address) and store it as the manual value.
 router.post('/servers/:id/detect-wan-ip', pWebsites, async (req, res) => {
-  const server = getServerRow(req.params.id);
+  const server = await getServerRow(req.params.id);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
   if (!server.fortigate_id) return res.status(400).json({ error: 'Link a FortiGate to this Caddy server first' });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(server.fortigate_id);
+  const [fw] = await db.select().from(firewalls).where(eq(firewalls.id, server.fortigate_id)).limit(1);
   if (!fw) return res.status(404).json({ error: 'Linked FortiGate not found' });
   try {
     let ip = fw.external_ip || '';
@@ -831,8 +905,8 @@ router.post('/servers/:id/detect-wan-ip', pWebsites, async (req, res) => {
       ip = String(iface?.ip || '').split(' ')[0] || '';
     }
     if (!ip) return res.status(400).json({ error: 'Could not determine a WAN IP from the FortiGate' });
-    db.prepare('UPDATE caddy_servers SET wan_ip = ? WHERE id = ?').run(ip, req.params.id);
-    logAudit(req, 'website_detect_wan_ip', server.name, ip);
+    await db.update(caddyServers).set({ wan_ip: ip }).where(eq(caddyServers.id, Number(req.params.id)));
+    await logAudit(req, 'website_detect_wan_ip', server.name, ip);
     res.json({ wanIp: ip });
   } catch (e) {
     res.status(500).json({ error: sanitizeError(e.message) });
@@ -846,10 +920,17 @@ router.post('/servers/:id/detect-wan-ip', pWebsites, async (req, res) => {
 // managed=0 rows: visible in the portal, occupying their domain (so nobody can
 // re-publish over them), but never pushed to / deleted from Caddy.
 
-function annotateDiscovered(serverId, sites) {
-  const existingStmt = db.prepare('SELECT id, server_id FROM caddy_sites WHERE domain = ?');
+async function annotateDiscovered(serverId, sites) {
+  // Batch the existing-domain lookup (one IN-list, not one query per site).
+  const domains = sites.map((s) => s.domain).filter(Boolean);
+  const existingByDomain = new Map();
+  if (domains.length) {
+    const rows = await db.select({ id: caddySites.id, server_id: caddySites.server_id, domain: caddySites.domain })
+      .from(caddySites).where(inArray(caddySites.domain, domains));
+    for (const r of rows) existingByDomain.set(r.domain, r);
+  }
   return sites.map((s) => {
-    const existing = existingStmt.get(s.domain);
+    const existing = existingByDomain.get(s.domain);
     let blockedReason = '';
     if (existing) {
       blockedReason = existing.server_id === serverId
@@ -867,19 +948,19 @@ function annotateDiscovered(serverId, sites) {
 }
 
 router.get('/servers/:id/discover', pWebsites, async (req, res) => {
-  const server = getServerRow(req.params.id);
+  const server = await getServerRow(req.params.id);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
   try {
     const caddy = createCaddyClient(server);
     const { sites, managedCount } = await caddy.discoverSites();
-    res.json({ sites: annotateDiscovered(server.id, sites), managedCount });
+    res.json({ sites: await annotateDiscovered(server.id, sites), managedCount });
   } catch (e) {
     res.status(500).json({ error: sanitizeError(e.message) });
   }
 });
 
 router.post('/servers/:id/import', pWebsites, async (req, res) => {
-  const server = getServerRow(req.params.id);
+  const server = await getServerRow(req.params.id);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
   // Only domain names are accepted from the client — upstream/kind/wildcard are
   // re-read from the live Caddy config so nothing user-supplied lands in a row.
@@ -887,28 +968,29 @@ router.post('/servers/:id/import', pWebsites, async (req, res) => {
   try {
     const caddy = createCaddyClient(server);
     const { sites } = await caddy.discoverSites();
-    const annotated = annotateDiscovered(server.id, sites);
+    const annotated = await annotateDiscovered(server.id, sites);
     const byDomain = new Map(annotated.map((s) => [s.domain, s]));
     const targets = requested ?? annotated.filter((s) => s.importable).map((s) => s.domain);
 
-    const insert = db.prepare(`
-      INSERT INTO caddy_sites (server_id, domain, upstream_host, upstream_port, owner_user_id, status, status_detail, steps, fortigate_id, inspection_profile, managed, kind, wildcard)
-      VALUES (?, ?, ?, ?, NULL, 'live', ?, '[]', NULL, '', 0, ?, ?)
-    `);
     const imported = [];
     const skipped = [];
+    const toInsert = [];
     for (const domain of targets) {
       const entry = byDomain.get(domain);
       if (!entry) { skipped.push({ domain, reason: 'Not found in the Caddy config' }); continue; }
       if (!entry.importable) { skipped.push({ domain, reason: entry.blockedReason }); continue; }
-      insert.run(
-        server.id, domain, entry.upstreamHost || '', entry.upstreamPort || 0,
-        'Imported from Caddy — this route is managed in the Caddyfile, not by Homelabrrr.',
-        entry.kind || 'reverse_proxy', entry.wildcard || '',
-      );
+      // Imported rows: managed=false (Caddyfile-owned), empty steps, no owner.
+      toInsert.push({
+        server_id: server.id, domain, upstream_host: entry.upstreamHost || '', upstream_port: entry.upstreamPort || 0,
+        owner_user_id: null, status: 'live',
+        status_detail: 'Imported from Caddy — this route is managed in the Caddyfile, not by Homelabrrr.',
+        steps: [], fortigate_id: null, inspection_profile: '', managed: false,
+        kind: entry.kind || 'reverse_proxy', wildcard: entry.wildcard || '',
+      });
       imported.push(domain);
     }
-    logAudit(req, 'website_import_sites', server.name, `${imported.length} imported, ${skipped.length} skipped`);
+    if (toInsert.length) await db.insert(caddySites).values(toInsert);
+    await logAudit(req, 'website_import_sites', server.name, `${imported.length} imported, ${skipped.length} skipped`);
     res.json({ imported, skipped });
   } catch (e) {
     res.status(500).json({ error: sanitizeError(e.message) });
@@ -918,10 +1000,10 @@ router.post('/servers/:id/import', pWebsites, async (req, res) => {
 // SSL/SSH inspection profiles + local certs on the linked FortiGate (admin, for
 // picking the profile to wire certs into).
 router.get('/servers/:id/inspection-profiles', pWebsites, async (req, res) => {
-  const server = getServerRow(req.params.id);
+  const server = await getServerRow(req.params.id);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
   if (!server.fortigate_id) return res.json({ profiles: [], certificates: [] });
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(server.fortigate_id);
+  const [fw] = await db.select().from(firewalls).where(eq(firewalls.id, server.fortigate_id)).limit(1);
   if (!fw) return res.status(404).json({ error: 'Linked FortiGate not found' });
   try {
     const client = createClient(fw);
@@ -943,45 +1025,50 @@ router.get('/servers/:id/inspection-profiles', pWebsites, async (req, res) => {
 //  ADMIN — all sites + ownership assignment
 // ────────────────────────────────────────────────────────────────────────────
 
-router.get('/admin/sites', pWebsites, (req, res) => {
-  const rows = db.prepare(`${SITE_SELECT} ORDER BY s.created_at DESC`).all();
+router.get('/admin/sites', pWebsites, async (req, res) => {
+  const rows = await siteQuery().orderBy(desc(caddySites.created_at));
   res.json(rows.map(serializeSite));
 });
 
 // Minimal directories for the admin dropdowns. Exposed under can_manage_websites
 // so a websites-only admin isn't forced to also hold can_manage_users /
 // can_manage_firewalls just to assign an owner or link a FortiGate.
-router.get('/admin/users', pWebsites, (req, res) => {
-  const users = db.prepare('SELECT id, username, is_admin FROM users ORDER BY username').all();
-  res.json(users.map((u) => ({ id: u.id, username: u.username, isAdmin: u.is_admin === 1 })));
+router.get('/admin/users', pWebsites, async (req, res) => {
+  const rows = await db.select({ id: users.id, username: users.username, is_admin: users.is_admin })
+    .from(users).orderBy(users.username);
+  res.json(rows.map((u) => ({ id: u.id, username: u.username, isAdmin: !!u.is_admin })));
 });
 
-router.get('/firewalls', pWebsites, (req, res) => {
-  const fws = db.prepare('SELECT id, name, wan_interface, external_ip, root_vdom FROM firewalls ORDER BY name').all();
+router.get('/firewalls', pWebsites, async (req, res) => {
+  const fws = await db.select({
+    id: firewalls.id, name: firewalls.name, wan_interface: firewalls.wan_interface,
+    external_ip: firewalls.external_ip, root_vdom: firewalls.root_vdom,
+  }).from(firewalls).orderBy(firewalls.name);
   res.json(fws.map((f) => ({ id: f.id, name: f.name, wanInterface: f.wan_interface, externalIp: f.external_ip || '', rootVdom: f.root_vdom || 'root' })));
 });
 
-router.post('/admin/sites/:id/assign', pWebsites, (req, res) => {
+router.post('/admin/sites/:id/assign', pWebsites, async (req, res) => {
   const { userId } = req.body;
-  const site = db.prepare('SELECT * FROM caddy_sites WHERE id = ?').get(req.params.id);
+  const [site] = await db.select().from(caddySites).where(eq(caddySites.id, Number(req.params.id))).limit(1);
   if (!site) return res.status(404).json({ error: 'Site not found' });
 
   let newOwner = null;
   if (userId !== null && userId !== undefined && userId !== '') {
     newOwner = parseInt(userId, 10);
-    const target = db.prepare('SELECT id, username FROM users WHERE id = ?').get(newOwner);
+    const [target] = await db.select({ id: users.id, username: users.username })
+      .from(users).where(eq(users.id, newOwner)).limit(1);
     if (!target) return res.status(404).json({ error: 'User not found' });
   }
-  db.prepare('UPDATE caddy_sites SET owner_user_id = ? WHERE id = ?').run(newOwner, req.params.id);
-  logAudit(req, 'website_assign_site', site.domain, `owner=${newOwner ?? 'none'}`);
+  await db.update(caddySites).set({ owner_user_id: newOwner }).where(eq(caddySites.id, Number(req.params.id)));
+  await logAudit(req, 'website_assign_site', site.domain, `owner=${newOwner ?? 'none'}`);
   res.json({ ok: true });
 });
 
 router.delete('/admin/sites/:id', pWebsites, async (req, res) => {
-  const site = db.prepare('SELECT * FROM caddy_sites WHERE id = ?').get(req.params.id);
+  const [site] = await db.select().from(caddySites).where(eq(caddySites.id, Number(req.params.id))).limit(1);
   if (!site) return res.status(404).json({ error: 'Site not found' });
   await removeSite(site, req);
-  logAudit(req, 'website_delete_site', site.domain, 'admin');
+  await logAudit(req, 'website_delete_site', site.domain, 'admin');
   res.json({ ok: true });
 });
 
@@ -990,51 +1077,61 @@ router.delete('/admin/sites/:id', pWebsites, async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 
 // Servers a user can publish to + whether they'd be able to (needs a WAN IP).
-router.get('/config', (req, res) => {
-  const servers = db.prepare('SELECT * FROM caddy_servers ORDER BY name').all().map((s) => ({
+router.get('/config', async (req, res) => {
+  const rows = await db.select().from(caddyServers).orderBy(caddyServers.name);
+  const fwMap = await firewallsByIds(rows.map((r) => r.fortigate_id));
+  const servers = rows.map((s) => ({
     id: s.id,
     name: s.name,
-    wanIp: effectiveWanIp(s),
+    wanIp: wanIpFor(s, fwMap.get(s.fortigate_id) || null),
     hasInspection: !!(s.fortigate_id && s.inspection_profile),
   }));
   res.json({ servers, isAdmin: !!req.session.isAdmin });
 });
 
 // The concrete upstream targets this user is allowed to point a site at.
-router.get('/upstream-options', (req, res) => {
+router.get('/upstream-options', async (req, res) => {
   if (req.session.isAdmin) {
     return res.json({ isAdmin: true, vms: [], subnets: [] });
   }
-  const { vmIps, subnets } = getUserAllowedUpstreams(req.session.userId);
+  const { vmIps, subnets } = await getUserAllowedUpstreams(req.session.userId);
   // Enrich the raw IPs with the assigned VM identity for a friendlier picker.
-  const assignments = db.prepare('SELECT node, vmid FROM vm_assignments WHERE user_id = ?').all(req.session.userId);
-  const sshStmt = db.prepare('SELECT host FROM vm_ssh_configs WHERE vmid = ?');
+  const assignments = await db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
+    .from(vmAssignments).where(eq(vmAssignments.user_id, req.session.userId));
+  // Batch the SSH-config lookup (one IN-list keyed by vmid, not a query per VM).
+  const vmids = [...new Set(assignments.map((a) => a.vmid))];
+  const hostByVmid = new Map();
+  if (vmids.length) {
+    const cfgs = await db.select({ vmid: vmSshConfigs.vmid, host: vmSshConfigs.host })
+      .from(vmSshConfigs).where(inArray(vmSshConfigs.vmid, vmids));
+    for (const c of cfgs) if (!hostByVmid.has(c.vmid)) hostByVmid.set(c.vmid, c.host);
+  }
   const vms = [];
   for (const a of assignments) {
-    const cfg = sshStmt.get(a.vmid);
-    if (cfg?.host && vmIps.includes(cfg.host)) {
-      vms.push({ vmid: a.vmid, node: a.node, ip: cfg.host });
+    const host = hostByVmid.get(a.vmid);
+    if (host && vmIps.includes(host)) {
+      vms.push({ vmid: a.vmid, node: a.node, ip: host });
     }
   }
   res.json({ isAdmin: false, vms, subnets, vmIps });
 });
 
-router.get('/sites', (req, res) => {
+router.get('/sites', async (req, res) => {
   const rows = req.session.isAdmin
-    ? db.prepare(`${SITE_SELECT} ORDER BY s.created_at DESC`).all()
-    : db.prepare(`${SITE_SELECT} WHERE s.owner_user_id = ? ORDER BY s.created_at DESC`).all(req.session.userId);
+    ? await siteQuery().orderBy(desc(caddySites.created_at))
+    : await siteQuery().where(eq(caddySites.owner_user_id, req.session.userId)).orderBy(desc(caddySites.created_at));
   res.json(rows.map(serializeSite));
 });
 
-router.get('/sites/:id', (req, res) => {
-  const { row, owns } = loadSiteForUser(req, req.params.id);
+router.get('/sites/:id', async (req, res) => {
+  const { row, owns } = await loadSiteForUser(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'Site not found' });
   if (!owns) return res.status(403).json({ error: 'Forbidden' });
   res.json(serializeSite(row));
 });
 
-router.get('/sites/:id/status', (req, res) => {
-  const { row, owns } = loadSiteForUser(req, req.params.id);
+router.get('/sites/:id/status', async (req, res) => {
+  const { row, owns } = await loadSiteForUser(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'Site not found' });
   if (!owns) return res.status(403).json({ error: 'Forbidden' });
   res.json(serializeSite(row));
@@ -1044,10 +1141,10 @@ router.get('/sites/:id/status', (req, res) => {
 router.post('/validate-dns', dnsLimiter, async (req, res) => {
   const domain = normalizeDomain(req.body.domain);
   if (!isValidDomain(domain)) return res.status(400).json({ error: 'Enter a valid domain name (e.g. app.example.com)' });
-  const server = getServerRow(req.body.serverId);
+  const server = await getServerRow(req.body.serverId);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
   try {
-    const result = await validateDomainDns(domain, effectiveWanIp(server));
+    const result = await validateDomainDns(domain, await effectiveWanIp(server));
     // Admins aren't blocked by a failing check (see POST /sites) — let the UI say so.
     res.json({ ...result, adminOverride: !!req.session.isAdmin });
   } catch (e) {
@@ -1056,13 +1153,13 @@ router.post('/validate-dns', dnsLimiter, async (req, res) => {
 });
 
 // Shared validation for create/update.
-function validateSiteInput(req, { domain, upstreamHost, upstreamPort }) {
+async function validateSiteInput(req, { domain, upstreamHost, upstreamPort }) {
   const d = normalizeDomain(domain);
   if (!isValidDomain(d)) return { error: 'Enter a valid domain name (e.g. app.example.com)' };
   if (!isValidUpstreamHost(upstreamHost)) return { error: 'Upstream host must be a valid IP address or hostname' };
   const port = parsePort(upstreamPort);
   if (port === null) return { error: 'Upstream port must be between 1 and 65535' };
-  const reach = userCanReachUpstream(req.session.userId, upstreamHost, req.session.isAdmin);
+  const reach = await userCanReachUpstream(req.session.userId, upstreamHost, req.session.isAdmin);
   if (!reach.ok) return { error: reach.message };
   return { domain: d, upstreamHost, upstreamPort: port };
 }
@@ -1089,17 +1186,18 @@ function resolveInspectionProfile(req, { current, onValue }) {
 }
 
 router.post('/sites', dnsLimiter, async (req, res) => {
-  const server = getServerRow(req.body.serverId);
+  const server = await getServerRow(req.body.serverId);
   if (!server) return res.status(404).json({ error: 'Select a valid Caddy server' });
 
-  const parsed = validateSiteInput(req, req.body);
+  const parsed = await validateSiteInput(req, req.body);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
   const { domain, upstreamHost, upstreamPort } = parsed;
 
   // Domain uniqueness — friendly message before we hit the UNIQUE constraint.
-  const clash = db.prepare('SELECT owner_user_id, managed FROM caddy_sites WHERE domain = ?').get(domain);
+  const [clash] = await db.select({ owner_user_id: caddySites.owner_user_id, managed: caddySites.managed })
+    .from(caddySites).where(eq(caddySites.domain, domain)).limit(1);
   if (clash) {
-    if (clash.managed === 0) {
+    if (!clash.managed) {
       return res.status(409).json({ error: 'This domain already exists on the Caddy server (imported from its Caddyfile) — change it there instead.' });
     }
     const mine = clash.owner_user_id === req.session.userId;
@@ -1111,7 +1209,7 @@ router.post('/sites', dnsLimiter, async (req, res) => {
   // subdomain whose record isn't created yet, Cloudflare-proxied records that
   // resolve to CF edge IPs, split-horizon DNS). The result is recorded on the
   // dns step instead of blocking.
-  const wanIp = effectiveWanIp(server);
+  const wanIp = await effectiveWanIp(server);
   let dnsResult;
   try {
     dnsResult = await validateDomainDns(domain, wanIp);
@@ -1138,36 +1236,37 @@ router.post('/sites', dnsLimiter, async (req, res) => {
 
   let siteId;
   try {
-    const r = db.prepare(`
-      INSERT INTO caddy_sites (server_id, domain, upstream_host, upstream_port, owner_user_id, status, status_detail, steps, fortigate_id, inspection_profile)
-      VALUES (?, ?, ?, ?, ?, 'pushing', '', ?, ?, ?)
-    `).run(server.id, domain, upstreamHost, upstreamPort, req.session.userId, stepList(steps), fortigateId, inspectionProfile);
-    siteId = r.lastInsertRowid;
+    const [inserted] = await db.insert(caddySites).values({
+      server_id: server.id, domain, upstream_host: upstreamHost, upstream_port: upstreamPort,
+      owner_user_id: req.session.userId, status: 'pushing', status_detail: '',
+      steps: stepList(steps), fortigate_id: fortigateId, inspection_profile: inspectionProfile,
+    }).returning({ id: caddySites.id });
+    siteId = inserted.id;
   } catch (e) {
-    if (String(e.message).includes('UNIQUE')) {
+    if (isUniqueViolation(e)) {
       return res.status(409).json({ error: 'This domain is already published.' });
     }
     return res.status(500).json({ error: sanitizeError(e.message) });
   }
 
-  logAudit(req, 'website_create_site', domain, `${upstreamHost}:${upstreamPort} → caddy#${server.id}`);
+  await logAudit(req, 'website_create_site', domain, `${upstreamHost}:${upstreamPort} → caddy#${server.id}`);
   startSiteFlow(siteId);
 
-  const row = db.prepare(`${SITE_SELECT} WHERE s.id = ?`).get(siteId);
+  const [row] = await siteQuery().where(eq(caddySites.id, siteId)).limit(1);
   res.json(serializeSite(row));
 });
 
 router.put('/sites/:id', dnsLimiter, async (req, res) => {
-  const { row, owns } = loadSiteForUser(req, req.params.id);
+  const { row, owns } = await loadSiteForUser(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'Site not found' });
   if (!owns) return res.status(403).json({ error: 'Forbidden' });
-  if (row.managed === 0) return res.status(400).json({ error: 'This site was imported from Caddy and is managed in the Caddyfile — edit it there.' });
-  const server = getServerRow(row.server_id);
+  if (!row.managed) return res.status(400).json({ error: 'This site was imported from Caddy and is managed in the Caddyfile — edit it there.' });
+  const server = await getServerRow(row.server_id);
   if (!server) return res.status(404).json({ error: 'Caddy server not found' });
 
   // Domain is immutable (it's the UNIQUE identity + the cert subject); only the
   // upstream target can change. Re-validate ownership of the new upstream.
-  const parsed = validateSiteInput(req, { domain: row.domain, upstreamHost: req.body.upstreamHost, upstreamPort: req.body.upstreamPort });
+  const parsed = await validateSiteInput(req, { domain: row.domain, upstreamHost: req.body.upstreamHost, upstreamPort: req.body.upstreamPort });
   if (parsed.error) return res.status(400).json({ error: parsed.error });
 
   // Admins may also flip this site's SSL-inspection wiring after the fact —
@@ -1186,40 +1285,42 @@ router.put('/sites/:id', dnsLimiter, async (req, res) => {
     await releaseInspectionSlot(row, req);
   }
 
-  db.prepare('UPDATE caddy_sites SET upstream_host = ?, upstream_port = ?, inspection_profile = ?, cert_name = ? WHERE id = ?')
-    .run(parsed.upstreamHost, parsed.upstreamPort, nextProfile, nextProfile ? row.cert_name : '', row.id);
-  logAudit(req, 'website_update_site', row.domain,
+  await db.update(caddySites).set({
+    upstream_host: parsed.upstreamHost, upstream_port: parsed.upstreamPort,
+    inspection_profile: nextProfile, cert_name: nextProfile ? row.cert_name : '',
+  }).where(eq(caddySites.id, row.id));
+  await logAudit(req, 'website_update_site', row.domain,
     `${parsed.upstreamHost}:${parsed.upstreamPort}`
     + (inspectionChanged ? ` — SSL inspection ${nextProfile ? `→ "${nextProfile}"` : 'off'}` : ''));
 
   // Reset the pipeline and re-run so Caddy gets the new upstream.
   const steps = INITIAL_STEPS.map((s) => ({ ...s, status: s.key === 'dns' ? 'done' : 'pending' }));
-  db.prepare('UPDATE caddy_sites SET steps = ?, status = ?, status_detail = ? WHERE id = ?')
-    .run(stepList(steps), 'pushing', '', row.id);
+  await db.update(caddySites).set({ steps: stepList(steps), status: 'pushing', status_detail: '' })
+    .where(eq(caddySites.id, row.id));
   startSiteFlow(row.id);
 
-  const updated = db.prepare(`${SITE_SELECT} WHERE s.id = ?`).get(row.id);
+  const [updated] = await siteQuery().where(eq(caddySites.id, row.id)).limit(1);
   res.json(serializeSite(updated));
 });
 
-router.post('/sites/:id/retry', dnsLimiter, (req, res) => {
-  const { row, owns } = loadSiteForUser(req, req.params.id);
+router.post('/sites/:id/retry', dnsLimiter, async (req, res) => {
+  const { row, owns } = await loadSiteForUser(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'Site not found' });
   if (!owns) return res.status(403).json({ error: 'Forbidden' });
-  if (row.managed === 0) return res.status(400).json({ error: 'This site was imported from Caddy and is managed in the Caddyfile — nothing to retry.' });
+  if (!row.managed) return res.status(400).json({ error: 'This site was imported from Caddy and is managed in the Caddyfile — nothing to retry.' });
 
   const steps = INITIAL_STEPS.map((s) => ({ ...s, status: s.key === 'dns' ? 'done' : 'pending' }));
-  db.prepare('UPDATE caddy_sites SET steps = ?, status = ?, status_detail = ? WHERE id = ?')
-    .run(stepList(steps), 'pushing', '', row.id);
-  logAudit(req, 'website_retry_site', row.domain, '');
+  await db.update(caddySites).set({ steps: stepList(steps), status: 'pushing', status_detail: '' })
+    .where(eq(caddySites.id, row.id));
+  await logAudit(req, 'website_retry_site', row.domain, '');
   startSiteFlow(row.id);
 
-  const updated = db.prepare(`${SITE_SELECT} WHERE s.id = ?`).get(row.id);
+  const [updated] = await siteQuery().where(eq(caddySites.id, row.id)).limit(1);
   res.json(serializeSite(updated));
 });
 
 router.delete('/sites/:id', async (req, res) => {
-  const { row, owns } = loadSiteForUser(req, req.params.id);
+  const { row, owns } = await loadSiteForUser(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'Site not found' });
   if (!owns) return res.status(403).json({ error: 'Forbidden' });
   try {
@@ -1227,7 +1328,7 @@ router.delete('/sites/:id', async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: sanitizeError(e.message) });
   }
-  logAudit(req, 'website_delete_site', row.domain, '');
+  await logAudit(req, 'website_delete_site', row.domain, '');
   res.json({ ok: true });
 });
 
@@ -1235,12 +1336,13 @@ router.delete('/sites/:id', async (req, res) => {
 // its inspection profile. Compared on slot identity rather than literal name so
 // a sibling whose row still records last renewal's `<domain>_<old date>` counts
 // as a user of the same slot.
-function certStillInUse(site) {
+async function certStillInUse(site) {
   const key = certNameToSubject(site.cert_name) || String(site.cert_name || '').toLowerCase();
-  return db.prepare(
-    "SELECT cert_name FROM caddy_sites WHERE id != ? AND fortigate_id = ? AND inspection_profile = ? AND cert_name != ''"
-  ).all(site.id, site.fortigate_id, site.inspection_profile)
-    .some((r) => (certNameToSubject(r.cert_name) || String(r.cert_name || '').toLowerCase()) === key);
+  const rows = await db.select({ cert_name: caddySites.cert_name })
+    .from(caddySites)
+    .where(and(ne(caddySites.id, site.id), eq(caddySites.fortigate_id, site.fortigate_id),
+      eq(caddySites.inspection_profile, site.inspection_profile), ne(caddySites.cert_name, '')));
+  return rows.some((r) => (certNameToSubject(r.cert_name) || String(r.cert_name || '').toLowerCase()) === key);
 }
 
 // Free the site's slot on the SSL/SSH inspection profile, unless another site
@@ -1253,11 +1355,11 @@ async function releaseInspectionSlot(site, req) {
   if (!site.fortigate_id || !site.inspection_profile || !site.cert_name) return;
   // Never detach the shared inspection bundle: it covers every published
   // domain, so removing it because one site went away would break all of them.
-  const server = getServerRow(site.server_id);
+  const server = await getServerRow(site.server_id);
   const bundleBase = String(server?.inspection_bundle_cert || '').trim().toLowerCase();
   if (bundleBase && stripCertDateSuffix(site.cert_name).toLowerCase() === bundleBase) return;
-  if (certStillInUse(site)) return;
-  const fw = db.prepare('SELECT * FROM firewalls WHERE id = ?').get(site.fortigate_id);
+  if (await certStillInUse(site)) return;
+  const [fw] = await db.select().from(firewalls).where(eq(firewalls.id, site.fortigate_id)).limit(1);
   if (!fw) return;
   try {
     const client = createClient(fw);
@@ -1270,7 +1372,7 @@ async function releaseInspectionSlot(site, req) {
     }
     if (removed.length === 0) return;
     if (req) {
-      logAudit(req, 'website_detach_inspection_cert', site.domain,
+      await logAudit(req, 'website_detach_inspection_cert', site.domain,
         `${removed.join(', ')} removed from "${site.inspection_profile}" — ${remaining.length}/${SERVER_CERT_MAX} slots used`);
     }
     console.log(`[websites] detached ${removed.join(', ')} from inspection profile "${site.inspection_profile}" (${remaining.length}/${SERVER_CERT_MAX} slots used)`);
@@ -1290,10 +1392,10 @@ async function releaseInspectionSlot(site, req) {
 // permanently costs a slot that the next publish needs.
 async function removeSite(site, req = null) {
   await releaseInspectionSlot(site, req);
-  const server = getServerRow(site.server_id);
-  if (server && site.managed !== 0 && sshConfigured(server)) {
+  const server = await getServerRow(site.server_id);
+  if (server && site.managed && sshConfigured(server)) {
     // Caddyfile mode: drop the row, then regenerate the snippet without it.
-    db.prepare('DELETE FROM caddy_sites WHERE id = ?').run(site.id);
+    await db.delete(caddySites).where(eq(caddySites.id, site.id));
     try {
       await syncServerSnippet(server);
     } catch (err) {
@@ -1301,7 +1403,7 @@ async function removeSite(site, req = null) {
     }
     return;
   }
-  if (server && site.managed !== 0) {
+  if (server && site.managed) {
     try {
       const caddy = createCaddyClient(server);
       await caddy.deleteRoute(site.id);
@@ -1309,7 +1411,7 @@ async function removeSite(site, req = null) {
       console.warn(`[websites] failed to delete Caddy route for site ${site.id}: ${err.message}`);
     }
   }
-  db.prepare('DELETE FROM caddy_sites WHERE id = ?').run(site.id);
+  await db.delete(caddySites).where(eq(caddySites.id, site.id));
 }
 
 export default router;

@@ -183,8 +183,12 @@ function jsFiles(dir) {
   const out = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...jsFiles(full));
-    else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) out.push(full);
+    // testUtils never ships in the container — its TEST_DATABASE_URL is a
+    // test-harness knob, not a runtime setting compose has to pass through.
+    if (entry.isDirectory()) {
+      if (entry.name === 'testUtils') continue;
+      out.push(...jsFiles(full));
+    } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) out.push(full);
   }
   return out;
 }
