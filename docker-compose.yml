@@ -1,8 +1,32 @@
 services:
+  postgres:
+    # PostgreSQL 17 pairs with the postgresql17-client (pg_dump/pg_restore)
+    # installed in the backend image — pg_dump must be >= the server major.
+    # Change both together (compose image + backend Dockerfile apk package).
+    image: postgres:17-alpine
+    container_name: proxmox-frontend-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-homelabrrr}
+      - POSTGRES_USER=${POSTGRES_USER:-homelabrrr}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-homelabrrr} -d ${POSTGRES_DB:-homelabrrr}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - internal
+
   backend:
     build: ./backend
     container_name: proxmox-frontend-backend
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       - NODE_ENV=production
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET must be set in .env}
@@ -39,20 +63,23 @@ services:
       - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-14}
       - BACKUP_INTERVAL_MS=${BACKUP_INTERVAL_MS:-86400000}
       - PORT=3000
-      # Explicit for clarity: this is the db_data volume mount point below.
-      # Changing it moves the database off the backed-up volume.
-      - DB_PATH=${DB_PATH:-/app/data/db.sqlite}
-      - DATABASE_URL=${DATABASE_URL:-}
+      # PostgreSQL connection. Points at the postgres service on the internal
+      # network; the password comes from POSTGRES_PASSWORD in .env.
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-homelabrrr}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-homelabrrr}}
       - PG_POOL_SIZE=${PG_POOL_SIZE:-10}
+      # Legacy SQLite path — retained only for the one-time importSqlite tool
+      # (see the "Migrating from SQLite" runbook). Ignored by the running server.
+      - DB_PATH=${DB_PATH:-/app/data/db.sqlite}
     volumes:
+      # db_data is kept for one release as the SQLite import source / rollback
+      # artifact; the running server no longer writes to it.
       - db_data:/app/data
       - ${BACKUP_HOST_PATH:-./backups}:/app/backups
       - ${BACKUP_OFFSITE_HOST_PATH:-./backups-offsite}:/app/backups-offsite
-    # /api/health is unauthenticated and only answers once the server is
-    # listening — which is after db.js runs its migrations and index.js finishes
-    # the startup PuTTY-key sweep. start_period covers that window: probes that
-    # fail inside it don't count against `retries`, while a probe that succeeds
-    # marks the container healthy immediately.
+    # /api/health/ready is unauthenticated and only answers 200 once migrations
+    # have applied and the server is listening. start_period covers that window:
+    # probes that fail inside it don't count against `retries`, while a probe
+    # that succeeds marks the container healthy immediately.
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
@@ -83,6 +110,7 @@ services:
       - internal
 
 volumes:
+  pg_data:
   db_data:
 
 networks:
