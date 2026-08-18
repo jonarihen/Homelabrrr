@@ -131,5 +131,6 @@ test('the allowlist is still live — the sanctioned read is the only match', ()
 
 test('the sanctioned provision.js read really does fold the role back in', () => {
   const src = fs.readFileSync(path.join(SRC_ROOT, 'routes', 'provision.ts'), 'utf8');
-  assert.match(src, /getRolePermissions\(user\.role_id\)\.has\('can_provision'\)/);
+  // The optional `)` tolerates the async form: (await getRolePermissions(...)).has(...)
+  assert.match(src, /getRolePermissions\(user\.role_id\)\)?\.has\('can_provision'\)/);
 });

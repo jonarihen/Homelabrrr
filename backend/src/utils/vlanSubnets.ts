@@ -10,22 +10,25 @@
 // The db handle is passed in by callers (which already import it) so this
 // module stays free of side effects and is unit-testable with a stub.
 
+import { eq } from 'drizzle-orm';
 import { vlanTagToSubnet } from '../fortigate.ts';
+import type { DbOrTx } from '../db/client.ts';
+import { vlans, userVlans } from '../db/schema/index.ts';
 
 const CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
 
-const USER_VLAN_SQL = `
-  SELECT v.tag, v.mode, v.subnet_cidr
-  FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id
-  WHERE uv.user_id = ?
-`;
+interface VlanRow {
+  tag?: number | null;
+  mode?: string | null;
+  subnet_cidr?: string | null;
+}
 
 /**
  * The network a single `vlans` row covers, or '' when it covers none.
  * An explicit CIDR always wins; a tagged-only VLAN without one is not something
  * we can infer an address range for, so it grants nothing.
  */
-export function vlanRowCidr(row) {
+export function vlanRowCidr(row: VlanRow): string {
   const explicit = String(row?.subnet_cidr || '').trim();
   if (CIDR_RE.test(explicit)) return explicit;
   if (row?.mode === 'tagged_only') return '';
@@ -33,8 +36,8 @@ export function vlanRowCidr(row) {
 }
 
 /** Unique, empty-free CIDR list for a set of `vlans` rows. */
-export function vlanRowsToCidrs(rows) {
-  const cidrs = [];
+export function vlanRowsToCidrs(rows: VlanRow[]): string[] {
+  const cidrs: string[] = [];
   for (const row of Array.isArray(rows) ? rows : []) {
     const cidr = vlanRowCidr(row);
     if (cidr && !cidrs.includes(cidr)) cidrs.push(cidr);
@@ -43,6 +46,11 @@ export function vlanRowsToCidrs(rows) {
 }
 
 /** Every network reachable through the VLANs assigned to `userId`. */
-export function userVlanCidrs(db, userId) {
-  return vlanRowsToCidrs(db.prepare(USER_VLAN_SQL).all(userId));
+export async function userVlanCidrs(db: DbOrTx, userId: number): Promise<string[]> {
+  const rows = await db
+    .select({ tag: vlans.tag, mode: vlans.mode, subnet_cidr: vlans.subnet_cidr })
+    .from(vlans)
+    .innerJoin(userVlans, eq(userVlans.vlan_id, vlans.id))
+    .where(eq(userVlans.user_id, userId));
+  return vlanRowsToCidrs(rows);
 }

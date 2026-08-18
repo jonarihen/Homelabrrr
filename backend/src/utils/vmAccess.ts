@@ -1,16 +1,33 @@
-import db from '../db.ts';
+import { and, eq, inArray } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { users, vmAssignments } from '../db/schema/index.ts';
 import { nodeLookupCandidates } from './nodeRef.ts';
 import { userHasPermission, effectivePermissions } from './permissions.ts';
 import { canPerformVmOp } from './vmOps.ts';
 
+// The facts canPerformVmOp (utils/vmOps.ts) decides on. `isAdmin: true`
+// short-circuits; the remaining flags are only resolved for non-admins.
+interface VmOpContext {
+  isAdmin: boolean;
+  isAssigned?: boolean;
+  seeAllVms?: boolean;
+  operateAllVms?: boolean;
+  canEditHardware?: boolean;
+}
+
 // Read access to a VM: an assignment, the read-only fleet flag `see_all_vms`,
 // or the operator flag `can_operate_all_vms` (operating implies seeing).
 // Mutating/console routes must NOT use this — call userCanPerformVmOp instead.
-export function userCanAccessVm(userId, node, vmid, isAdmin) {
+export async function userCanAccessVm(
+  userId: number,
+  node: string,
+  vmid: number | string,
+  isAdmin: boolean,
+): Promise<boolean> {
   if (isAdmin) return true;
 
   // Effective check: per-user column OR role grant
-  if (userHasPermission(userId, 'see_all_vms', 'can_operate_all_vms')) return true;
+  if (await userHasPermission(userId, 'see_all_vms', 'can_operate_all_vms')) return true;
 
   return userOwnsVm(userId, node, vmid);
 }
@@ -18,32 +35,45 @@ export function userCanAccessVm(userId, node, vmid, isAdmin) {
 // Strict ownership: only an actual assignment counts (no see_all_vms /
 // can_operate_all_vms bypass). Used for destructive operations like VM
 // deletion, restore, and snapshot rollback.
-export function userOwnsVm(userId, node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
+export async function userOwnsVm(
+  userId: number,
+  node: string,
+  vmid: number | string,
+): Promise<boolean> {
+  const parsedVmid = Number.parseInt(String(vmid), 10);
   const candidates = nodeLookupCandidates(node);
-  for (const candidate of candidates) {
-    const row = db.prepare(
-      'SELECT id FROM vm_assignments WHERE user_id = ? AND vmid = ? AND node = ? LIMIT 1'
-    ).get(userId, parsedVmid, candidate);
-    if (row) return true;
-  }
-  return false;
+  if (candidates.length === 0) return false;
+  const [row] = await db
+    .select({ id: vmAssignments.id })
+    .from(vmAssignments)
+    .where(and(
+      eq(vmAssignments.user_id, userId),
+      eq(vmAssignments.vmid, parsedVmid),
+      inArray(vmAssignments.node, candidates),
+    ))
+    .limit(1);
+  return row !== undefined;
 }
 
 // Resolve the facts canPerformVmOp needs, with one user lookup rather than one
 // per flag. Session admins short-circuit; a DB row flagged is_admin bypasses
 // too, matching userHasPermission / requirePermission.
-export function vmOpContext(userId, node, vmid, isAdmin) {
+export async function vmOpContext(
+  userId: number,
+  node: string,
+  vmid: number | string,
+  isAdmin: boolean,
+): Promise<VmOpContext> {
   if (isAdmin) return { isAdmin: true };
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (!user) return { isAdmin: false };
-  if (user.is_admin === 1) return { isAdmin: true };
+  if (user.is_admin) return { isAdmin: true };
 
-  const perms = effectivePermissions(user);
+  const perms = await effectivePermissions(user);
   return {
     isAdmin: false,
-    isAssigned: userOwnsVm(userId, node, vmid),
+    isAssigned: await userOwnsVm(userId, node, vmid),
     seeAllVms: perms.see_all_vms,
     operateAllVms: perms.can_operate_all_vms,
     canEditHardware: perms.can_edit_vm_hardware,
@@ -51,16 +81,22 @@ export function vmOpContext(userId, node, vmid, isAdmin) {
 }
 
 /**
- * The gate every VM route runs on. `op` is a key of VM_OP_TIERS (utils/vmOps.js)
+ * The gate every VM route runs on. `op` is a key of VM_OP_TIERS (utils/vmOps.ts)
  * — the tier table there, not the call site, decides which permission applies.
  */
-export function userCanPerformVmOp(userId, node, vmid, isAdmin, op) {
-  return canPerformVmOp(op, vmOpContext(userId, node, vmid, isAdmin));
+export async function userCanPerformVmOp(
+  userId: number,
+  node: string,
+  vmid: number | string,
+  isAdmin: boolean,
+  op: string,
+): Promise<boolean> {
+  return canPerformVmOp(op, await vmOpContext(userId, node, vmid, isAdmin));
 }
 
 // True when the user sees the whole fleet inventory rather than just their
 // assignments (drives the "all VMs" listing).
-export function userSeesAllVms(userId, isAdmin) {
+export async function userSeesAllVms(userId: number, isAdmin: boolean): Promise<boolean> {
   if (isAdmin) return true;
   return userHasPermission(userId, 'see_all_vms', 'can_operate_all_vms');
 }

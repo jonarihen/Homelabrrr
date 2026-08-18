@@ -1,4 +1,6 @@
-import db from '../db.ts';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { users, notificationWebhooks } from '../db/schema/index.ts';
 import { decryptSecret } from './secrets.ts';
 import { getHosts, getHostStatus } from '../proxmox.ts';
 
@@ -32,7 +34,30 @@ const COLORS = {
   info: 0x5865f2,    // discord blurple
 };
 
-function colorForEvent(key, status) {
+// Loose payload shape — call sites pass ad-hoc event context.
+export interface NotifyPayload {
+  vm?: unknown;
+  domain?: unknown;
+  owner?: unknown;
+  status?: unknown;
+  detail?: unknown;
+  url?: string;
+  ownerUserId?: number;
+  [key: string]: unknown;
+}
+
+interface DiscordEmbedField { name: string; value: string; inline?: boolean }
+interface DiscordEmbed {
+  title: string;
+  color: number;
+  timestamp: string;
+  footer: { text: string };
+  description?: string;
+  fields?: DiscordEmbedField[];
+  url?: string;
+}
+
+function colorForEvent(key: string, status: unknown): number {
   if (key === 'deployment.failed' || key === 'backup.failed'
     || key === 'node.unreachable' || key === 'security.lockout') return COLORS.failure;
   if (key === 'node.recovered' || key === 'backup.created') return COLORS.success;
@@ -43,22 +68,22 @@ function colorForEvent(key, status) {
 
 // Absolute link back to a portal page, if a base URL is configured. Falls back
 // to ALLOWED_ORIGIN (the one host we already trust as the portal's public URL).
-export function portalLink(path) {
+export function portalLink(path?: string): string | undefined {
   const base = (process.env.PORTAL_BASE_URL || process.env.ALLOWED_ORIGIN || '').replace(/\/+$/, '');
   if (!base) return undefined;
   if (!path) return base;
   return `${base}${path.startsWith('/') ? '' : '/'}${path}`;
 }
 
-function buildEmbed(eventType, payload) {
+function buildEmbed(eventType: string, payload: NotifyPayload): DiscordEmbed {
   const meta = EVENT_BY_KEY.get(eventType);
-  const fields = [];
+  const fields: DiscordEmbedField[] = [];
   const resource = payload.vm || payload.domain;
   if (resource) fields.push({ name: payload.vm ? 'VM' : 'Resource', value: String(resource).slice(0, 256), inline: true });
   if (payload.owner) fields.push({ name: 'Owner', value: String(payload.owner).slice(0, 256), inline: true });
   if (payload.status) fields.push({ name: 'Status', value: String(payload.status).slice(0, 256), inline: true });
 
-  const embed = {
+  const embed: DiscordEmbed = {
     title: (meta?.label || eventType).slice(0, 256),
     color: colorForEvent(eventType, payload.status),
     timestamp: new Date().toISOString(),
@@ -80,15 +105,21 @@ const RATE_WINDOW_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_QUEUE = 200;          // drop-and-log if a webhook is wedged
 
-const workers = new Map();      // webhookId -> { queue, sends, running }
+interface WebhookWorker {
+  queue: { url: string; body: unknown }[];
+  sends: number[];  // epoch-ms timestamps of recent sends (sliding window)
+  running: boolean;
+}
 
-function workerFor(id) {
+const workers = new Map<number, WebhookWorker>();
+
+function workerFor(id: number): WebhookWorker {
   let w = workers.get(id);
   if (!w) { w = { queue: [], sends: [], running: false }; workers.set(id, w); }
   return w;
 }
 
-async function postJson(url, body) {
+async function postJson(url: string, body: unknown): Promise<void> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -107,7 +138,7 @@ async function postJson(url, body) {
   }
 }
 
-async function drain(id) {
+async function drain(id: number): Promise<void> {
   const w = workerFor(id);
   if (w.running) return;
   w.running = true;
@@ -120,12 +151,12 @@ async function drain(id) {
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
-      const item = w.queue.shift();
+      const item = w.queue.shift()!;
       w.sends.push(Date.now());
       try {
         await postJson(item.url, item.body);
       } catch (err) {
-        console.warn(`[notify] webhook ${id} send failed: ${err.message}`);
+        console.warn(`[notify] webhook ${id} send failed: ${(err as Error).message}`);
       }
     }
   } finally {
@@ -133,7 +164,7 @@ async function drain(id) {
   }
 }
 
-function enqueue(id, url, body) {
+function enqueue(id: number, url: string, body: unknown): void {
   const w = workerFor(id);
   if (w.queue.length >= MAX_QUEUE) {
     console.warn(`[notify] webhook ${id} queue full — dropping event`);
@@ -144,10 +175,11 @@ function enqueue(id, url, body) {
 }
 
 // ─── Public fire-and-forget entrypoint ───────────────────────────────────────
-// notify() NEVER throws into the caller — a webhook/config failure must not
-// break provisioning, backups, or auth. Call it inline (no await) right next to
-// the corresponding logAudit call.
-export function notify(eventType, payload = {}) {
+// notify()'s promise NEVER rejects — every failure (including the DB reads) is
+// caught here, so a webhook/config failure must not break provisioning,
+// backups, or auth. Call it inline without await right next to the
+// corresponding logAudit call; awaiting it is also safe.
+export async function notify(eventType: string, payload: NotifyPayload = {}): Promise<void> {
   try {
     const meta = EVENT_BY_KEY.get(eventType);
     if (!meta) return;
@@ -155,19 +187,24 @@ export function notify(eventType, payload = {}) {
     // Per-user opt-out: suppress owner-scoped events when the resource owner
     // has opted out of notifications about their own resources.
     if (meta.ownerScoped && payload.ownerUserId) {
-      const row = db.prepare('SELECT notify_opt_out FROM users WHERE id = ?').get(payload.ownerUserId);
-      if (row && row.notify_opt_out === 1) return;
+      const [row] = await db.select({ notify_opt_out: users.notify_opt_out })
+        .from(users).where(eq(users.id, payload.ownerUserId)).limit(1);
+      if (row?.notify_opt_out) return;
     }
 
-    const webhooks = db.prepare('SELECT id, url, event_types FROM notification_webhooks WHERE enabled = 1').all();
+    const webhooks = await db.select({
+      id: notificationWebhooks.id,
+      url: notificationWebhooks.url,
+      event_types: notificationWebhooks.event_types,
+    }).from(notificationWebhooks).where(eq(notificationWebhooks.enabled, true));
     if (!webhooks.length) return;
 
     const body = { embeds: [buildEmbed(eventType, payload)] };
 
     for (const wh of webhooks) {
-      let types = [];
-      try { types = wh.event_types ? JSON.parse(wh.event_types) : []; } catch { types = []; }
-      if (!Array.isArray(types) || !types.includes(eventType)) continue;
+      // event_types is jsonb — already an array; guard against odd stored shapes.
+      const types = Array.isArray(wh.event_types) ? wh.event_types : [];
+      if (!types.includes(eventType)) continue;
 
       let url;
       try { url = decryptSecret(wh.url); } catch { continue; }
@@ -177,13 +214,13 @@ export function notify(eventType, payload = {}) {
     }
   } catch (err) {
     // A notifier failure must NEVER surface to the calling flow.
-    console.warn(`[notify] failed for ${eventType}: ${err.message}`);
+    console.warn(`[notify] failed for ${eventType}: ${(err as Error).message}`);
   }
 }
 
 // Send a one-off test embed to a raw webhook URL. Unlike notify(), this awaits
 // and rethrows so the admin "Send test" route can report the real outcome.
-export async function sendTestWebhook(url) {
+export async function sendTestWebhook(url: string): Promise<void> {
   await postJson(url, {
     embeds: [{
       title: 'Homelabrrr test notification',
@@ -200,11 +237,13 @@ export async function sendTestWebhook(url) {
 // node.unreachable / node.recovered on state transitions only. The first
 // observation of a host/node seeds state silently so a node that is already
 // down at startup does not fire a spurious alert.
-const nodeHealthState = new Map(); // key -> 'online' | 'offline'
+const nodeHealthState = new Map<string, 'online' | 'offline'>();
 
-export async function pollNodeHealth() {
+export async function pollNodeHealth(): Promise<void> {
+  // getHosts() is still synchronous mid-migration; the await is a no-op today
+  // and keeps this call site correct once proxmox.ts goes async.
   let hosts;
-  try { hosts = getHosts(); } catch { return; }
+  try { hosts = await getHosts(); } catch { return; }
 
   for (const host of hosts) {
     let status;
@@ -213,7 +252,7 @@ export async function pollNodeHealth() {
     const hostKey = `host:${host.id}`;
     if (!status.online) {
       if (nodeHealthState.get(hostKey) === 'online') {
-        notify('node.unreachable', {
+        await notify('node.unreachable', {
           domain: host.name,
           status: 'unreachable',
           detail: 'Proxmox host is not responding',
@@ -225,7 +264,7 @@ export async function pollNodeHealth() {
     }
 
     if (nodeHealthState.get(hostKey) === 'offline') {
-      notify('node.recovered', {
+      await notify('node.recovered', {
         domain: host.name,
         status: 'online',
         detail: 'Proxmox host is reachable again',
@@ -239,7 +278,7 @@ export async function pollNodeHealth() {
       const cur = n.status === 'online' ? 'online' : 'offline';
       const prev = nodeHealthState.get(key);
       if (prev && prev !== cur) {
-        notify(cur === 'online' ? 'node.recovered' : 'node.unreachable', {
+        await notify(cur === 'online' ? 'node.recovered' : 'node.unreachable', {
           domain: `${host.name} / ${n.node}`,
           status: n.status,
           detail: cur === 'online' ? 'Node is back online' : 'Node is offline',

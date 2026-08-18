@@ -1,5 +1,5 @@
 import { httpError } from './httpError.ts';
-import db from '../db.ts';
+import { getSetting, setSetting } from '../db/settings.ts';
 import { getNodeStatus, getStorageStatus, getAllVMs } from '../proxmox.ts';
 import { decodeNodeRef } from './nodeRef.ts';
 import {
@@ -10,40 +10,42 @@ import {
 
 const GB = 1024 ** 3;
 
-const fmtGb = (bytes) => (bytes / GB).toFixed(1);
+const fmtGb = (bytes: number) => (bytes / GB).toFixed(1);
 
-const validationError = (message) => httpError(400, message);
+const validationError = (message: string) => httpError(400, message);
 
 // ─── Capacity policy settings ────────────────────────────────────────────────
-// Admin-editable, stored in the key/value `settings` table (same pattern as the
-// lease defaults in utils/leases.js). Memory is advisory by default: a homelab
-// runs with configured guest RAM above physical, so a hard block on memory made
-// normal topologies unusable through the portal.
+// Admin-editable, stored in the key/value `settings` table via the shared
+// getSetting/setSetting helpers (settings.value stays text — parse here).
+// Memory is advisory by default: a homelab runs with configured guest RAM
+// above physical, so a hard block on memory made normal topologies unusable
+// through the portal.
 
 const MEMORY_MODE_KEY = 'capacity_memory_mode';
 const OVERCOMMIT_RATIO_KEY = 'capacity_memory_overcommit_ratio';
 
-function readSetting(key) {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-  return row?.value;
+export interface CapacitySettings {
+  memoryMode: string;
+  overcommitRatio: number;
 }
 
-export function getCapacitySettings() {
+export async function getCapacitySettings(): Promise<CapacitySettings> {
+  const [memoryMode, overcommitRatio] = await Promise.all([
+    getSetting(MEMORY_MODE_KEY),
+    getSetting(OVERCOMMIT_RATIO_KEY),
+  ]);
   return {
-    memoryMode: normalizeMemoryMode(readSetting(MEMORY_MODE_KEY) ?? DEFAULT_MEMORY_MODE),
-    overcommitRatio: normalizeOvercommitRatio(readSetting(OVERCOMMIT_RATIO_KEY) ?? DEFAULT_OVERCOMMIT_RATIO),
+    memoryMode: normalizeMemoryMode(memoryMode ?? DEFAULT_MEMORY_MODE),
+    overcommitRatio: normalizeOvercommitRatio(overcommitRatio ?? DEFAULT_OVERCOMMIT_RATIO),
   };
 }
 
-export function setCapacitySettings({ memoryMode, overcommitRatio } = {}) {
-  const upsert = db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  );
+export async function setCapacitySettings({ memoryMode, overcommitRatio }: { memoryMode?: unknown; overcommitRatio?: unknown } = {}): Promise<CapacitySettings> {
   if (memoryMode !== undefined && memoryMode !== null) {
-    upsert.run(MEMORY_MODE_KEY, normalizeMemoryMode(memoryMode));
+    await setSetting(MEMORY_MODE_KEY, normalizeMemoryMode(memoryMode));
   }
   if (overcommitRatio !== undefined && overcommitRatio !== null) {
-    upsert.run(OVERCOMMIT_RATIO_KEY, String(normalizeOvercommitRatio(overcommitRatio)));
+    await setSetting(OVERCOMMIT_RATIO_KEY, String(normalizeOvercommitRatio(overcommitRatio)));
   }
   return getCapacitySettings();
 }
@@ -51,11 +53,11 @@ export function setCapacitySettings({ memoryMode, overcommitRatio } = {}) {
 // Sum of configured RAM across the guests on a node. Best-effort: returns null
 // when the cluster can't be enumerated so the policy can fall back instead of
 // treating the node as empty.
-async function allocatedMemoryOnNode(node) {
+async function allocatedMemoryOnNode(node: string): Promise<number | null> {
   try {
     const vms = await getAllVMs();
     return sumAllocatedMemoryBytes(guestsOnNode(vms, node)).bytes;
-  } catch (err) {
+  } catch (err: any) {
     console.warn(`[capacity] could not enumerate guests for ${node}: ${err.message}`);
     return null;
   }
@@ -65,7 +67,7 @@ async function allocatedMemoryOnNode(node) {
 //
 // Memory is compared against physical RAM × the configured overcommit ratio
 // (never against `memory.free`, which is near zero on a healthy node) and is
-// advisory by default — see capacityPolicy.js. Storage stays a hard block:
+// advisory by default — see capacityPolicy.ts. Storage stays a hard block:
 // `storage.avail` is a real limit.
 //
 // Throws (err.status = 400) only on a genuine capacity violation; if Proxmox
@@ -74,19 +76,19 @@ async function allocatedMemoryOnNode(node) {
 //
 // Returns { warnings: string[], memoryWarning: string } so callers can record
 // an advisory note on the deployment instead of failing it.
-export async function assertNodeCapacity(node, { memoryMb, diskGb, storage }) {
-  const warnings = [];
+export async function assertNodeCapacity(node: string, { memoryMb, diskGb, storage }: { memoryMb?: unknown; diskGb?: unknown; storage?: string }): Promise<{ warnings: string[]; memoryWarning: string }> {
+  const warnings: string[] = [];
 
   let nodeStatus = null;
   try {
     nodeStatus = await getNodeStatus(node);
-  } catch (err) {
+  } catch (err: any) {
     console.warn(`[capacity] could not read node status for ${node}: ${err.message}`);
   }
 
   const requestedMb = Number(memoryMb);
   if (nodeStatus && Number.isFinite(requestedMb) && requestedMb > 0) {
-    const { memoryMode, overcommitRatio } = getCapacitySettings();
+    const { memoryMode, overcommitRatio } = await getCapacitySettings();
     if (memoryMode !== 'off') {
       const verdict = evaluateMemoryCapacity({
         requestedMb,
@@ -105,12 +107,12 @@ export async function assertNodeCapacity(node, { memoryMb, diskGb, storage }) {
     }
   }
 
-  const requestedDiskGb = parseFloat(diskGb);
+  const requestedDiskGb = parseFloat(diskGb as string);
   if (storage && Number.isFinite(requestedDiskGb) && requestedDiskGb > 0) {
     let storageStatus = null;
     try {
       storageStatus = await getStorageStatus(node, storage);
-    } catch (err) {
+    } catch (err: any) {
       console.warn(`[capacity] could not read storage "${storage}" on ${node}: ${err.message}`);
     }
     const availBytes = storageStatus?.avail;

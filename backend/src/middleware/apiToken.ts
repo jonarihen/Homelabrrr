@@ -1,27 +1,57 @@
-import db from '../db.ts';
+import { and, count, eq, gt, isNull, lt, or } from 'drizzle-orm';
+import { db, type DbOrTx } from '../db/client.ts';
+import { apiTokens, tokenAuthAttempts, users } from '../db/schema/index.ts';
 import { hashApiToken } from '../utils/apiTokens.ts';
 import { requiredScopeForRequest } from '../utils/apiTokenScopes.ts';
 import { logAudit } from '../utils/audit.ts';
+import { log } from '../utils/logger.ts';
 
 // Rate-limit failed Bearer-token authentication the same way login attempts are
 // throttled: too many bad tokens from one IP within the window get locked out.
 const TOKEN_LOCKOUT_WINDOW_MS = 10 * 60 * 1000;
 const TOKEN_LOCKOUT_MAX = 20;
 
-function clientIp(req) {
+function clientIp(req): string {
   return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
-function recentTokenFailures(ip, windowStart) {
-  return db.prepare(
-    'SELECT COUNT(*) as count FROM token_auth_attempts WHERE ip = ? AND attempted_at > ?'
-  ).get(ip, windowStart).count;
+// Denial audits are fire-and-forget (conventions M13): the 403 payload —
+// including the machine-read scope code — must reach the client
+// deterministically even when the audit insert fails.
+function auditDenial(req, action: string, target: string, detail: string): void {
+  logAudit(req, action, target, detail)
+    .catch((err) => log('warn', 'audit_write_failed', { action, error: err?.message }));
 }
 
-function recordTokenFailure(ip) {
+async function recentTokenFailures(database: DbOrTx, ip: string, windowStart: number): Promise<number> {
+  const [{ c }] = await database
+    .select({ c: count() })
+    .from(tokenAuthAttempts)
+    .where(and(eq(tokenAuthAttempts.ip, ip), gt(tokenAuthAttempts.attempted_at, windowStart)));
+  return c;
+}
+
+/**
+ * Record a failed token attempt and return how many failures the IP now has
+ * inside the lockout window.
+ *
+ * Prune → count → insert runs as ONE short transaction (redesign R8): failed
+ * token auth is attacker-controlled load, and running the triple on a single
+ * pool connection inside one atomic unit means concurrent failures cannot
+ * interleave between the prune and the insert — the count is exact at the
+ * moment the failure is recorded, and the attempts table cannot be pruned out
+ * from under a half-finished recording. Kept deliberately short: three cheap
+ * indexed statements and nothing else, so the connection is held for
+ * microseconds, not across any auth work.
+ */
+async function recordTokenFailure(ip: string): Promise<number> {
   const now = Date.now();
-  db.prepare('DELETE FROM token_auth_attempts WHERE attempted_at < ?').run(now - TOKEN_LOCKOUT_WINDOW_MS);
-  db.prepare('INSERT INTO token_auth_attempts (ip, attempted_at) VALUES (?, ?)').run(ip, now);
+  return db.transaction(async (tx) => {
+    await tx.delete(tokenAuthAttempts).where(lt(tokenAuthAttempts.attempted_at, now - TOKEN_LOCKOUT_WINDOW_MS));
+    const failures = await recentTokenFailures(tx, ip, now - TOKEN_LOCKOUT_WINDOW_MS);
+    await tx.insert(tokenAuthAttempts).values({ ip, attempted_at: now });
+    return failures + 1;
+  });
 }
 
 /**
@@ -34,11 +64,11 @@ function recordTokenFailure(ip) {
  * `req.apiToken` marker used for audit attribution and to block sensitive
  * (interactive-only) operations. No session cookie is created for token auth.
  */
-export function authenticateApiToken(req, res, next) {
+export async function authenticateApiToken(req, res, next): Promise<void> {
   const ip = clientIp(req);
   const windowStart = Date.now() - TOKEN_LOCKOUT_WINDOW_MS;
 
-  if (recentTokenFailures(ip, windowStart) >= TOKEN_LOCKOUT_MAX) {
+  if (await recentTokenFailures(db, ip, windowStart) >= TOKEN_LOCKOUT_MAX) {
     return res.status(429).json({ error: 'Too many invalid API token attempts. Try again later.' });
   }
 
@@ -46,29 +76,49 @@ export function authenticateApiToken(req, res, next) {
   // "Bearer " by the caller; re-extract the raw token here.
   const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   if (!raw) {
-    recordTokenFailure(ip);
+    await recordTokenFailure(ip);
     return res.status(401).json({ error: 'Invalid API token' });
   }
 
   const tokenHash = hashApiToken(raw);
-  const token = db.prepare(
-    "SELECT id, user_id, name, scopes, expires_at FROM api_tokens WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > datetime('now'))"
-  ).get(tokenHash);
+  const [token] = await db
+    .select({
+      id: apiTokens.id,
+      user_id: apiTokens.user_id,
+      name: apiTokens.name,
+      scopes: apiTokens.scopes,
+      expires_at: apiTokens.expires_at,
+    })
+    .from(apiTokens)
+    .where(and(
+      eq(apiTokens.token_hash, tokenHash),
+      or(isNull(apiTokens.expires_at), gt(apiTokens.expires_at, new Date()))
+    ))
+    .limit(1);
 
   if (!token) {
-    recordTokenFailure(ip);
+    await recordTokenFailure(ip);
     return res.status(401).json({ error: 'Invalid or expired API token' });
   }
 
   // Resolve the live user every request — role/permission changes and account
   // deletion take effect immediately.
-  const user = db.prepare('SELECT id, username, is_admin FROM users WHERE id = ?').get(token.user_id);
+  const [user] = await db
+    .select({ id: users.id, username: users.username, is_admin: users.is_admin })
+    .from(users)
+    .where(eq(users.id, token.user_id))
+    .limit(1);
   if (!user) {
-    recordTokenFailure(ip);
+    await recordTokenFailure(ip);
     return res.status(401).json({ error: 'Invalid API token' });
   }
 
-  db.prepare("UPDATE api_tokens SET last_used_at = datetime('now') WHERE id = ?").run(token.id);
+  // Usage stamp is best-effort fire-and-forget (conventions M13): auth must
+  // never slow down or fail because the bookkeeping UPDATE did.
+  db.update(apiTokens)
+    .set({ last_used_at: new Date() })
+    .where(eq(apiTokens.id, token.id))
+    .catch((err) => log('warn', 'api_token_last_used_write_failed', { error: err?.message }));
 
   // Provide a plain session-shaped object so every downstream requireAuth /
   // requirePermission / userCanAccessVm check works unchanged. The no-op
@@ -77,7 +127,7 @@ export function authenticateApiToken(req, res, next) {
   req.session = {
     userId: user.id,
     username: user.username,
-    isAdmin: user.is_admin === 1,
+    isAdmin: !!user.is_admin,
     destroy: (cb) => { if (typeof cb === 'function') cb(); },
   };
   req.apiToken = {
@@ -93,11 +143,11 @@ export function enforceApiTokenScope(req, res, next) {
   if (!req.apiToken) return next();
   const required = requiredScopeForRequest(req);
   if (!required) {
-    logAudit(req, 'api_token_scope_denied', String(req.originalUrl || req.path).split('?')[0], 'interactive session required');
+    auditDenial(req, 'api_token_scope_denied', String(req.originalUrl || req.path).split('?')[0], 'interactive session required');
     return res.status(403).json({ error: 'This identity operation requires an interactive session' });
   }
   if (!req.apiToken.scopes.has(required) && !req.apiToken.scopes.has('admin')) {
-    logAudit(req, 'api_token_scope_denied', String(req.originalUrl || req.path).split('?')[0], `required=${required}`);
+    auditDenial(req, 'api_token_scope_denied', String(req.originalUrl || req.path).split('?')[0], `required=${required}`);
     return res.status(403).json({ error: `API token requires the ${required} scope`, code: 'API_TOKEN_SCOPE_REQUIRED' });
   }
   next();

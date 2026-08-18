@@ -1,15 +1,14 @@
 // Regression coverage for VLAN placement authorization.
-// Run with:  node --test src/utils/vlanAccess.test.js   (from backend/)
+// Run with:  node --test src/utils/vlanAccess.test.ts   (from backend/)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseVlanTag, checkVlanAssignment } from './vlanAccess.ts';
+import { createTestDatabase } from '../testUtils/pgTestDb.ts';
+import { users, vlans, userVlans } from '../db/schema/index.ts';
 
-// Stub db whose assignment lookup returns a row (assigned) or undefined (not).
-const dbReturning = (row) => ({ prepare: () => ({ get: () => row }) });
-const assignedDb = dbReturning({ id: 7 });
-const unassignedDb = dbReturning(undefined);
-// Guard: this db must never be queried (used for admin / untagged / invalid paths).
-const explodingDb = { prepare: () => { throw new Error('db should not be queried'); } };
+// The admin / untagged / invalid paths return before any query — a db that
+// throws on use proves they never touch it.
+const explodingDb = new Proxy({}, { get() { throw new Error('db should not be queried'); } });
 
 test('parseVlanTag classifies untagged, tagged, and invalid values', () => {
   for (const v of [null, undefined, '', 0, '0']) {
@@ -22,37 +21,42 @@ test('parseVlanTag classifies untagged, tagged, and invalid values', () => {
   }
 });
 
-test('admins may use any VLAN, including untagged', () => {
+test('admins may use any VLAN, including untagged', async () => {
   for (const vlanTag of [null, '', 0, 1001, 'anything']) {
     assert.equal(
-      checkVlanAssignment(explodingDb, { userId: 1, isAdmin: true, vlanTag }),
+      await checkVlanAssignment(explodingDb as never, { userId: 1, isAdmin: true, vlanTag }),
       null,
     );
   }
 });
 
-test('non-admin: untagged/native network is refused with 403', () => {
+test('non-admin: untagged/native network is refused with 403', async () => {
   for (const vlanTag of [null, undefined, '', 0, '0']) {
-    const res = checkVlanAssignment(explodingDb, { userId: 2, isAdmin: false, vlanTag });
-    assert.equal(res.status, 403);
-    assert.match(res.error, /untagged\/native network is reserved for administrators/);
+    const res = await checkVlanAssignment(explodingDb as never, { userId: 2, isAdmin: false, vlanTag });
+    assert.equal(res?.status, 403);
+    assert.match(res!.error, /untagged\/native network is reserved for administrators/);
   }
 });
 
-test('non-admin: malformed tag is rejected with 400', () => {
-  const res = checkVlanAssignment(explodingDb, { userId: 2, isAdmin: false, vlanTag: 'not-a-number' });
-  assert.equal(res.status, 400);
+test('non-admin: malformed tag is rejected with 400', async () => {
+  const res = await checkVlanAssignment(explodingDb as never, { userId: 2, isAdmin: false, vlanTag: 'not-a-number' });
+  assert.equal(res?.status, 400);
 });
 
-test('non-admin: an assigned VLAN is permitted', () => {
-  assert.equal(
-    checkVlanAssignment(assignedDb, { userId: 2, isAdmin: false, vlanTag: 1001 }),
-    null,
-  );
-});
+test('non-admin: assigned VLAN passes, unassigned is refused with 403', async () => {
+  const testDb = await createTestDatabase();
+  try {
+    const [user] = await testDb.db.insert(users).values({ username: 'vlan-access-user', password: 'x' }).returning({ id: users.id });
+    const [assigned] = await testDb.db.insert(vlans).values({ name: 'a', tag: 1001, mode: 'managed', subnet_cidr: '' }).returning({ id: vlans.id });
+    // A second VLAN exists but is NOT assigned to the user.
+    await testDb.db.insert(vlans).values({ name: 'b', tag: 1002, mode: 'managed', subnet_cidr: '' });
+    await testDb.db.insert(userVlans).values({ user_id: user.id, vlan_id: assigned.id });
 
-test('non-admin: an unassigned VLAN is refused with 403', () => {
-  const res = checkVlanAssignment(unassignedDb, { userId: 2, isAdmin: false, vlanTag: 1002 });
-  assert.equal(res.status, 403);
-  assert.match(res.error, /do not have access to that VLAN/);
+    assert.equal(await checkVlanAssignment(testDb.db, { userId: user.id, isAdmin: false, vlanTag: 1001 }), null);
+    const refused = await checkVlanAssignment(testDb.db, { userId: user.id, isAdmin: false, vlanTag: 1002 });
+    assert.equal(refused?.status, 403);
+    assert.match(refused!.error, /do not have access to that VLAN/);
+  } finally {
+    await testDb.drop();
+  }
 });

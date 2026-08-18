@@ -7,21 +7,23 @@
 // authorization — this helper closes that gap and is the single decision point
 // shared by every route that sets a VM's VLAN.
 
-// SQL kept here so the assignment lookup is defined once. The db handle is
-// passed in by callers (which already import it) so this module stays free of
-// side effects and is unit-testable with a stub.
-const ASSIGNED_VLAN_SQL =
-  'SELECT v.id FROM vlans v JOIN user_vlans uv ON uv.vlan_id = v.id WHERE uv.user_id = ? AND v.tag = ?';
+// The db handle is passed in by callers (which already import it) so this
+// module stays free of side effects and is unit-testable with a stub.
+import { and, eq } from 'drizzle-orm';
+import type { DbOrTx } from '../db/client.ts';
+import { vlans, userVlans } from '../db/schema/index.ts';
+
+type ParsedVlanTag = { untagged: true } | { invalid: true } | { tag: number };
 
 // Interpret a VLAN tag from a request body.
 //   { untagged: true }      — null / undefined / '' / 0 (the native network)
 //   { tag: <positive int> } — a specific VLAN tag
 //   { invalid: true }       — a malformed value (non-numeric, <= 0)
-export function parseVlanTag(value) {
+export function parseVlanTag(value: unknown): ParsedVlanTag {
   if (value === null || value === undefined || value === '' || value === 0 || value === '0') {
     return { untagged: true };
   }
-  const tag = Number.parseInt(value, 10);
+  const tag = Number.parseInt(value as string, 10);
   if (!Number.isInteger(tag) || tag < 1) return { invalid: true };
   return { tag };
 }
@@ -30,21 +32,29 @@ export function parseVlanTag(value) {
 // including untagged. Non-admins must target an assigned VLAN; untagged and
 // unassigned tags are refused. Returns `null` when permitted, otherwise
 // `{ status, error }` for the caller to return verbatim.
-export function checkVlanAssignment(db, { userId, isAdmin, vlanTag }) {
+export async function checkVlanAssignment(
+  db: DbOrTx,
+  { userId, isAdmin, vlanTag }: { userId: number; isAdmin: boolean; vlanTag: unknown },
+): Promise<{ status: number; error: string } | null> {
   if (isAdmin) return null;
 
   const parsed = parseVlanTag(vlanTag);
-  if (parsed.invalid) {
+  if ('invalid' in parsed) {
     return { status: 400, error: 'Invalid VLAN tag' };
   }
-  if (parsed.untagged) {
+  if ('untagged' in parsed) {
     return {
       status: 403,
       error: 'You must place this VM on a VLAN assigned to you. The untagged/native network is reserved for administrators.',
     };
   }
 
-  const allowed = db.prepare(ASSIGNED_VLAN_SQL).get(userId, parsed.tag);
+  const [allowed] = await db
+    .select({ id: vlans.id })
+    .from(vlans)
+    .innerJoin(userVlans, eq(userVlans.vlan_id, vlans.id))
+    .where(and(eq(userVlans.user_id, userId), eq(vlans.tag, parsed.tag)))
+    .limit(1);
   if (!allowed) {
     return { status: 403, error: 'You do not have access to that VLAN' };
   }

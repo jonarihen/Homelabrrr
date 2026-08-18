@@ -1,19 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { createTestDatabase } from '../testUtils/pgTestDb.ts';
 
-test('mutation audit records success, denial, and failure without request bodies or secrets', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'homelabrrr-audit-'));
+test('mutation audit records success, denial, and failure without request bodies or secrets', async () => {
+  // The db singleton reads DATABASE_URL at import time, so the middleware is
+  // exercised in a subprocess pointed at a throwaway database.
+  const testDb = await createTestDatabase();
   try {
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import assert from 'node:assert/strict';
       import { EventEmitter } from 'node:events';
-      const { default: db } = await import('./src/db.ts');
+      const { db, closeDb } = await import('./src/db/client.ts');
+      const { users, auditLog } = await import('./src/db/schema/index.ts');
+      const { desc } = await import('drizzle-orm');
       const { auditMutations } = await import('./src/middleware/mutationAudit.ts');
-      const user = db.prepare('SELECT id, username FROM users LIMIT 1').get();
+      const [user] = await db.insert(users)
+        .values({ username: 'audit-admin', password: 'irrelevant-hash', is_admin: true })
+        .returning({ id: users.id, username: users.username });
       for (const [statusCode, outcome] of [[201, 'success'], [403, 'denied'], [500, 'failed']]) {
         const response = new EventEmitter();
         response.statusCode = statusCode;
@@ -25,26 +29,30 @@ test('mutation audit records success, denial, and failure without request bodies
         };
         auditMutations(request, response, () => {});
         response.emit('finish');
-        const row = db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 1').get();
+        // The finish handler's INSERT is fire-and-forget (conventions M13) —
+        // poll until the row for this request lands.
+        let row;
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          [row] = await db.select().from(auditLog).orderBy(desc(auditLog.id)).limit(1);
+          if (row?.request_id === request.requestId) break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        assert.equal(row?.request_id, request.requestId, 'audit row was not written');
         assert.equal(row.outcome, outcome);
-        assert.equal(row.request_id, request.requestId);
         assert.equal(row.target, '/api/sftp/upload');
         assert.doesNotMatch(JSON.stringify(row), /must-not-appear/);
       }
-      db.close();
+      await closeDb();
     `], {
       cwd: process.cwd(), encoding: 'utf8', env: {
         ...process.env,
-        DB_PATH: join(directory, 'audit.sqlite'),
-        SECRET_ENCRYPTION_KEY: '66'.repeat(32),
-        SESSION_SECRET: 'audit-test-session-secret-is-long-enough',
-        INITIAL_ADMIN_USERNAME: 'audit-admin',
-        INITIAL_ADMIN_PASSWORD: 'audit-password-strong',
+        DATABASE_URL: testDb.url,
       },
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    await testDb.drop();
   }
 });
 

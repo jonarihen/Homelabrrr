@@ -1,6 +1,18 @@
 import crypto from 'node:crypto';
+import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import type { DbOrTx } from '../db/client.ts';
+import { recoveryCodes, sessions, webauthnCredentials } from '../db/schema/index.ts';
 
-export function resolveWebauthnConfig({ configuredOrigin = '', allowedOrigin = '', protocol = 'https', host = '', rpID = '', rpName = '' }) {
+interface WebauthnConfigOptions {
+  configuredOrigin?: string;
+  allowedOrigin?: string;
+  protocol?: string;
+  host?: string;
+  rpID?: string;
+  rpName?: string;
+}
+
+export function resolveWebauthnConfig({ configuredOrigin = '', allowedOrigin = '', protocol = 'https', host = '', rpID = '', rpName = '' }: WebauthnConfigOptions) {
   const origin = configuredOrigin || allowedOrigin || `${protocol}://${host}`;
   let parsed;
   try { parsed = new URL(origin); }
@@ -15,61 +27,82 @@ export function resolveWebauthnConfig({ configuredOrigin = '', allowedOrigin = '
   return { origin: parsed.origin, rpID: relyingPartyId, rpName: rpName || 'Homelabrrr' };
 }
 
-export function hashRecoveryCode(code) {
+export function hashRecoveryCode(code: string | null | undefined): string {
   return crypto.createHash('sha256').update(String(code || '').replace(/\s|-/g, '').toUpperCase()).digest('hex');
 }
 
-export function consumeRecoveryCode(database, userId, codeHash) {
-  const consume = database.transaction(() => {
-    const code = database.prepare('SELECT id FROM recovery_codes WHERE user_id = ? AND code_hash = ? AND used_at IS NULL')
-      .get(userId, codeHash);
-    if (!code) return false;
-    return database.prepare("UPDATE recovery_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL").run(code.id).changes === 1;
-  });
-  return consume();
+export async function consumeRecoveryCode(database: DbOrTx, userId: number, codeHash: string): Promise<boolean> {
+  // Atomic claim: the `used_at IS NULL` predicate inside the UPDATE is the
+  // concurrency guard — two racing consumers cannot both observe rowCount === 1.
+  const result = await database
+    .update(recoveryCodes)
+    .set({ used_at: new Date() })
+    .where(and(
+      eq(recoveryCodes.user_id, userId),
+      eq(recoveryCodes.code_hash, codeHash),
+      isNull(recoveryCodes.used_at),
+    ));
+  return result.rowCount === 1;
 }
 
-export function parseStoredSession(row, currentSid) {
-  try {
-    const data = JSON.parse(row.sess || '{}');
-    return {
-      id: row.sid,
-      current: row.sid === currentSid,
-      createdAt: data.createdAt || null,
-      lastSeenAt: data.lastSeenAt || null,
-      expiresAt: row.expire || null,
-      ip: data.clientIp || '',
-      userAgent: data.userAgent || '',
-      userId: data.userId,
-    };
-  } catch { return null; }
+interface StoredSessionRow {
+  sid: string;
+  sess: unknown;
+  expire: Date | null;
 }
 
-export function removeWebauthnCredential(database, userId, credentialId) {
-  const credential = database.prepare('SELECT id, name FROM webauthn_credentials WHERE id = ? AND user_id = ?')
-    .get(credentialId, userId);
-  if (!credential) return null;
-  database.prepare('DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?').run(credential.id, userId);
-  return credential;
+export function parseStoredSession(row: StoredSessionRow, currentSid: string) {
+  // sess is jsonb — it arrives as an object; non-object payloads are treated
+  // as corrupt, same contract as the old unparseable-JSON case.
+  if (!row.sess || typeof row.sess !== 'object') return null;
+  const data = row.sess as Record<string, any>;
+  return {
+    id: row.sid,
+    current: row.sid === currentSid,
+    createdAt: data.createdAt || null,
+    lastSeenAt: data.lastSeenAt || null,
+    expiresAt: row.expire || null,
+    ip: data.clientIp || '',
+    userAgent: data.userAgent || '',
+    userId: data.userId,
+  };
 }
 
-export function revokeStoredSession(database, userId, sessionId, currentSid) {
+export async function removeWebauthnCredential(database: DbOrTx, userId: number, credentialId: string): Promise<{ id: string; name: string } | null> {
+  // Owner-scoped delete; RETURNING reports what was removed (or that nothing was).
+  const [credential] = await database
+    .delete(webauthnCredentials)
+    .where(and(eq(webauthnCredentials.id, credentialId), eq(webauthnCredentials.user_id, userId)))
+    .returning({ id: webauthnCredentials.id, name: webauthnCredentials.name });
+  return credential ?? null;
+}
+
+export async function revokeStoredSession(database: DbOrTx, userId: number, sessionId: string, currentSid: string) {
   if (sessionId === currentSid) return { ok: false, current: true };
-  const row = database.prepare('SELECT sid, sess, expire FROM sessions WHERE sid = ?').get(sessionId);
+  const [row] = await database
+    .select({ sid: sessions.sid, sess: sessions.sess, expire: sessions.expire })
+    .from(sessions)
+    .where(eq(sessions.sid, sessionId))
+    .limit(1);
   const parsed = row && parseStoredSession(row, currentSid);
   if (!parsed || parsed.userId !== userId) return { ok: false, missing: true };
-  database.prepare('DELETE FROM sessions WHERE sid = ?').run(row.sid);
+  await database.delete(sessions).where(eq(sessions.sid, row.sid));
   return { ok: true, session: parsed };
 }
 
-export function revokeOtherStoredSessions(database, userId, currentSid) {
-  const rows = database.prepare('SELECT sid, sess, expire FROM sessions WHERE sid != ?').all(currentSid);
-  const remove = database.prepare('DELETE FROM sessions WHERE sid = ?');
-  let revoked = 0;
-  database.transaction(() => {
-    for (const row of rows) {
-      if (parseStoredSession(row, currentSid)?.userId === userId) revoked += remove.run(row.sid).changes;
-    }
-  })();
-  return revoked;
+export async function revokeOtherStoredSessions(database: DbOrTx, userId: number, currentSid: string): Promise<number> {
+  // Ownership lives inside the sess payload, so read + filter + delete under one
+  // transaction; the old per-row DELETE loop is a single inArray delete now.
+  return database.transaction(async (tx) => {
+    const rows = await tx
+      .select({ sid: sessions.sid, sess: sessions.sess, expire: sessions.expire })
+      .from(sessions)
+      .where(ne(sessions.sid, currentSid));
+    const sids = rows
+      .filter((row) => parseStoredSession(row, currentSid)?.userId === userId)
+      .map((row) => row.sid);
+    if (sids.length === 0) return 0;
+    const result = await tx.delete(sessions).where(inArray(sessions.sid, sids));
+    return result.rowCount ?? 0;
+  });
 }

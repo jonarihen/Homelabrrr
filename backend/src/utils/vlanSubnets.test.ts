@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { userVlanCidrs, vlanRowCidr, vlanRowsToCidrs } from './vlanSubnets.ts';
+import { createTestDatabase } from '../testUtils/pgTestDb.ts';
+import { users, vlans, userVlans } from '../db/schema/index.ts';
 
 test('a managed VLAN derives its network from the tag, not from subnet_cidr', () => {
   // Managed VLANs are stored with an empty subnet_cidr on purpose — reading
@@ -42,19 +44,24 @@ test('rows collapse to a unique, empty-free CIDR list', () => {
   assert.deepEqual(vlanRowsToCidrs(null), []);
 });
 
-test('userVlanCidrs reads the assigned rows through the passed db handle', () => {
-  const calls = [];
-  const db = {
-    prepare: (sql) => ({
-      all: (userId) => {
-        calls.push({ sql, userId });
-        return [{ tag: 1012, mode: 'managed', subnet_cidr: '' }];
-      },
-    }),
-  };
+test('userVlanCidrs reads the assigned rows through the passed db handle', async () => {
+  const testDb = await createTestDatabase();
+  try {
+    const [user] = await testDb.db.insert(users).values({ username: 'vlan-subnet-user', password: 'x' }).returning({ id: users.id });
+    const [managed] = await testDb.db.insert(vlans).values({ name: 'm', tag: 1012, mode: 'managed', subnet_cidr: '' }).returning({ id: vlans.id });
+    // A tagged-only VLAN without a CIDR contributes nothing — assigning it must
+    // not widen the returned set.
+    const [tagged] = await testDb.db.insert(vlans).values({ name: 't', tag: 700, mode: 'tagged_only', subnet_cidr: '' }).returning({ id: vlans.id });
+    await testDb.db.insert(userVlans).values([
+      { user_id: user.id, vlan_id: managed.id },
+      { user_id: user.id, vlan_id: tagged.id },
+    ]);
 
-  assert.deepEqual(userVlanCidrs(db, 7), ['10.10.12.0/24']);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].userId, 7);
-  assert.match(calls[0].sql, /user_vlans/);
+    assert.deepEqual(await userVlanCidrs(testDb.db, user.id), ['10.10.12.0/24']);
+    // A user with no assignments covers nothing.
+    const [other] = await testDb.db.insert(users).values({ username: 'vlan-subnet-none', password: 'x' }).returning({ id: users.id });
+    assert.deepEqual(await userVlanCidrs(testDb.db, other.id), []);
+  } finally {
+    await testDb.drop();
+  }
 });

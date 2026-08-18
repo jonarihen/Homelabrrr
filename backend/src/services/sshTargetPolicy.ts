@@ -1,6 +1,8 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
-import db from '../db.ts';
+import { and, count, eq, gt, inArray, lt } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { publicIpAssignments, sshConnectionAttempts } from '../db/schema/index.ts';
 import { validateHost, validatePort } from '../utils/validation.ts';
 import { getLXCConfig, getVMAgentInterfaces, getVMConfig } from '../proxmox.ts';
 import { parseIpConfig0 } from '../utils/detectedIps.ts';
@@ -9,25 +11,47 @@ import { userVlanCidrs } from '../utils/vlanSubnets.ts';
 
 const ATTEMPT_WINDOW_MS = 60_000;
 
-export function sshConnectionRateLimited(userId, kind, limit) {
+// Prune, count, and record ride one transaction (a single pool connection).
+// The read-then-insert can overshoot the limit slightly under concurrency —
+// same tolerance the serialized SQLite version effectively had.
+export async function sshConnectionRateLimited(userId: number, kind: string, limit: number): Promise<boolean> {
   const now = Date.now();
-  db.prepare('DELETE FROM ssh_connection_attempts WHERE attempted_at < ?').run(now - ATTEMPT_WINDOW_MS);
-  const count = db.prepare('SELECT COUNT(*) AS count FROM ssh_connection_attempts WHERE user_id = ? AND kind = ? AND attempted_at > ?')
-    .get(userId, kind, now - ATTEMPT_WINDOW_MS).count;
-  if (count >= limit) return true;
-  db.prepare('INSERT INTO ssh_connection_attempts (user_id, kind, attempted_at) VALUES (?, ?, ?)').run(userId, kind, now);
-  return false;
+  const windowStart = now - ATTEMPT_WINDOW_MS;
+  return db.transaction(async (tx) => {
+    await tx.delete(sshConnectionAttempts).where(lt(sshConnectionAttempts.attempted_at, windowStart));
+    const [{ c }] = await tx
+      .select({ c: count() })
+      .from(sshConnectionAttempts)
+      .where(and(
+        eq(sshConnectionAttempts.user_id, userId),
+        eq(sshConnectionAttempts.kind, kind),
+        gt(sshConnectionAttempts.attempted_at, windowStart),
+      ));
+    if (c >= limit) return true;
+    await tx.insert(sshConnectionAttempts).values({ user_id: userId, kind, attempted_at: now });
+    return false;
+  });
 }
 
-function assignedNetworks(userId) {
+async function assignedNetworks(userId: number): Promise<string[]> {
   return userVlanCidrs(db, userId);
 }
 
-function explicitlyAssignedAddresses(userId, node, vmid) {
-  return db.prepare(`
-    SELECT private_ip AS ip FROM public_ip_assignments
-    WHERE user_id = ? AND node IN (?, ?) AND vmid = ?
-  `).all(userId, node, String(node).replace(/^\d+~/, ''), Number.parseInt(vmid, 10)).map((row) => row.ip);
+async function explicitlyAssignedAddresses(userId: number, node: string, vmid: number | string): Promise<string[]> {
+  // NaN matched nothing in SQLite; PostgreSQL rejects it as an integer
+  // parameter, so keep the same fail-closed outcome without a round trip.
+  const parsedVmid = Number.parseInt(String(vmid), 10);
+  if (!Number.isInteger(parsedVmid)) return [];
+  const rows = await db
+    .select({ ip: publicIpAssignments.private_ip })
+    .from(publicIpAssignments)
+    .where(and(
+      eq(publicIpAssignments.user_id, userId),
+      // Legacy assignment rows may store the bare node name (utils/nodeRef.ts).
+      inArray(publicIpAssignments.node, [String(node), String(node).replace(/^\d+~/, '')]),
+      eq(publicIpAssignments.vmid, parsedVmid),
+    ));
+  return rows.map((row) => row.ip);
 }
 
 function addressesFromAgent(payload) {
@@ -38,7 +62,7 @@ function addressesFromAgent(payload) {
 }
 
 function addressesFromConfig(config) {
-  const addresses = [];
+  const addresses: string[] = [];
   for (const [key, value] of Object.entries(config || {})) {
     if (!/^ipconfig\d+$/.test(key) && !/^net\d+$/.test(key)) continue;
     const parsed = parseIpConfig0(String(value || ''));
@@ -51,8 +75,8 @@ function addressesFromConfig(config) {
   return addresses;
 }
 
-async function detectedVmAddresses(node, vmid) {
-  const addresses = new Set();
+async function detectedVmAddresses(node: string, vmid: number | string): Promise<Set<string>> {
+  const addresses = new Set<string>();
   try {
     let config;
     try { config = await getVMConfig(node, vmid); }
@@ -76,24 +100,22 @@ export async function authorizeSshTarget({ userId, isAdmin, node, vmid, host, po
     try {
       addresses = [...new Set((await dns.lookup(checkedHost, { all: true, verbatim: true })).map((entry) => entry.address))];
     } catch {
-      const err = new Error('SSH host could not be resolved');
-      err.status = 400;
-      err.code = 'SSH_TARGET_UNRESOLVED';
-      throw err;
+      throw Object.assign(new Error('SSH host could not be resolved'), { status: 400, code: 'SSH_TARGET_UNRESOLVED' });
     }
   }
 
-  const networks = assignedNetworks(userId);
-  const exact = new Set([
-    ...explicitlyAssignedAddresses(userId, node, vmid),
-    ...(await detectedVmAddresses(node, vmid)),
+  const [networks, explicit, detected] = await Promise.all([
+    assignedNetworks(userId),
+    explicitlyAssignedAddresses(userId, node, vmid),
+    detectedVmAddresses(node, vmid),
   ]);
+  const exact = new Set([...explicit, ...detected]);
   const allowed = allowedResolvedSshAddresses(addresses, { exactAddresses: [...exact], networks });
   if (!allowed.length) {
-    const err = new Error('SSH/SFTP target is outside the VM addresses or networks assigned to you');
-    err.status = 403;
-    err.code = 'SSH_TARGET_NOT_ASSIGNED';
-    throw err;
+    throw Object.assign(
+      new Error('SSH/SFTP target is outside the VM addresses or networks assigned to you'),
+      { status: 403, code: 'SSH_TARGET_NOT_ASSIGNED' },
+    );
   }
 
   // Pin the address selected by policy so a later DNS lookup cannot rebind the
