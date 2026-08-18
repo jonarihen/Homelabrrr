@@ -1,6 +1,8 @@
 import https from 'https';
 import tls from 'tls';
-import db from './db.ts';
+import { eq } from 'drizzle-orm';
+import { db } from './db/client.ts';
+import { pveHosts } from './db/schema/index.ts';
 import { decryptSecret } from './utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.ts';
 import { pickVmid, isVmidTakenError, VmidReservations, VMID_MIN } from './utils/vmidAllocator.ts';
@@ -8,19 +10,22 @@ import { ADMIN_PVE_HOSTS_HREF } from './utils/upstreamError.ts';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
+// verify_tls is a real boolean now; the only insecure state is an explicit
+// `false` (the `=== false` / `!== false` form preserves the old `=== 0` /
+// `!== 0` semantics — a null verify_tls still verifies, i.e. stays secure).
 function assertSecureTls(host, label = 'Proxmox host') {
-  if (host.verify_tls === 0 && !ALLOW_INSECURE_UPSTREAM_TLS) {
+  if (host.verify_tls === false && !ALLOW_INSECURE_UPSTREAM_TLS) {
     throw new Error(`${label} TLS verification is disabled. Re-enable TLS verification or set ALLOW_INSECURE_UPSTREAM_TLS=true as a temporary exception.`);
   }
 }
 
 function agentForHost(host) {
   assertSecureTls(host);
-  return new https.Agent({ rejectUnauthorized: host.verify_tls !== 0 });
+  return new https.Agent({ rejectUnauthorized: host.verify_tls !== false });
 }
 
-function getHostById(hostId) {
-  const host = db.prepare('SELECT * FROM pve_hosts WHERE id = ?').get(hostId);
+async function getHostById(hostId) {
+  const [host] = await db.select().from(pveHosts).where(eq(pveHosts.id, hostId)).limit(1);
   if (!host) {
     throw new Error(`Configured Proxmox host ${hostId} was not found`);
   }
@@ -79,23 +84,24 @@ export const hostDelete = (host, path) => makeRequest(host, 'DELETE', path);
 
 // ── Host helpers ─────────────────────────────────────────────────────────────
 
-export function getHosts() {
-  return db.prepare('SELECT * FROM pve_hosts ORDER BY name').all();
+export async function getHosts() {
+  return db.select().from(pveHosts).orderBy(pveHosts.name);
 }
 
-export function getHost(id) {
-  return db.prepare('SELECT * FROM pve_hosts WHERE id = ?').get(id);
+export async function getHost(id) {
+  const [host] = await db.select().from(pveHosts).where(eq(pveHosts.id, id)).limit(1);
+  return host;
 }
 
 // Get first host (backwards compat for single-host usage)
-function defaultHost() {
-  const host = db.prepare('SELECT * FROM pve_hosts ORDER BY id LIMIT 1').get();
+async function defaultHost() {
+  const [host] = await db.select().from(pveHosts).orderBy(pveHosts.id).limit(1);
   if (!host) throw new Error('No PVE hosts configured');
   return host;
 }
 
 async function findHostsForNodeName(nodeName) {
-  const hosts = getHosts();
+  const hosts = await getHosts();
   const matches = [];
   for (const h of hosts) {
     try {
@@ -112,7 +118,7 @@ async function hostForNode(nodeRef, opts = {}) {
   if (!nodeName) throw new Error('Node is required');
   if (!isValidNodeName(nodeName)) throw new Error('Invalid node name');
 
-  if (hostId) return getHostById(hostId);
+  if (hostId) return await getHostById(hostId);
 
   const matches = await findHostsForNodeName(nodeName);
   if (matches.length === 1) return matches[0];
@@ -134,7 +140,7 @@ async function hostForNode(nodeRef, opts = {}) {
   }
 
   if (matches.length === 0) {
-    const hosts = getHosts();
+    const hosts = await getHosts();
     if (hosts.length === 1) return hosts[0];
     throw new Error(`Node ${nodeName} was not found on any configured Proxmox host`);
   }
@@ -150,9 +156,9 @@ async function resolveNode(nodeRef, opts = {}) {
 
 // ── Proxmox API wrappers ─────────────────────────────────────────────────────
 
-export const proxmoxGet  = (path)       => makeRequest(defaultHost(), 'GET', path);
-export const proxmoxPost = (path, body) => makeRequest(defaultHost(), 'POST', path, body ?? {});
-export const proxmoxPut  = (path, body) => makeRequest(defaultHost(), 'PUT', path, body ?? {});
+export const proxmoxGet  = async (path)       => makeRequest(await defaultHost(), 'GET', path);
+export const proxmoxPost = async (path, body) => makeRequest(await defaultHost(), 'POST', path, body ?? {});
+export const proxmoxPut  = async (path, body) => makeRequest(await defaultHost(), 'PUT', path, body ?? {});
 
 // Host-aware variants
 export const hostGet  = (host, path)       => makeRequest(host, 'GET', path);
@@ -193,7 +199,7 @@ export async function getAllVMs() {
   const now = Date.now();
   if (_vmCache.data && now < _vmCache.expires) return _vmCache.data;
 
-  const hosts = getHosts();
+  const hosts = await getHosts();
   const allVms = [];
   for (const h of hosts) {
     try {
@@ -358,6 +364,8 @@ export async function getHostStatus(host) {
 // "already exists". The backend is single-process — the same assumption the
 // tag-sync scheduler makes — so an in-process set is enough. Entries expire on
 // their own (see VmidReservations) in case a caller never releases.
+// (pg upgrade path: replace this in-process set with a Postgres advisory lock
+// if the backend ever runs as more than one process.)
 const vmidReservations = new VmidReservations();
 
 // Hand a reserved id back early — call this when the create/clone that was
@@ -368,7 +376,7 @@ export function releaseVmid(vmid) {
 }
 
 export async function getNextVmid() {
-  const hosts = getHosts();
+  const hosts = await getHosts();
   // Collect all used VMIDs across every connected host so IDs are globally unique
   const usedIds = new Set();
   const failedHosts = [];
@@ -522,7 +530,7 @@ export async function getNetworks(node) {
 }
 
 export async function getNodes() {
-  const hosts = getHosts();
+  const hosts = await getHosts();
   const allNodes = [];
   for (const h of hosts) {
     try {
@@ -714,7 +722,7 @@ export function getHostCertFingerprint(host) {
     const socket = tls.connect({
       host: host.host,
       port: host.port,
-      rejectUnauthorized: host.verify_tls !== 0,
+      rejectUnauthorized: host.verify_tls !== false,
     }, () => {
       const cert = socket.getPeerCertificate();
       socket.end();
@@ -888,6 +896,6 @@ export async function getHostForNode(nodeName) {
     port: host.port,
     tokenId: host.token_id,
     tokenSecret: decryptSecret(host.token_secret),
-    verifyTls: host.verify_tls !== 0,
+    verifyTls: host.verify_tls !== false,
   };
 }
