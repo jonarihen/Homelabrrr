@@ -9,7 +9,7 @@ import { db } from '../db/client.ts';
 import { backupRuns } from '../db/schema/index.ts';
 import { log } from '../utils/logger.ts';
 import { notify, portalLink } from '../utils/notify.ts';
-import { encryptBackupFile } from '../utils/encryptedBackup.ts';
+import { encryptBackupFile, verifyEncryptedBackup } from '../utils/encryptedBackup.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -91,14 +91,15 @@ export async function createVerifiedBackup({ requestId = '' }: { requestId?: str
         '--dbname', String(process.env.DATABASE_URL),
         '--file', plain,
       ]);
-      // Lightweight verification: pg_dump exited zero (above) and produced a
-      // non-empty archive. TODO: a full verify should run `pg_restore --list`
-      // on the plaintext dump to confirm the archive's table of contents.
       if ((await stat(plain)).size <= 0) throw new Error('pg_dump produced an empty archive');
       await encryptBackupFile(plain, localTarget, settings.passphrase);
       await copyFile(localTarget, offsiteTarget);
-      // The copy that would actually be used for disaster recovery must exist
-      // and be non-empty, not merely the local staging artifact.
+      // Verify BOTH the staging artifact and the disaster-recovery copy by
+      // decrypting each and reading its pg_dump table of contents — a backup
+      // that cannot be listed is worthless, and the off-host copy is the one
+      // that actually gets restored.
+      await verifyEncryptedBackup(localTarget, settings.passphrase);
+      await verifyEncryptedBackup(offsiteTarget, settings.passphrase);
       const size = (await stat(offsiteTarget)).size;
       if (size <= 0) throw new Error('Off-host backup copy is empty');
       await db

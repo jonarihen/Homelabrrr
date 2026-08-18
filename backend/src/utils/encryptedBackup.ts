@@ -2,10 +2,12 @@ import crypto from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { appendFile, open, unlink, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import Database from 'better-sqlite3';
 
+const execFileAsync = promisify(execFile);
 const MAGIC = Buffer.from('HOMELABRRR-BACKUP-V1\n');
 
 export async function encryptBackupFile(source, target, passphrase) {
@@ -45,19 +47,27 @@ export async function decryptBackupFile(source, target, passphrase) {
   );
 }
 
-export function verifySqliteBackup(path) {
-  const restored = new Database(path, { readonly: true, fileMustExist: true });
+// Verify a pg_dump custom-format archive is intact and structurally sane by
+// reading its table of contents (pg_restore --list rejects a corrupt archive
+// and never touches a live database). Confirm the schema_migrations table is
+// present so a truncated dump can't pass.
+export async function verifyPostgresDump(path: string): Promise<void> {
+  let toc: string;
   try {
-    const result = restored.pragma('integrity_check', { simple: true });
-    if (result !== 'ok') throw new Error(`Restored database integrity check failed: ${result}`);
-    restored.prepare('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1').get();
-  } finally { restored.close(); }
+    const { stdout } = await execFileAsync('pg_restore', ['--list', path], { maxBuffer: 64 * 1024 * 1024 });
+    toc = stdout;
+  } catch (err) {
+    throw new Error(`Backup archive is not a readable pg_dump: ${(err as Error).message}`);
+  }
+  if (!/\bschema_migrations\b/.test(toc)) {
+    throw new Error('Backup archive is missing the schema_migrations table — it is not a Homelabrrr database dump');
+  }
 }
 
-export async function verifyEncryptedBackup(path, passphrase) {
-  const temp = join(tmpdir(), `homelabrrr-verify-${crypto.randomUUID()}.sqlite`);
+export async function verifyEncryptedBackup(path: string, passphrase: string): Promise<void> {
+  const temp = join(tmpdir(), `homelabrrr-verify-${crypto.randomUUID()}.dump`);
   try {
     await decryptBackupFile(path, temp, passphrase);
-    verifySqliteBackup(temp);
+    await verifyPostgresDump(temp);
   } finally { await unlink(temp).catch(() => {}); }
 }

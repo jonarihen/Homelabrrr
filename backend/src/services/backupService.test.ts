@@ -2,19 +2,37 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { access, writeFile, stat } from 'node:fs/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { desc, eq } from 'drizzle-orm';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
 import { backupRuns } from '../db/schema/index.ts';
 
-// SKIPPED in this environment: createVerifiedBackup shells out to `pg_dump`,
-// which must be present AND at least the version of the server it dumps. The
-// local dev/CI test server is PostgreSQL 18.x while the available pg_dump is
-// 17.x, so a live dump is refused with a version mismatch. Remove the `skip`
-// once pg_dump matches the test server (the body below is otherwise complete
-// and exercises the full dump → encrypt → offsite → verify pipeline).
-const SKIP_REASON = 'requires a pg_dump matching the test PostgreSQL server version';
+const execFileAsync = promisify(execFile);
+
+// createVerifiedBackup shells out to pg_dump/pg_restore, which must be present
+// AND at least the major version of the server. Skip only when the tools are
+// missing or older than the server (the body exercises the full dump → encrypt
+// → offsite → verify pipeline).
+async function pgDumpSkipReason(): Promise<string | false> {
+  try {
+    const { stdout: dumpV } = await execFileAsync('pg_dump', ['--version']);
+    const dumpMajor = Number(/(\d+)\./.exec(dumpV)?.[1]);
+    const server = await createTestDatabase();
+    const { rows } = await server.pool.query('SHOW server_version');
+    await server.drop();
+    const serverMajor = Number(/(\d+)/.exec(String(rows[0].server_version))?.[1]);
+    if (!Number.isFinite(dumpMajor) || !Number.isFinite(serverMajor)) return 'could not determine pg_dump/server versions';
+    if (dumpMajor < serverMajor) return `pg_dump ${dumpMajor} is older than server ${serverMajor}`;
+    return false;
+  } catch (err) {
+    return `pg_dump unavailable: ${(err as Error).message}`;
+  }
+}
+
+const SKIP_REASON = await pgDumpSkipReason();
 
 test('backup service verifies both artifacts and records success or destination failure', { skip: SKIP_REASON }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'homelabrrr-backup-service-'));
