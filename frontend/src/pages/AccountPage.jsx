@@ -477,7 +477,10 @@ const EXPIRY_OPTIONS = [
 
 function fmtDate(v) {
   if (!v) return '—';
-  const d = new Date(v.replace(' ', 'T') + 'Z');
+  // The API sends ISO-8601 (…T…Z) now; tolerate the legacy 'YYYY-MM-DD HH:MM:SS'
+  // UTC form too by only adding the T/Z it lacks.
+  const s = String(v);
+  const d = new Date(s.includes('T') ? s : s.replace(' ', 'T') + (s.includes('Z') ? '' : 'Z'));
   return isNaN(d.getTime()) ? v : d.toLocaleString();
 }
 

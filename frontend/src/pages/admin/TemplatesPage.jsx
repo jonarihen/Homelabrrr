@@ -901,7 +901,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
     defaultDiskGb: template?.default_disk_gb || 20,
     defaultStorage: template?.default_storage || 'local-lvm',
     cloudInit: template?.cloud_init || false,
-    enabled: template?.enabled !== 0,
+    enabled: template?.enabled ?? true,
   });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);

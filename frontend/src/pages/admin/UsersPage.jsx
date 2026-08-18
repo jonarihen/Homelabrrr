@@ -1252,7 +1252,9 @@ const btnCls   = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-
 
 function tokenDate(v) {
   if (!v) return '—';
-  const d = new Date(v.replace(' ', 'T') + 'Z');
+  // ISO-8601 from the API; tolerate the legacy 'YYYY-MM-DD HH:MM:SS' UTC form.
+  const s = String(v);
+  const d = new Date(s.includes('T') ? s : s.replace(' ', 'T') + (s.includes('Z') ? '' : 'Z'));
   return isNaN(d.getTime()) ? v : d.toLocaleString();
 }
 

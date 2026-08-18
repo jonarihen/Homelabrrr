@@ -378,8 +378,8 @@ export default function AssignmentsPage() {
   // they represent a pending admin action (remove the leftover), not history.
   const visibleMigrations = migrations.filter(m =>
     m.status === 'running' ||
-    (m.status === 'ok' && m.kept_source === 1) ||
-    (m.finished_at && Date.now() - new Date(m.finished_at.replace(' ', 'T') + 'Z').getTime() < 60 * 60 * 1000)
+    (m.status === 'ok' && !!m.kept_source) ||
+    (m.finished_at && Date.now() - new Date(String(m.finished_at).includes('T') ? m.finished_at : String(m.finished_at).replace(' ', 'T') + 'Z').getTime() < 60 * 60 * 1000)
   );
 
   const cleanupSource = async (m) => {
@@ -464,7 +464,7 @@ export default function AssignmentsPage() {
               {m.status === 'error' && m.status_detail && (
                 <span className="text-xs text-gray-500 truncate max-w-[24rem]" title={m.status_detail}>{m.status_detail}</span>
               )}
-              {m.status === 'ok' && m.kept_source === 1 && (
+              {m.status === 'ok' && !!m.kept_source && (
                 <button
                   onClick={() => cleanupSource(m)}
                   title={m.status_detail}
