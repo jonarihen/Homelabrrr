@@ -16,7 +16,7 @@ export async function imageDeployTargets(image) {
   const volPath = image.volid.slice(storageId.length + 1);
   const targets = [{ hostId: ownHostId, node: ownNode, nodeRef: image.node, storage: storageId, volid: image.volid }];
   try {
-    const ownHost = getHost(ownHostId);
+    const ownHost = await getHost(ownHostId);
     if (!ownHost) return targets;
     const ownDefs = await getStorageDefs(ownHost);
     const key = sharedStorageKey((ownDefs || []).find((d) => d.storage === storageId));
@@ -25,7 +25,7 @@ export async function imageDeployTargets(image) {
     const nodeByHost = new Map();
     for (const n of await getNodes()) if (!nodeByHost.has(n.hostId)) nodeByHost.set(n.hostId, n.node);
 
-    for (const h of getHosts()) {
+    for (const h of await getHosts()) {
       if (h.id === ownHostId) continue;
       const nodeName = nodeByHost.get(h.id);
       if (!nodeName) continue;
