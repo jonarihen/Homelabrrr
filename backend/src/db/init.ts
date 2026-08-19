@@ -1,8 +1,10 @@
 import bcrypt from 'bcryptjs';
+import { existsSync } from 'node:fs';
 import { and, eq, count, inArray, isNotNull, ne, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from './client.ts';
 import { runMigrations } from './migrate.ts';
 import { setSetting, getSetting } from './settings.ts';
+import { importDatabase } from '../scripts/importSqlite.ts';
 import {
   users, roles, rolePermissions, sshKeys, pveHosts, firewalls,
   notificationWebhooks, caddyServers, provisionedVms, vmMigrations, isos,
@@ -169,9 +171,52 @@ async function bootstrapInitialAdmin(): Promise<void> {
   log('info', 'initial_admin_created', { username: initialUsername, source: 'environment' });
 }
 
+// One-time automatic SQLite -> PostgreSQL import. On the first boot of a fresh
+// PostgreSQL database, if a legacy db.sqlite is present (the db_data volume the
+// old build wrote to), copy it in so an existing install upgrades with a plain
+// `docker compose up -d --build` — no manual import step. Guarded three ways: a
+// settings flag so it never runs twice, an emptiness check so it never writes
+// over existing data, and AUTO_IMPORT_SQLITE=false to opt out entirely. The
+// operator must keep the same SECRET_ENCRYPTION_KEY across the cutover — the
+// encrypted columns are copied verbatim.
+const IMPORT_DONE_KEY = 'sqlite_auto_import';
+
+async function maybeAutoImportSqlite(): Promise<void> {
+  if (String(process.env.AUTO_IMPORT_SQLITE || 'auto').toLowerCase() === 'false') return;
+  const source = process.env.DB_PATH || '/app/data/db.sqlite';
+  if (!existsSync(source)) return;                       // nothing to import
+  if (await getSetting(IMPORT_DONE_KEY)) return;         // already handled once
+
+  // Never import over a database that already holds data (e.g. a manual import
+  // already ran). Record the decision so the check is skipped next time.
+  const [{ c: userCount }] = await db.select({ c: count() }).from(users);
+  const [{ c: roleCount }] = await db.select({ c: count() }).from(roles);
+  if (userCount > 0 || roleCount > 0) {
+    await setSetting(IMPORT_DONE_KEY, JSON.stringify({ at: new Date().toISOString(), skipped: 'target not empty' }));
+    return;
+  }
+
+  const target = process.env.DATABASE_URL as string;
+  log('info', 'sqlite_auto_import_started', { source });
+  const result = await importDatabase({
+    source,
+    target,
+    nullOrphans: true,
+    log: (line) => log('info', 'sqlite_auto_import', { line }),
+  });
+  const rows = Object.values(result.copied).reduce((sum, n) => sum + n, 0);
+  await setSetting(IMPORT_DONE_KEY, JSON.stringify({
+    at: new Date().toISOString(), source, rows, orphanRefsNulled: result.orphanRefsNulled,
+  }));
+  log('info', 'sqlite_auto_import_complete', {
+    tables: Object.keys(result.copied).length, rows, orphanRefsNulled: result.orphanRefsNulled,
+  });
+}
+
 export async function initDatabase(): Promise<void> {
   await runMigrations();
   assertSecretEncryptionKey();
+  await maybeAutoImportSqlite();
   await seedBuiltInRoles();
 
   const migratedSecrets = await migrateLegacySecrets();

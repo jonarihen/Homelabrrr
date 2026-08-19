@@ -39,7 +39,13 @@ export const OPTIONAL_ENV_VARS = [
   {
     name: 'DB_PATH',
     defaultValue: '/app/data/db.sqlite',
-    effect: 'SQLite database file (the db_data volume mount point in Docker)',
+    effect: 'legacy SQLite file path — read only by the one-time import (auto-import source)',
+  },
+  {
+    name: 'AUTO_IMPORT_SQLITE',
+    defaultValue: 'auto',
+    effect: 'on first boot of an empty database, import a legacy db.sqlite at DB_PATH if present',
+    unsetNote: 'auto-imports when a legacy SQLite file exists and the database is empty; set to "false" to disable',
   },
   {
     name: 'DATABASE_URL',

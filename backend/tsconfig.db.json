@@ -8,5 +8,6 @@
     "src/types/**/*.ts",
     "src/testUtils/**/*.ts",
     "drizzle.config.ts"
-  ]
+  ],
+  "exclude": ["src/**/*.test.ts"]
 }

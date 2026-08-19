@@ -14,11 +14,12 @@
 // The whole copy runs on one connection inside one transaction: any error —
 // including a verification mismatch — rolls everything back.
 //
-// better-sqlite3 is a devDependency: this script runs where the repo is checked
-// out with dev dependencies installed, never inside the production image.
+// Reads the SQLite source through Node's built-in node:sqlite (zero extra
+// dependencies), so it runs anywhere the backend runs — including inside the
+// production image, which is what lets initDatabase() auto-import on first boot.
 
 import { pathToFileURL } from 'node:url';
-import Database from 'better-sqlite3';
+import { openSqliteReadonly, type SqliteReader } from './sqliteReader.ts';
 import pg from 'pg';
 import { is, getTableName } from 'drizzle-orm';
 import { getTableConfig, PgTable } from 'drizzle-orm/pg-core';
@@ -163,17 +164,17 @@ function quoteIdent(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
 
-function sqliteTableNames(src: InstanceType<typeof Database>): Set<string> {
+function sqliteTableNames(src: SqliteReader): Set<string> {
   const rows = src.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;
   return new Set(rows.map((row) => row.name));
 }
 
-function sqliteColumnNames(src: InstanceType<typeof Database>, table: string): Set<string> {
+function sqliteColumnNames(src: SqliteReader, table: string): Set<string> {
   const rows = src.prepare('SELECT name FROM pragma_table_info(?)').all(table) as Array<{ name: string }>;
   return new Set(rows.map((row) => row.name));
 }
 
-function sqliteCount(src: InstanceType<typeof Database>, table: string): number {
+function sqliteCount(src: SqliteReader, table: string): number {
   const row = src.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`).get() as { n: number };
   return Number(row.n);
 }
@@ -186,7 +187,7 @@ async function pgCount(client: pg.PoolClient, table: string): Promise<number> {
 // ─── Orphan pre-scan ─────────────────────────────────────────────────────────
 
 function scanOrphans(
-  src: InstanceType<typeof Database>,
+  src: SqliteReader,
   sourceTables: Set<string>,
   log: (line: string) => void
 ): Map<string, OrphanScan> {
@@ -271,9 +272,10 @@ function transformValue(table: string, column: ColumnMeta, raw: unknown, rowRef:
     return raw;
   }
 
-  // bytea
+  // bytea — node:sqlite yields BLOBs as Uint8Array; pg wants a Buffer.
   if (raw === null) return null;
   if (Buffer.isBuffer(raw)) return raw;
+  if (raw instanceof Uint8Array) return Buffer.from(raw);
   return fail(`expected a BLOB, got ${JSON.stringify(raw)}`);
 }
 
@@ -294,7 +296,7 @@ async function insertBatch(
 
 async function copyTable(
   client: pg.PoolClient,
-  src: InstanceType<typeof Database>,
+  src: SqliteReader,
   meta: TableMeta,
   orphanSets: Map<string, OrphanScan>,
   log: (line: string) => void
@@ -366,7 +368,7 @@ function renderTable(headers: string[], rows: string[][]): string[] {
 
 async function verifyImport(
   client: pg.PoolClient,
-  src: InstanceType<typeof Database>,
+  src: SqliteReader,
   sourceTables: Set<string>,
   order: string[],
   skipped: Record<string, string>,
@@ -440,7 +442,7 @@ export async function importDatabase(options: ImportOptions): Promise<ImportResu
   const metas = buildTableMetas();
   const order = topologicalOrder(metas);
 
-  const src = new Database(options.source, { readonly: true, fileMustExist: true });
+  const src = openSqliteReadonly(options.source);
   const pool = new pg.Pool({ connectionString: options.target, max: 1 });
   try {
     // 1. Source integrity gate.

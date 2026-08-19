@@ -67,9 +67,12 @@ services:
       # network; the password comes from POSTGRES_PASSWORD in .env.
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-homelabrrr}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-homelabrrr}}
       - PG_POOL_SIZE=${PG_POOL_SIZE:-10}
-      # Legacy SQLite path — retained only for the one-time importSqlite tool
-      # (see the "Migrating from SQLite" runbook). Ignored by the running server.
+      # Legacy SQLite path. On the first boot of an empty PostgreSQL database,
+      # if this file exists (an existing install's db_data volume), the backend
+      # imports it automatically — so upgrading is a plain `compose up`. Set
+      # AUTO_IMPORT_SQLITE=false to skip it. Ignored once data is present.
       - DB_PATH=${DB_PATH:-/app/data/db.sqlite}
+      - AUTO_IMPORT_SQLITE=${AUTO_IMPORT_SQLITE:-auto}
     volumes:
       # db_data is kept for one release as the SQLite import source / rollback
       # artifact; the running server no longer writes to it.

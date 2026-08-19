@@ -454,7 +454,34 @@ Incremental maintenance deletes at most 500 eligible rows per high-growth table 
 
 ## Migrating from SQLite
 
-Homelabrrr stored its state in SQLite before this release. If you are upgrading an existing install, run this one-time operator runbook once to copy that database into PostgreSQL. The old `db_data` volume is left completely untouched throughout, so a rollback is always available.
+Homelabrrr stored its state in SQLite before this release. Upgrading an existing install is automatic — the old `db_data` volume is left completely untouched throughout, so a rollback is always available.
+
+### The easy path — automatic on upgrade
+
+Just pull and rebuild:
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+On the **first boot against an empty PostgreSQL database**, the backend notices the legacy `db.sqlite` still sitting on the `db_data` volume (at `DB_PATH`) and imports it for you — same transforms, same verification, same `--null-orphans` handling as the manual tool below — then records that it has done so and never repeats it. The `postgres` service starts first (Compose waits for it to be healthy), the import runs during startup, and the app comes up on the imported data. Watch it happen:
+
+```bash
+docker compose logs -f backend | grep sqlite_auto_import
+curl --fail http://127.0.0.1:8181/api/health/ready
+```
+
+Then sign in and spot-check **Admin → Operations**. Keep the `db_data` volume until you have taken and verified your first PostgreSQL backup; to roll back, `git checkout` the pre-migration tag and `docker compose up -d --build` (the SQLite data was never touched).
+
+Notes:
+- Keep the **same `SECRET_ENCRYPTION_KEY`** across the upgrade — the encrypted columns are copied byte-for-byte and still need that key to decrypt.
+- The auto-import only ever runs into an **empty** database and only **once** (guarded by a `sqlite_auto_import` settings flag); it never writes over existing data.
+- To opt out and do it by hand instead, set `AUTO_IMPORT_SQLITE=false` and follow the manual runbook below.
+
+### The manual path — explicit control
+
+Prefer to run the copy yourself (e.g. to a database Compose does not manage, or to inspect the verification table before starting the app)? Set `AUTO_IMPORT_SQLITE=false`, then:
 
 1. Stop the backend so nothing writes to the old database while you copy it:
 
@@ -469,14 +496,14 @@ Homelabrrr stored its state in SQLite before this release. If you are upgrading 
    docker compose ps postgres        # wait until STATUS shows (healthy)
    ```
 
-3. Run the import tool from a **throwaway container** that mounts the old `db_data` volume read-only and installs the dev toolchain (the import path uses `better-sqlite3`, which builds natively there). Verify the actual volume and network names first with `docker volume ls` / `docker network ls` — Compose prefixes them with the project name:
+3. Run the import from a **throwaway container** that mounts the old `db_data` volume read-only. The import reads SQLite through Node's built-in `node:sqlite`, so no native toolchain is needed — a plain `npm ci --omit=dev` is enough. Verify the actual volume and network names first with `docker volume ls` / `docker network ls` — Compose prefixes them with the project name:
 
    ```bash
    docker run --rm \
      -v <project>_db_data:/old:ro \
      -v $(pwd)/backend:/app -w /app \
      --network <project>_internal \
-     node:26.5.1-alpine sh -c "apk add --no-cache python3 make g++ && npm ci && \
+     node:26.5.1-alpine sh -c "npm ci --omit=dev --ignore-scripts && \
        node src/scripts/importSqlite.ts --source /old/db.sqlite \
        --target postgres://homelabrrr:$POSTGRES_PASSWORD@postgres:5432/homelabrrr"
    ```
