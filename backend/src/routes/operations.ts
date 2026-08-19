@@ -79,7 +79,7 @@ async function listOperations() {
 router.get('/', async (req, res) => {
   res.json({
     operations: await listOperations(),
-    database: databaseMaintenanceStatus(),
+    database: await databaseMaintenanceStatus(),
     backups: await backupStatus(),
     encryption: encryptionKeyStatus(),
     encryptionRotation: await planEncryptedSecretRotation(),
@@ -92,15 +92,15 @@ router.post('/database-maintenance', requireRecentReauthentication, async (req, 
   const batchSize = req.body?.batchSize === undefined
     ? undefined
     : boundedInteger(req.body.batchSize, { field: 'batchSize', min: 1, max: 5000 });
-  const result = runDatabaseMaintenance({ batchSize });
-  await logAudit(req, 'database_maintenance_run', 'sqlite', JSON.stringify(result.deleted));
+  const result = await runDatabaseMaintenance({ batchSize });
+  await logAudit(req, 'database_maintenance_run', 'postgres', JSON.stringify(result.deleted));
   res.json(result);
 });
 
 router.post('/backups', requireRecentReauthentication, async (req, res) => {
   try {
     const result = await createVerifiedBackup({ requestId: req.requestId || '' });
-    logAudit(req, 'database_backup_verified', String(result.id), `size=${result.size_bytes}`);
+    await logAudit(req, 'database_backup_verified', String(result.id), `size=${result.size_bytes}`);
     res.status(201).json(result);
   } catch (err) { sendError(res, err); }
 });

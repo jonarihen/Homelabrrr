@@ -67,7 +67,7 @@ export const ACTIONS = {
       { name: 'role', type: 'string', required: false, default: 'undefined', help: 'Interface role' },
       { name: 'skipIfExists', type: 'boolean', required: false, default: true, help: 'Skip if the interface already exists' },
     ],
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{
         method: 'POST', path: 'cmdb/system/interface', scope: 'global',
         body: this._body(p, client),
@@ -119,7 +119,7 @@ export const ACTIONS = {
       { name: 'vdom', type: 'string', required: false, help: 'VDOM override (blank = firewall VDOM)' },
       { name: 'skipIfExists', type: 'boolean', required: false, default: true },
     ],
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{ method: 'POST', path: 'cmdb/firewall/address', scope: scopeOf(client, p.vdom), body: this._body(p), summary: `Create address object ${p.name} (${p.subnet})` }];
     },
     _body(p) {
@@ -166,7 +166,7 @@ export const ACTIONS = {
       { name: 'vdom', type: 'string', required: false, help: 'VDOM override (blank = firewall VDOM)' },
       { name: 'skipIfExists', type: 'boolean', required: false, default: true },
     ],
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{ method: 'POST', path: 'cmdb/firewall.service/custom', scope: scopeOf(client, p.vdom), body: this._body(p), summary: `Create service ${p.name} (${p.protocol}/${p.port})` }];
     },
     _body(p) {
@@ -218,7 +218,7 @@ export const ACTIONS = {
       { name: 'dedupeBySrcintf', type: 'string', required: false, help: 'Skip if a policy already has this src interface' },
       { name: 'moveAfterSameLabel', type: 'boolean', required: false, help: 'Re-order after an existing policy sharing the global-label' },
     ],
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{ method: 'POST', path: 'cmdb/firewall/policy', scope: scopeOf(client, p.vdom), body: buildPolicyBody(p), summary: `Create policy "${p.name}" (${asList(p.srcintf).join(',')} → ${asList(p.dstintf).join(',')})` }];
     },
     async execute(client, p, _ctx) {
@@ -273,7 +273,7 @@ export const ACTIONS = {
       { name: 'vdom', type: 'string', required: false, help: 'VDOM (blank = firewall VDOM)' },
       { name: 'dedupeByDst', type: 'boolean', required: false, default: true, help: 'Skip if a route to this destination exists' },
     ],
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{ method: 'POST', path: 'cmdb/router/static', scope: scopeOf(client, p.vdom), body: { dst: `${p.dst} ${p.netmask}`, gateway: String(p.gateway), device: String(p.device) }, summary: `Create static route ${p.dst}/${p.netmask} via ${p.gateway} dev ${p.device}` }];
     },
     async execute(client, p, _ctx) {
@@ -314,7 +314,7 @@ export const ACTIONS = {
       { name: 'dns2', type: 'string', required: false, default: '8.8.8.8' },
       { name: 'dedupeByInterface', type: 'boolean', required: false, default: true },
     ],
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{ method: 'POST', path: 'cmdb/system.dhcp/server', scope: client.vdom, body: this._body(p), summary: `Create DHCP server on ${p.interface} (${p.startIp}–${p.endIp})` }];
     },
     _body(p) {
@@ -366,7 +366,7 @@ export const ACTIONS = {
       { name: 'extintf', type: 'string', required: false, default: 'any' },
       { name: 'vdom', type: 'string', required: false, help: 'VDOM (blank = firewall VDOM)' },
     ],
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{ method: 'POST', path: 'cmdb/firewall/vip', scope: scopeOf(client, p.vdom), body: this._body(p), summary: `Create VIP ${p.name} (${p.extport} → ${p.mappedip}:${p.mappedport})` }];
     },
     _body(p) {
@@ -408,7 +408,7 @@ export const ACTIONS = {
       { name: 'trunk', type: 'boolean', required: false, default: true, help: 'Add to allowed-vlans (trunk) vs access VLAN' },
       { name: 'vdom', type: 'string', required: false, help: 'VDOM (blank = firewall VDOM)' },
     ],
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{ method: 'PUT', path: `cmdb/switch-controller/managed-switch/${p.serial}`, scope: scopeOf(client, p.vdom), summary: `Add ${p.vlanName} to ${p.trunk === false ? 'access VLAN on' : 'allowed-vlans on'} ${p.serial}/${p.port}` }];
     },
     async execute(client, p, _ctx) {
@@ -476,7 +476,7 @@ export const ACTIONS = {
         if (Buffer.byteLength(raw) > MAX_CUSTOM_BODY_BYTES) throw new Error(`custom_api_call body exceeds ${MAX_CUSTOM_BODY_BYTES} bytes`);
       }
     },
-    plan(p, _ctx, _client) {
+    plan(p, _ctx, client) {
       return [{ method: String(p.method || 'POST'), path: String(p.path || '').replace(/^\/api\/v2\//, ''), scope: scopeOf(client, p.vdom), body: this._body(p), summary: `${p.method} ${p.path}` }];
     },
     _body(p) {
@@ -508,7 +508,7 @@ export const ACTIONS = {
       if (arts.length === 0) return [{ method: 'DELETE', path: '(recorded artifacts)', scope: '(firewall)', summary: 'Delete recorded artifacts in reverse order' }];
       return arts.slice().reverse().map((a) => ({ method: 'DELETE', path: teardownPath(a), scope: a.vdom || '(firewall vdom)', summary: `Delete ${describeArtifact(a)}` }));
     },
-    async execute(client, _p, _ctx) {
+    async execute(client, _p, ctx) {
       const arts = (ctx && ctx.artifacts) || [];
       const calls = [];
       for (let i = arts.length - 1; i >= 0; i -= 1) {

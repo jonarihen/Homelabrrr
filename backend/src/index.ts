@@ -630,7 +630,7 @@ const tagSyncSchedulerStart = Date.now();
 async function tagSyncTick() {
   try {
     if (isTagSyncRunning()) return;
-    const settings = getTagSyncSettings();
+    const settings = await getTagSyncSettings();
     if (settings.paused) return;
 
     // Anchor the cadence to the last completed run (persisted) so restarts don't
@@ -641,7 +641,7 @@ async function tagSyncTick() {
     if (Date.now() < dueAt) return;
 
     const summary = await runFullTagSync({ trigger: 'scheduled' });
-    logAuditEntry({
+    await logAuditEntry({
       username: 'system',
       action: 'vm_tags_sync_scheduled',
       target: 'all',
