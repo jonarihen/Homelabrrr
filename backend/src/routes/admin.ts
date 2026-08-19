@@ -1880,7 +1880,8 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         // Provisioning now runs through the configurable workflow engine. The
         // seeded default `vlan_provision` workflow reproduces the historical
         // hardcoded sequence exactly; edits to it change what the next sync does.
-        const bundle = getWorkflowBundle(fw.id, 'vlan_provision');
+        const bundle = await getWorkflowBundle(fw.id, 'vlan_provision');
+        if (!bundle) throw new Error(`VLAN provision workflow is unavailable for firewall ${fw.name}`);
         const settings = workflowSettings(bundle.workflow);
         const subnet = deriveSubnet(vlan.tag, settings);
         if (!subnet) throw new Error(`Cannot derive subnet from VLAN tag ${vlan.tag}`);
@@ -2109,7 +2110,8 @@ router.post('/policies', pPolicies, async (req, res) => {
     // default `policy_create` workflow reproduces the forward/reverse policy
     // shapes exactly; the engine rolls back the forward policy if the reverse
     // one fails.
-    const bundle = getWorkflowBundle(fw.id, 'policy_create');
+    const bundle = await getWorkflowBundle(fw.id, 'policy_create');
+    if (!bundle) throw new Error(`Policy creation workflow is unavailable for firewall ${fw.name}`);
     const context = {
       action,
       bidirectional: doReverse,
@@ -2850,7 +2852,8 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
     // through the configurable workflow engine. The seeded default
     // `port_forward_create` workflow reproduces the historical sequence exactly;
     // the engine records each created object and rolls back in reverse on failure.
-    const bundle = getWorkflowBundle(fw.id, 'port_forward_create');
+    const bundle = await getWorkflowBundle(fw.id, 'port_forward_create');
+    if (!bundle) throw new Error(`Port-forward workflow is unavailable for firewall ${fw.name}`);
     const context = {
       name,
       protocol,
