@@ -4,7 +4,7 @@
 
 [![Frontend](https://img.shields.io/badge/frontend-React%2018%20%2B%20Vite-61dafb?style=flat-square&logo=react&logoColor=white)](#stack)
 [![Backend](https://img.shields.io/badge/backend-Node.js%20%2B%20Express-339933?style=flat-square&logo=node.js&logoColor=white)](#stack)
-[![Database](https://img.shields.io/badge/database-SQLite-003b57?style=flat-square&logo=sqlite&logoColor=white)](#stack)
+[![Database](https://img.shields.io/badge/database-PostgreSQL-4169e1?style=flat-square&logo=postgresql&logoColor=white)](#stack)
 [![Deployment](https://img.shields.io/badge/deployment-Docker%20Compose-2496ed?style=flat-square&logo=docker&logoColor=white)](#quick-start)
 [![Security](https://img.shields.io/badge/security-passkeys%20%2B%20role%20controls-bf3989?style=flat-square)](#security-model)
 
@@ -83,7 +83,7 @@ This project pulls those into one interface so users can work inside guardrails 
 - `VM Leases` — set the default lease duration + grace period, review every VM's lease with owner and live status, renew/adjust/extend any lease, exempt infra VMs, run the expiry sweep on demand, and backfill leases onto VMs that predate the feature; expired-past-grace VMs are highlighted as reclaimable
 - `Notifications` — add Discord webhooks, choose which event types each one receives, and send a test message; webhook URLs are encrypted at rest and all changes are audit-logged
 - `Audit Log` — change tracking with user/IP/timestamp
-- `Operations` — interrupted Proxmox task reconciliation, encrypted backup/restore-verification status, SQLite/WAL maintenance, and secret-key rotation planning
+- `Operations` — interrupted Proxmox task reconciliation, encrypted backup/restore-verification status, PostgreSQL retention/maintenance, and secret-key rotation planning
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user
 
 ## Architecture
@@ -93,7 +93,7 @@ flowchart LR
     U[Browser] --> RP[Reverse Proxy / TLS]
     RP --> FE[Frontend<br/>React + Vite + Nginx]
     FE --> BE[Backend<br/>Express + WebSocket proxy]
-    BE --> DB[(SQLite)]
+    BE --> DB[(PostgreSQL)]
     BE --> PVE[Proxmox VE API]
     BE --> FGT[FortiGate API]
 ```
@@ -101,13 +101,13 @@ flowchart LR
 ## Stack
 
 - Frontend: React 18, Vite 8, Tailwind CSS 3, React Router 7
-- Backend: Node.js 24 LTS (ESM), Express 5, `ws`, `ssh2`, `busboy`
-- Database: SQLite via `better-sqlite3` (encrypted secrets at rest)
-- Auth: SQLite-backed session cookies, rate-limited login/2FA, TOTP, WebAuthn/passkeys, recovery codes, and scoped bearer tokens
+- Backend: Node.js 26 (ESM + TypeScript, run directly via native type stripping — no build step), Express 5, `ws`, `ssh2`, `busboy`
+- Database: PostgreSQL 17, accessed through **Drizzle ORM** over **node-postgres (`pg`)** with a shared connection pool (encrypted secrets at rest)
+- Auth: Drizzle-backed PostgreSQL session store, rate-limited login/2FA, TOTP, WebAuthn/passkeys, recovery codes, and scoped bearer tokens
 - Console access: Proxmox VNC websocket proxy via noVNC, plus browser SSH via `xterm.js`
 - File access: SFTP over `ssh2`, sharing the SSH credential and host-key verification flow
 - Integrations: Proxmox VE API (multi-host), FortiGate REST API
-- Deployment: Docker Compose (two containers — backend + frontend/nginx)
+- Deployment: Docker Compose (three services — `postgres` + backend + frontend/nginx)
 
 ## Screens and Flow
 
@@ -299,9 +299,9 @@ IP, the value is wrong. The same data is available at `GET /api/health/client-ip
 and the backend logs a one-time warning on startup traffic when the numbers disagree.
 ### 5. Configure encrypted, verified, off-host backups
 
-Everything Homelabrrr knows lives in one SQLite file inside `db_data`. `docker compose down` keeps that volume; `docker compose down -v` **deletes it**.
+Everything Homelabrrr knows lives in the PostgreSQL database inside the `pg_data` volume. `docker compose down` keeps that volume; `docker compose down -v` **deletes it**.
 
-The backend can take an online SQLite-consistent snapshot with `better-sqlite3`'s backup API, encrypt it with AES-256-GCM, copy it to a separate destination, decrypt that copied artifact into an isolated temporary database, and run both an integrity check and schema query. No application downtime is required for the scheduled snapshot.
+The backend can take an online `pg_dump --format=custom` snapshot, encrypt it with AES-256-GCM into a `homelabrrr-<stamp>.dump.enc` archive, copy it to a separate destination, and verify it by decrypting the copied artifact and reading its archive table of contents with `pg_restore --list`. No application downtime is required for the scheduled snapshot. (`pg_dump`/`pg_restore` come from the `postgresql17-client` package baked into the backend image.)
 
 Set these before enabling backups:
 
@@ -322,43 +322,55 @@ Keep `BACKUP_ENCRYPTION_KEY` in a password manager or secrets system separate fr
 
 #### Disaster-recovery restore
 
-1. Secure a copy of the encrypted `.sqlite.enc` artifact and the separate backup key.
-2. Stop the writer and decrypt to a new filename; the restore command refuses to overwrite an existing file and verifies integrity/schema before returning success.
-3. Preserve the failed database, remove its stale WAL/SHM sidecars, promote the verified restore, start the backend, then check readiness and sign in.
+Restore is a two-step operation: `restore-backup` turns the encrypted archive back into a verified plain `pg_dump` custom-format file, and then `pg_restore` loads that file into a **new, empty database** — never over a live one.
 
-```bash
-docker compose stop backend
-docker compose run --rm \
-  -e BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" \
-  backend npm run restore-backup -- \
-  /app/backups-offsite/homelabrrr-YYYY-MM-DDTHH-MM-SS.sqlite.enc \
-  /app/data/db-restored.sqlite
+1. Secure a copy of the encrypted `.dump.enc` artifact and the separate backup key.
+2. Decrypt and verify it to a plain `.dump` file. The restore command refuses to overwrite an existing target and reads the archive's table of contents before reporting success.
 
-docker compose run --rm --entrypoint sh backend -c \
-  'mv /app/data/db.sqlite /app/data/db.sqlite.pre-restore && rm -f /app/data/db.sqlite-wal /app/data/db.sqlite-shm && mv /app/data/db-restored.sqlite /app/data/db.sqlite'
+   ```bash
+   docker compose run --rm \
+     -e BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" \
+     backend npm run restore-backup -- \
+     /app/backups-offsite/homelabrrr-YYYY-MM-DDTHH-MM-SS.dump.enc \
+     /app/data/db-restored.dump
+   ```
 
-docker compose start backend
-curl --fail http://127.0.0.1:8181/api/health/ready
-```
+3. Create a fresh target database and load the verified archive into it with `pg_restore` (drop ownership so it re-owns to the connecting role). Do this against a **new** database, not the live one:
 
-If application validation fails, stop the backend, move the restored database aside, put `db.sqlite.pre-restore` back, and restart. Never discard the pre-restore database until users, upstream credentials, and a fresh backup have all been verified.
+   ```bash
+   # e.g. create homelabrrr_restored on the same server, then:
+   pg_restore --no-owner --dbname="postgres://homelabrrr:$POSTGRES_PASSWORD@127.0.0.1:5432/homelabrrr_restored" \
+     ./data/db-restored.dump
+   ```
 
-For an emergency raw volume archive, stop the backend first and archive the entire `db_data` volume, including any WAL/SHM files. A live file copy is not a supported SQLite-consistent backup.
+4. Point the backend at the restored database (set `DATABASE_URL` to it, or promote it to the primary name once verified), start the backend, then check readiness and sign in:
+
+   ```bash
+   docker compose up -d backend
+   curl --fail http://127.0.0.1:8181/api/health/ready
+   ```
+
+Never discard the original database until users, upstream credentials, and a fresh backup have all been verified against the restored copy.
 
 ## Local Development
 
-Docker Compose is the normal deployment path. For local frontend/backend development:
+Docker Compose is the normal deployment path. For local frontend/backend development you need a reachable PostgreSQL — a throwaway one is a single command:
+
+```bash
+docker run -d -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:17-alpine
+```
+
+Then start the backend (TypeScript runs directly — no build step):
 
 ```powershell
 cd backend
 npm install
-New-Item -ItemType Directory -Force data
+$env:DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/postgres"
 $env:SESSION_SECRET="dev-session-secret"
 $env:SECRET_ENCRYPTION_KEY="0123456789abcdef0123456789abcdef"
 $env:INITIAL_ADMIN_USERNAME="admin"
 $env:INITIAL_ADMIN_PASSWORD="change-this-before-first-start"
-$env:DB_PATH="./data/db.sqlite"
-node src/index.js
+npm run dev            # node --watch src/index.ts, backend on :3000
 ```
 
 In another shell:
@@ -373,13 +385,14 @@ Vite proxies `/api` and websocket traffic to `http://localhost:3000`.
 
 ## Tests and Build Checks
 
-The repository has package-level lint/test/build scripts, Playwright coverage for route authorization, and a GitHub Actions workflow:
+The repository has package-level lint/test/type-check/build scripts, Playwright coverage for route authorization, and a GitHub Actions workflow. The backend test suite (~620 tests via `node --test`) talks to a real PostgreSQL: set `TEST_DATABASE_URL` (default `postgres://postgres:postgres@127.0.0.1:5432/postgres`) and have a reachable server — the throwaway `docker run … postgres:17-alpine` from [Local Development](#local-development) is enough.
 
 ```bash
 cd backend
 npm ci
 npm run lint
-npm test
+npm run typecheck               # strict type-check of the db layer
+TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres npm test
 
 cd ../frontend
 npm ci
@@ -389,7 +402,7 @@ npm run build
 npm run e2e
 ```
 
-CI repeats those checks and builds both production images on every pull request. The supported runtime is Node.js 24 LTS. Production Docker bases are deliberately pinned to `node:24.17.0-alpine3.24` and `nginx:1.30.4-alpine3.24`; Dependabot proposes reviewed updates for npm, Docker, and GitHub Actions dependencies.
+CI (`.github/workflows/ci.yml`) repeats those checks against a `postgres:17-alpine` service container and builds both production images on every pull request. The supported runtime is Node.js 26. Production Docker bases are deliberately pinned to `node:26.5.1-alpine3.24` and `nginx:1.31.3-alpine3.24`; Dependabot proposes reviewed updates for npm, Docker, and GitHub Actions dependencies.
 
 ## Environment
 
@@ -397,6 +410,9 @@ Example values live in [`.env.example`](.env.example).
 
 | Variable | Purpose |
 | --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string the backend uses. In Docker Compose it is assembled from `POSTGRES_*` and points at the bundled `postgres` service; set it directly to use an external database instead |
+| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | Database name, role, and password for the bundled `postgres` service; `docker-compose.yml` also reads them to build `DATABASE_URL` (a password is required) |
+| `PG_POOL_SIZE` | Maximum connections in the backend's shared `pg` pool (default `10`) |
 | `SESSION_SECRET` | Session signing secret |
 | `SECRET_ENCRYPTION_KEY` | 32-byte master key for encrypting secrets at rest; accepted as base64, 64-char hex, or exactly 32 bytes of raw text |
 | `SECRET_ENCRYPTION_KEY_ID` | Stable identifier embedded in new ciphertext (default `primary`); choose a new ID when rotating the key |
@@ -416,10 +432,10 @@ Example values live in [`.env.example`](.env.example).
 | `VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS` | How long a scheduled graceful shutdown waits before the hard-stop fallback fires (default `120000`) |
 | `WEBSITE_RECONCILE_INTERVAL_MS` | How often published websites are re-checked: admin-API routes dropped by a `caddy reload` are re-pushed, and every published site is re-probed over HTTPS (default `300000` = 5 min; minimum `60000`) — see [Route durability](#️-route-durability-admin-api-routes-are-not-persistent) |
 | `AUDIT_RETENTION_DAYS` / `JOB_RETENTION_DAYS` | Retention for audit records (default 365 days) and terminal job history (default 90 days) |
-| `BACKUP_DIR` / `BACKUP_OFFSITE_DIR` / `BACKUP_ENCRYPTION_KEY` | Enables scheduled SQLite-consistent, encrypted backups whose separately copied artifact is restore-verified; keep the backup key separate from the database and both destinations |
+| `BACKUP_DIR` / `BACKUP_OFFSITE_DIR` / `BACKUP_ENCRYPTION_KEY` | Enables scheduled `pg_dump` custom-format, encrypted backups whose separately copied artifact is restore-verified (`pg_restore --list`); keep the backup key separate from the database and both destinations |
 | `BACKUP_RETENTION_DAYS` / `BACKUP_INTERVAL_MS` | Backup retention (default 14 days) and schedule (default daily) |
 | `BACKUP_HOST_PATH` / `BACKUP_OFFSITE_HOST_PATH` | Compose host mounts for local staging and the separately mounted/replicated disaster-recovery destination |
-| `DB_PATH` | SQLite database file (default `/app/data/db.sqlite`, inside the `db_data` volume — moving it takes the database off the volume you back up) |
+| `DB_PATH` | **Legacy** — path to the old SQLite file, used only by the one-time `import-sqlite` tool (see [Migrating from SQLite](#migrating-from-sqlite)). The running server no longer reads or writes it |
 
 Every variable in this table is passed into the backend container by `docker-compose.yml`, and the backend logs which ones it recognised at startup (`docker compose logs backend | grep '\[config\]'`) — so a setting that is being ignored is visible rather than silent.
 
@@ -427,14 +443,92 @@ Useful implementation defaults:
 
 - backend listens on port `3000` inside Docker
 - frontend nginx listens on port `80` inside Docker and publishes host port `8181`
-- SQLite data is stored in the `db_data` Docker volume at `/app/data/db.sqlite`
+- PostgreSQL data is stored in the `pg_data` Docker volume; the old `db_data` volume is retained for one release only, as the SQLite import source / rollback artifact, and the running server no longer writes to it
 - SFTP uploads stream directly to the guest without an application-level size cap; available space and limits on the remote host are the effective ceiling. Other API requests are capped by nginx at 105 MB
 
 ## Database Migrations, Retention, and Recovery
 
-Schema changes are ordered in `schema_migrations`. The legacy schema is adopted as one transactional baseline; subsequent migrations have stable increasing versions. Only SQLite's exact duplicate-column idempotency condition is tolerated while adopting an older installation. Any syntax, disk, lock, permissions, corruption, or integrity failure stops startup before the server listens. Take a verified backup before deploying a migration-bearing release and retain the pre-upgrade artifact through the validation window.
+Schema changes ship as numbered SQL files in `backend/drizzle/`. Each is produced from the Drizzle schema with `npm run db:generate` (drizzle-kit) and then hand-trimmed — the generator's output is a draft, not gospel — and a small runner applies the unapplied files in order, inside one advisory-locked transaction, recording each in the `schema_migrations` table. Migrations run automatically at startup, before the server begins listening, so any migration failure stops the boot rather than serving on a half-applied schema. Never edit an already-applied migration; add a new numbered file. Take a verified backup before deploying a migration-bearing release and retain the pre-upgrade artifact through the validation window.
 
-Incremental maintenance deletes at most 500 eligible rows per high-growth table per run, then performs `PRAGMA optimize` and a passive WAL checkpoint—never an online full `VACUUM`. Defaults are 365 days for security audit history and 90 days for terminal provisioning, migration, backup-task, and workflow history; running/queued records are protected. Configure `AUDIT_RETENTION_DAYS` and `JOB_RETENTION_DAYS` to meet your policy. **Admin → Operations** reports database, WAL, reclaimable size, oldest retained records, and the last cleanup result.
+Incremental maintenance deletes at most 500 eligible rows per high-growth table per run (batch capped at 5000), then runs `ANALYZE` to refresh planner statistics — the PostgreSQL analogue of the old `PRAGMA optimize`. PostgreSQL's autovacuum reclaims dead-row space on its own, so there is no online `VACUUM` step. Defaults are 365 days for security audit history and 90 days for terminal provisioning, migration, backup-task, and workflow history; running/queued records are protected. Configure `AUDIT_RETENTION_DAYS` and `JOB_RETENTION_DAYS` to meet your policy. **Admin → Operations** reports database size, the reclaimable (dead-tuple) estimate, oldest retained records, and the last cleanup result. (PostgreSQL's WAL is cluster-global rather than per-database, so the panel's WAL figure is always `0`.)
+
+## Migrating from SQLite
+
+Homelabrrr stored its state in SQLite before this release. Upgrading an existing install is automatic — the old `db_data` volume is left completely untouched throughout, so a rollback is always available.
+
+### The easy path — automatic on upgrade
+
+Just pull and rebuild:
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+On the **first boot against an empty PostgreSQL database**, the backend notices the legacy `db.sqlite` still sitting on the `db_data` volume (at `DB_PATH`) and imports it for you — same transforms, same verification, same `--null-orphans` handling as the manual tool below — then records that it has done so and never repeats it. The `postgres` service starts first (Compose waits for it to be healthy), the import runs during startup, and the app comes up on the imported data. Watch it happen:
+
+```bash
+docker compose logs -f backend | grep sqlite_auto_import
+curl --fail http://127.0.0.1:8181/api/health/ready
+```
+
+Then sign in and spot-check **Admin → Operations**. Keep the `db_data` volume until you have taken and verified your first PostgreSQL backup; to roll back, `git checkout` the pre-migration tag and `docker compose up -d --build` (the SQLite data was never touched).
+
+Notes:
+- Keep the **same `SECRET_ENCRYPTION_KEY`** across the upgrade — the encrypted columns are copied byte-for-byte and still need that key to decrypt.
+- The auto-import only ever runs into an **empty** database and only **once** (guarded by a `sqlite_auto_import` settings flag); it never writes over existing data.
+- To opt out and do it by hand instead, set `AUTO_IMPORT_SQLITE=false` and follow the manual runbook below.
+
+### The manual path — explicit control
+
+Prefer to run the copy yourself (e.g. to a database Compose does not manage, or to inspect the verification table before starting the app)? Set `AUTO_IMPORT_SQLITE=false`, then:
+
+1. Stop the backend so nothing writes to the old database while you copy it:
+
+   ```bash
+   docker compose stop backend
+   ```
+
+2. Bring up only PostgreSQL and wait for it to report healthy:
+
+   ```bash
+   docker compose up -d postgres
+   docker compose ps postgres        # wait until STATUS shows (healthy)
+   ```
+
+3. Run the import from a **throwaway container** that mounts the old `db_data` volume read-only. The import reads SQLite through Node's built-in `node:sqlite`, so no native toolchain is needed — a plain `npm ci --omit=dev` is enough. Verify the actual volume and network names first with `docker volume ls` / `docker network ls` — Compose prefixes them with the project name:
+
+   ```bash
+   docker run --rm \
+     -v <project>_db_data:/old:ro \
+     -v $(pwd)/backend:/app -w /app \
+     --network <project>_internal \
+     node:26.5.1-alpine sh -c "npm ci --omit=dev --ignore-scripts && \
+       node src/scripts/importSqlite.ts --source /old/db.sqlite \
+       --target postgres://homelabrrr:$POSTGRES_PASSWORD@postgres:5432/homelabrrr"
+   ```
+
+   The tool copies every table in foreign-key order and translates the SQLite representation to PostgreSQL types along the way: `0`/`1` → real booleans, `TEXT` dates → `timestamptz`, the `''`-empty sentinel → `NULL`, JSON strings → `jsonb`, `BLOB` → `bytea`, and encrypted columns are copied **byte-for-byte** (so the `enc:v2:` envelopes still decrypt with your existing key). It refuses a non-empty target unless you pass `--force`, and it prints a per-table verification table at the end. If it reports orphaned rows (references the new foreign keys would reject), rerun with `--null-orphans` to import them with those references set to `NULL`.
+
+   Flags: `--source`, `--target`, `--force`, `--include-sessions` (also copy the 24h-ephemeral `sessions` table, normally skipped), `--null-orphans`.
+
+4. Check the verification table, then bring the app up on PostgreSQL and confirm it:
+
+   ```bash
+   docker compose up -d --build backend frontend
+   curl --fail http://127.0.0.1:8181/api/health/ready
+   ```
+
+   Sign in and spot-check **Admin → Operations**.
+
+5. **Rollback.** The `db_data` volume was never modified, so reverting is just checking out the pre-migration tag and rebuilding:
+
+   ```bash
+   git checkout <pre-migration tag>
+   docker compose up -d --build
+   ```
+
+   Keep the `db_data` volume until you have taken and verified your first PostgreSQL backup.
 
 ## Encryption-Key Rotation Runbook
 
@@ -443,17 +537,17 @@ Encrypted values use `enc:v2:<key-id>:` envelopes. New writes use only `SECRET_E
 1. Create and verify an off-host database backup. Record the current key ID and keep its key outside the archive.
 2. Generate a new 32-byte key, choose a new stable ID, set it as the current key, and put the old ID/key in `SECRET_ENCRYPTION_PREVIOUS_KEYS`.
 3. Restart. Open **Admin → Operations** and inspect the dry-run counts. Do not rotate if any record is undecryptable.
-4. Select **Rotate now**. Rotation is one SQLite transaction: any bad record rolls every earlier update back. Confirm the remaining count is zero and exercise Proxmox, firewall, SSH, webhook, and 2FA integrations.
+4. Select **Rotate now**. Rotation is one database transaction: any bad record rolls every earlier update back. Confirm the remaining count is zero and exercise Proxmox, firewall, SSH, webhook, and 2FA integrations.
 5. Keep the old key available through the rollback/backup-retention window. Then remove it from `SECRET_ENCRYPTION_PREVIOUS_KEYS`, restart, and verify readiness plus a new backup.
 
 Rollback means restoring the pre-rotation backup and restoring its keyring, or temporarily re-adding the old key ID when rollback does not require a database restore. Never log, commit, or store key material beside the backup.
 
 ## Observability and Shutdown
 
-- `/api/health/live` checks process viability only. `/api/health/ready` checks SQLite access, integrity, and the applied schema version without a destructive probe.
-- Authenticated admins can read Prometheus text at `/api/metrics`: request totals/latency, upstream failures, job states, active VNC/SSH WebSockets, and SQLite/database/WAL size.
+- `/api/health/live` checks process viability only. `/api/health/ready` checks PostgreSQL connectivity and the applied schema version (it reads the highest `schema_migrations` version) without a destructive probe.
+- Authenticated admins can read Prometheus text at `/api/metrics`: request totals/latency, upstream failures, job states, active VNC/SSH WebSockets, and PostgreSQL database size (`homelabrrr_pg_database_bytes`).
 - Backend logs are structured JSON for request and lifecycle events, return `X-Request-Id`, and centrally redact credential-shaped fields. Long-running operation rows retain their originating request ID and actor.
-- `SIGTERM`/`SIGINT` stop new HTTP and background-job admission, timers, schedulers, and website polling; close WebSockets with code 1001; give scheduler, backup, provisioning, ISO/image, template-build, and console-patch work a bounded 15-second drain; checkpoint WAL; and close SQLite. A forced drain is recorded in the shutdown log, and any unfinished durable operation is reconciled on the next start.
+- `SIGTERM`/`SIGINT` stop new HTTP and background-job admission, timers, schedulers, and website polling; close WebSockets with code 1001; give scheduler, backup, provisioning, ISO/image, template-build, and console-patch work a bounded 15-second drain; and close the PostgreSQL connection pool. A forced drain is recorded in the shutdown log, and any unfinished durable operation is reconciled on the next start.
 
 An actionable baseline is to alert when readiness fails for two consecutive checks, any encrypted backup is unverified/failed, upstream failure counts rise continuously, `needs_review` jobs remain unresolved, or WAL size grows without returning after maintenance. Route backup failures to an operator-owned notification channel.
 
@@ -497,9 +591,9 @@ Operationally important:
 
 - The frontend is plain HTTP inside Docker by design.
   Put TLS at the reverse proxy.
-- The SQLite volume contains sensitive operational data encrypted at rest.
+- The PostgreSQL data volume (`pg_data`) contains sensitive operational data, with upstream secrets encrypted at rest.
   Back it up and protect it — see [Configure encrypted, verified, off-host backups](#5-configure-encrypted-verified-off-host-backups).
-- The backend container drops to an unprivileged user (`node`, uid 1000) before starting the API.
+- The backend image runs as the unprivileged `node` user (uid 1000) from PID 1; it no longer writes an on-disk database, so there is no root-owned db file to chown at startup.
 - SSH private keys are stored encrypted in the application database for browser terminal access.
   Treat the DB as sensitive.
 
@@ -507,7 +601,7 @@ Operationally important:
 
 - Run exactly **one backend replica**. Console/SFTP handoff tokens, VMID reservations, background-job locks, notification queues, and schedulers keep process-local state. Multiple replicas can lose console handoffs or perform the same scheduled work twice.
 - Provisioning and migration rows persist their Proxmox UPID, actor, phase, and request ID. A restart moves every unfinished operation—with or without an upstream task ID—to `needs_review` in **Admin → Operations** instead of guessing that it failed. **Check upstream** records the observed task state without silently changing the portal resource, while **Remove tracking only** is available only after a terminal result and never deletes the Proxmox guest. Verify the resource in Proxmox before resolving, retrying, or removing tracking. ISO/image-specific pollers still require operator review after interruption.
-- Keep live SQLite on the local `db_data` volume; this deployment is not designed for a shared network filesystem or horizontally scaled writers. Scheduled backups use SQLite's online backup API, while raw file/volume archives still require the backend to be stopped.
+- Keep PostgreSQL on the local `pg_data` volume; this deployment is not designed for horizontally scaled backend writers (the single-replica constraint above is what matters — in-process schedulers, locks, and console-handoff maps assume one backend). Scheduled backups use an online `pg_dump`, so no downtime is needed for them.
 
 ## Reverse Proxy Notes
 
@@ -542,13 +636,13 @@ docker-compose.yml    Main deployment entrypoint
 Git gives you code history and rollback.
 It does not roll back:
 
-- the SQLite database volume
+- the PostgreSQL data volume
 - saved credentials inside the DB
 - firewall changes already pushed to FortiGate
 - Proxmox-side changes already applied
 
 If you want safe rollback in practice, pair Git with database backups and network config backups.
-See [Back up the `db_data` volume](#5-back-up-the-db_data-volume) for the database half.
+See [Configure encrypted, verified, off-host backups](#5-configure-encrypted-verified-off-host-backups) for the database half.
 
 ## Changelog
 

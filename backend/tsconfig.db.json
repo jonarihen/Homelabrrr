@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noImplicitAny": true
+  },
+  "include": [
+    "src/db/**/*.ts",
+    "src/types/**/*.ts",
+    "src/testUtils/**/*.ts",
+    "drizzle.config.ts"
+  ],
+  "exclude": ["src/**/*.test.ts"]
+}

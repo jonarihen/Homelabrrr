@@ -3,28 +3,30 @@ FROM node:26.5.1-alpine3.24
 WORKDIR /app
 
 COPY package*.json ./
-RUN apk add --no-cache --virtual .native-build python3 make g++ \
- && npm ci --omit=dev \
- && apk del .native-build \
- && apk add --no-cache putty su-exec
+# Production dependencies are all pure JS now (pg, bcryptjs, ssh2, ...) — no
+# native build toolchain needed. better-sqlite3 is a devDependency (used only
+# by the one-time SQLite import tool, which runs in a throwaway container), but
+# drizzle-orm declares it as an optional peer, so npm keeps it under --omit=dev.
+# --ignore-scripts skips its node-gyp build (the package is never imported at
+# runtime) and ssh2's optional native accelerators (it falls back to pure JS),
+# so no Python/make/g++ is required. puttygen migrates legacy PuTTY SSH keys;
+# postgresql17-client provides pg_dump/pg_restore for the encrypted backup
+# pipeline (must match the postgres:17 server major in docker-compose.yml).
+RUN npm ci --omit=dev --ignore-scripts \
+ && apk add --no-cache putty postgresql17-client
 
 COPY src ./src
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY drizzle ./drizzle
 
-# /app/data is where the db_data volume mounts. chown here covers a *fresh*
-# volume (Docker seeds a new named volume from the image, ownership included);
-# the entrypoint repeats it at runtime for volumes that already exist from a
-# root-era deployment, where the mount masks whatever the image says.
-#
-# There is deliberately no `USER node` line: the entrypoint has to start as root
-# to be able to fix that ownership, and drops to node (uid 1000) with su-exec
-# before exec'ing the CMD. The Node process itself never runs as root.
-RUN mkdir -p /app/data \
- && chown -R node:node /app/data \
- && sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
- && chmod +x /usr/local/bin/docker-entrypoint.sh
+# /app/data (legacy SQLite import mount) and the backup staging dirs are owned
+# by the unprivileged runtime user. The server no longer writes an on-disk
+# database, so there is no root-owned db file to fix up at runtime — the process
+# that holds decrypted secrets runs as node from PID 1.
+RUN mkdir -p /app/data /app/backups /app/backups-offsite \
+ && chown -R node:node /app/data /app/backups /app/backups-offsite
+
+USER node
 
 EXPOSE 3000
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["node", "src/index.js"]
+CMD ["node", "src/index.ts"]

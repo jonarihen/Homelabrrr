@@ -128,7 +128,7 @@ function StepCard({ step, index, count, actionDef, actions, onChange, onMove, on
             onFocus={() => onFocusField(index, '__condition', 'string')} />
         </div>
         <label className="flex items-center gap-2 text-sm text-gray-300">
-          <input type="checkbox" checked={step.enabled !== 0 && step.enabled !== false} onChange={(e) => onChange({ ...step, enabled: e.target.checked ? 1 : 0 })} className="accent-orange-600" />
+          <input type="checkbox" checked={step.enabled !== 0 && step.enabled !== false} onChange={(e) => onChange({ ...step, enabled: e.target.checked })} className="accent-orange-600" />
           <span className="font-mono text-[11px] uppercase tracking-wider">Enabled</span>
         </label>
         <label className="flex items-center gap-2 text-sm text-gray-300">
@@ -368,7 +368,7 @@ export default function WorkflowsPage() {
               return (
                 <button key={t.trigger} onClick={() => setTrigger(t.trigger)}
                   className={`border px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.1em] transition-colors ${active ? 'border-orange-600 bg-orange-600/10 text-orange-300' : 'border-gray-800 text-gray-500 hover:border-gray-600 hover:text-gray-300'}`}>
-                  {t.label}{wf && wf.enabled === 0 ? ' · off' : ''}
+                  {t.label}{wf && !wf.enabled ? ' · off' : ''}
                 </button>
               );
             })}

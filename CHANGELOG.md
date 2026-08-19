@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-18 — Moved the database to PostgreSQL
+
+- **Homelabrrr now stores everything in PostgreSQL instead of SQLite.** The whole backend was rebuilt on Drizzle ORM and TypeScript, and `docker compose up` now brings up a bundled `postgres` service alongside the app. This lifts the single-file database ceiling — real concurrency, proper types (true/false flags, timezone-aware timestamps, native JSON), and room to grow — while every feature works exactly as before
+- **Existing installs upgrade without losing anything.** A one-time import tool copies a live `db.sqlite` into PostgreSQL, preserving users, hosts, keys, assignments, leases, audit history, and every encrypted secret byte-for-byte, and prints a table verifying the row counts on both sides before you cut over. The old data volume is kept as a rollback path until the first PostgreSQL backup is verified — see **Migrating from SQLite** in the README
+- **Backups are now PostgreSQL dumps.** The nightly encrypted backup produces a `pg_dump` archive (`.dump.enc`) instead of a SQLite copy, verifies it by reading the archive's table of contents, and restores through `pg_restore` into a fresh database; the encryption, off-host copy, and retention behaviour are unchanged
+
 ## 2026-08-08 — Each disk can go to its own storage when migrating a VM
 
 - **The migrate window now asks per disk, not once for the whole VM.** Every disk in the **Disk plan** carries its own target-storage dropdown, so a boot disk can land on the SSD pool while a 2 TB data disk goes to the spinning pool. The **Target storage** select above still sets all of them at once — it is the default, and a per-disk dropdown overrides it
