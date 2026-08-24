@@ -43,9 +43,9 @@ export async function imageDeployTargets(image) {
 
 // The default target pool for deploying this image on a given host: the
 // per-host map wins, then the legacy single default_storage, else null (the
-// caller auto-picks). `image.default_storage_map` is the JSON string column.
+// caller auto-picks). `image.default_storage_map` is jsonb — it arrives as an
+// object already (no JSON.parse), same as the readers in routes/cloudimages.ts.
 export function defaultStorageForHost(image, hostId) {
-  let map = {};
-  try { map = image.default_storage_map ? JSON.parse(image.default_storage_map) : {}; } catch { map = {}; }
+  const map = image.default_storage_map || {};
   return map[String(hostId)] || map[hostId] || image.default_storage || null;
 }
