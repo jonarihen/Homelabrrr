@@ -38,9 +38,10 @@ jobs:
         working-directory: backend
       - run: npm run typecheck
         working-directory: backend
-      # postgresql-client provides pg_dump/pg_restore for the backup-pipeline
-      # test (matches the postgres:17 service).
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # pg_dump/pg_restore for the backup-pipeline test. The major version must
+      # match the postgres:17 service — pg_dump aborts on a newer server, and
+      # Ubuntu's unversioned `postgresql-client` resolves to 16 on 24.04.
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client-17
       - run: npm test
         working-directory: backend
 
