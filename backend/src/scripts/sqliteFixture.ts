@@ -1,8 +1,8 @@
 // Synthetic OLD-format SQLite database for the importSqlite test. The legacy
-// schema is built by the real legacy module (src/db.ts builds the full schema
-// and bootstraps the admin at import time), spawned in a child process exactly
-// like dbMigration.test.ts does; fixture rows exercising every import
-// transform are then inserted on top.
+// schema is built by the real legacy module (./legacySqliteDb.ts builds the
+// full schema and bootstraps the admin at import time), spawned in a child
+// process exactly like dbMigration.test.ts does; fixture rows exercising every
+// import transform are then inserted on top.
 
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
@@ -34,7 +34,7 @@ export const FIXTURE = {
 export function buildFixtureSqlite(path: string): void {
   // Build the legacy schema + admin bootstrap by importing the legacy module
   // in a child process (it does all of that at import time).
-  const legacyModuleUrl = new URL('../db.ts', import.meta.url).href;
+  const legacyModuleUrl = new URL('./legacySqliteDb.ts', import.meta.url).href;
   const result = spawnSync(
     process.execPath,
     ['--input-type=module', '-e', `await import(${JSON.stringify(legacyModuleUrl)})`],

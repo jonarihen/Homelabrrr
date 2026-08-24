@@ -17,8 +17,9 @@ import { validatePassword, validateUsername } from '../utils/validation.ts';
 import { log } from '../utils/logger.ts';
 
 // Explicit startup bootstrap — the PostgreSQL replacement for the import-time
-// side effects the old src/db.ts performed. index.ts awaits initDatabase()
-// before wiring any middleware; nothing else may touch the pool earlier.
+// side effects the old SQLite layer (now src/scripts/legacySqliteDb.ts)
+// performed. index.ts awaits initDatabase() before wiring any middleware;
+// nothing else may touch the pool earlier.
 
 // The registry of encrypted-at-rest columns. Values carry the enc:v2:<kid>:
 // envelope from utils/secrets.ts and are copied byte-for-byte by the SQLite

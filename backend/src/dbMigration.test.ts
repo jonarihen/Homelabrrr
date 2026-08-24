@@ -11,7 +11,7 @@ const KEY = '33'.repeat(32);
 function importDatabase(path, { bootstrap = false } = {}) {
   return spawnSync(process.execPath, ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
-    const { default: db } = await import('./src/db.ts');
+    const { default: db } = await import('./src/scripts/legacySqliteDb.ts');
     const migrations = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map((row) => row.version);
     assert.deepEqual(migrations, [2026080400, 2026080401, 2026080402, 2026080403]);
     assert.equal(db.pragma('quick_check', { simple: true }), 'ok');
@@ -66,7 +66,7 @@ test('a legacy database without migration metadata is adopted without losing use
     legacy.close();
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import assert from 'node:assert/strict';
-      const { default: db } = await import('./src/db.ts');
+      const { default: db } = await import('./src/scripts/legacySqliteDb.ts');
       assert.equal(db.prepare("SELECT password FROM users WHERE username = 'existing-admin'").get().password, 'preserved-hash');
       assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count, 4);
       db.close();
@@ -104,7 +104,7 @@ test('restart moves interrupted operations with and without UPIDs into manual re
   const path = join(directory, 'database.sqlite');
   try {
     const first = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      const { default: db } = await import('./src/db.ts');
+      const { default: db } = await import('./src/scripts/legacySqliteDb.ts');
       const user = db.prepare('SELECT id FROM users LIMIT 1').get();
       db.prepare("INSERT INTO provisioned_vms (user_id, node, vmid, name, status, upid) VALUES (?, '1~pve', 301, 'with-upid', 'creating', 'UPID:test')").run(user.id);
       db.prepare("INSERT INTO provisioned_vms (user_id, node, vmid, name, status, upid) VALUES (?, '1~pve', 302, 'without-upid', 'configuring', '')").run(user.id);
@@ -123,7 +123,7 @@ test('restart moves interrupted operations with and without UPIDs into manual re
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const second = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import assert from 'node:assert/strict';
-      const { default: db } = await import('./src/db.ts');
+      const { default: db } = await import('./src/scripts/legacySqliteDb.ts');
       assert.deepEqual(db.prepare("SELECT status FROM provisioned_vms WHERE vmid IN (301, 302) ORDER BY vmid").all(), [{ status: 'needs_review' }, { status: 'needs_review' }]);
       assert.equal(db.prepare('SELECT status FROM vm_migrations WHERE vmid = 303').get().status, 'needs_review');
       db.close();
