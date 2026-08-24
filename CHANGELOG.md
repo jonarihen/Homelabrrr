@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-24 — The "Verify TLS certificate" switch on a firewall works again
+
+- **Unchecking *Verify TLS certificate* on a FortiGate had no effect at all.** Pushing a VLAN to a firewall that still presents an untrusted self-signed certificate failed with *"FortiGate connection error: unable to verify the first certificate"* — the exact error the checkbox exists to avoid — because the portal went on verifying whatever the box said. The setting became a real true/false value in the PostgreSQL move, and the code that reads it was still comparing it against the old numeric `0`; `false` never equals `0`, so every firewall came out on the verifying side and the switch was decorative
+- **The Caddy admin API had the same dead switch**, in the same line of code, and is fixed with it
+- **Turning verification off now tells you what it needs.** Insecure upstream TLS is deliberately gated behind `ALLOW_INSECURE_UPSTREAM_TLS=true` — a guard that until now was unreachable, since nothing ever reached the off state. With the switch off and the variable unset, the portal answers *"FortiGate TLS verification is disabled. Re-enable TLS verification or set ALLOW_INSECURE_UPSTREAM_TLS=true as a temporary exception"* instead of a certificate error that pointed at the wrong problem. The right fix for a homelab FortiGate is still to trust its certificate rather than to stop checking
+- **The secure default is unchanged.** Only an explicit *off* is insecure — a firewall or Caddy server with no setting recorded verifies, exactly as before
+
 ## 2026-08-18 — Moved the database to PostgreSQL
 
 - **Homelabrrr now stores everything in PostgreSQL instead of SQLite.** The whole backend was rebuilt on Drizzle ORM and TypeScript, and `docker compose up` now brings up a bundled `postgres` service alongside the app. This lifts the single-file database ceiling — real concurrency, proper types (true/false flags, timezone-aware timestamps, native JSON), and room to grow — while every feature works exactly as before

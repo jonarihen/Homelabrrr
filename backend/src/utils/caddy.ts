@@ -556,13 +556,20 @@ export class CaddyClient {
   }
 }
 
-/** Build a CaddyClient from a caddy_servers DB row (secret decrypted at call time). */
+/**
+ * Build a CaddyClient from a caddy_servers DB row (secret decrypted at call time).
+ *
+ * verify_tls is a real PostgreSQL boolean, so the only insecure state is an
+ * explicit `false` — `!== false` preserves the old SQLite `!== 0` semantics
+ * (a null verify_tls still verifies, i.e. stays secure) without the bug that
+ * `false !== 0` is true, which pinned verification on regardless of the setting.
+ */
 export function createCaddyClient(row) {
   return new CaddyClient({
     apiUrl: row.api_url,
     authType: row.auth_type || 'none',
     authSecret: row.auth_secret ? decryptSecret(row.auth_secret) : '',
-    verifyTls: row.verify_tls !== 0,
+    verifyTls: row.verify_tls !== false,
     serverName: row.server_name || '',
   });
 }

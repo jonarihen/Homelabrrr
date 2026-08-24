@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import {
   buildSiteRoute,
   collectHostRoutes,
+  createCaddyClient,
   findShadowingRoutes,
   hostCoveredByWildcard,
   managedRouteId,
@@ -218,4 +219,30 @@ test('another portal-managed route for the same host is still a conflict', () =>
 test('an empty or missing config is not a conflict', () => {
   assert.deepEqual(findShadowingRoutes({}, 'site.example.com', 1), []);
   assert.deepEqual(findShadowingRoutes({ srv1: {} }, 'site.example.com', 1), []);
+});
+
+// ─── createCaddyClient — the verify_tls mapping ──────────────────────────────
+//
+// Same defect as the FortiGate client (see fortigate.test.ts): `verify_tls` is
+// a real PostgreSQL boolean now, and the leftover `!== 0` comparison read
+// `false` as "verify" because `false !== 0` is true.
+
+function serverRow(verifyTls) {
+  return {
+    api_url: 'https://caddy.example.com:2019',
+    auth_type: 'none',
+    auth_secret: '',
+    server_name: 'srv0',
+    verify_tls: verifyTls,
+  };
+}
+
+test('verify_tls false disables Caddy admin API verification', () => {
+  assert.equal(createCaddyClient(serverRow(false)).verifyTls, false);
+});
+
+test('verify_tls true (or null) verifies the Caddy admin API', () => {
+  assert.equal(createCaddyClient(serverRow(true)).verifyTls, true);
+  assert.equal(createCaddyClient(serverRow(null)).verifyTls, true);
+  assert.equal(createCaddyClient(serverRow(undefined)).verifyTls, true);
 });
