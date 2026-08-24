@@ -32,7 +32,65 @@ export const SANCTIONED_COLUMN_READS = [
   },
 ];
 
+/**
+ * The same bug class in the Drizzle idiom the PostgreSQL migration moved the
+ * codebase to: `db.select({ can_x: users.can_x })`. The raw-SQL regex above
+ * cannot see these, so after the migration it was guarding an empty set.
+ *
+ * Scoped to a whole statement rather than a line, because a Drizzle projection
+ * spans many lines. The rule is the invariant itself: a query that pulls a
+ * permission column must also pull `role_id`, or the role can never be folded
+ * back in. That admits the two legitimate readers (the admin user-listing
+ * query, which selects everything for display, and the sanctioned
+ * loadProvisioner() read) without naming either — and still catches the
+ * one-off `SELECT can_x` lookup that started issue #71.
+ */
+export const DRIZZLE_PERMISSION_COLUMN_READ = /\busers\.(?:can_[a-z_]+|see_all_vms)\b/;
+export const DRIZZLE_ROLE_ID_READ = /\busers\.role_id\b/;
+
 const toPosix = (p) => String(p).replace(/\\/g, '/');
+
+/**
+ * Blank out comments while preserving every byte offset (and therefore every
+ * line number), so prose describing the pattern is never mistaken for code.
+ */
+function blankComments(source) {
+  return String(source ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
+}
+
+function lineNumberAt(source, index) {
+  let line = 1;
+  for (let i = 0; i < index && i < source.length; i += 1) {
+    if (source[i] === '\n') line += 1;
+  }
+  return line;
+}
+
+/**
+ * Scan one file's contents for Drizzle-idiom permission-column reads that do
+ * not also load `role_id`. Returns [{ file, line, text }], same shape as the
+ * raw-SQL scanner, so both feed the same allowlist helpers.
+ */
+export function scanForDrizzlePermissionColumnReads(filePath, contents) {
+  const source = String(contents ?? '');
+  const code = blankComments(source);
+  const lines = source.split(/\r?\n/);
+  const findings = [];
+  let start = 0;
+  for (let i = 0; i <= code.length; i += 1) {
+    if (i < code.length && code[i] !== ';') continue;
+    const statement = code.slice(start, i);
+    const match = DRIZZLE_PERMISSION_COLUMN_READ.exec(statement);
+    if (match && !DRIZZLE_ROLE_ID_READ.test(statement)) {
+      const line = lineNumberAt(source, start + match.index);
+      findings.push({ file: toPosix(filePath), line, text: (lines[line - 1] || '').trim() });
+    }
+    start = i + 1;
+  }
+  return findings;
+}
 
 /**
  * Scan one file's contents. Returns [{ file, line, text }] for every
