@@ -321,13 +321,16 @@ router.get('/users', pUsers, async (req, res) => {
   const windowStart = Date.now() - LOCKOUT_WINDOW_MS;
   // Correlated per-user aggregates (VM count, recent failures, worst per-IP
   // failure streak). Computed as subquery scalars so the row shape is unchanged.
+  // PostgreSQL COUNT()/MAX(COUNT()) are bigint, which pg hands back as a string;
+  // `sql<number>` is only a type assertion, so mapWith(Number) is what actually
+  // keeps these numbers in the JSON (they were numbers under SQLite).
   const la = loginAttempts;
-  const vmCountSq = sql<number>`(SELECT COUNT(*) FROM ${vmAssignments} WHERE ${vmAssignments.user_id} = ${users.id})`;
-  const recentFailuresSq = sql<number>`(SELECT COUNT(*) FROM ${la} WHERE ${la.username} = ${users.username} AND ${la.attempted_at} > ${windowStart})`;
+  const vmCountSq = sql<number>`(SELECT COUNT(*) FROM ${vmAssignments} WHERE ${vmAssignments.user_id} = ${users.id})`.mapWith(Number);
+  const recentFailuresSq = sql<number>`(SELECT COUNT(*) FROM ${la} WHERE ${la.username} = ${users.username} AND ${la.attempted_at} > ${windowStart})`.mapWith(Number);
   const maxIpFailuresSq = sql<number>`(SELECT COALESCE(MAX(ip_count), 0) FROM (
         SELECT COUNT(*) AS ip_count FROM ${la}
         WHERE ${la.username} = ${users.username} AND ${la.attempted_at} > ${windowStart} GROUP BY ${la.ip}
-      ) AS s)`;
+      ) AS s)`.mapWith(Number);
   const rows = await db.select({
     id: users.id, username: users.username, is_admin: users.is_admin, see_all_vms: users.see_all_vms,
     can_operate_all_vms: users.can_operate_all_vms, can_provision: users.can_provision, can_create_vms: users.can_create_vms,
