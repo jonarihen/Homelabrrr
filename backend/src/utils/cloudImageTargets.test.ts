@@ -8,11 +8,30 @@
 // empty map — the configured per-host pool was never applied. The round-trip
 // test is the one that pins it, since a hand-built fixture can always be
 // written in whichever dialect the code happens to expect.
-import test from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTestDatabase } from '../testUtils/pgTestDb.ts';
+import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { cloudImages } from '../db/schema/index.ts';
-import { defaultStorageForHost } from './cloudImageTargets.ts';
+
+// cloudImageTargets.ts reaches the singleton db (src/db/client.ts) through
+// proxmox.ts, and client.ts throws at import time when DATABASE_URL is unset —
+// CI only sets TEST_DATABASE_URL. So the module is imported dynamically once
+// the throwaway database exists, the same way middleware/auth.test.ts does it.
+let testDb: TestDatabase;
+let defaultStorageForHost: typeof import('./cloudImageTargets.ts').defaultStorageForHost;
+let closeDb: (() => Promise<void>) | undefined;
+
+before(async () => {
+  testDb = await createTestDatabase();
+  process.env.DATABASE_URL = testDb.url;
+  ({ closeDb } = await import('../db/client.ts'));
+  ({ defaultStorageForHost } = await import('./cloudImageTargets.ts'));
+});
+
+after(async () => {
+  await closeDb?.();
+  await testDb.drop();
+});
 
 const image = (overrides = {}) => ({
   id: 1,
@@ -53,23 +72,18 @@ test('an empty or absent map is not an error', () => {
 });
 
 test('the per-host map survives a round trip through PostgreSQL', async () => {
-  const t = await createTestDatabase();
-  try {
-    await t.db.insert(cloudImages).values({
-      name: 'debian-12',
-      url: 'https://example.invalid/debian-12.qcow2',
-      node: '1~pve',
-      storage: 'local',
-      default_storage_map: { 1: 'fast-nvme', 2: 'ceph-pool' },
-    });
-    const [stored] = await t.db.select().from(cloudImages).limit(1);
+  await testDb.db.insert(cloudImages).values({
+    name: 'debian-12',
+    url: 'https://example.invalid/debian-12.qcow2',
+    node: '1~pve',
+    storage: 'local',
+    default_storage_map: { 1: 'fast-nvme', 2: 'ceph-pool' },
+  });
+  const [stored] = await testDb.db.select().from(cloudImages).limit(1);
 
-    // jsonb comes back parsed — that is precisely why JSON.parse must not run.
-    assert.equal(typeof stored.default_storage_map, 'object');
+  // jsonb comes back parsed — that is precisely why JSON.parse must not run.
+  assert.equal(typeof stored.default_storage_map, 'object');
 
-    assert.equal(defaultStorageForHost(stored, 1), 'fast-nvme');
-    assert.equal(defaultStorageForHost(stored, 2), 'ceph-pool');
-  } finally {
-    await t.drop();
-  }
+  assert.equal(defaultStorageForHost(stored, 1), 'fast-nvme');
+  assert.equal(defaultStorageForHost(stored, 2), 'ceph-pool');
 });
