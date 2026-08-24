@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-24 — Three more settings that stopped taking effect in the PostgreSQL move
+
+- **A VM's power schedule showed itself as switched off even while it was running.** Open the schedule on a VM that sleeps overnight and the *Enabled* toggle came up unchecked, the **Skip tonight** button was missing entirely, and the "sleeps 23:00–08:00" badge never appeared on any VM card. The schedule itself was working the whole time — VMs were still being stopped and started on time — but everything that reported it read a true/false flag as if it were still the old numeric `1`, and `true` never equals `1`. The real risk was the toggle: anyone who reopened a working schedule saw it off, and saving from there genuinely switched it off. All of it reads correctly again
+- **Disabling a public IP pool did nothing.** A pool switched off was still handing out addresses and still accepting new port forwards onto them — the same flag comparison, so the check that should have refused with *"Public IP pool … is disabled"* could never fire. Turning a pool off now takes it out of service for both assignments and published ports, as it was meant to
+- **Per-host default storage on a cloud image was ignored at deploy time.** Setting a target pool per Proxmox host saved correctly and displayed correctly, but the deploy form never pre-selected it and automatic host placement never used it — the setting is stored as structured JSON now and the code reading it was still unpacking it as text, failing quietly and falling back to picking storage on its own. The pool you configured is used again
+- **The admin user list reports its counts as numbers again.** VM count and recent-failure counts were coming back as text (`"3"` rather than `3`) since the move. Nothing on screen looked wrong, but it was a change nobody asked for in what the API returns
+
 ## 2026-08-24 — The "Verify TLS certificate" switch on a firewall works again
 
 - **Unchecking *Verify TLS certificate* on a FortiGate had no effect at all.** Pushing a VLAN to a firewall that still presents an untrusted self-signed certificate failed with *"FortiGate connection error: unable to verify the first certificate"* — the exact error the checkbox exists to avoid — because the portal went on verifying whatever the box said. The setting became a real true/false value in the PostgreSQL move, and the code that reads it was still comparing it against the old numeric `0`; `false` never equals `0`, so every firewall came out on the verifying side and the switch was decorative

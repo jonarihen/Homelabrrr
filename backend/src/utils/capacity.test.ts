@@ -31,7 +31,7 @@ before(async () => {
   // A host whose API is guaranteed unreachable (nothing listens on port 1):
   // assertNodeCapacity must skip, not block, when Proxmox can't be queried.
   // Seeded in the legacy SQLite because proxmox.ts still resolves hosts there.
-  const legacy = (await import('../db.ts')).default;
+  const legacy = (await import('../scripts/legacySqliteDb.ts')).default;
   legacy.prepare(
     "INSERT INTO pve_hosts (id, name, host, port, token_id, token_secret) VALUES (1, 'pve', '127.0.0.1', 1, 'tok', 'secret')"
   ).run();

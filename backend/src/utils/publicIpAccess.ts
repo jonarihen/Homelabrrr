@@ -69,7 +69,7 @@ export function checkPublicIpUsage({
   if (publicIp.state === 'error') {
     return { status: 409, error: `Public IP ${publicIp.address} is in an error state` };
   }
-  if (pool && pool.enabled === 0) {
+  if (pool && !pool.enabled) {
     return { status: 409, error: `Public IP pool "${pool.name}" is disabled` };
   }
 
@@ -140,7 +140,7 @@ export function checkAssignmentRequest({
 } = {}) {
   if (!publicIp) return { status: 404, error: 'Public IP not found' };
   if (!pool) return { status: 404, error: 'Public IP pool not found' };
-  if (pool.enabled === 0) return { status: 409, error: `Public IP pool "${pool.name}" is disabled` };
+  if (!pool.enabled) return { status: 409, error: `Public IP pool "${pool.name}" is disabled` };
   if (publicIp.state === 'disabled' || publicIp.state === 'error') {
     return { status: 409, error: `Public IP ${publicIp.address} is ${publicIp.state}` };
   }

@@ -32,7 +32,7 @@ before(async () => {
   // PostgreSQL (FK to pve_hosts). Once proxmox.ts is converted, the PG row
   // keeps this test valid unchanged.
   await testDb.db.insert(pveHosts).values({ id: 1, name: 'pve', host: 'pve.example', token_id: 'tok', token_secret: 'secret' });
-  const legacy = (await import('../db.ts')).default;
+  const legacy = (await import('../scripts/legacySqliteDb.ts')).default;
   legacy.prepare(
     "INSERT INTO pve_hosts (id, name, host, token_id, token_secret) VALUES (1, 'pve', 'pve.example', 'tok', 'secret')"
   ).run();

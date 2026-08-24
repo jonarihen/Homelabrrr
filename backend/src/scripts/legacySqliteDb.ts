@@ -1,11 +1,28 @@
+// The PRE-MIGRATION SQLite data layer, kept for ONE purpose: building the
+// legacy-format fixture database that the SQLite -> PostgreSQL import tests
+// read. It is not part of the running application — src/db/ replaced it — and
+// nothing in src/routes, src/utils or src/index.ts imports it.
+//
+// Importing this module has side effects by design: it opens (creating if
+// absent) the SQLite file at DB_PATH, builds the whole legacy schema and
+// bootstraps the initial admin. That is exactly what the fixture builder wants,
+// which is why it is spawned in a child process rather than imported inline
+// (src/scripts/sqliteFixture.ts, src/dbMigration.test.ts).
+//
+// It depends on better-sqlite3, a devDependency — so this module is only ever
+// loadable in a dev/test install, never in the production image.
+//
+// Do not add new callers, and do not "modernise" it: its value is that it still
+// produces byte-for-byte the schema real installations are being migrated from.
+
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import {
   assertSecretEncryptionKey, decryptSecret, encryptSecret, isEncryptedSecret, secretNeedsMigration,
-} from './utils/secrets.ts';
-import { PERMISSION_KEYS } from './utils/permissionKeys.ts';
-import { validatePassword, validateUsername } from './utils/validation.ts';
-import { log } from './utils/logger.ts';
+} from '../utils/secrets.ts';
+import { PERMISSION_KEYS } from '../utils/permissionKeys.ts';
+import { validatePassword, validateUsername } from '../utils/validation.ts';
+import { log } from '../utils/logger.ts';
 
 const DB_PATH = process.env.DB_PATH || '/app/data/db.sqlite';
 const INITIAL_ADMIN_USERNAME = process.env.INITIAL_ADMIN_USERNAME || '';

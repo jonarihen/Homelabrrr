@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   scanForLegacyPermissionColumnReads,
+  scanForDrizzlePermissionColumnReads,
   isSanctionedColumnRead,
   unsanctionedColumnReads,
 } from './permissionColumnScan.ts';
@@ -102,11 +103,11 @@ function walkJsFiles(dir, out = []) {
   return out;
 }
 
-function scanBackendSource() {
+function scanBackendSource(scan = scanForLegacyPermissionColumnReads) {
   const findings = [];
   for (const file of walkJsFiles(SRC_ROOT)) {
     const rel = path.relative(path.join(SRC_ROOT, '..'), file);
-    findings.push(...scanForLegacyPermissionColumnReads(rel, fs.readFileSync(file, 'utf8')));
+    findings.push(...scan(rel, fs.readFileSync(file, 'utf8')));
   }
   return findings;
 }
@@ -137,4 +138,75 @@ test('the sanctioned provision.js read really does fold the role back in', () =>
   const src = fs.readFileSync(path.join(SRC_ROOT, 'routes', 'provision.ts'), 'utf8');
   // The optional `)` tolerates the async form: (await getRolePermissions(...)).has(...)
   assert.match(src, /getRolePermissions\(user\.role_id\)\)?\.has\('can_provision'\)/);
+});
+
+// ─── the Drizzle idiom ──────────────────────────────────────────────────────
+// The raw-SQL scanner above matches text the migration deleted, so on its own
+// it now guards an empty set. These cover the shape the codebase actually uses.
+
+test('flags a Drizzle permission read that never loads role_id', () => {
+  const src = [
+    'async function canManageAllPortForwards(req) {',
+    '  const [user] = await db.select({ can_manage_firewalls: users.can_manage_firewalls })',
+    '    .from(users).where(eq(users.id, req.session.userId)).limit(1);',
+    '  return !!user?.can_manage_firewalls;',
+    '}',
+  ].join('\n');
+  const found = scanForDrizzlePermissionColumnReads('src/routes/admin.ts', src);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].line, 2);
+  assert.equal(found[0].file, 'src/routes/admin.ts');
+});
+
+test('flags see_all_vms the same way as the can_* columns', () => {
+  const src = 'const [u] = await db.select({ see_all_vms: users.see_all_vms }).from(users).limit(1);';
+  assert.equal(scanForDrizzlePermissionColumnReads('src/routes/x.ts', src).length, 1);
+});
+
+test('a projection that also loads role_id is allowed, even across many lines', () => {
+  const src = [
+    'const rows = await db.select({',
+    '  id: users.id,',
+    '  can_provision: users.can_provision,',
+    '  see_all_vms: users.see_all_vms,',
+    '  role_id: users.role_id,',
+    '}).from(users).orderBy(users.username);',
+  ].join('\n');
+  assert.deepEqual(scanForDrizzlePermissionColumnReads('src/routes/admin.ts', src), []);
+});
+
+test('role_id in a neighbouring statement does not launder the read', () => {
+  const src = [
+    'const [perm] = await db.select({ can_provision: users.can_provision }).from(users).limit(1);',
+    'const [meta] = await db.select({ role_id: users.role_id }).from(users).limit(1);',
+  ].join('\n');
+  const found = scanForDrizzlePermissionColumnReads('src/routes/x.ts', src);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].line, 1);
+});
+
+test('does not flag prose about the pattern, or unrelated columns', () => {
+  const src = [
+    '// never write db.select({ can_provision: users.can_provision }) for an access check',
+    '/* users.see_all_vms is banned here — use userHasPermission() */',
+    'const [u] = await db.select({ username: users.username, is_admin: users.is_admin }).from(users).limit(1);',
+    'const perms = await db.select({ permission: rolePermissions.permission }).from(rolePermissions);',
+  ].join('\n');
+  assert.deepEqual(scanForDrizzlePermissionColumnReads('src/routes/x.ts', src), []);
+});
+
+test('handles empty / missing contents without throwing', () => {
+  assert.deepEqual(scanForDrizzlePermissionColumnReads('a.ts', ''), []);
+  assert.deepEqual(scanForDrizzlePermissionColumnReads('a.ts', null), []);
+});
+
+test('backend/src has no Drizzle permission read that drops role_id', () => {
+  const offenders = unsanctionedColumnReads(scanBackendSource(scanForDrizzlePermissionColumnReads));
+  assert.deepEqual(
+    offenders, [],
+    'These queries select a users.can_*/see_all_vms column without also loading\n'
+    + 'role_id, so a role-granted permission would be silently ignored. Use\n'
+    + `userHasPermission()/effectivePermissions() from utils/permissions.ts:\n${
+      offenders.map((o) => `  ${o.file}:${o.line}  ${o.text}`).join('\n')}`,
+  );
 });

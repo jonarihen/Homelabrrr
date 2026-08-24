@@ -17,7 +17,7 @@ const OTHER = 43;
 const publicIp = (overrides = {}) => ({
   id: 7, pool_id: 1, firewall_id: 1, address: '203.0.113.10', state: 'assigned', ...overrides,
 });
-const pool = (overrides = {}) => ({ id: 1, name: 'NovaCloud Frankfurt', enabled: 1, ...overrides });
+const pool = (overrides = {}) => ({ id: 1, name: 'NovaCloud Frankfurt', enabled: true, ...overrides });
 const assignment = (overrides = {}) => ({
   id: 5, public_ip_id: 7, user_id: OWNER, vmid: 101, private_ip: '10.10.7.10', status: 'pending', ...overrides,
 });
@@ -103,7 +103,7 @@ test('disabled addresses and disabled pools fail closed', () => {
     target: { mappedIp: '10.10.7.10' },
   }).status, 409);
   assert.equal(checkPublicIpUsage({
-    userId: OWNER, publicIp: publicIp(), pool: pool({ enabled: 0 }), assignment: assignment(),
+    userId: OWNER, publicIp: publicIp(), pool: pool({ enabled: false }), assignment: assignment(),
     target: { mappedIp: '10.10.7.10' },
   }).status, 409);
 });
@@ -199,7 +199,7 @@ test('reserved, disabled and errored addresses cannot be handed out', () => {
 });
 
 test('a disabled pool cannot hand out addresses', () => {
-  assert.equal(checkAssignmentRequest(request({ pool: pool({ enabled: 0 }) })).status, 409);
+  assert.equal(checkAssignmentRequest(request({ pool: pool({ enabled: false }) })).status, 409);
 });
 
 // ─── Releasing ──────────────────────────────────────────────────────────────

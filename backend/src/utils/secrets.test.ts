@@ -62,7 +62,7 @@ test('startup leaves previous-key v2 values pending for an explicit reviewed rot
   const databasePath = join(directory, 'rotation.sqlite');
   try {
     runModule(`
-      const { default: db } = await import('./src/db.ts');
+      const { default: db } = await import('./src/scripts/legacySqliteDb.ts');
       const { encryptSecret } = await import('./src/utils/secrets.ts');
       const user = db.prepare('SELECT id FROM users LIMIT 1').get();
       db.prepare('INSERT INTO ssh_keys (user_id, name, private_key) VALUES (?, ?, ?)').run(user.id, 'pending-old', encryptSecret('review-before-rotation'));
@@ -78,7 +78,7 @@ test('startup leaves previous-key v2 values pending for an explicit reviewed rot
     });
     runModule(`
       import assert from 'node:assert/strict';
-      const { default: db, planEncryptedSecretRotation } = await import('./src/db.ts');
+      const { default: db, planEncryptedSecretRotation } = await import('./src/scripts/legacySqliteDb.ts');
       const stored = db.prepare("SELECT private_key FROM ssh_keys WHERE name = 'pending-old'").get().private_key;
       assert.match(stored, /^enc:v2:old:/);
       assert.deepEqual(
@@ -109,7 +109,7 @@ test('database rotation rolls back every earlier update when one record is undec
   try {
     runModule(`
       import assert from 'node:assert/strict';
-      const { default: db, planEncryptedSecretRotation, rotateEncryptedSecrets } = await import('./src/db.ts');
+      const { default: db, planEncryptedSecretRotation, rotateEncryptedSecrets } = await import('./src/scripts/legacySqliteDb.ts');
       const user = db.prepare('SELECT id FROM users LIMIT 1').get();
       db.prepare('INSERT INTO ssh_keys (user_id, name, private_key) VALUES (?, ?, ?)').run(user.id, 'good-old', process.env.OLD_VALUE);
       db.prepare('INSERT INTO ssh_keys (user_id, name, private_key) VALUES (?, ?, ?)').run(user.id, 'missing-key', process.env.OLD_VALUE.replace('enc:v2:old:', 'enc:v2:missing:'));

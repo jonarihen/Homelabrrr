@@ -1,4 +1,5 @@
-// Part of the Drizzle PostgreSQL schema (transcribed from src/db.ts) — see docs/postgres-conventions.md.
+// Part of the Drizzle PostgreSQL schema (transcribed from the pre-migration
+// SQLite layer, now src/scripts/legacySqliteDb.ts) — see docs/postgres-conventions.md.
 import {
   pgTable,
   integer,
