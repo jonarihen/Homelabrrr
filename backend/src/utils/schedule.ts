@@ -109,14 +109,14 @@ export function serializeSchedule(row, now = Date.now()) {
   if (!row) return null;
   const skipUntil = Number(row.skip_until) || 0;
   return {
-    enabled: row.enabled === 1,
+    enabled: !!row.enabled,
     stopTime: row.stop_time || '',
     startTime: row.start_time || '',
     days: Number(row.days),
     timezone: row.timezone || 'UTC',
     skipUntil,
     skipActive: skipUntil > now,
-    runningDueToManual: row.running_due_to_manual === 1,
+    runningDueToManual: !!row.running_due_to_manual,
     lastAction: row.last_action || '',
     lastActionAt: Number(row.last_action_at) || 0,
   };
@@ -124,7 +124,7 @@ export function serializeSchedule(row, now = Date.now()) {
 
 // Compact summary used for the VM card badge (no derived-state internals).
 export function scheduleBadge(row, now = Date.now()) {
-  if (!row || row.enabled !== 1 || !row.stop_time || !row.start_time) return null;
+  if (!row || !row.enabled || !row.stop_time || !row.start_time) return null;
   const skipUntil = Number(row.skip_until) || 0;
   return {
     enabled: true,
