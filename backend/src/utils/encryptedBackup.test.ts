@@ -12,15 +12,28 @@ import { createTestDatabase } from '../testUtils/pgTestDb.ts';
 
 const execFileAsync = promisify(execFile);
 
-async function hasPgTools(): Promise<boolean> {
+// pg_dump/pg_restore must be present AND at least the major version of the
+// server — pg_dump aborts on a server newer than itself, so merely checking
+// that the binaries exist turns an environment mismatch into a test failure.
+// Mirrors the guard in services/backupService.test.ts.
+async function pgToolsSkipReason(): Promise<string | false> {
   try {
-    await execFileAsync('pg_dump', ['--version']);
+    const { stdout: dumpV } = await execFileAsync('pg_dump', ['--version']);
     await execFileAsync('pg_restore', ['--version']);
-    return true;
-  } catch {
+    const dumpMajor = Number(/(\d+)\./.exec(dumpV)?.[1]);
+    const server = await createTestDatabase();
+    const { rows } = await server.pool.query('SHOW server_version');
+    await server.drop();
+    const serverMajor = Number(/(\d+)/.exec(String(rows[0].server_version))?.[1]);
+    if (!Number.isFinite(dumpMajor) || !Number.isFinite(serverMajor)) return 'could not determine pg_dump/server versions';
+    if (dumpMajor < serverMajor) return `pg_dump ${dumpMajor} is older than server ${serverMajor}`;
     return false;
+  } catch (err) {
+    return `pg_dump/pg_restore unavailable: ${(err as Error).message}`;
   }
 }
+
+const PG_TOOLS_SKIP = await pgToolsSkipReason();
 
 const PASS = 'backup-passphrase-that-is-at-least-32-characters';
 
@@ -52,7 +65,7 @@ test('wrong backup keys fail authentication', async () => {
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('verifyEncryptedBackup accepts a real pg_dump archive and rejects a non-dump', { skip: (await hasPgTools()) ? false : 'requires pg_dump/pg_restore' }, async () => {
+test('verifyEncryptedBackup accepts a real pg_dump archive and rejects a non-dump', { skip: PG_TOOLS_SKIP }, async () => {
   const db = await createTestDatabase();
   const directory = mkdtempSync(join(tmpdir(), 'homelabrrr-backup-pg-'));
   try {

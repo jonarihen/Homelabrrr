@@ -38,9 +38,31 @@ jobs:
         working-directory: backend
       - run: npm run typecheck
         working-directory: backend
-      # postgresql-client provides pg_dump/pg_restore for the backup-pipeline
-      # test (matches the postgres:17 service).
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # pg_dump/pg_restore for the backup-pipeline test. Their major version
+      # must be >= the postgres:17 service — pg_dump refuses to dump a server
+      # newer than itself. Two things make that awkward on ubuntu-24.04:
+      #   * the archive only carries client 16, and the runner image has no
+      #     PGDG apt source of its own, so 17 has to be pulled from PGDG;
+      #   * /usr/bin/pg_dump is postgresql-client-common's pg_wrapper, and the
+      #     runner's version of that package predates 17, so its
+      #     "use the newest installed" logic still resolves to 16 however many
+      #     later clients are installed. Hence the explicit bin directory on
+      #     PATH rather than trusting the wrapper.
+      # If this ever drifts again the tests skip with a reason rather than
+      # failing — see pgToolsSkipReason in backend/src/utils/encryptedBackup.test.ts.
+      - name: Install pg_dump/pg_restore matching the postgres service
+        run: |
+          CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+      # Separate step so $GITHUB_PATH is in effect — proves which client won.
+      - run: pg_dump --version
       - run: npm test
         working-directory: backend
 

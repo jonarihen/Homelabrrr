@@ -7,12 +7,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { toPveVmName, PVE_VM_NAME_MAX } from './vmName.js';
 // Reaching across into backend/ is deliberate: it is the only way to prove the
-// preview matches the server. Both packages are ESM and vmName.js has no
-// imports of its own, so this resolves as a plain file.
+// preview matches the server. The backend is TypeScript run through Node's
+// native type stripping, so the specifier carries the .ts extension and
+// vmName.ts — which has no imports of its own — resolves as a plain file.
 import {
   toPveVmName as backendToPveVmName,
   PVE_VM_NAME_MAX as BACKEND_MAX,
-} from '../../../backend/src/utils/vmName.js';
+} from '../../../backend/src/utils/vmName.ts';
 
 // [input, expected] — mirrors backend/src/utils/vmName.test.js.
 const CASES = [

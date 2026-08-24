@@ -835,7 +835,15 @@ export class FortiGateAPI {
 }
 
 /**
- * Create a FortiGateAPI instance from a DB firewall row
+ * Create a FortiGateAPI instance from a DB firewall row.
+ *
+ * verify_tls is a real PostgreSQL boolean, so the only insecure state is an
+ * explicit `false` — the `!== false` form preserves the old SQLite `!== 0`
+ * semantics (a null verify_tls still verifies, i.e. stays secure). Comparing
+ * the boolean against `0` is what broke this: `false !== 0` is true, so a
+ * firewall with verification switched off kept verifying anyway and every
+ * request against a self-signed certificate died with
+ * `unable to verify the first certificate`.
  */
 export function createClient(firewall) {
   return new FortiGateAPI(
@@ -843,6 +851,6 @@ export function createClient(firewall) {
     firewall.port,
     decryptSecret(firewall.api_key),
     firewall.vdom,
-    firewall.verify_tls !== 0
+    firewall.verify_tls !== false
   );
 }
