@@ -1,4 +1,4 @@
-FROM node:26.5.1-alpine3.24 AS builder
+FROM node:26.8.1-alpine3.24 AS builder
 
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
@@ -7,7 +7,7 @@ COPY frontend/ ./
 COPY CHANGELOG.md /app/CHANGELOG.md
 RUN npm run build
 
-FROM nginx:1.31.3-alpine3.24
+FROM nginx:1.31.4-alpine3.24
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
