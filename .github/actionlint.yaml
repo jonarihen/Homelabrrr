@@ -1,0 +1,10 @@
+# actionlint configuration.
+# https://github.com/rhysd/actionlint/blob/main/docs/config.md
+#
+# actionlint only knows the GitHub-hosted runner labels, so the labels of our
+# self-hosted runners have to be declared here or they are reported as invalid
+# `runs-on` values.
+self-hosted-runner:
+  labels:
+    # Production deploy runner (.github/workflows/deploy.yml).
+    - homelabrrr-production
