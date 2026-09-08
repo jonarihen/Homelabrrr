@@ -13,7 +13,7 @@ COPY package*.json ./
 # postgresql17-client provides pg_dump/pg_restore for the encrypted backup
 # pipeline (must match the postgres:17 server major in docker-compose.yml).
 RUN npm ci --omit=dev --ignore-scripts \
- && apk add --no-cache putty postgresql17-client
+ && apk add --no-cache postgresql17-client=17.11-r0 putty=0.84-r1
 
 COPY src ./src
 COPY drizzle ./drizzle
