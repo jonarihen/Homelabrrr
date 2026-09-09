@@ -68,7 +68,7 @@ export default function VMIPManagementPanel({ node, vmid, currentSshHost = '', o
 }
 
 function IPInterfaceCard({ network, node, vmid, currentSshHost, onReload, onSshHostUpdate }) {
-  const scopes = network.dhcpScopes || [];
+  const scopes = useMemo(() => network.dhcpScopes || [], [network.dhcpScopes]);
   const defaultScopeId = useMemo(() => {
     const preferred = scopes.find((scope) => !scope.error);
     return preferred ? String(preferred.firewallId) : (scopes[0] ? String(scopes[0].firewallId) : '');

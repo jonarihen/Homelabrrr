@@ -1112,9 +1112,9 @@ function CreateForm({ onStarted }) {
     if (!form.node) return;
     api.get(`/provision/nodes/${form.node}/storages`).then(r => {
       setStorages(r.data);
-      if (!form.storage && r.data.length > 0) {
+      if (r.data.length > 0) {
         const lvm = r.data.find(s => s.storage === 'local-lvm') || r.data[0];
-        setForm(f => ({ ...f, storage: lvm.storage }));
+        setForm(f => (f.storage ? f : { ...f, storage: lvm.storage }));
       }
     }).catch(() => {});
     // The networks list is admin-only; non-admins are pinned to vmbr0 on the
@@ -1122,12 +1122,12 @@ function CreateForm({ onStarted }) {
     if (isAdmin) {
       api.get(`/provision/nodes/${form.node}/networks`).then(r => {
         setBridges(r.data);
-        if (r.data.length > 0 && !r.data.find(b => b.iface === form.bridge)) {
-          setForm(f => ({ ...f, bridge: r.data[0].iface }));
+        if (r.data.length > 0) {
+          setForm(f => (r.data.some(b => b.iface === f.bridge) ? f : { ...f, bridge: r.data[0].iface }));
         }
       }).catch(() => {});
     }
-  }, [form.node]);
+  }, [form.node, isAdmin]);
 
   useEffect(() => {
     if (!form.node || !form.storage) return;

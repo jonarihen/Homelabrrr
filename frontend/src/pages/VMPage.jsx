@@ -1225,7 +1225,7 @@ function BackupsSection({ node, vmid }) {
     api.get(`/vms/${node}/${vmid}/backup-storages`)
       .then(r => {
         setStorages(r.data);
-        if (r.data.length > 0 && !form.storage) setForm(f => ({ ...f, storage: r.data[0].storage }));
+        if (r.data.length > 0) setForm(f => (f.storage ? f : { ...f, storage: r.data[0].storage }));
       })
       .catch(() => {});
   }, [node, vmid]);

@@ -48,6 +48,8 @@ function TransferProgress({ percent, detail }) {
 export default function MigrateVMModal({ vm, onClose, onDone }) {
   const running = vm.status === 'running';
   const isLxc = vm.type === 'lxc';
+  const vmNode = routeNode(vm);
+  const vmid = vm.vmid;
 
   const [nodes, setNodes] = useState([]);
   const [targetNode, setTargetNode] = useState('');
@@ -95,7 +97,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
     Promise.all([
       api.get(`/provision/nodes/${encodeURIComponent(targetNode)}/storages`),
       api.get(`/provision/nodes/${encodeURIComponent(targetNode)}/networks`),
-      api.get(`/migrate/plan/${encodeURIComponent(routeNode(vm))}/${vm.vmid}?target=${encodeURIComponent(targetNode)}`),
+      api.get(`/migrate/plan/${encodeURIComponent(vmNode)}/${vmid}?target=${encodeURIComponent(targetNode)}`),
     ])
       .then(([s, n, p]) => {
         const usable = s.data.filter((st) => st.content?.includes(wanted));
@@ -114,7 +116,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
       })
       .catch((e) => setError(e.response?.data?.error || 'Failed to load target node resources'))
       .finally(() => setLoadingTarget(false));
-  }, [targetNode, isLxc]);
+  }, [targetNode, isLxc, vmNode, vmid]);
 
   useEffect(() => () => clearInterval(pollRef.current), []);
 

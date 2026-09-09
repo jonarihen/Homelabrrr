@@ -621,7 +621,7 @@ const maintenanceTimer = setInterval(tickMaintenance, 60_000);
 // utils/vmTags.js — the backend is single-process). Shares the exact fleet loop
 // used by POST /admin/sync-vm-tags via runFullTagSync().
 //
-// NOTE (#21/#26 tie-in): these issues propose shared background-scheduler
+// Follow-up (#21/#26 tie-in): these issues propose shared background-scheduler
 // plumbing. This feature ships its own self-contained ticker; if that shared
 // scheduler lands, this block can be folded into it.
 const TAG_SYNC_TICK_MS = 5 * 60 * 1000;   // re-evaluate whether a run is due
