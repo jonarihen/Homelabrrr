@@ -33,7 +33,10 @@
     "ws": "^8.21.2"
   },
   "overrides": {
-    "qs": "^6.16.0"
+    "qs": "^6.16.0",
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.12"
+    }
   },
   "devDependencies": {
     "@types/busboy": "^1.5.4",
