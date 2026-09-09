@@ -68,14 +68,14 @@ name = "actionlint"
 name = "eslint"
 version = "10.8.0"
 package_file = "package.json"
-package_filters = ["eslint"]
+package_filters = ["eslint", "globals"]
 prefix = "backend"
 
 [[plugin]]
 name = "eslint"
 version = "10.8.0"
 package_file = "package.json"
-package_filters = ["eslint"]
+package_filters = ["eslint", "globals"]
 prefix = "frontend"
 
 [[plugin]]

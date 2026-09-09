@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
@@ -344,18 +344,18 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   const [tokensLoaded, setTokensLoaded] = useState(false);
   const [tokenMsg, setTokenMsg] = useState('');
 
-  const loadUserData = async () => {
+  const loadUserData = useCallback(async () => {
     const [vms, vlans] = await Promise.all([
       api.get(`/admin/users/${user.id}/vms`),
       api.get(`/admin/users/${user.id}/vlans`),
     ]);
     setUserVMs(vms.data);
     setUserVLANs(vlans.data);
-  };
+  }, [user.id]);
 
-  useEffect(() => { loadUserData(); }, [user.id]);
+  useEffect(() => { loadUserData(); }, [loadUserData]);
 
-  const loadTokens = async () => {
+  const loadTokens = useCallback(async () => {
     try {
       const { data } = await api.get(`/admin/users/${user.id}/tokens`);
       setTokens(data);
@@ -364,9 +364,9 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
     } finally {
       setTokensLoaded(true);
     }
-  };
+  }, [user.id]);
 
-  useEffect(() => { if (tab === 'tokens') loadTokens(); }, [tab, user.id]);
+  useEffect(() => { if (tab === 'tokens') loadTokens(); }, [tab, loadTokens]);
 
   const revokeToken = async (token) => {
     if (!window.confirm(`Revoke "${token.name}" belonging to ${user.username}? Any script using it loses access immediately.`)) return;

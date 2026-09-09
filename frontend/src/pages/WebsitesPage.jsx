@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import Layout from '../components/Layout.jsx';
 import PrereqCallout from '../components/PrereqCallout.jsx';
 import api from '../api.js';
@@ -20,7 +20,7 @@ export default function WebsitesPage() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const [cfg, s, up] = await Promise.all([
         api.get('/websites/config'),
@@ -32,9 +32,9 @@ export default function WebsitesPage() {
       setUpstream(up.data || { isAdmin: false, vms: [], subnets: [] });
     } catch { /* ignore */ }
     finally { setLoading(false); }
-  };
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   // Publishing chains off a registered Caddy server that knows its own WAN IP —
   // without it the DNS pre-check cannot tell the user where to point the A
@@ -294,7 +294,7 @@ function SiteCard({ site: initial, servers, upstream, isAdmin, onChanged }) {
     };
     timerRef.current = setTimeout(tick, 2500);
     return () => clearTimeout(timerRef.current);
-  }, [inFlight, site.id]);
+  }, [inFlight, site.id, onChanged]);
 
   const retry = async () => {
     setBusy(true); setError('');

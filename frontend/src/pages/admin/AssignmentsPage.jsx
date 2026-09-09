@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef } from 'react';
+import { Fragment, useCallback, useState, useEffect, useRef } from 'react';
 import api from '../../api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import MigrateVMModal from '../../components/MigrateVMModal.jsx';
@@ -35,19 +35,19 @@ function TagSyncCard() {
 
   const note = (text, kind = 'info') => setMsg({ text, kind });
 
-  const loadStatus = async () => {
+  const loadStatus = useCallback(async () => {
     try {
       const { data } = await api.get('/admin/tag-sync/status');
       setStatus(data);
       setIntervalDraft((prev) => (prev === '' ? String(data.intervalHours ?? '') : prev));
       return data;
     } catch (e) {
-      note(e.response?.data?.error || 'Failed to load tag-sync status', 'error');
+      setMsg({ text: e.response?.data?.error || 'Failed to load tag-sync status', kind: 'error' });
       return null;
     }
-  };
+  }, []);
 
-  useEffect(() => { loadStatus(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { loadStatus(); }, [loadStatus]);
 
   // Poll live while a run is in flight (manual or scheduled), then stop.
   useEffect(() => {
@@ -57,8 +57,7 @@ function TagSyncCard() {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
-    // eslint-disable-next-line
-  }, [status?.running]);
+  }, [status?.running, loadStatus]);
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
@@ -280,7 +279,7 @@ export default function AssignmentsPage() {
   const [hostCount, setHostCount] = useState(0);
   const migrationPollRef = useRef(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const r = await api.get('/admin/vms');
       setVms(r.data);
@@ -289,11 +288,11 @@ export default function AssignmentsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   // Cross-host migrations run in the background — keep a banner alive while
   // any are running, even after the modal is closed. Admin-only endpoint.
-  const loadMigrations = async () => {
+  const loadMigrations = useCallback(async () => {
     if (!user?.isAdmin) return;
     try {
       const { data } = await api.get('/migrate');
@@ -313,7 +312,7 @@ export default function AssignmentsPage() {
         }, 5000);
       }
     } catch { /* non-admin or endpoint unavailable */ }
-  };
+  }, [user?.isAdmin, load]);
 
   useEffect(() => {
     load();
@@ -323,8 +322,11 @@ export default function AssignmentsPage() {
     if (user?.isAdmin) {
       api.get('/admin/pve-hosts').then((r) => setHostCount(r.data.length)).catch(() => {});
     }
-    return () => clearInterval(migrationPollRef.current);
-  }, []);
+    return () => {
+      clearInterval(migrationPollRef.current);
+      migrationPollRef.current = null;
+    };
+  }, [load, loadMigrations, user?.isAdmin]);
 
   const unassign = async (assignment) => {
     if (!confirm('Remove this VM assignment?')) return;

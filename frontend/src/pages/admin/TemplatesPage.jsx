@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useMemo, useState, useEffect } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
@@ -14,7 +14,7 @@ export default function TemplatesPage() {
   const [editTemplate, setEditTemplate] = useState(null);
   const [error, setError] = useState('');
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const r = await api.get('/provision/admin/templates');
       setTemplates(r.data);
@@ -23,9 +23,9 @@ export default function TemplatesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   const deleteTemplate = async (id, name) => {
     if (!confirm(`Delete template "${name}"? This does not delete the actual VM.`)) return;
@@ -180,7 +180,7 @@ function CloudImagesSection({ onTemplatesChanged }) {
   const [templateImage, setTemplateImage] = useState(null);
   const [editImage, setEditImage] = useState(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const r = await api.get('/cloud-images');
       setImages(prev => {
@@ -191,16 +191,18 @@ function CloudImagesSection({ onTemplatesChanged }) {
         return r.data;
       });
     } catch { /* section is admin-only; errors surface on actions */ }
-  };
+  }, [onTemplatesChanged]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const imageWorkInFlight = images.some(i => i.status === 'downloading' || i.status === 'templating' || i.console_patch_status === 'patching');
 
   // Poll while anything is in flight
   useEffect(() => {
-    if (!images.some(i => i.status === 'downloading' || i.status === 'templating' || i.console_patch_status === 'patching')) return undefined;
+    if (!imageWorkInFlight) return undefined;
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
-  }, [images]);
+  }, [imageWorkInFlight, load]);
 
   const remove = async (img) => {
     if (!confirm(`Delete cloud image "${img.name}"? The downloaded file is removed from ${img.storage}.`)) return;
@@ -358,9 +360,9 @@ function CloudImagesSection({ onTemplatesChanged }) {
 // per host; the chosen pool is pre-selected when deploying on that host. Empty =
 // auto-pick at deploy time. Local-storage images have a single host.
 function CloudImageDefaultStorageModal({ image, onClose, onSaved }) {
-  const targets = image.deployTargets?.length
+  const targets = useMemo(() => (image.deployTargets?.length
     ? image.deployTargets
-    : [{ hostId: null, nodeRef: image.nodeRef || image.node, node: image.node, hostName: image.hostName || '' }];
+    : [{ hostId: null, nodeRef: image.nodeRef || image.node, node: image.node, hostName: image.hostName || '' }]), [image.deployTargets, image.nodeRef, image.node, image.hostName]);
   const [storagesByHost, setStoragesByHost] = useState({});
   const [values, setValues] = useState(() => {
     const init = {};
@@ -378,7 +380,7 @@ function CloudImageDefaultStorageModal({ image, onClose, onSaved }) {
         .catch(() => [t.hostId, []])
     )).then(pairs => { if (!cancelled) setStoragesByHost(Object.fromEntries(pairs)); });
     return () => { cancelled = true; };
-  }, [image.id]);
+  }, [targets]);
 
   const save = async (e) => {
     e.preventDefault();
@@ -451,9 +453,9 @@ function CloudImageFormModal({ onClose, onSaved }) {
       .then(r => {
         setStorages(r.data);
         const importCapable = r.data.filter(s => s.content?.includes('import'));
-        if (!importCapable.find(s => s.storage === form.storage)) {
-          setForm(f => ({ ...f, storage: importCapable[0]?.storage || '' }));
-        }
+        setForm(f => (importCapable.some(s => s.storage === f.storage)
+          ? f
+          : { ...f, storage: importCapable[0]?.storage || '' }));
       })
       .catch(() => setStorages([]));
   }, [form.node]);
@@ -686,7 +688,7 @@ function IsosSection() {
   }, [isos]);
 
   const remove = async (iso) => {
-    // NOTE: native confirm/alert mirrors the sibling CloudImagesSection on this
+    // Native confirm/alert mirrors the sibling CloudImagesSection on this
     // page; the in-app notify/confirm dialogs live in a separate a11y branch and
     // will convert this page's dialogs in one pass once merged.
     if (!confirm(`Delete ISO "${iso.name}"? The downloaded file is removed from ${iso.storage}.`)) return;
@@ -791,9 +793,9 @@ function IsoFormModal({ onClose, onSaved }) {
       .then(r => {
         const isoCapable = r.data.filter(s => s.content?.includes('iso'));
         setStorages(isoCapable);
-        if (!isoCapable.find(s => s.storage === form.storage)) {
-          setForm(f => ({ ...f, storage: isoCapable[0]?.storage || '' }));
-        }
+        setForm(f => (isoCapable.some(s => s.storage === f.storage)
+          ? f
+          : { ...f, storage: isoCapable[0]?.storage || '' }));
       })
       .catch(() => setStorages([]));
   }, [form.node]);

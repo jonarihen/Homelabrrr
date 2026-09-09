@@ -1285,7 +1285,7 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
   }
 });
 
-// NOTE (storage exposure, issue #19): this endpoint grows an *existing* disk in
+// Storage exposure (issue #19): this endpoint grows an *existing* disk in
 // place (e.g. scsi0) — it never names a storage pool, so there is no exposed/
 // hidden pool to enforce here. There is currently no "add a disk on a chosen
 // storage" path in hardware edit; if one is added, call assertStorageExposed()
