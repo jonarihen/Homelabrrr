@@ -982,13 +982,11 @@ function isValidCidr(cidr = '') {
   const match = trimmed.match(/^(\d{1,3})(?:\.(\d{1,3})){3}\/(\d{1,2})$/);
   if (!match) return false;
   const [ip, prefix] = trimmed.split('/');
+  const inRange = (n, max) => Number.isInteger(n) && n >= 0 && n <= max;
   const octets = ip.split('.').map(Number);
-  const prefixNum = Number(prefix);
-  return octets.length === 4
-    && octets.every(octet => Number.isInteger(octet) && octet >= 0 && octet <= 255)
-    && Number.isInteger(prefixNum)
-    && prefixNum >= 0
-    && prefixNum <= 32;
+  if (octets.length !== 4) return false;
+  if (!octets.every(octet => inRange(octet, 255))) return false;
+  return inRange(Number(prefix), 32);
 }
 
 function serializeVlanSubnet(vlan) {
@@ -1140,6 +1138,35 @@ router.put('/vlans/:id', pVlans, async (req, res) => {
   }
 });
 
+// Every FortiGate object a managed VIP owns, in teardown order. Each step is
+// independent and best-effort: an object already gone upstream must not stop
+// the rest of the cleanup.
+function managedVipCleanupSteps(pf, sync, rootVdom) {
+  const labVdom = sync.vdom || 'lab';
+  const steps = [];
+  if (pf.policy_id) {
+    steps.push({ label: `Root policy ${pf.policy_id}`, run: (c) => c.deletePolicy(pf.policy_id, rootVdom) });
+  }
+  if (pf.lab_policy_id) {
+    steps.push({ label: `Lab policy ${pf.lab_policy_id}`, run: (c) => c.deletePolicy(pf.lab_policy_id, labVdom) });
+  }
+  steps.push({ label: `VIP ${pf.vip_name}`, run: (c) => c.deleteVip(pf.vip_name, rootVdom) });
+  if (pf.service_name) {
+    steps.push({ label: `Service ${pf.service_name}`, run: (c) => c.deleteServiceObject(pf.service_name, rootVdom) });
+    steps.push({ label: `Lab service ${pf.service_name}`, run: (c) => c.deleteServiceObject(pf.service_name, labVdom) });
+  }
+  if (pf.vlan_interface) {
+    const labAddressName = buildManagedVipAddressName(pf.vip_name, pf.mapped_ip);
+    steps.push({ label: `Lab address ${labAddressName}`, run: (c) => c.deleteAddressObject(labAddressName, labVdom) });
+  }
+  return steps;
+}
+
+async function bestEffort(label, run) {
+  try { await run(); }
+  catch (e) { console.warn(`[delete-vlan] ${label} cleanup:`, e.message); }
+}
+
 router.delete('/vlans/:id', pVlans, async (req, res) => {
   const [vlan] = await db.select().from(vlans).where(eq(vlans.id, Number(req.params.id))).limit(1);
   if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
@@ -1177,32 +1204,8 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
 
       for (const pf of portForwards) {
         try {
-          // Delete root VDOM policy
-          if (pf.policy_id) {
-            try { await client.deletePolicy(pf.policy_id, rootVdom); }
-            catch (e) { console.warn(`[delete-vlan] Root policy ${pf.policy_id} cleanup:`, e.message); }
-          }
-          if (pf.lab_policy_id) {
-            const labVdom = sync.vdom || 'lab';
-            try { await client.deletePolicy(pf.lab_policy_id, labVdom); }
-            catch (e) { console.warn(`[delete-vlan] Lab policy ${pf.lab_policy_id} cleanup:`, e.message); }
-          }
-          // Delete VIP from root VDOM
-          try { await client.deleteVip(pf.vip_name, rootVdom); }
-          catch (e) { console.warn(`[delete-vlan] VIP ${pf.vip_name} cleanup:`, e.message); }
-          // Delete service object from root VDOM
-          if (pf.service_name) {
-            try { await client.deleteServiceObject(pf.service_name, rootVdom); }
-            catch (e) { console.warn(`[delete-vlan] Service ${pf.service_name} cleanup:`, e.message); }
-            const labVdom = sync.vdom || 'lab';
-            try { await client.deleteServiceObject(pf.service_name, labVdom); }
-            catch (e) { console.warn(`[delete-vlan] Lab service ${pf.service_name} cleanup:`, e.message); }
-          }
-          if (pf.vlan_interface) {
-            const labVdom = sync.vdom || 'lab';
-            const labAddressName = buildManagedVipAddressName(pf.vip_name, pf.mapped_ip);
-            try { await client.deleteAddressObject(labAddressName, labVdom); }
-            catch (e) { console.warn(`[delete-vlan] Lab address ${labAddressName} cleanup:`, e.message); }
+          for (const step of managedVipCleanupSteps(pf, sync, rootVdom)) {
+            await bestEffort(step.label, () => step.run(client));
           }
           // Remove DB record
           await db.delete(managedVips).where(eq(managedVips.id, pf.id));

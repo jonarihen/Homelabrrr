@@ -1,60 +1,72 @@
-export function parseChangelog(markdown) {
-  const entries = [];
-  const lines = markdown.split(/\r?\n/);
-  let currentEntry = null;
-  let currentSection = null;
+const ENTRY_RE = /^##\s+(\d{4}-\d{2}-\d{2})\s+[—-]\s+(.+)$/;
+const SECTION_RE = /^###\s+(.+)$/;
+const DASH_BULLET_RE = /^-\s+(.+)$/;
+const NUMBERED_BULLET_RE = /^\d+\.\s+(.+)$/;
 
-  const pushEntry = () => {
-    if (!currentEntry) return;
-    const firstSection = currentEntry.sections[0];
-    const firstItem = firstSection?.items?.[0];
-    currentEntry.summary = firstItem || currentEntry.title;
-    entries.push(currentEntry);
-  };
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || line === '---') continue;
-
-    const entryMatch = line.match(/^##\s+(\d{4}-\d{2}-\d{2})\s+[—-]\s+(.+)$/);
-    if (entryMatch) {
-      pushEntry();
-      currentEntry = {
-        date: entryMatch[1],
-        title: entryMatch[2],
-        summary: '',
-        sections: [],
-      };
-      currentSection = null;
-      continue;
-    }
-
-    if (!currentEntry) continue;
-
-    const sectionMatch = line.match(/^###\s+(.+)$/);
-    if (sectionMatch) {
-      currentSection = {
-        heading: sectionMatch[1],
-        items: [],
-      };
-      currentEntry.sections.push(currentSection);
-      continue;
-    }
-
-    const bulletMatch = line.match(/^-\s+(.+)$/) || line.match(/^\d+\.\s+(.+)$/);
-    if (bulletMatch) {
-      if (!currentSection) {
-        currentSection = {
-          heading: 'Notes',
-          items: [],
-        };
-        currentEntry.sections.push(currentSection);
-      }
-      currentSection.items.push(bulletMatch[1]);
-    }
-  }
-
-  pushEntry();
-  return entries;
+function createParser() {
+  return { entries: [], entry: null, section: null };
 }
 
+// An entry's summary is its first bullet, falling back to the title when the
+// entry has no bullets at all.
+function closeEntry(state) {
+  if (!state.entry) return;
+  state.entry.summary = state.entry.sections[0]?.items?.[0] || state.entry.title;
+  state.entries.push(state.entry);
+}
+
+function startEntry(state, [, date, title]) {
+  closeEntry(state);
+  state.entry = { date, title, summary: '', sections: [] };
+  state.section = null;
+}
+
+function startSection(state, heading) {
+  state.section = { heading, items: [] };
+  state.entry.sections.push(state.section);
+}
+
+function addBullet(state, text) {
+  // Bullets before any `###` heading collect under an implicit section.
+  if (!state.section) startSection(state, 'Notes');
+  state.section.items.push(text);
+}
+
+// Ordered line handlers: the first one that claims the line wins. Each returns
+// true when it consumed the line. Handlers after the first run only once an
+// entry is open, so stray prose above the first `##` is ignored.
+const HANDLERS = [
+  (state, line) => {
+    const match = line.match(ENTRY_RE);
+    if (match) startEntry(state, match);
+    return Boolean(match);
+  },
+  (state, line) => {
+    const match = line.match(SECTION_RE);
+    if (match) startSection(state, match[1]);
+    return Boolean(match);
+  },
+  (state, line) => {
+    const match = line.match(DASH_BULLET_RE) || line.match(NUMBERED_BULLET_RE);
+    if (match) addBullet(state, match[1]);
+    return Boolean(match);
+  },
+];
+
+function isSkippable(line) {
+  return !line || line === '---';
+}
+
+export function parseChangelog(markdown) {
+  const state = createParser();
+
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (isSkippable(line)) continue;
+    const handlers = state.entry ? HANDLERS : HANDLERS.slice(0, 1);
+    handlers.some(handle => handle(state, line));
+  }
+
+  closeEntry(state);
+  return state.entries;
+}
