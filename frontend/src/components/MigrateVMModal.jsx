@@ -1,7 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
-import api from '../api.js';
 import Modal from './Modal.jsx';
-import { routeNode, displayNode } from '../utils/nodeRef.js';
+import { displayNode } from '../utils/nodeRef.js';
+import useMigrateVM from './useMigrateVM.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
 const labelCls = 'block text-xs text-gray-500 uppercase tracking-wider mb-1';
@@ -22,9 +21,6 @@ const STEP_ICON = {
   skipped: 'text-gray-600',
 };
 
-// Disk-transfer progress scraped from the Proxmox task log. Only rendered when
-// the backend actually parsed a percentage — LXC copies (rsync) and the early
-// phase of a migration report none, and those keep the pulsing dot instead.
 function TransferProgress({ percent, detail }) {
   const pct = Math.min(100, Math.max(0, percent));
   return (
@@ -40,222 +36,14 @@ function TransferProgress({ percent, detail }) {
   );
 }
 
-// Admin: move a guest to a different (non-clustered) Proxmox host. When both
-// hosts mount the same NFS/CIFS storage the backend plans an "adopt" migration
-// that re-references those disks instead of copying them. Started migrations
-// keep running server-side — closing the modal is safe; the Assignments page
-// banner keeps showing progress.
 export default function MigrateVMModal({ vm, onClose, onDone }) {
-  const running = vm.status === 'running';
-  const isLxc = vm.type === 'lxc';
-  const vmNode = routeNode(vm);
-  const vmid = vm.vmid;
-
-  const [nodes, setNodes] = useState([]);
-  const [targetNode, setTargetNode] = useState('');
-  const [storages, setStorages] = useState([]);
-  const [storage, setStorage] = useState('');
-  // Per-disk overrides on top of `storage`. A disk with no entry follows the
-  // single target storage — picking a new one there clears the overrides so
-  // "apply to all" stays literally true.
-  const [diskStorages, setDiskStorages] = useState({});
-  const [bridges, setBridges] = useState([]);
-  const [bridge, setBridge] = useState('');
-  const [plan, setPlan] = useState(null);
-  const [fullCopy, setFullCopy] = useState(false);
-  const [online, setOnline] = useState(running && !isLxc);
-  const [deleteSource, setDeleteSource] = useState(true);
-  const [error, setError] = useState('');
-  const [loadingTarget, setLoadingTarget] = useState(false);
-  const [starting, setStarting] = useState(false);
-  const [migration, setMigration] = useState(null);
-  // Set when the backend refuses because the running VM has a stale boot order
-  // that can't be corrected live; drives the one-click resolution panel.
-  const [bootIssue, setBootIssue] = useState(null);
-  const [preparing, setPreparing] = useState('');
-  const [info, setInfo] = useState('');
-  const pollRef = useRef(null);
-
-  useEffect(() => {
-    api.get('/provision/nodes')
-      .then((r) => {
-        const eligible = r.data.filter((n) => n.hostId !== vm.hostId && n.status === 'online');
-        setNodes(eligible);
-        if (eligible.length === 1) setTargetNode(eligible[0].nodeRef);
-      })
-      .catch((e) => setError(e.response?.data?.error || 'Failed to load target hosts'));
-  }, [vm.hostId]);
-
-  useEffect(() => {
-    if (!targetNode) return;
-    setLoadingTarget(true);
-    setStorage('');
-    setDiskStorages({});
-    setBridge('');
-    setPlan(null);
-    const wanted = isLxc ? 'rootdir' : 'images';
-    Promise.all([
-      api.get(`/provision/nodes/${encodeURIComponent(targetNode)}/storages`),
-      api.get(`/provision/nodes/${encodeURIComponent(targetNode)}/networks`),
-      api.get(`/migrate/plan/${encodeURIComponent(vmNode)}/${vmid}?target=${encodeURIComponent(targetNode)}`),
-    ])
-      .then(([s, n, p]) => {
-        const usable = s.data.filter((st) => st.content?.includes(wanted));
-        setStorages(usable);
-        setPlan(p.data);
-        // Adopt mode: default boot disks onto the target's first non-shared
-        // storage (mirrors "SSD boot disk on the host, data on NFS")
-        const sharedIds = new Set((p.data.sharedStorages || []).map((x) => x.targetId));
-        const firstLocal = usable.find((st) => !sharedIds.has(st.storage));
-        if (p.data.mode === 'adopt') setStorage(firstLocal?.storage || '');
-        else if (usable.length > 0) setStorage(usable[0].storage);
-        setBridges(n.data);
-        const defaultBridge = n.data.find((b) => b.iface === 'vmbr0') || n.data[0];
-        if (defaultBridge) setBridge(defaultBridge.iface);
-        setError('');
-      })
-      .catch((e) => setError(e.response?.data?.error || 'Failed to load target node resources'))
-      .finally(() => setLoadingTarget(false));
-  }, [targetNode, isLxc, vmNode, vmid]);
-
-  useEffect(() => () => clearInterval(pollRef.current), []);
-
-  const poll = (id) => {
-    pollRef.current = setInterval(async () => {
-      try {
-        const { data } = await api.get(`/migrate/${id}`);
-        setMigration(data);
-        if (data.status !== 'running') {
-          clearInterval(pollRef.current);
-          onDone?.();
-        }
-      } catch { /* keep polling */ }
-    }, 4000);
-  };
-
-  const effectiveMode = plan && !fullCopy ? plan.mode : 'remote_migrate';
-  const adopt = effectiveMode === 'adopt';
-  const blockedByRunning = adopt && running;
-
-  // Disks whose destination is actually up to the user. A full copy places
-  // every data volume; adopt only places the ones that were local to begin
-  // with — the shared ones are adopted where they already live.
-  const placeableDisks = (plan?.disks || []).filter((d) => (
-    adopt ? d.action === 'copy' : d.action === 'copy' || d.action === 'remount'
-  ));
-  const diskTarget = (key) => (key in diskStorages ? diskStorages[key] : storage);
-  const setDiskTarget = (key, value) => setDiskStorages((prev) => ({ ...prev, [key]: value }));
-
-  // Proxmox maps a source STORAGE to a target storage during a cross-host copy,
-  // so disks that share one travel together — sending them to different pools
-  // means the copy puts them in one and the backend moves the rest afterwards.
-  // Adopt is unaffected: it moves each disk itself and can simply obey.
-  const splitSources = adopt ? [] : [...placeableDisks.reduce((acc, d) => {
-    if (!d.storage) return acc;
-    acc.set(d.storage, (acc.get(d.storage) || new Set()).add(diskTarget(d.key)));
-    return acc;
-  }, new Map())].filter(([, targets]) => targets.size > 1).map(([source]) => source);
-  // A container's volumes cannot be moved after the copy (pct move-volume needs
-  // it stopped, and rootfs cannot move at all), so that second pass is
-  // QEMU-only and the split has to be refused for an LXC.
-  const splitBlocked = !adopt && isLxc && splitSources.length > 0;
-
-  // A full copy streams every volume to its target storage, and a storage that
-  // can't import the source's format only fails once the guest is already
-  // stopped. The backend refuses it too — this just says so before the click.
-  // Adopt never streams, so the verdict doesn't apply there.
-  const chosenStorages = [...new Set([storage, ...placeableDisks.map((d) => diskTarget(d.key))])].filter(Boolean);
-  const storageIssue = adopt
-    ? null
-    : (plan?.storageCompatibility || []).find((c) => chosenStorages.includes(c.storage) && c.severity === 'error');
-  const missingDiskTarget = !adopt && placeableDisks.some((d) => !diskTarget(d.key));
-
-  const submitMigration = async (onlineOverride) => {
-    const { data } = await api.post(`/migrate/${encodeURIComponent(routeNode(vm))}/${vm.vmid}`, {
-      targetNode,
-      targetStorage: storage || undefined,
-      // Explicit per disk rather than relying on the fallback, so what the
-      // modal shows is exactly what the backend plans. An empty value is a
-      // real answer in adopt mode ("keep this one on shared storage") and is
-      // sent as such.
-      diskStorages: Object.fromEntries(placeableDisks.map((d) => [d.key, diskTarget(d.key)])),
-      targetBridge: bridge,
-      online: onlineOverride === undefined ? online : onlineOverride,
-      deleteSource,
-      fullCopy,
-    });
-    setMigration({ id: data.id, mode: data.mode, status: 'running', status_detail: '', steps: [] });
-    poll(data.id);
-  };
-
-  const start = async () => {
-    setStarting(true);
-    setError('');
-    setBootIssue(null);
-    try {
-      await submitMigration();
-    } catch (e) {
-      const d = e.response?.data;
-      if (d?.code === 'stale_boot_order') setBootIssue(d);
-      else setError(d?.error || 'Failed to start migration');
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  const waitForStatus = async (want, tries) => {
-    for (let i = 0; i < tries; i++) {
-      await new Promise((r) => setTimeout(r, 3000));
-      try {
-        const { data } = await api.get(`/vms/${encodeURIComponent(routeNode(vm))}/${vm.vmid}/status`);
-        if (data.status === want) return true;
-      } catch { /* keep polling */ }
-    }
-    return false;
-  };
-
-  const powerAction = (action) =>
-    api.post(`/vms/${encodeURIComponent(routeNode(vm))}/${vm.vmid}/action`, { action });
-
-  // Stop the VM, then migrate offline — the backend corrects the stale boot
-  // order automatically once the VM isn't running.
-  const stopAndMigrate = async () => {
-    setPreparing('stop');
-    setError('');
-    try {
-      await powerAction('stop');
-      if (!(await waitForStatus('stopped', 40))) {
-        setError('VM did not stop in time — check it and try again.');
-        return;
-      }
-      setBootIssue(null);
-      await submitMigration(false);
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to stop the VM');
-    } finally {
-      setPreparing('');
-    }
-  };
-
-  // Reboot to apply the pending boot-order fix to the active config; the user
-  // then starts a live migration once the VM is back up.
-  const rebootToFix = async () => {
-    setPreparing('reboot');
-    setError('');
-    try {
-      await powerAction('reboot');
-      setBootIssue(null);
-      setError('');
-      // A soft heads-up rather than blocking — the VM reboots in the background.
-      setInfo('Rebooting the VM to apply the boot-order fix. Once it is running again, click Start migration for a live move.');
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to reboot the VM');
-    } finally {
-      setPreparing('');
-    }
-  };
-
-  const targetHostName = nodes.find((n) => n.nodeRef === targetNode)?.hostName || '';
+  const {
+    adopt, blockedByRunning, bootIssue, bridge, bridges, deleteSource, diskTarget, error,
+    fullCopy, info, isLxc, loadingTarget, migration, nodes, online, placeableDisks, plan,
+    preparing, rebootToFix, running, setBridge, setDeleteSource, setDiskTarget, setFullCopy,
+    setOnline, setStorage, setTargetNode, splitBlocked, splitSources, start, startDisabled,
+    starting, stopAndMigrate, storage, storageIssue, storages, targetHostName, targetNode,
+  } = useMigrateVM(vm, onDone);
   const showProgress = migration?.status === 'running' && typeof migration.progress === 'number';
 
   return (
@@ -399,7 +187,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
               <label className={labelCls}>{adopt ? 'Target storage for boot / local disks' : 'Target storage'}</label>
               <select
                 value={storage}
-                onChange={(e) => { setStorage(e.target.value); setDiskStorages({}); }}
+                onChange={(e) => setStorage(e.target.value)}
                 className={inputCls}
                 disabled={!targetNode || loadingTarget}
               >
@@ -451,9 +239,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                 <input
                   type="checkbox"
                   checked={fullCopy}
-                  // Flipping this changes which disks are placeable at all, so
-                  // the per-disk picks start over from the single target.
-                  onChange={(e) => { setFullCopy(e.target.checked); setDiskStorages({}); }}
+                  onChange={(e) => setFullCopy(e.target.checked)}
                   className="mt-0.5"
                 />
                 <span>
@@ -519,8 +305,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
             ) : (
               <button
                 onClick={start}
-                disabled={starting || loadingTarget || !targetNode || !bridge || blockedByRunning
-                  || !!storageIssue || splitBlocked || missingDiskTarget || (!adopt && !storage)}
+                disabled={startDisabled}
                 className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
               >
                 {starting ? 'Starting…' : adopt ? 'Start shared-storage migration' : 'Start migration'}

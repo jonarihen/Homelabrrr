@@ -3,13 +3,14 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { isos } from '../db/schema/index.ts';
 import {
-  downloadUrlToStorage, deleteVolume, getTaskStatus, getStorageContent,
+  downloadUrlToStorage, deleteVolume,
 } from '../proxmox.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { logAudit } from '../utils/audit.ts';
 import { decodeNodeRef } from '../utils/nodeRef.ts';
 import { assertPublicDownloadUrl } from '../utils/urlGuard.ts';
+import { awaitStorageDownload, storageSlug } from '../utils/storageDownload.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
 
 const router = Router();
@@ -26,19 +27,6 @@ function serializeIso(row: any) {
 
 async function setIsoStatus(id: number, status: string, detail = '') {
   await db.update(isos).set({ status, status_detail: detail }).where(eq(isos.id, id));
-}
-
-async function waitForTask(node: string, upid: string, { attempts = 240, intervalMs = 5000 } = {}) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    try {
-      const task = await getTaskStatus(node, upid);
-      if (task.status === 'stopped') {
-        return { ok: task.exitstatus === 'OK', exitstatus: task.exitstatus || '' };
-      }
-    } catch { /* keep polling */ }
-  }
-  return { ok: false, exitstatus: 'timeout' };
 }
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -64,7 +52,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: err.message });
   }
 
-  const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'iso';
+  const slug = storageSlug(name, 'iso');
 
   const [inserted] = await db.insert(isos).values({
     name, url, node, storage, status: 'downloading', request_id: req.requestId || '',
@@ -82,24 +70,15 @@ router.post('/', async (req, res) => {
 
     // Poll in the background; the row's status is the source of truth for the UI
     startBackgroundWork(async () => {
-      const result = await waitForTask(node, upid);
-      if (!result.ok) {
-        await setIsoStatus(id, 'error', result.exitstatus === 'timeout'
-          ? 'Timed out waiting for the download'
-          : `Download failed: ${result.exitstatus}`);
+      const outcome = await awaitStorageDownload({
+        node, storage, volid, upid, content: 'iso',
+        missingMessage: 'Download finished but the ISO was not found on the storage',
+      });
+      if (!outcome.ok) {
+        await setIsoStatus(id, 'error', outcome.error);
         return;
       }
-      try {
-        const content = await getStorageContent(node, storage, 'iso');
-        const vol = content.find((c: any) => c.volid === volid);
-        if (!vol) {
-          await setIsoStatus(id, 'error', 'Download finished but the ISO was not found on the storage');
-          return;
-        }
-        await db.update(isos).set({ status: 'ready', status_detail: '', size: vol.size || 0 }).where(eq(isos.id, id));
-      } catch (err: any) {
-        await setIsoStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
-      }
+      await db.update(isos).set({ status: 'ready', status_detail: '', size: outcome.size }).where(eq(isos.id, id));
     }, { kind: 'iso-download', id, requestId: req.requestId })
       .catch((err: any) => { setIsoStatus(id, 'error', sanitizeError(err.message)).catch(() => {}); });
 

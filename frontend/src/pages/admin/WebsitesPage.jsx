@@ -1,182 +1,19 @@
-import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import useWebsitesAdmin from './useWebsitesAdmin.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const selectCls = inputCls;
 
 const IN_FLIGHT = ['validating', 'pushing', 'issuing', 'inspecting', 'pending'];
 
-function defaultForm() {
-  return {
-    name: '', apiUrl: '', authType: 'none', authSecret: '', serverName: '', verifyTls: true, wanIp: '', fortigateId: '', inspectionProfile: '', inspectionBundleCert: '',
-    sshHost: '', sshPort: 22, sshUser: '', sshAuthType: 'key', sshSecret: '', snippetPath: '/etc/caddy/homelabrrr.caddy', caddyfilePath: '/etc/caddy/Caddyfile',
-  };
-}
-
 export default function AdminWebsitesPage() {
   useDocumentTitle('Websites');
-  const [servers, setServers] = useState([]);
-  const [statuses, setStatuses] = useState({});
-  const [sites, setSites] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [firewalls, setFirewalls] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-  const [editId, setEditId] = useState(null);
-  const [form, setForm] = useState(defaultForm());
-  const [profiles, setProfiles] = useState({ profiles: [], certificates: [] });
-  const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [banner, setBanner] = useState('');
-
-  const load = async () => {
-    try {
-      const [srv, st, us, fw] = await Promise.all([
-        api.get('/websites/servers'),
-        api.get('/websites/admin/sites'),
-        api.get('/websites/admin/users'),
-        api.get('/websites/firewalls'),
-      ]);
-      setServers(srv.data || []);
-      setSites(st.data || []);
-      setUsers(us.data || []);
-      setFirewalls(fw.data || []);
-      (srv.data || []).forEach((s) => {
-        setStatuses((prev) => ({ ...prev, [s.id]: { loading: true } }));
-        api.get(`/websites/servers/${s.id}/status`)
-          .then((r) => setStatuses((prev) => ({ ...prev, [s.id]: { ...r.data, loading: false } })))
-          .catch(() => setStatuses((prev) => ({ ...prev, [s.id]: { online: false, loading: false, error: 'Failed to check' } })));
-      });
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to load');
-    } finally { setLoading(false); }
-  };
-
-  useEffect(() => { load(); }, []);
-
-  const loadProfiles = (id) => {
-    if (!id) { setProfiles({ profiles: [], certificates: [] }); return; }
-    api.get(`/websites/servers/${id}/inspection-profiles`)
-      .then((r) => setProfiles(r.data || { profiles: [], certificates: [] }))
-      .catch(() => setProfiles({ profiles: [], certificates: [] }));
-  };
-
-  const openAdd = () => { setEditId(null); setForm(defaultForm()); setProfiles({ profiles: [], certificates: [] }); setError(''); setShowForm(true); };
-
-  const openEdit = (s) => {
-    setEditId(s.id);
-    setForm({
-      name: s.name, apiUrl: s.apiUrl, authType: s.authType || 'none', authSecret: '', serverName: s.serverName || '', verifyTls: !!s.verifyTls, wanIp: s.wanIpManual || '', fortigateId: s.fortigateId || '', inspectionProfile: s.inspectionProfile || '', inspectionBundleCert: s.inspectionBundleCert || '',
-      sshHost: s.sshHost || '', sshPort: s.sshPort || 22, sshUser: s.sshUser || '', sshAuthType: s.sshAuthType || 'key', sshSecret: '', snippetPath: s.snippetPath || '/etc/caddy/homelabrrr.caddy', caddyfilePath: s.caddyfilePath || '/etc/caddy/Caddyfile',
-    });
-    setError('');
-    setShowForm(true);
-    loadProfiles(s.id);
-  };
-
-  const save = async (e) => {
-    e.preventDefault();
-    setSaving(true); setError('');
-    try {
-      if (editId) {
-        const r = await api.put(`/websites/servers/${editId}`, form);
-        if (r.data.syncWarning) setBanner(r.data.syncWarning);
-        setShowForm(false);
-        load();
-      } else {
-        const r = await api.post('/websites/servers', form);
-        if (r.data.syncWarning) setBanner(r.data.syncWarning);
-        setShowForm(false);
-        load();
-        // Pull what's already configured on the Caddy right away.
-        openImport({ id: r.data.id, name: form.name });
-      }
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to save');
-    } finally { setSaving(false); }
-  };
-
-  const remove = async (id) => {
-    setError('');
-    try { await api.delete(`/websites/servers/${id}`); load(); }
-    catch (e) { setError(e.response?.data?.error || 'Failed to delete'); }
-  };
-
-  const [syncingId, setSyncingId] = useState(null);
-  const syncServer = async (s) => {
-    setBanner(''); setError(''); setSyncingId(s.id);
-    try {
-      const r = await api.post(`/websites/servers/${s.id}/sync`);
-      if (r.data.mode === 'caddyfile') setBanner(`Caddyfile synced on ${s.name}: ${r.data.sites} site(s) written, Caddy reloaded`);
-      else setBanner(r.data.repaired.length ? `Re-pushed ${r.data.repaired.length} missing route(s) on ${s.name}: ${r.data.repaired.join(', ')}` : `No drift on ${s.name} — every managed route is present`);
-      load();
-    } catch (e) { setError(e.response?.data?.error || 'Sync failed'); }
-    finally { setSyncingId(null); }
-  };
-
-  const detectWanIp = async () => {
-    if (!editId) return;
-    try { const r = await api.post(`/websites/servers/${editId}/detect-wan-ip`); setForm((f) => ({ ...f, wanIp: r.data.wanIp })); }
-    catch (e) { setError(e.response?.data?.error || 'Detection failed'); }
-  };
-
-  const assign = async (site, userId) => {
-    setBanner('');
-    try {
-      await api.post(`/websites/admin/sites/${site.id}/assign`, { userId: userId === '' ? null : userId });
-      setBanner(`Reassigned ${site.domain}`);
-      load();
-    } catch (e) { setError(e.response?.data?.error || 'Failed to assign'); }
-  };
-
-  const [confirmDeleteSite, setConfirmDeleteSite] = useState(null);
-  const deleteSite = async (site) => {
-    try { await api.delete(`/websites/admin/sites/${site.id}`); setConfirmDeleteSite(null); load(); }
-    catch (e) { setError(e.response?.data?.error || 'Failed to delete'); }
-  };
-
-  // ── Import of pre-existing Caddy sites ──
-  const [importSrv, setImportSrv] = useState(null); // { id, name }
-  const [importData, setImportData] = useState({ loading: false, sites: [], managedCount: 0, error: '' });
-  const [importSel, setImportSel] = useState(new Set());
-  const [importing, setImporting] = useState(false);
-
-  const openImport = (server) => {
-    setImportSrv(server);
-    setImportData({ loading: true, sites: [], managedCount: 0, error: '' });
-    setImportSel(new Set());
-    api.get(`/websites/servers/${server.id}/discover`)
-      .then((r) => {
-        const sites = r.data.sites || [];
-        setImportData({ loading: false, sites, managedCount: r.data.managedCount || 0, error: '' });
-        setImportSel(new Set(sites.filter((s) => s.importable).map((s) => s.domain)));
-      })
-      .catch((e) => setImportData({ loading: false, sites: [], managedCount: 0, error: e.response?.data?.error || 'Failed to read the Caddy config' }));
-  };
-
-  const toggleImport = (domain) => {
-    setImportSel((prev) => {
-      const next = new Set(prev);
-      if (next.has(domain)) next.delete(domain); else next.add(domain);
-      return next;
-    });
-  };
-
-  const runImport = async () => {
-    if (!importSrv || importSel.size === 0) return;
-    setImporting(true);
-    try {
-      const r = await api.post(`/websites/servers/${importSrv.id}/import`, { domains: [...importSel] });
-      const skipped = r.data.skipped?.length ? `, ${r.data.skipped.length} skipped` : '';
-      setBanner(`Imported ${r.data.imported.length} site(s) from ${importSrv.name}${skipped}`);
-      setImportSrv(null);
-      load();
-    } catch (e) {
-      setImportData((d) => ({ ...d, error: e.response?.data?.error || 'Import failed' }));
-    } finally { setImporting(false); }
-  };
+  const {
+    servers, statuses, sites, users, firewalls, loading, showForm, editId, form, profiles, error, saving, banner, syncingId, confirmDeleteSite,
+    importSrv, importData, importSel, importing, setShowForm, setForm, setConfirmDeleteSite, setImportSrv, openAdd, openEdit, save, remove,
+    syncServer, detectWanIp, assign, deleteSite, openImport, toggleImport, runImport,
+  } = useWebsitesAdmin();
 
   return (
     <div className="p-6 lg:p-8 max-w-5xl mx-auto space-y-8">

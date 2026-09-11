@@ -1,6 +1,4 @@
-import { Client as SSHClient } from 'ssh2';
-import { decryptSecret } from './secrets.ts';
-import { sshHostFingerprint } from './sshHostKey.ts';
+import { connectTofuSsh, execTofuSsh } from './sshTofu.ts';
 
 // ─── Caddyfile snippet sync ────────────────────────────────────────────────────
 // The admin API is ephemeral when Caddy's config comes from a Caddyfile: any
@@ -47,47 +45,7 @@ export function generateSnippet(sites) {
   return lines.join('\n');
 }
 
-function connectSsh(server) {
-  return new Promise((resolve, reject) => {
-    const conn = new SSHClient();
-    const expected = server.ssh_host_key || '';
-    let fingerprint = '';
-    let hostKeyError = '';
-    conn.on('ready', () => resolve({ conn, fingerprint }));
-    conn.on('error', (err) => {
-      reject(new Error(hostKeyError || `SSH connection to ${server.ssh_host} failed: ${err.message}`));
-    });
-    const secret = decryptSecret(server.ssh_secret);
-    const auth = server.ssh_auth_type === 'password' ? { password: secret } : { privateKey: secret };
-    conn.connect({
-      host: server.ssh_host,
-      port: server.ssh_port || 22,
-      username: server.ssh_user,
-      readyTimeout: 10000,
-      ...auth,
-      hostVerifier: (key) => {
-        fingerprint = sshHostFingerprint(key);
-        if (expected && fingerprint !== expected) {
-          hostKeyError = `SSH host key mismatch for ${server.ssh_host}: expected ${expected}, got ${fingerprint}. If the host was rebuilt, re-save the server with a new SSH host to clear the pinned key.`;
-          return false;
-        }
-        return true; // first connect: trust-on-first-use, pinned by the caller
-      },
-    });
-  });
-}
-
-function execSsh(conn, command) {
-  return new Promise((resolve, reject) => {
-    conn.exec(command, (err, stream) => {
-      if (err) return reject(err);
-      let output = '';
-      stream.on('data', (d) => { output += d; });
-      stream.stderr.on('data', (d) => { output += d; });
-      stream.on('close', (code) => resolve({ code, output }));
-    });
-  });
-}
+const HOST_KEY_HINT = 'If the host was rebuilt, re-save the server with a new SSH host to clear the pinned key.';
 
 function getSftp(conn) {
   return new Promise((resolve, reject) => {
@@ -132,7 +90,7 @@ export async function deploySnippet(server, sites) {
   }
 
   const content = generateSnippet(sites);
-  const { conn, fingerprint } = await connectSsh(server);
+  const { conn, fingerprint } = await connectTofuSsh(server, HOST_KEY_HINT);
   try {
     const sftp = await getSftp(conn);
     const previous = await sftpReadFile(sftp, snippetPath);
@@ -140,13 +98,13 @@ export async function deploySnippet(server, sites) {
 
     const putInPlace = async (body) => {
       await sftpWriteFile(sftp, tmpPath, body);
-      const mv = await execSsh(conn, `mv -f '${tmpPath}' '${snippetPath}'`);
+      const mv = await execTofuSsh(conn, `mv -f '${tmpPath}' '${snippetPath}'`);
       if (mv.code !== 0) throw new Error(`Could not write the snippet on the Caddy host: ${mv.output.trim()}`);
     };
 
     await putInPlace(content);
 
-    const validate = await execSsh(conn, `caddy validate --config '${caddyfilePath}' --adapter caddyfile 2>&1`);
+    const validate = await execTofuSsh(conn, `caddy validate --config '${caddyfilePath}' --adapter caddyfile 2>&1`);
     if (validate.code !== 0) {
       // Restore what was there before so the user's next manual reload isn't
       // broken by us. (An empty file keeps a pre-added `import` line working.)
@@ -154,7 +112,7 @@ export async function deploySnippet(server, sites) {
       throw new Error(`Caddyfile validation failed — snippet rolled back, Caddy was NOT reloaded. ${validate.output.trim().slice(-500)}`);
     }
 
-    const reload = await execSsh(conn, `caddy reload --config '${caddyfilePath}' --adapter caddyfile 2>&1`);
+    const reload = await execTofuSsh(conn, `caddy reload --config '${caddyfilePath}' --adapter caddyfile 2>&1`);
     if (reload.code !== 0) {
       throw new Error(`Caddy reload failed (the snippet is in place; reload manually or re-sync): ${reload.output.trim().slice(-500)}`);
     }

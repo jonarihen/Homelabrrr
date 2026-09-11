@@ -4,12 +4,12 @@ import { execFile } from 'child_process';
 import { writeFile, readFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { sshKeys, vmSshConfigs, vmSshUserConfigs } from '../db/schema/index.ts';
 import { requireAuth } from '../middleware/auth.ts';
 import { userCanPerformVmOp } from '../utils/vmAccess.ts';
-import { nodeLookupCandidates } from '../utils/nodeRef.ts';
+import { getGlobalSshConfig, getUserSshConfig } from '../utils/vmSshConfig.ts';
 import { normalizeSshHostFingerprint, scanSshHostFingerprint } from '../utils/sshHostKey.ts';
 import { decryptSecret, encryptSecret } from '../utils/secrets.ts';
 import { derivePublicKey } from '../utils/sshPublicKey.ts';
@@ -62,47 +62,6 @@ function sendSshError(req, res, err) {
 
 // SSH session store (token → { host, port, username, privateKey, expires })
 export const sshSessions = new Map();
-
-async function getGlobalSshConfig(node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
-  const candidates = nodeLookupCandidates(node);
-  if (candidates.length === 0) return null;
-  // Legacy rows may store the bare node name — match any candidate in one query,
-  // then honour the candidate order (full ref preferred over bare name).
-  const rows = await db
-    .select({
-      node: vmSshConfigs.node,
-      host: vmSshConfigs.host,
-      port: vmSshConfigs.port,
-      host_fingerprint: vmSshConfigs.host_fingerprint,
-    })
-    .from(vmSshConfigs)
-    .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, parsedVmid)));
-  for (const candidate of candidates) {
-    const row = rows.find((r) => r.node === candidate);
-    if (row) return row;
-  }
-  return null;
-}
-
-async function getUserSshConfig(userId, node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
-  const candidates = nodeLookupCandidates(node);
-  if (candidates.length === 0) return null;
-  const rows = await db
-    .select({ node: vmSshUserConfigs.node, username: vmSshUserConfigs.username })
-    .from(vmSshUserConfigs)
-    .where(and(
-      eq(vmSshUserConfigs.user_id, userId),
-      inArray(vmSshUserConfigs.node, candidates),
-      eq(vmSshUserConfigs.vmid, parsedVmid),
-    ));
-  for (const candidate of candidates) {
-    const row = rows.find((r) => r.node === candidate);
-    if (row) return row;
-  }
-  return null;
-}
 
 // ─── SSH Keys ────────────────────────────────────────────────────────────────
 

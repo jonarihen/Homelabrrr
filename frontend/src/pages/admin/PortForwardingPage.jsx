@@ -1,305 +1,24 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
-import { shortenVipName, PORT_FORWARD_NAME_MAX } from '../../utils/vipName.js';
+import { PORT_FORWARD_NAME_MAX } from '../../utils/vipName.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import usePortForwarding, { buildRuleName, SERVICE_PRESETS } from './usePortForwarding.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
-
-const SERVICE_PRESETS = [
-  { label: 'SSH',    port: 22,   protocol: 'tcp' },
-  { label: 'HTTP',   port: 80,   protocol: 'tcp' },
-  { label: 'HTTPS',  port: 443,  protocol: 'tcp' },
-  { label: 'RDP',    port: 3389, protocol: 'tcp' },
-  { label: 'Custom', port: null, protocol: 'tcp' },
-];
-
-// Headline for the "every VM is blocked the same way" callout. The per-VM
-// message the backend sends is singular, so the heading carries the count.
-const BLOCK_TITLES = {
-  no_ip: n => (n === 1 ? 'VM IP address not recorded' : 'No VM IP addresses recorded'),
-  untagged: n => (n === 1 ? 'VM has no VLAN tag' : 'No VLAN tags on your VMs'),
-  vlan_not_synced: () => 'VLAN not synced to this firewall',
-  vlan_not_assigned: n => (n === 1 ? 'VLAN not assigned to you' : 'No VLANs assigned to you'),
-};
-
-// Used when several VMs are blocked by the same code but for different VLANs,
-// so no single backend message describes all of them.
-const BLOCK_SUMMARIES = {
-  no_ip: n => `Homelabrrr doesn't know the IP address of any of your ${n} accessible VMs yet.`,
-  untagged: n => `None of your ${n} accessible VMs have a VLAN tag on their network interface, so there's no firewall interface to publish through.`,
-  vlan_not_synced: n => `The VLANs behind your ${n} accessible VMs haven't been synced to this firewall yet.`,
-  vlan_not_assigned: n => `The VLANs behind your ${n} accessible VMs aren't assigned to you.`,
-};
-
-function portProtocolLabel(port, protocol) {
-  const trimmedPort = String(port || '').trim();
-  if (!trimmedPort) return '';
-  return `${trimmedPort}/${String(protocol || 'tcp').toLowerCase()}`;
-}
-
-function buildRuleName(vmName, service, port, protocol) {
-  const trimmedVmName = String(vmName || '').trim();
-  if (!trimmedVmName) return '';
-  let raw;
-  if (service === 'Custom') {
-    const suffix = portProtocolLabel(port, protocol);
-    raw = `${trimmedVmName} - Custom${suffix ? ` ${suffix}` : ''}`;
-  } else {
-    raw = `${trimmedVmName} - ${service}`;
-  }
-  // Shorten to FortiGate's limit so the previewed name matches what the backend
-  // persists (the backend re-applies the same shortener as a hard guard).
-  return shortenVipName(raw, PORT_FORWARD_NAME_MAX);
-}
 
 export default function PortForwardingPage() {
   useDocumentTitle('Port Forwarding');
   const { user } = useAuth();
   const canManageAllPortForwards = !!(user?.isAdmin || user?.permissions?.canManageFirewalls);
 
-  const [firewalls, setFirewalls] = useState([]);
-  const [selectedFw, setSelectedFw] = useState(null);
-  const [fwConfig, setFwConfig] = useState(null);
-
-  const [vips, setVips] = useState([]);
-  const [interfaces, setInterfaces] = useState([]);
-  const [vmTargets, setVmTargets] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  // WAN config editing
-  const [editingWan, setEditingWan] = useState(false);
-  const [wanForm, setWanForm] = useState({ externalIp: '', rootWanZone: 'underlay' });
-  const [savingWan, setSavingWan] = useState(false);
-
-  // Create form
-  const [showCreate, setShowCreate] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState('');
-  const [form, setForm] = useState({
-    vmKey: '', service: 'SSH', protocol: 'tcp',
-    extPort: '', mappedPort: '22', name: '',
-    dstInterface: '', vlanInterface: '', mappedIp: '',
-    customProtocol: 'tcp',
-  });
-  const [attempted, setAttempted] = useState(false);
-
-  const [deleting, setDeleting] = useState(null);
-
-  // Load firewalls
-  useEffect(() => {
-    api.get('/admin/firewalls')
-      .then(r => {
-        setFirewalls(r.data);
-        if (r.data.length > 0) setSelectedFw(r.data[0].id);
-      })
-      .catch(() => setError('Failed to load firewalls'))
-      .finally(() => setLoading(false));
-  }, []);
-
-  // Load VIPs + interfaces + VM targets when firewall changes
-  const loadData = useCallback(async () => {
-    if (!selectedFw) return;
-    setLoading(true);
-    setError('');
-    try {
-      const fw = firewalls.find(f => f.id === selectedFw);
-      if (fw) {
-        setFwConfig({ external_ip: fw.external_ip || '', root_wan_zone: fw.root_wan_zone || 'underlay' });
-        setWanForm({ externalIp: fw.external_ip || '', rootWanZone: fw.root_wan_zone || 'underlay' });
-      }
-      const [vipsRes, ifacesRes, targetsRes] = await Promise.all([
-        api.get(`/admin/firewalls/${selectedFw}/vips`),
-        canManageAllPortForwards
-          ? api.get(`/admin/firewalls/${selectedFw}/root-interfaces`)
-          : Promise.resolve({ data: [] }),
-        api.get(`/admin/firewalls/${selectedFw}/vm-targets`),
-      ]);
-      setVips(vipsRes.data);
-      setInterfaces(ifacesRes.data);
-      setVmTargets(targetsRes.data.targets || []);
-    } catch (err) {
-      setError(err.response?.data?.error || 'Failed to load port forwarding data');
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedFw, firewalls, canManageAllPortForwards]);
-
-  useEffect(() => { loadData(); }, [loadData]);
-
-  // Selected VM details
-  const selectedVm = useMemo(() => {
-    if (!form.vmKey) return null;
-    return vmTargets.find(v => `${routeNode(v)}/${v.vmid}` === form.vmKey) || null;
-  }, [form.vmKey, vmTargets]);
-
-  // The backend now returns every VM the user can see, annotated with `eligible`
-  // and a structured `blocked` reason, instead of silently dropping the ones
-  // that are missing a prerequisite. Privileged users can still pick a
-  // VLAN-blocked VM and choose the destination interface by hand (`overridable`).
-  const selectableTargets = useMemo(
-    () => vmTargets.filter(v => v.eligible || v.overridable),
-    [vmTargets],
-  );
-  const blockedTargets = useMemo(
-    () => vmTargets.filter(v => !v.eligible && !v.overridable),
-    [vmTargets],
-  );
-
-  // When nothing is selectable and every blocked VM shares one cause, promote
-  // that cause to a callout with the fix (and a link to it, when there is one
-  // single place to go).
-  const blockedCallout = useMemo(() => {
-    if (loading || selectableTargets.length > 0 || blockedTargets.length === 0) return null;
-    const first = blockedTargets[0].blocked;
-    if (!first) return null;
-    if (!blockedTargets.every(v => v.blocked?.code === first.code)) return null;
-    const count = blockedTargets.length;
-    const sameMessage = blockedTargets.every(v => v.blocked?.message === first.message);
-    const sameHref = blockedTargets.every(v => (v.blocked?.href || '') === (first.href || ''));
-    return {
-      code: first.code,
-      title: (BLOCK_TITLES[first.code] || (() => 'These VMs cannot be published yet'))(count),
-      message: sameMessage
-        ? first.message
-        : (BLOCK_SUMMARIES[first.code] || (() => first.message))(count),
-      action: first.action || '',
-      href: sameHref ? (first.href || '') : '',
-    };
-  }, [loading, selectableTargets, blockedTargets]);
-
-  // When VM selection changes, auto-fill IP, interface, and name from pre-resolved data
-  const handleVmChange = (vmKey) => {
-    if (!vmKey) {
-      setForm(f => ({ ...f, vmKey: '', mappedIp: '', dstInterface: '', name: '' }));
-      return;
-    }
-    const vm = vmTargets.find(v => `${routeNode(v)}/${v.vmid}` === vmKey);
-    if (!vm) return;
-
-    setForm(f => ({
-      ...f,
-      vmKey,
-      mappedIp: vm.ip,
-      dstInterface: vm.dstInterface || f.dstInterface,
-      vlanInterface: vm.vlanInterface || '',
-      name: buildRuleName(vm.name, f.service, f.mappedPort, f.customProtocol),
-    }));
-  };
-
-  // When service selection changes, update ports and name
-  const handleServiceChange = (serviceLabel) => {
-    const preset = SERVICE_PRESETS.find(s => s.label === serviceLabel);
-    const vm = selectedVm;
-    const vmName = vm?.name || '';
-    if (preset && preset.port) {
-      setForm(f => ({
-        ...f,
-        service: serviceLabel,
-        protocol: preset.protocol,
-        mappedPort: String(preset.port),
-        extPort: f.extPort || String(preset.port),
-        name: buildRuleName(vmName, serviceLabel, preset.port, preset.protocol) || f.name,
-      }));
-    } else {
-      setForm(f => ({
-        ...f,
-        service: serviceLabel,
-        mappedPort: '',
-        name: buildRuleName(vmName, serviceLabel, f.mappedPort, f.customProtocol) || f.name,
-      }));
-    }
-  };
-
-  // Live port conflict check
-  const portConflict = form.extPort
-    ? vips.find(v => String(v.extport) === String(form.extPort) && (v.protocol || 'tcp') === (form.service === 'Custom' ? form.customProtocol : form.protocol))
-    : null;
-
-  const saveWanConfig = async () => {
-    setSavingWan(true);
-    try {
-      await api.put(`/admin/firewalls/${selectedFw}/wan-config`, {
-        externalIp: wanForm.externalIp,
-        rootWanZone: wanForm.rootWanZone,
-      });
-      setFwConfig({ external_ip: wanForm.externalIp, root_wan_zone: wanForm.rootWanZone });
-      setEditingWan(false);
-      setFirewalls(prev => prev.map(f =>
-        f.id === selectedFw ? { ...f, external_ip: wanForm.externalIp, root_wan_zone: wanForm.rootWanZone } : f
-      ));
-    } catch (err) {
-      setError(err.response?.data?.error || 'Failed to save WAN config');
-    } finally {
-      setSavingWan(false);
-    }
-  };
-
-  // Compute missing fields for validation feedback
-  const missingFields = [];
-  if (!form.vmKey) missingFields.push('Target VM');
-  if (!form.extPort) missingFields.push('External Port');
-  if (!form.mappedPort) missingFields.push('Internal Port');
-  if (!form.mappedIp) missingFields.push('Internal IP');
-  if (!form.dstInterface) missingFields.push('Destination Interface');
-  if (!form.name) missingFields.push('Rule Name');
-  if (portConflict) missingFields.push(`Port ${form.extPort} already in use`);
-
-  const handleCreate = async (e) => {
-    e.preventDefault();
-    setAttempted(true);
-    if (missingFields.length > 0) return;
-    setCreating(true);
-    setCreateError('');
-    const proto = form.service === 'Custom' ? form.customProtocol : form.protocol;
-    try {
-      await api.post(`/admin/firewalls/${selectedFw}/vips`, {
-        node: selectedVm?.nodeRef || selectedVm?.node,
-        vmid: selectedVm?.vmid,
-        name: form.name,
-        protocol: proto,
-        extPort: parseInt(form.extPort),
-        mappedIp: form.mappedIp,
-        mappedPort: parseInt(form.mappedPort),
-        dstInterface: form.dstInterface,
-        vlanInterface: form.vlanInterface,
-        srcAddresses: ['all'],
-      });
-      setShowCreate(false);
-      setForm({
-        vmKey: '', service: 'SSH', protocol: 'tcp',
-        extPort: '', mappedPort: '22', name: '',
-        dstInterface: '', vlanInterface: '', mappedIp: '', customProtocol: 'tcp',
-      });
-      setAttempted(false);
-      await loadData();
-    } catch (err) {
-      setCreateError(err.response?.data?.error || 'Failed to create port forward');
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const handleDelete = async (vipName) => {
-    if (!confirm(`Delete port forward "${vipName}"?\nThis will remove the VIP and its firewall policy from the root VDOM.`)) return;
-    setDeleting(vipName);
-    try {
-      await api.delete(`/admin/firewalls/${selectedFw}/vips/${encodeURIComponent(vipName)}`);
-      await loadData();
-    } catch (err) {
-      setError(err.response?.data?.error || 'Failed to delete port forward');
-    } finally {
-      setDeleting(null);
-    }
-  };
-
-  const sortedVips = [...vips].sort((a, b) => {
-    if (a.managed !== b.managed) return a.managed ? -1 : 1;
-    return parseInt(a.extport || 0) - parseInt(b.extport || 0);
-  });
+  const {
+    firewalls, selectedFw, selectFirewall, fwConfig, vips, interfaces, vmTargets, loading, error, setError,
+    editingWan, setEditingWan, wanForm, setWanForm, savingWan, saveWanConfig, cancelWanEdit,
+    showCreate, toggleCreate, closeCreate, creating, createError, form, setForm, attempted, deleting,
+    selectedVm, selectableTargets, blockedTargets, blockedCallout, portConflict, missingFields,
+    handleVmChange, handleServiceChange, handleCreate, handleDelete, sortedVips,
+  } = usePortForwarding(canManageAllPortForwards);
 
   const needsWanConfig = !fwConfig?.external_ip;
   const managedCount = vips.filter(v => v.managed).length;
@@ -322,7 +41,7 @@ export default function PortForwardingPage() {
         </div>
         {!needsWanConfig && !loading && (
           <button
-            onClick={() => { setShowCreate(!showCreate); setCreateError(''); setAttempted(false); }}
+            onClick={toggleCreate}
             className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
               showCreate
                 ? 'bg-gray-700 hover:bg-gray-600 text-gray-300'
@@ -340,7 +59,7 @@ export default function PortForwardingPage() {
           <label className="text-sm text-gray-400">Firewall:</label>
           <select
             value={selectedFw || ''}
-            onChange={e => { setSelectedFw(parseInt(e.target.value)); setShowCreate(false); }}
+            onChange={e => selectFirewall(parseInt(e.target.value))}
             className="bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-1.5 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
           >
             {firewalls.map(fw => (
@@ -375,7 +94,7 @@ export default function PortForwardingPage() {
                   className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm rounded-lg transition-colors">
                   {savingWan ? 'Saving...' : 'Save'}
                 </button>
-                <button onClick={() => { setEditingWan(false); setWanForm({ externalIp: fwConfig.external_ip, rootWanZone: fwConfig.root_wan_zone }); }}
+                <button onClick={cancelWanEdit}
                   className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">
                   Cancel
                 </button>
@@ -628,7 +347,7 @@ export default function PortForwardingPage() {
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors">
                 {creating ? 'Creating...' : 'Create Port Forward'}
               </button>
-              <button type="button" onClick={() => { setShowCreate(false); setCreateError(''); setAttempted(false); }}
+              <button type="button" onClick={closeCreate}
                 className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">
                 Cancel
               </button>

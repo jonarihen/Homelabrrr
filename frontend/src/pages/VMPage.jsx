@@ -10,6 +10,7 @@ import VMScheduleModal from '../components/VMScheduleModal.jsx';
 import VMIPManagementPanel from '../components/VMIPManagementPanel.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import useSSHConfig from '../hooks/useSSHConfig.js';
+import useVMBackups from '../hooks/useVMBackups.js';
 import { useConsoleSessions } from '../contexts/ConsoleSessionsContext.jsx';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
@@ -1157,213 +1158,25 @@ function BackupTag({ led, children, title }) {
 }
 
 function BackupsSection({ node, vmid }) {
-  const [backups, setBackups] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [storages, setStorages] = useState([]);
-  const [creating, setCreating] = useState(false);
-  const [restoring, setRestoring] = useState(null);
-  const [deleting, setDeleting] = useState(null);
-  const [showForm, setShowForm] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-  const [form, setForm] = useState({ storage: '', mode: 'snapshot', compress: 'zstd', notes: '' });
-  const [restoreConfirm, setRestoreConfirm] = useState(null); // volid to confirm
-  const [restoreStorage, setRestoreStorage] = useState('');
-  const [browseBackup, setBrowseBackup] = useState(null); // { storage, volid }
-  const [browseFiles, setBrowseFiles] = useState([]);
-  const [browsePathStack, setBrowsePathStack] = useState([]); // [{filepath, label}]
-  const [browseLoading, setBrowseLoading] = useState(false);
-  const [browseError, setBrowseError] = useState('');
-  const [collapsedGroups, setCollapsedGroups] = useState({});
-  // The archive list is long and rarely the reason someone opens a VM, so the
-  // section starts folded and only the summary line is shown until asked for.
-  const [expanded, setExpanded] = useState(false);
-  // Backup tasks tracked by the backend. Proxmox lists the archive it is still
-  // writing, so without these a half-written dump looks like a finished backup.
-  const [tasks, setTasks] = useState([]);
-  const [dismissedTaskId, setDismissedTaskId] = useState(null);
+  const {
+    backups, loading, storages, creating, restoring, deleting, showForm, setShowForm,
+    error, success, form, setForm, restoreConfirm, setRestoreConfirm, restoreStorage,
+    setRestoreStorage, browseBackup, setBrowseBackup, browseFiles, setBrowseFiles,
+    browsePathStack, setBrowsePathStack, browseLoading, browseError, collapsedGroups,
+    setCollapsedGroups, expanded, setExpanded, dismissedTaskId, setDismissedTaskId,
+    latestTask, runningTask, groups, totalSize, createBackup, restoreBackup, deleteBackup,
+    openFileBrowser, navigateInto, navigateBack, navigateTo, downloadFile,
+  } = useVMBackups(node, vmid);
 
-  const loadBackups = useCallback(async () => {
-    try {
-      const r = await api.get(`/vms/${node}/${vmid}/backups`);
-      setBackups(r.data);
-    } catch { setBackups([]); }
-    finally { setLoading(false); }
-  }, [node, vmid]);
-
-  const loadTasks = useCallback(async () => {
-    try {
-      const r = await api.get(`/vms/${node}/${vmid}/backup-tasks`);
-      setTasks(r.data || []);
-      return r.data || [];
-    } catch { return []; }
-  }, [node, vmid]);
-
-  useEffect(() => { loadBackups(); }, [loadBackups]);
-
-  // Picked up on mount too, so a dump that outlived the tab is still reported.
-  useEffect(() => { loadTasks(); }, [loadTasks]);
-
-  const latestTask = tasks[0] || null;
-  const runningTask = tasks.find(t => t.status === 'running') || null;
-  const runningTaskId = runningTask?.id ?? null;
-
-  // Poll only while something is running; the row id is stable across polls, so
-  // the interval isn't torn down and rebuilt on every tick.
-  useEffect(() => {
-    if (runningTaskId == null) return undefined;
-    const timer = setInterval(async () => {
-      const next = await loadTasks();
-      // Finished: refresh the list so the archive loses its in-progress flag
-      // and its real size and verification state show up.
-      if (!next.some(t => t.status === 'running')) loadBackups();
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [runningTaskId, loadTasks, loadBackups]);
-
-  useEffect(() => {
-    api.get(`/vms/${node}/${vmid}/backup-storages`)
-      .then(r => {
-        setStorages(r.data);
-        if (r.data.length > 0) setForm(f => (f.storage ? f : { ...f, storage: r.data[0].storage }));
-      })
-      .catch(() => {});
-  }, [node, vmid]);
-
-  // Group backups by the storage they live on, enriched with storage metadata
-  const groups = useMemo(() => {
-    const map = new Map();
-    for (const b of backups) {
-      const key = b.storage || 'unknown';
-      if (!map.has(key)) map.set(key, []);
-      map.get(key).push(b);
-    }
-    return [...map.entries()]
-      .map(([storage, items]) => {
-        const meta = storages.find(s => s.storage === storage);
-        return {
-          storage,
-          items,
-          type: meta?.type || (items.some(i => /^pbs-/.test(i.format || '')) ? 'pbs' : undefined),
-          total: meta?.total,
-          used: meta?.used,
-          size: items.reduce((sum, i) => sum + (i.size || 0), 0),
-        };
-      })
-      .sort((a, b) => a.storage.localeCompare(b.storage));
-  }, [backups, storages]);
-
-  const totalSize = useMemo(
-    () => backups.reduce((sum, b) => sum + (b.size || 0), 0),
-    [backups],
-  );
-
-  const createBackup = async () => {
-    setCreating(true); setError(''); setSuccess('');
-    try {
-      await api.post(`/vms/${node}/${vmid}/backup`, form);
-      setShowForm(false);
-      setDismissedTaskId(null);
-      // No optimistic reload: the progress panel takes it from here and the
-      // list is refreshed once the task actually finishes. Reloading at a fixed
-      // delay is what used to render a half-written archive as a finished one.
-      await Promise.all([loadTasks(), loadBackups()]);
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to create backup');
-    } finally { setCreating(false); }
-  };
-
-  const restoreBackup = async (backup) => {
-    setRestoring(backup.volid); setError(''); setSuccess('');
-    try {
-      await api.post(`/vms/${node}/${vmid}/restore`, {
-        archive: backup.volid,
-        ...(restoreStorage && { storage: restoreStorage }),
-      });
-      setSuccess('Restore started — the VM will be overwritten with the backup contents. This may take several minutes.');
-      setRestoreConfirm(null);
-      setRestoreStorage('');
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to restore backup');
-    } finally { setRestoring(null); }
-  };
-
-  const deleteBackup = async (storage, volid) => {
-    if (!confirm('Delete this backup? This cannot be undone.')) return;
-    setDeleting(volid); setError('');
-    try {
-      await api.delete(`/vms/${node}/${vmid}/backups/${storage}/${volid}`);
-      setBackups(b => b.filter(x => x.volid !== volid));
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to delete backup');
-    } finally { setDeleting(null); }
-  };
-
-  const openFileBrowser = async (backup) => {
-    setBrowseBackup(backup);
-    setBrowsePathStack([]);
-    setBrowseError('');
-    await loadFiles(backup.storage, backup.volid, '/');
-  };
-
-  const loadFiles = async (storage, volid, filepath) => {
-    setBrowseLoading(true); setBrowseError('');
-    try {
-      const r = await api.get(`/vms/${node}/${vmid}/backup-files/${storage}/${volid}`, {
-        params: { filepath },
-      });
-      setBrowseFiles(Array.isArray(r.data) ? r.data : []);
-    } catch (e) {
-      setBrowseError(e.response?.data?.error || 'Failed to list files. File-level restore may not be supported for this backup format.');
-      setBrowseFiles([]);
-    } finally { setBrowseLoading(false); }
-  };
-
-  const navigateInto = async (item) => {
-    const targetPath = item.filepath;
-    setBrowsePathStack(prev => [...prev, { filepath: targetPath, label: item.text }]);
-    await loadFiles(browseBackup.storage, browseBackup.volid, targetPath);
-  };
-
-  const navigateBack = async () => {
-    const newStack = [...browsePathStack];
-    newStack.pop();
-    setBrowsePathStack(newStack);
-    const parentPath = newStack.length > 0 ? newStack[newStack.length - 1].filepath : '/';
-    await loadFiles(browseBackup.storage, browseBackup.volid, parentPath);
-  };
-
-  const navigateTo = async (index) => {
-    if (index < 0) {
-      setBrowsePathStack([]);
-      await loadFiles(browseBackup.storage, browseBackup.volid, '/');
-    } else {
-      const newStack = browsePathStack.slice(0, index + 1);
-      setBrowsePathStack(newStack);
-      await loadFiles(browseBackup.storage, browseBackup.volid, newStack[newStack.length - 1].filepath);
-    }
-  };
-
-  const downloadFile = (filepath) => {
-    const params = new URLSearchParams({ filepath });
-    window.open(`/api/vms/${node}/${vmid}/backup-download/${browseBackup.storage}/${browseBackup.volid}?${params}`, '_blank');
-  };
-
-  const fmtDate = (ts) => {
-    if (!ts) return '—';
-    return new Date(ts * 1000).toLocaleString();
-  };
-
-  const fmtSize = (bytes) => {
+  const fmtDate = ts => ts ? new Date(ts * 1000).toLocaleString() : '—';
+  const fmtSize = bytes => {
     if (!bytes) return '—';
     const gb = bytes / 1024 / 1024 / 1024;
     if (gb >= 1) return `${gb.toFixed(2)} GB`;
     const mb = bytes / 1024 / 1024;
     if (mb >= 1) return `${mb.toFixed(1)} MB`;
-    const kb = bytes / 1024;
-    return `${kb.toFixed(1)} KB`;
+    return `${(bytes / 1024).toFixed(1)} KB`;
   };
-
   const selectStyle = "w-full bg-gray-800 border border-gray-700/50 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all";
 
   return (

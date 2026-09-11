@@ -4,13 +4,14 @@ import { db } from '../db/client.ts';
 import { cloudImages, pveHosts, vmTemplates } from '../db/schema/index.ts';
 import {
   downloadUrlToStorage, deleteVolume, convertToTemplate,
-  getTaskStatus, getStorageContent, withFreshVmid, createVM, resizeVMDisk, getHost,
+  withFreshVmid, createVM, resizeVMDisk, getHost,
 } from '../proxmox.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { logAudit } from '../utils/audit.ts';
 import { decodeNodeRef } from '../utils/nodeRef.ts';
 import { assertPublicDownloadUrl } from '../utils/urlGuard.ts';
+import { awaitStorageDownload, storageSlug, waitForStorageTask } from '../utils/storageDownload.ts';
 import { imageDeployTargets } from '../utils/cloudImageTargets.ts';
 import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
@@ -28,19 +29,6 @@ function serializeImage(row: any) {
 
 async function setImageStatus(id: number, status: string, detail = '') {
   await db.update(cloudImages).set({ status, status_detail: detail }).where(eq(cloudImages.id, id));
-}
-
-async function waitForTask(node: string, upid: string, { attempts = 240, intervalMs = 5000 } = {}) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    try {
-      const task = await getTaskStatus(node, upid);
-      if (task.status === 'stopped') {
-        return { ok: task.exitstatus === 'OK', exitstatus: task.exitstatus || '' };
-      }
-    } catch { /* keep polling */ }
-  }
-  return { ok: false, exitstatus: 'timeout' };
 }
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -92,7 +80,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: err.message });
   }
 
-  const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'cloud-image';
+  const slug = storageSlug(name, 'cloud-image');
 
   const [inserted] = await db.insert(cloudImages).values({
     name, url, node, storage, default_storage: defStore, default_storage_map: defStoreMap,
@@ -114,26 +102,17 @@ router.post('/', async (req, res) => {
 
     // Poll in the background; the row's status is the source of truth for the UI
     startBackgroundWork(async () => {
-      const result = await waitForTask(node, upid);
-      if (!result.ok) {
-        await setImageStatus(id, 'error', result.exitstatus === 'timeout'
-          ? 'Timed out waiting for the download'
-          : `Download failed: ${result.exitstatus}`);
+      const outcome = await awaitStorageDownload({
+        node, storage, volid, upid, content: 'import',
+        missingMessage: 'Download finished but the image was not found on the storage',
+      });
+      if (!outcome.ok) {
+        await setImageStatus(id, 'error', outcome.error);
         return;
       }
-      try {
-        const content = await getStorageContent(node, storage, 'import');
-        const vol = content.find((c: any) => c.volid === volid);
-        if (!vol) {
-          await setImageStatus(id, 'error', 'Download finished but the image was not found on the storage');
-          return;
-        }
-        await db.update(cloudImages)
-          .set({ status: 'ready', status_detail: '', size: vol.size || 0 })
-          .where(eq(cloudImages.id, id));
-      } catch (err: any) {
-        await setImageStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
-      }
+      await db.update(cloudImages)
+        .set({ status: 'ready', status_detail: '', size: outcome.size })
+        .where(eq(cloudImages.id, id));
     }, { kind: 'cloud-image-download', id, requestId: req.requestId })
       .catch((err: any) => { setImageStatus(id, 'error', sanitizeError(err.message)).catch(() => {}); });
 
@@ -363,7 +342,7 @@ router.post('/:id/template', async (req, res) => {
     await logAudit(req, 'cloud_image_template', `${image.node}/${vmid}`, `image:${image.name} name:${name}`);
 
     startBackgroundWork(async () => {
-      const result = await waitForTask(image.node, upid);
+      const result = await waitForStorageTask(image.node, upid);
       if (!result.ok) {
         await setImageStatus(image.id, 'ready', `Template creation failed (VMID ${vmid}): ${result.exitstatus}`);
         return;
