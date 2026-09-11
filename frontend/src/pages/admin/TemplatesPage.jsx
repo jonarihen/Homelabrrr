@@ -174,6 +174,33 @@ function fmtSize(bytes) {
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 }
 
+// The "where does this download land" field pair, shared by the cloud-image and
+// ISO download modals. `storages` differs per caller (import- vs ISO-capable).
+function NodeStorageFields({ form, setForm, nodes, storages }) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <div>
+        <label className="block text-xs text-gray-400 mb-1.5">Node</label>
+        <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
+          <option value="">Select node...</option>
+          {nodes.map(n => (
+            <option key={routeNode(n)} value={routeNode(n)}>
+              {displayNode(n.node)}{n.hostName ? ` (${n.hostName})` : ''}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className="block text-xs text-gray-400 mb-1.5">Download to Storage</label>
+        <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
+          <option value="">Select...</option>
+          {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function CloudImagesSection({ onTemplatesChanged }) {
   const [images, setImages] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -504,26 +531,7 @@ function CloudImageFormModal({ onClose, onSaved }) {
           <input type="url" required value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} className={inputCls} placeholder="https://cloud-images.ubuntu.com/…" />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Node</label>
-            <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
-              <option value="">Select node...</option>
-              {nodes.map(n => (
-                <option key={routeNode(n)} value={routeNode(n)}>
-                  {displayNode(n.node)}{n.hostName ? ` (${n.hostName})` : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Download to Storage</label>
-            <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
-              <option value="">Select...</option>
-              {importStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
-            </select>
-          </div>
-        </div>
+        <NodeStorageFields form={form} setForm={setForm} nodes={nodes} storages={importStorages} />
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Default VM storage (optional)</label>
@@ -843,26 +851,7 @@ function IsoFormModal({ onClose, onSaved }) {
           <input type="url" required value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} className={inputCls} placeholder="https://cdimage.debian.org/…/debian-12-amd64-netinst.iso" />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Node</label>
-            <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
-              <option value="">Select node...</option>
-              {nodes.map(n => (
-                <option key={routeNode(n)} value={routeNode(n)}>
-                  {displayNode(n.node)}{n.hostName ? ` (${n.hostName})` : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Download to Storage</label>
-            <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
-              <option value="">Select...</option>
-              {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
-            </select>
-          </div>
-        </div>
+        <NodeStorageFields form={form} setForm={setForm} nodes={nodes} storages={storages} />
 
         {form.node && storages.length === 0 && (
           <p className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/30 rounded-lg p-2.5">

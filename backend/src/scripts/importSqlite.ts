@@ -366,72 +366,115 @@ function renderTable(headers: string[], rows: string[][]): string[] {
   return [line(headers), widths.map((w) => '-'.repeat(w)).join('  '), ...rows.map(line)];
 }
 
-async function verifyImport(
-  client: pg.PoolClient,
-  src: SqliteReader,
-  sourceTables: Set<string>,
-  order: string[],
-  skipped: Record<string, string>,
-  log: (line: string) => void
-): Promise<string[]> {
+type VerifyContext = {
+  client: pg.PoolClient;
+  src: SqliteReader;
+  sourceTables: Set<string>;
+  order: string[];
+  skipped: Record<string, string>;
+  log: (line: string) => void;
+};
+
+type VerifySection = { rows: string[][]; mismatches: string[] };
+
+const showCount = (v: number | null) => (v === null ? '—' : String(v));
+
+// One comparison row plus the mismatch line it produces when the two sides
+// disagree — every verification phase below is built out of this.
+function compare(label: string, sqliteV: number | null, pgV: number | null, unit: string): {
+  row: string[];
+  mismatch: string | null;
+} {
+  const ok = sqliteV === pgV;
+  return {
+    row: [label, showCount(sqliteV), showCount(pgV), ok ? 'ok' : 'MISMATCH'],
+    mismatch: ok ? null : `${label}: ${showCount(sqliteV)}${unit} in SQLite but ${showCount(pgV)} in PostgreSQL`,
+  };
+}
+
+function sqliteCountWhere(ctx: VerifyContext, table: string, where: string): number {
+  if (!ctx.sourceTables.has(table)) return 0;
+  return Number((ctx.src.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)} WHERE ${where}`).get() as { n: number }).n);
+}
+
+async function pgCountWhere(ctx: VerifyContext, table: string, where: string): Promise<number> {
+  const { rows } = await ctx.client.query(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)} WHERE ${where}`);
+  return Number(rows[0].n);
+}
+
+async function verifyRowCounts(ctx: VerifyContext): Promise<VerifySection> {
+  const rows: string[][] = [];
   const mismatches: string[] = [];
-  const countRows: string[][] = [];
-  for (const name of order) {
+  for (const name of ctx.order) {
     if (name === 'schema_migrations') continue;
-    const pgN = await pgCount(client, name);
-    if (name in skipped) {
-      const sqliteN = sourceTables.has(name) ? String(sqliteCount(src, name)) : '—';
-      countRows.push([name, sqliteN, String(pgN), `skipped (${skipped[name]})`]);
+    const pgN = await pgCount(ctx.client, name);
+    if (name in ctx.skipped) {
+      const sqliteN = ctx.sourceTables.has(name) ? String(sqliteCount(ctx.src, name)) : '—';
+      rows.push([name, sqliteN, String(pgN), `skipped (${ctx.skipped[name]})`]);
       continue;
     }
-    const sqliteN = sqliteCount(src, name);
-    const ok = sqliteN === pgN;
-    countRows.push([name, String(sqliteN), String(pgN), ok ? 'ok' : 'MISMATCH']);
-    if (!ok) mismatches.push(`${name}: ${sqliteN} rows in SQLite but ${pgN} in PostgreSQL`);
+    const { row, mismatch } = compare(name, sqliteCount(ctx.src, name), pgN, ' rows');
+    rows.push(row);
+    if (mismatch) mismatches.push(mismatch);
   }
-  log('');
-  log('Verification — row counts:');
-  for (const line of renderTable(['table', 'sqlite', 'postgres', 'status'], countRows)) log(`  ${line}`);
+  return { rows, mismatches };
+}
 
-  const encRows: string[][] = [];
+async function verifyEncryptedValues(ctx: VerifyContext): Promise<VerifySection> {
+  const rows: string[][] = [];
+  const mismatches: string[] = [];
   for (const [table, column] of ENCRYPTED_COLUMN_LIST) {
     const where = `${quoteIdent(column)} LIKE 'enc:%'`;
-    const sqliteN = sourceTables.has(table)
-      ? Number((src.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)} WHERE ${where}`).get() as { n: number }).n)
-      : 0;
-    const { rows } = await client.query(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)} WHERE ${where}`);
-    const pgN = Number(rows[0].n);
-    const ok = sqliteN === pgN;
-    encRows.push([`${table}.${column}`, String(sqliteN), String(pgN), ok ? 'ok' : 'MISMATCH']);
-    if (!ok) mismatches.push(`${table}.${column}: ${sqliteN} enc:-prefixed values in SQLite but ${pgN} in PostgreSQL`);
+    const { row, mismatch } = compare(
+      `${table}.${column}`,
+      sqliteCountWhere(ctx, table, where),
+      await pgCountWhere(ctx, table, where),
+      ' enc:-prefixed values'
+    );
+    rows.push(row);
+    if (mismatch) mismatches.push(mismatch);
   }
-  log('');
-  log('Verification — encrypted values (enc: prefix):');
-  for (const line of renderTable(['column', 'sqlite', 'postgres', 'status'], encRows)) log(`  ${line}`);
+  return { rows, mismatches };
+}
 
-  const spotRows: string[][] = [];
-  const spot = (label: string, sqliteV: number | null, pgV: number | null) => {
-    const ok = sqliteV === pgV;
-    const show = (v: number | null) => (v === null ? '—' : String(v));
-    spotRows.push([label, show(sqliteV), show(pgV), ok ? 'ok' : 'MISMATCH']);
-    if (!ok) mismatches.push(`${label}: ${show(sqliteV)} in SQLite but ${show(pgV)} in PostgreSQL`);
-  };
+async function verifySpotChecks(ctx: VerifyContext): Promise<VerifySection> {
   const bcryptWhere = `"password" LIKE '$2%'`;
-  const sqliteBcrypt = sourceTables.has('users')
-    ? Number((src.prepare(`SELECT COUNT(*) AS n FROM "users" WHERE ${bcryptWhere}`).get() as { n: number }).n)
-    : 0;
-  const pgBcrypt = Number((await client.query(`SELECT COUNT(*) AS n FROM "users" WHERE ${bcryptWhere}`)).rows[0].n);
-  spot('users.password bcrypt ($2)', sqliteBcrypt, pgBcrypt);
-  const sqliteAudit = sourceTables.has('audit_log')
-    ? (src.prepare('SELECT MIN(id) AS lo, MAX(id) AS hi FROM "audit_log"').get() as { lo: number | null; hi: number | null })
+  const sqliteAudit = ctx.sourceTables.has('audit_log')
+    ? (ctx.src.prepare('SELECT MIN(id) AS lo, MAX(id) AS hi FROM "audit_log"').get() as { lo: number | null; hi: number | null })
     : { lo: null, hi: null };
-  const pgAudit = (await client.query('SELECT MIN(id) AS lo, MAX(id) AS hi FROM "audit_log"')).rows[0];
-  spot('audit_log MIN(id)', sqliteAudit.lo === null ? null : Number(sqliteAudit.lo), pgAudit.lo === null ? null : Number(pgAudit.lo));
-  spot('audit_log MAX(id)', sqliteAudit.hi === null ? null : Number(sqliteAudit.hi), pgAudit.hi === null ? null : Number(pgAudit.hi));
-  log('');
-  log('Verification — spot checks:');
-  for (const line of renderTable(['check', 'sqlite', 'postgres', 'status'], spotRows)) log(`  ${line}`);
+  const pgAudit = (await ctx.client.query('SELECT MIN(id) AS lo, MAX(id) AS hi FROM "audit_log"')).rows[0];
+  const num = (v: number | null) => (v === null ? null : Number(v));
 
+  const checks = [
+    compare(
+      'users.password bcrypt ($2)',
+      sqliteCountWhere(ctx, 'users', bcryptWhere),
+      await pgCountWhere(ctx, 'users', bcryptWhere),
+      ''
+    ),
+    compare('audit_log MIN(id)', num(sqliteAudit.lo), num(pgAudit.lo), ''),
+    compare('audit_log MAX(id)', num(sqliteAudit.hi), num(pgAudit.hi), ''),
+  ];
+  return {
+    rows: checks.map((c) => c.row),
+    mismatches: checks.map((c) => c.mismatch).filter((m): m is string => m !== null),
+  };
+}
+
+async function verifyImport(ctx: VerifyContext): Promise<string[]> {
+  const phases: [string, string, VerifySection][] = [
+    ['Verification — row counts:', 'table', await verifyRowCounts(ctx)],
+    ['Verification — encrypted values (enc: prefix):', 'column', await verifyEncryptedValues(ctx)],
+    ['Verification — spot checks:', 'check', await verifySpotChecks(ctx)],
+  ];
+
+  const mismatches: string[] = [];
+  for (const [heading, firstHeader, section] of phases) {
+    ctx.log('');
+    ctx.log(heading);
+    for (const line of renderTable([firstHeader, 'sqlite', 'postgres', 'status'], section.rows)) ctx.log(`  ${line}`);
+    mismatches.push(...section.mismatches);
+  }
   return mismatches;
 }
 
@@ -519,7 +562,7 @@ export async function importDatabase(options: ImportOptions): Promise<ImportResu
         await resetSequences(client, metas, order);
 
         // 8. Verify inside the same transaction; any mismatch rolls back.
-        const mismatches = await verifyImport(client, src, sourceTables, order, skipped, log);
+        const mismatches = await verifyImport({ client, src, sourceTables, order, skipped, log });
         if (mismatches.length > 0) {
           throw new Error(`Verification failed — rolling back:\n${mismatches.map((m) => `  ${m}`).join('\n')}`);
         }
