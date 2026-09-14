@@ -22,7 +22,7 @@ import { httpError, sendError } from '../utils/httpError.ts';
 import { logAudit } from '../utils/audit.ts';
 import { notify, portalLink } from '../utils/notify.ts';
 import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.ts';
-import { checkVlanAssignment } from '../utils/vlanAccess.ts';
+import { checkVlanAssignment, parseVlanTag, parseNetInterface } from '../utils/vlanAccess.ts';
 import { summarizeLease, renewLease } from '../utils/leases.ts';
 import { assertUserQuota, sizeToGb } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
@@ -1184,15 +1184,25 @@ router.post('/:node/:vmid/cloudinit-credentials', async (req, res) => {
 
 router.put('/:node/:vmid/vlan', async (req, res) => {
   const { node, vmid } = req.params;
-  const { netInterface = 'net0', vlanTag } = req.body;
+  const { netInterface: rawNetInterface, vlanTag } = req.body;
 
   if (!(await allowOp(req, node, vmid, 'vm.vlan'))) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
+  // A NIC config is a comma-delimited property list, so both the key and the
+  // tag have to be normalized before they are written — and the *normalized*
+  // tag is what gets configured below, so authorization can never approve one
+  // value while a different one reaches Proxmox (utils/vlanAccess.ts).
+  const netInterface = parseNetInterface(rawNetInterface);
+  if (!netInterface) return res.status(400).json({ error: 'Invalid network interface' });
+
+  const parsedTag = parseVlanTag(vlanTag);
+  if ('invalid' in parsedTag) return res.status(400).json({ error: 'Invalid VLAN tag' });
+
   // Authorize the target VLAN. Non-admins must move the VM onto a VLAN assigned
   // to them; setting it untagged (removing the tag) drops the VM onto the
-  // native network and is admin-only (utils/vlanAccess.js).
+  // native network and is admin-only (utils/vlanAccess.ts).
   const vlanErr = await checkVlanAssignment(db, { userId: req.session.userId, isAdmin: req.session.isAdmin, vlanTag });
   if (vlanErr) return res.status(vlanErr.status).json({ error: vlanErr.error });
 
@@ -1205,16 +1215,17 @@ router.put('/:node/:vmid/vlan', async (req, res) => {
 
     // Parse "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0,tag=100,firewall=1" style string
     let parts = current.split(',');
-    if (vlanTag === null || vlanTag === 0 || vlanTag === '') {
+    if ('untagged' in parsedTag) {
       parts = parts.filter(p => !p.startsWith('tag='));
     } else if (parts.some(p => p.startsWith('tag='))) {
-      parts = parts.map(p => p.startsWith('tag=') ? `tag=${vlanTag}` : p);
+      parts = parts.map(p => p.startsWith('tag=') ? `tag=${parsedTag.tag}` : p);
     } else {
-      parts.push(`tag=${vlanTag}`);
+      parts.push(`tag=${parsedTag.tag}`);
     }
 
     await updateVMConfig(node, vmid, { [netInterface]: parts.join(',') });
-    await logAudit(req, 'vlan_change', `${node}/${vmid}`, `${netInterface}=tag:${vlanTag}`);
+    const auditTag = 'untagged' in parsedTag ? 'none' : parsedTag.tag;
+    await logAudit(req, 'vlan_change', `${node}/${vmid}`, `${netInterface}=tag:${auditTag}`);
     res.json({ ok: true });
   } catch (err) {
     sendError(res, err);

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-14 — A VLAN change can only set a VLAN
+
+- **Changing a VM's VLAN now accepts a VLAN number and nothing else.** A Proxmox network card is configured as a comma-separated list of properties — `virtio=…,bridge=vmbr0,tag=100` — and the tag you submit was pasted into that list as-is while only its leading digits were checked against the VLANs assigned to you. A value written as `100,trunks=200` therefore passed the check as plain VLAN 100 and then went upstream carrying a second network property of its own choosing. The tag is now read as a whole number between 1 and 4094, and it is that number — never the text you typed — that is written to the network card, so what gets authorised and what gets configured can no longer differ
+- **Anything that is not a plain VLAN number is refused before the portal talks to Proxmox**, with *"Invalid VLAN tag"*: values carrying a comma or a second property, trailing characters, fractions, and tags outside the 802.1Q range. The interface being changed is likewise checked against the real network-card names (`net0`–`net31`). Administrators are held to the same parsing — being an admin lets you pick any VLAN, including the untagged native network, but not smuggle extra settings through the VLAN field
+- **Valid VLAN changes are unaffected.** A VLAN assigned to you still applies exactly as before, one not assigned to you is still refused, and clearing the tag to return a VM to the untagged network remains administrator-only
+
 ## 2026-08-24 — Three more settings that stopped taking effect in the PostgreSQL move
 
 - **A VM's power schedule showed itself as switched off even while it was running.** Open the schedule on a VM that sleeps overnight and the *Enabled* toggle came up unchecked, the **Skip tonight** button was missing entirely, and the "sleeps 23:00–08:00" badge never appeared on any VM card. The schedule itself was working the whole time — VMs were still being stopped and started on time — but everything that reported it read a true/false flag as if it were still the old numeric `1`, and `true` never equals `1`. The real risk was the toggle: anyone who reopened a working schedule saw it off, and saving from there genuinely switched it off. All of it reads correctly again
