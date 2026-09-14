@@ -22,7 +22,7 @@ import { httpError, sendError } from '../utils/httpError.ts';
 import { logAudit } from '../utils/audit.ts';
 import { notify, portalLink } from '../utils/notify.ts';
 import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.ts';
-import { checkVlanAssignment } from '../utils/vlanAccess.ts';
+import { checkVlanAssignment, parseVlanTag, isValidVmNetInterface } from '../utils/vlanAccess.ts';
 import { summarizeLease, renewLease } from '../utils/leases.ts';
 import { assertUserQuota, sizeToGb } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
@@ -1184,7 +1184,13 @@ router.post('/:node/:vmid/cloudinit-credentials', async (req, res) => {
 
 router.put('/:node/:vmid/vlan', async (req, res) => {
   const { node, vmid } = req.params;
-  const { netInterface = 'net0', vlanTag } = req.body;
+  const { netInterface = 'net0', vlanTag: rawVlanTag } = req.body;
+  if (!isValidVmNetInterface(netInterface)) {
+    return res.status(400).json({ error: 'Invalid network interface' });
+  }
+  const parsed = parseVlanTag(rawVlanTag);
+  if ('invalid' in parsed) return res.status(400).json({ error: 'Invalid VLAN tag' });
+  const vlanTag = 'tag' in parsed ? parsed.tag : null;
 
   if (!(await allowOp(req, node, vmid, 'vm.vlan'))) {
     return res.status(403).json({ error: 'Access denied' });
@@ -1205,7 +1211,7 @@ router.put('/:node/:vmid/vlan', async (req, res) => {
 
     // Parse "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0,tag=100,firewall=1" style string
     let parts = current.split(',');
-    if (vlanTag === null || vlanTag === 0 || vlanTag === '') {
+    if (vlanTag === null) {
       parts = parts.filter(p => !p.startsWith('tag='));
     } else if (parts.some(p => p.startsWith('tag='))) {
       parts = parts.map(p => p.startsWith('tag=') ? `tag=${vlanTag}` : p);

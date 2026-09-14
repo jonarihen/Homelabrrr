@@ -24,6 +24,8 @@ process.env.DATABASE_URL = integrationDb.url;
 const { requireAdmin, requireAuth } = await import('../middleware/auth.ts');
 test.after(async () => {
   rmSync(testDirectory, { recursive: true, force: true });
+  const { closeDb } = await import('../db/client.ts');
+  await closeDb();
   await integrationDb.drop();
 });
 
@@ -65,6 +67,25 @@ test('route integration rejects malformed and unexpected JSON fields consistentl
   const unexpected = await request(app).post('/validated').set(headers).send({ port: 22, password: 'never-accepted' });
   assert.equal(unexpected.status, 400);
   assert.equal(unexpected.body.code, 'UNEXPECTED_FIELD');
+});
+
+test('VLAN route rejects crafted tags and unsupported NIC keys before upstream access', async () => {
+  const vmRouter = (await import('./vms.ts')).default;
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.session = { userId: 1, isAdmin: true } as never;
+    next();
+  });
+  app.use('/vms', vmRouter);
+  for (const body of [
+    ...['100,trunks=200', '100x', '100.5', 100.5, 4095, '100\n', [100]].map(vlanTag => ({ vlanTag })),
+    ...['description', '__proto__', 'net32', 'net0,bridge=vmbr1', ['net0']].map(netInterface => ({ netInterface, vlanTag: 100 })),
+  ]) {
+    const response = await request(app).put('/vms/1~pve/100/vlan').send(body);
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.match(response.body.error, /^Invalid (VLAN tag|network interface)$/);
+  }
 });
 
 test('route integration sanitizes async upstream failures and returns a request ID', async () => {

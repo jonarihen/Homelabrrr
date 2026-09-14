@@ -15,33 +15,31 @@ import { vlans, userVlans } from '../db/schema/index.ts';
 
 type ParsedVlanTag = { untagged: true } | { invalid: true } | { tag: number };
 
-// Interpret a VLAN tag from a request body.
-//   { untagged: true }      — null / undefined / '' / 0 (the native network)
-//   { tag: <positive int> } — a specific VLAN tag
-//   { invalid: true }       — a malformed value (non-numeric, <= 0)
+export function isValidVmNetInterface(value: unknown): value is string {
+  return typeof value === 'string' && /^net(?:[0-9]|[12][0-9]|3[01])(?![\s\S])/.test(value);
+}
+
 export function parseVlanTag(value: unknown): ParsedVlanTag {
   if (value === null || value === undefined || value === '' || value === 0 || value === '0') {
     return { untagged: true };
   }
-  const tag = Number.parseInt(value as string, 10);
-  if (!Number.isInteger(tag) || tag < 1) return { invalid: true };
+  if (typeof value !== 'number' && (typeof value !== 'string' || !/^[0-9]+(?![\s\S])/.test(value))) {
+    return { invalid: true };
+  }
+  const tag = Number(value);
+  if (!Number.isInteger(tag) || tag < 1 || tag > 4094) return { invalid: true };
   return { tag };
 }
 
-// Decide whether `userId` may place a VM on `vlanTag`. Admins may use anything,
-// including untagged. Non-admins must target an assigned VLAN; untagged and
-// unassigned tags are refused. Returns `null` when permitted, otherwise
-// `{ status, error }` for the caller to return verbatim.
 export async function checkVlanAssignment(
   db: DbOrTx,
   { userId, isAdmin, vlanTag }: { userId: number; isAdmin: boolean; vlanTag: unknown },
 ): Promise<{ status: number; error: string } | null> {
-  if (isAdmin) return null;
-
   const parsed = parseVlanTag(vlanTag);
   if ('invalid' in parsed) {
     return { status: 400, error: 'Invalid VLAN tag' };
   }
+  if (isAdmin) return null;
   if ('untagged' in parsed) {
     return {
       status: 403,

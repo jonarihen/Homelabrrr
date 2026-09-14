@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-14 — Strict VLAN placement validation
+
+- VLAN changes and provisioning reject malformed or out-of-range tags, including injected Proxmox network properties. VLAN updates use normalized integers and accept only VM NIC keys `net0` through `net31`. Assigned VLAN access and administrator-only untagged networking are preserved.
+
 ## 2026-08-24 — Three more settings that stopped taking effect in the PostgreSQL move
 
 - **A VM's power schedule showed itself as switched off even while it was running.** Open the schedule on a VM that sleeps overnight and the *Enabled* toggle came up unchecked, the **Skip tonight** button was missing entirely, and the "sleeps 23:00–08:00" badge never appeared on any VM card. The schedule itself was working the whole time — VMs were still being stopped and started on time — but everything that reported it read a true/false flag as if it were still the old numeric `1`, and `true` never equals `1`. The real risk was the toggle: anyone who reopened a working schedule saw it off, and saving from there genuinely switched it off. All of it reads correctly again
