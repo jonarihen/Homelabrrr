@@ -262,6 +262,22 @@ export async function runLeaseSweep() {
     // Guard every lease independently: a single failing row (a stuck upstream
     // call, a bad DB write) must never abort the sweep of the remaining ones.
     try {
+      const [current] = await db
+        .select()
+        .from(vmLeases)
+        .where(eq(vmLeases.id, lease.id))
+        .limit(1);
+
+      if (!current || current.exempt || current.expired || !current.expires_at) {
+        continue;
+      }
+      if (current.expires_at.getTime() > Date.now()) {
+        continue;
+      }
+      if (lease.expires_at && current.expires_at.getTime() !== lease.expires_at.getTime()) {
+        continue;
+      }
+
       const candidates = nodeLookupCandidates(lease.node);
       const live = vms.find(v => Number(v.vmid) === lease.vmid
         && (candidates.includes(v.nodeRef) || candidates.includes(v.node)));
@@ -290,15 +306,26 @@ export async function runLeaseSweep() {
       // read-decide-write, and only the caller that still sees expired = false
       // commits the transition (WHERE id = ? AND expired = false).
       await db.transaction(async (tx) => {
-        const [current] = await tx
-          .select({ expired: vmLeases.expired })
+        const [latest] = await tx
+          .select({
+            expired: vmLeases.expired,
+            exempt: vmLeases.exempt,
+            expires_at: vmLeases.expires_at,
+          })
           .from(vmLeases)
           .where(eq(vmLeases.id, lease.id))
+          .for('update')
           .limit(1);
-        if (!current || current.expired) return;
+        if (!latest || latest.expired || latest.exempt || !latest.expires_at) return;
+        if (latest.expires_at.getTime() !== current.expires_at.getTime() || latest.expires_at.getTime() > Date.now()) return;
         await tx.update(vmLeases)
           .set({ expired: true, expired_at: new Date(), auto_stopped: autoStopped })
-          .where(and(eq(vmLeases.id, lease.id), eq(vmLeases.expired, false)));
+          .where(and(
+            eq(vmLeases.id, lease.id),
+            eq(vmLeases.expired, false),
+            eq(vmLeases.exempt, false),
+            sql`date_trunc('milliseconds', ${vmLeases.expires_at}) = ${current.expires_at}`,
+          ));
       });
     } catch (err: any) {
       await logSystemAudit('lease_sweep_error', `${lease.node}/${lease.vmid}`, err.message);

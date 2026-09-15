@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-15 — Lease sweep race condition resolved for renewed and exempt VMs
+
+- **The background lease sweep could shut down VMs and mark renewed or exempted leases as expired.** When running the periodic lease sweep, an initial query captured expired leases, followed by a cluster-wide enumeration of virtual machines across Proxmox hosts. If a user renewed their lease or an administrator marked it exempt during that enumeration window, the sweep continued with stale lease data: it shut down the newly renewed or exempt guest and updated its database status to expired, corrupting the lease record with a future expiry date and an expired status
+- **The lease sweep now verifies current lease state before stopping any guest and guards the database update.** Before shutting down a virtual machine, the sweep re-reads the lease record from the database to confirm it is still un-exempt, un-expired, and past its expiration timestamp. The post-shutdown database transition is further protected inside an exclusive transaction that ensures `expires_at` matches what was verified and remains un-exempt, skipping any lease renewed or modified in flight
+
 ## 2026-09-15 — Port forward and VLAN tracking records are preserved when firewall teardown fails
 
 - **Deleting a port forward or unsyncing a VLAN from a firewall used to delete the database tracking record even when the firewall failed to tear down the artifacts.** The workflow teardown engine caught upstream FortiGate errors (such as timeouts, connection refusals, or permission failures) and returned them in an error list rather than throwing. The deletion and unsync routes ignored this error list, deleted the `managed_vips` or `firewall_vlan_sync` records from the database, and returned `{ ok: true }`. Because the tracking records were deleted, subsequent retries failed with "Cannot delete unmanaged VIPs" or 404, leaving orphaned policies and VIPs on the firewall
