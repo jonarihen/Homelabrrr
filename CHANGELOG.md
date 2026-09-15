@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-15 — SSH Files tab now preserves selected key and passphrase
+
+- **Opening the Files tab in browser SSH sessions ignored the key and passphrase the user selected during connection.** When a user chose a non-default SSH key, or entered a passphrase for an encrypted key, the terminal would authenticate successfully but subsequent attempts to open the Files tab would silently use the first key from the list with an empty passphrase, causing authentication failures without any user-facing indication that the wrong credentials were used
+- **Files tab now uses the same credentials that authenticated the SSH terminal.** The form state—key selection and passphrase—is captured when the user connects and passed through to `/api/sftp/connect`; the Files tab respects this context instead of fetching available keys and defaulting to the first one
+- **Reconnecting the SSH terminal correctly re-initializes SFTP with the right key and passphrase.** A dropped shell or reconnect now restores the full authentication context, so the Files tab continues to function with the credentials the user originally provided
+
 ## 2026-09-15 — SSH terminal input encoding preserves UTF-8 characters
 
 - **Typing or pasting non-ASCII characters into the SSH terminal dropped or corrupted the input.** When sending input from the terminal to the backend, the frontend used `btoa()` directly on the JavaScript string. Characters outside Latin-1 (> 0xFF, such as CJK, Cyrillic, Arabic, or emojis) threw an `InvalidCharacterError` and were silently dropped, while characters between 0x80 and 0xFF (such as accented letters `é`, `ü`, `ñ`) were encoded as single bytes rather than standard UTF-8 byte sequences, corrupting the input sent to the SSH stream
