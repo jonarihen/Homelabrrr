@@ -238,7 +238,7 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
 
       term.onData((data) => {
         if (ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'data', stringToBase64Utf8(data) }));
+          ws.send(JSON.stringify({ type: 'data', data: stringToBase64Utf8(data) }));
         }
       });
 
