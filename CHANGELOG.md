@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-15 — SSH terminal input encoding preserves UTF-8 characters
+
+- **Typing or pasting non-ASCII characters into the SSH terminal dropped or corrupted the input.** When sending input from the terminal to the backend, the frontend used `btoa()` directly on the JavaScript string. Characters outside Latin-1 (> 0xFF, such as CJK, Cyrillic, Arabic, or emojis) threw an `InvalidCharacterError` and were silently dropped, while characters between 0x80 and 0xFF (such as accented letters `é`, `ü`, `ñ`) were encoded as single bytes rather than standard UTF-8 byte sequences, corrupting the input sent to the SSH stream
+- **SSH terminal input now converts characters to UTF-8 bytes before base64 encoding.** A dedicated helper encodes the input string into a UTF-8 `Uint8Array` via `TextEncoder` before converting to base64, ensuring accented letters, non-Latin scripts, and emojis are transmitted accurately to the remote shell
+
 ## 2026-09-15 — Lease sweep race condition resolved for renewed and exempt VMs
 
 - **The background lease sweep could shut down VMs and mark renewed or exempted leases as expired.** When running the periodic lease sweep, an initial query captured expired leases, followed by a cluster-wide enumeration of virtual machines across Proxmox hosts. If a user renewed their lease or an administrator marked it exempt during that enumeration window, the sweep continued with stale lease data: it shut down the newly renewed or exempt guest and updated its database status to expired, corrupting the lease record with a future expiry date and an expired status

@@ -8,6 +8,7 @@ import {
   CONNECTING, CONNECTED, DISCONNECTED, CONNECTION_ERROR,
   canReconnect, isConnected,
 } from '../utils/consoleStatus.js';
+import { stringToBase64Utf8 } from '../utils/encoding.js';
 
 export default function SSHSessionPanel({ vm, visible = true }) {
   const [step, setStep] = useState('config');
@@ -257,7 +258,7 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
 
       term.onData((data) => {
         if (ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'data', data: btoa(data) }));
+          ws.send(JSON.stringify({ type: 'data', data: stringToBase64Utf8(data) }));
         }
       });
 
