@@ -106,8 +106,6 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         hostFingerprint: form.hostFingerprint,
       });
 
-      // The host config is already persisted above, so a reconnect only needs
-      // to re-mint the single-use session token.
       const mintToken = async () => {
         const { data } = await api.post(connectEndpoint, {
           node: vmNode,
@@ -118,7 +116,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         return data.token;
       };
 
-      onConnect(await mintToken(), mintToken);
+      onConnect(await mintToken(), mintToken, { keyId: form.keyId, passphrase: form.passphrase });
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to connect');
     } finally {

@@ -17,15 +17,15 @@ export default function SSHSessionPanel({ vm, visible = true }) {
   const [activeTab, setActiveTab] = useState('terminal');
   const [sftpConnecting, setSftpConnecting] = useState(false);
   const [sftpError, setSftpError] = useState('');
-  // Re-mints an SSH session token with the settings the user connected with,
-  // so a dropped shell doesn't send them back through the form.
+  const formRef = useRef({ keyId: '', passphrase: '' });
   const mintTokenRef = useRef(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [reconnectError, setReconnectError] = useState('');
 
-  const handleSshConnect = (token, mintToken) => {
+  const handleSshConnect = (token, mintToken, formState) => {
     setSshToken(token);
     mintTokenRef.current = mintToken;
+    formRef.current = formState;
     setStep('connected');
   };
 
@@ -34,16 +34,10 @@ export default function SSHSessionPanel({ vm, visible = true }) {
 
     setReconnecting(true);
     setReconnectError('');
-    // Whatever dropped the shell almost certainly dropped the SFTP channel with
-    // it, and its token is single-use too. Drop it so `openFiles` mints a fresh
-    // one instead of short-circuiting onto a dead browser, and leave the Files
-    // tab if that is where the user is standing — it renders nothing without a
-    // token.
     setSftpToken(null);
     setSftpError('');
     setActiveTab('terminal');
     try {
-      // A new token remounts the SSH channel: SSHTerminal keys its effect on it.
       setSshToken(await mintTokenRef.current());
     } catch (e) {
       setReconnectError(e.response?.data?.error || 'Failed to reconnect');
@@ -62,19 +56,11 @@ export default function SSHSessionPanel({ vm, visible = true }) {
     setSftpConnecting(true);
     setSftpError('');
     try {
-      const keysRes = await api.get('/ssh/keys');
-
-      if (keysRes.data.length === 0) {
-        setSftpError('No SSH keys available');
-        setSftpConnecting(false);
-        return;
-      }
-
       const { data } = await api.post('/sftp/connect', {
         node: vmNode,
         vmid: vm.vmid,
-        keyId: keysRes.data[0].id,
-        passphrase: '',
+        keyId: formRef.current.keyId,
+        passphrase: formRef.current.passphrase,
       });
 
       setSftpToken(data.token);
@@ -96,7 +82,6 @@ export default function SSHSessionPanel({ vm, visible = true }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Tab bar */}
       <div className="flex items-center gap-1 px-3 py-1.5 border-b border-gray-700 bg-gray-900/80 shrink-0">
         <TabButton active={activeTab === 'terminal'} onClick={() => setActiveTab('terminal')} icon={
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -118,7 +103,6 @@ export default function SSHSessionPanel({ vm, visible = true }) {
         {sftpError && <span className="text-xs text-red-400 ml-2">{sftpError}</span>}
       </div>
 
-      {/* Panels */}
       <div className={`min-h-0 flex-1 ${activeTab === 'terminal' ? '' : 'hidden'}`}>
         <SSHTerminal
           token={sshToken}
@@ -185,7 +169,6 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
         fontSize: 14,
         fontFamily: "'IBM Plex Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
         theme: {
-          // AARIS operator-console theme — orange cursor, near-black surface
           background: '#0b0d11',
           foreground: '#e9ecef',
           cursor: '#ff5a1f',
@@ -228,8 +211,6 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'data') {
-            // Decode base64 to bytes and hand the Uint8Array to xterm so it
-            // parses multi-byte UTF-8 (spinners, checkmarks, box chars) correctly.
             const bin = atob(msg.data);
             const bytes = new Uint8Array(bin.length);
             for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
@@ -241,7 +222,6 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
             setStatus(CONNECTION_ERROR);
           }
         } catch {
-          // Ignore malformed websocket payloads
         }
       };
 
@@ -273,7 +253,6 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
           fitAddon.fit();
           sendSize();
         } catch {
-          // Ignore fit errors during transient layout changes
         }
       });
       resizeObserver.observe(containerRef.current);
@@ -304,7 +283,6 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
           }));
         }
       } catch {
-        // Ignore fit errors while the console window is restoring
       }
     }, 80);
 
@@ -316,7 +294,7 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
       <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-700 bg-gray-900 shrink-0">
         <span className={`text-xs px-2 py-0.5 rounded ${
           isConnected(status) ? 'bg-green-900 text-green-300' : 'bg-gray-800 text-gray-400'
-        }`}>{reconnecting ? 'Reconnecting…' : status}</span>
+        }`}>{reconnecting ? 'Reconnecting...' : status}</span>
 
         {onReconnect && canReconnect(status) && (
           <button
@@ -326,7 +304,7 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
             className="text-xs px-3 py-1 rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium transition-colors"
             title="Open a new SSH session with the same key and host settings"
           >
-            {reconnecting ? 'Reconnecting…' : 'Reconnect'}
+            {reconnecting ? 'Reconnecting...' : 'Reconnect'}
           </button>
         )}
 
