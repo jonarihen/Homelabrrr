@@ -607,13 +607,13 @@ function validatePermissionList(permissions) {
   return unique;
 }
 
-async function setRolePermissions(roleId, permissions) {
-  await db.transaction(async (tx) => {
-    await tx.delete(rolePermissions).where(eq(rolePermissions.role_id, roleId));
-    if (permissions.length > 0) {
-      await tx.insert(rolePermissions).values(permissions.map((p) => ({ role_id: roleId, permission: p })));
-    }
-  });
+// Replaces a role's permission set. Takes the caller's `tx` so the replacement
+// commits or rolls back together with the rest of the role write.
+async function setRolePermissions(tx, roleId, permissions) {
+  await tx.delete(rolePermissions).where(eq(rolePermissions.role_id, roleId));
+  if (permissions.length > 0) {
+    await tx.insert(rolePermissions).values(permissions.map((p) => ({ role_id: roleId, permission: p })));
+  }
 }
 
 router.get('/roles', pUsers, async (req, res) => {
@@ -633,11 +633,14 @@ router.post('/roles', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
   }
   try {
-    const [r] = await db.insert(roles).values({
-      name: String(name).trim(), description: String(description),
-      max_cores: maxCores, max_memory_gb: maxMemoryGb, max_storage_gb: maxStorageGb,
-    }).returning({ id: roles.id });
-    await setRolePermissions(r.id, perms);
+    const r = await db.transaction(async (tx) => {
+      const [row] = await tx.insert(roles).values({
+        name: String(name).trim(), description: String(description),
+        max_cores: maxCores, max_memory_gb: maxMemoryGb, max_storage_gb: maxStorageGb,
+      }).returning({ id: roles.id });
+      await setRolePermissions(tx, row.id, perms);
+      return row;
+    });
     await logAudit(req, 'admin_create_role', String(name).trim(), perms.join(','));
     const [created] = await db.select().from(roles).where(eq(roles.id, r.id)).limit(1);
     res.json(await serializeRole(created));
@@ -652,23 +655,23 @@ router.put('/roles/:id', requireAdmin, async (req, res) => {
   if (!role) return res.status(404).json({ error: 'Role not found' });
 
   const { name, description, permissions } = req.body;
+
+  // Validate every supplied field *before* writing anything: a rejection partway
+  // through used to leave the earlier metadata/permission writes committed, so a
+  // bad quota could still replace the live permissions of every role holder.
+  const patch = {};
   // Built-in roles keep their name/description; their permissions stay editable
   if (!role.built_in && name !== undefined) {
     if (!String(name).trim()) return res.status(400).json({ error: 'Role name required' });
-    try {
-      await db.update(roles).set({ name: String(name).trim() }).where(eq(roles.id, role.id));
-    } catch (err) {
-      if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
-      throw err;
-    }
+    patch.name = String(name).trim();
   }
   if (!role.built_in && description !== undefined) {
-    await db.update(roles).set({ description: String(description) }).where(eq(roles.id, role.id));
+    patch.description = String(description);
   }
+  let perms = null;
   if (permissions !== undefined) {
-    const perms = validatePermissionList(permissions);
+    perms = validatePermissionList(permissions);
     if (!perms) return res.status(400).json({ error: 'Invalid permission list' });
-    await setRolePermissions(role.id, perms);
   }
   // Quotas are editable on every role, including built-ins (like permissions)
   if ('maxCores' in req.body || 'maxMemoryGb' in req.body || 'maxStorageGb' in req.body) {
@@ -678,8 +681,23 @@ router.put('/roles/:id', requireAdmin, async (req, res) => {
     if (maxCores === undefined || maxMemoryGb === undefined || maxStorageGb === undefined) {
       return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
     }
-    await db.update(roles).set({ max_cores: maxCores, max_memory_gb: maxMemoryGb, max_storage_gb: maxStorageGb })
-      .where(eq(roles.id, role.id));
+    patch.max_cores = maxCores;
+    patch.max_memory_gb = maxMemoryGb;
+    patch.max_storage_gb = maxStorageGb;
+  }
+
+  // One transaction for metadata + permissions + quotas, so a DB failure anywhere
+  // in the update rolls the whole thing back.
+  try {
+    await db.transaction(async (tx) => {
+      if (Object.keys(patch).length > 0) {
+        await tx.update(roles).set(patch).where(eq(roles.id, role.id));
+      }
+      if (perms) await setRolePermissions(tx, role.id, perms);
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
+    throw err;
   }
   await logAudit(req, 'admin_update_role', role.name, Array.isArray(permissions) ? permissions.join(',') : '');
   const [updated] = await db.select().from(roles).where(eq(roles.id, role.id)).limit(1);
