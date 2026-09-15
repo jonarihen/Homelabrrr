@@ -831,12 +831,21 @@ export async function createVMBackup(node, vmid, opts = {}) {
 
 export async function restoreVMBackup(node, vmid, archive, storage, vmtype = 'qemu') {
   const { host, nodeName } = await resolveNode(node, { vmid });
-  const body = {
-    vmid: parseInt(vmid),
-    archive,
-    force: 1,
-    ...(storage && { storage }),
-  };
+  const isLxc = vmtype === 'lxc';
+  const body = isLxc
+    ? {
+        vmid: parseInt(vmid, 10),
+        ostemplate: archive,
+        restore: 1,
+        force: 1,
+        ...(storage && { storage }),
+      }
+    : {
+        vmid: parseInt(vmid, 10),
+        archive,
+        force: 1,
+        ...(storage && { storage }),
+      };
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}`, body);
 }
 

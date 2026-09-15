@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-15 — Restoring LXC backups uses the correct Proxmox container restore parameters
+
+- **Restoring an LXC container backup was sending VM-style restore parameters to Proxmox, causing validation failures.** The restore endpoint correctly routed requests to `/nodes/{node}/lxc` for containers, but supplied `{ vmid, archive, force: 1 }` in the request body. Proxmox's LXC creation API requires `ostemplate: <archive>` and `restore: 1` (along with `force: 1` when overwriting an existing container), and rejects `archive` as an unrecognised parameter. Container restores from both classic vzdump archives and Proxmox Backup Server snapshots failed validation upstream as a result
+- **Container restores now pass `ostemplate`, `restore: 1`, and `force: 1` to the LXC endpoint.** Restoring QEMU virtual machines is unchanged and continues to send `archive` and `force: 1` to `/nodes/{node}/qemu`. Optional target storage parameters continue to be forwarded for both guest types
+
 ## 2026-09-14 — Ordinary file-manager mistakes no longer take the portal down with them
 
 - **Opening a folder that is not there, downloading a file that has been moved, creating a folder that already exists, or deleting something already gone used to hang the request — and could take the backend with it.** Four of the SFTP browser's operations reported upstream failures through a callback that had no way to report anything: the error handler referred to a variable that was never passed in, so instead of a "path not found" the request simply never answered, and the fault escaped every safety net the route had around it. Any signed-in user with a live SFTP session could trigger it by accident, on the first typo
