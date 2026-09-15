@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-14 — A VLAN change can only set a VLAN
+
+- **Changing a VM's VLAN now accepts a VLAN number and nothing else.** A Proxmox network card is configured as a comma-separated list of properties — `virtio=…,bridge=vmbr0,tag=100` — and the tag you submit was pasted into that list as-is while only its leading digits were checked against the VLANs assigned to you. A value written as `100,trunks=200` therefore passed the check as plain VLAN 100 and then went upstream carrying a second network property of its own choosing. The tag is now read as a whole number between 1 and 4094, and it is that number — never the text you typed — that is written to the network card, so what gets authorised and what gets configured can no longer differ
+- **Anything that is not a plain VLAN number is refused before the portal talks to Proxmox**, with *"Invalid VLAN tag"*: values carrying a comma or a second property, trailing characters, fractions, and tags outside the 802.1Q range. The interface being changed is likewise checked against the real network-card names (`net0`–`net31`). Administrators are held to the same parsing — being an admin lets you pick any VLAN, including the untagged native network, but not smuggle extra settings through the VLAN field
+- **Valid VLAN changes are unaffected.** A VLAN assigned to you still applies exactly as before, one not assigned to you is still refused, and clearing the tag to return a VM to the untagged network remains administrator-only
+
 ## 2026-09-14 — A rejected role edit no longer half-applies
 
 - **Saving a role with a bad quota used to change its permissions anyway.** Edit a role, tick a different set of permissions, and type something a quota will not accept — a negative core count, say — and the save came back refused with *"Quota values must be non-negative integers"*, as it should. What it did not say is that the permission list had already been replaced before the quota was ever looked at, so every holder of that role silently gained or lost access while the screen reported a failed save. Renaming a role and changing its description had the same problem: they landed one at a time, and whatever was checked later could still reject the save on top of them. The refused save was also missing from the audit log, so there was no record of the change it had actually made
