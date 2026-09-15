@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-15 — Port forward and VLAN tracking records are preserved when firewall teardown fails
+
+- **Deleting a port forward or unsyncing a VLAN from a firewall used to delete the database tracking record even when the firewall failed to tear down the artifacts.** The workflow teardown engine caught upstream FortiGate errors (such as timeouts, connection refusals, or permission failures) and returned them in an error list rather than throwing. The deletion and unsync routes ignored this error list, deleted the `managed_vips` or `firewall_vlan_sync` records from the database, and returned `{ ok: true }`. Because the tracking records were deleted, subsequent retries failed with "Cannot delete unmanaged VIPs" or 404, leaving orphaned policies and VIPs on the firewall
+- **The routes now inspect teardown results and preserve tracking records if any errors occur.** If FortiGate artifact deletion fails, the tracking row remains intact in the database, a failure audit event is logged, and a 502 response is returned with sanitized failure details so the operation can be safely retried once the firewall is reachable
+
 ## 2026-09-15 — Restoring LXC backups uses the correct Proxmox container restore parameters
 
 - **Restoring an LXC container backup was sending VM-style restore parameters to Proxmox, causing validation failures.** The restore endpoint correctly routed requests to `/nodes/{node}/lxc` for containers, but supplied `{ vmid, archive, force: 1 }` in the request body. Proxmox's LXC creation API requires `ostemplate: <archive>` and `restore: 1` (along with `force: 1` when overwriting an existing container), and rejects `archive` as an unrecognised parameter. Container restores from both classic vzdump archives and Proxmox Backup Server snapshots failed validation upstream as a result

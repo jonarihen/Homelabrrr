@@ -1952,13 +1952,16 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
   }
 });
 
-router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
-  if (!req.session.isAdmin && !await userOwnsVlan(req.session.userId, req.params.id)) {
+async function handleVlanUnsync(req: any, res: any, vlanIdRaw: any, firewallIdRaw: any) {
+  const vlanId = Number(vlanIdRaw);
+  const firewallId = Number(firewallIdRaw);
+  if (!Number.isInteger(vlanId) || !Number.isInteger(firewallId)) {
+    return res.status(400).json({ error: 'Invalid VLAN or firewall ID' });
+  }
+  if (!req.session.isAdmin && !await userOwnsVlan(req.session.userId, vlanId)) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  // Mirrors the old `fvs.*, f.*` shape: firewall columns win on name collisions
-  // (id becomes the firewall id), plus the firewall_vlan_sync fields the
-  // teardown path needs.
+
   const [sync] = await db.select({
     ...getTableColumns(firewalls),
     interface_name: firewallVlanSync.interface_name,
@@ -1967,33 +1970,70 @@ router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
     artifacts: firewallVlanSync.artifacts,
   }).from(firewallVlanSync)
     .innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id))
-    .where(and(eq(firewallVlanSync.vlan_id, Number(req.params.id)), eq(firewallVlanSync.firewall_id, Number(req.params.firewallId))))
+    .where(and(eq(firewallVlanSync.vlan_id, vlanId), eq(firewallVlanSync.firewall_id, firewallId)))
     .limit(1);
   if (!sync) return res.status(404).json({ error: 'Sync record not found' });
 
   try {
     const client = createClient(sync);
     if (sync.artifacts) {
-      // Artifact-based teardown: delete exactly what this run created (reverse order).
-      // artifacts is a jsonb column — already an object.
-      await teardownArtifacts(client, sync.artifacts);
+      const teardownRes = await teardownArtifacts(client, sync.artifacts);
+      if (teardownRes.errors && teardownRes.errors.length > 0) {
+        console.warn(`[unsync-vlan] Teardown incomplete for VLAN ${vlanId} on firewall ${firewallId}:`, teardownRes.errors);
+        await logAudit(
+          req,
+          'admin_unsync_vlan_firewall_failed',
+          `VLAN ${vlanId}`,
+          `Firewall ${firewallId} teardown failed: ${teardownRes.errors.join('; ')}`
+        );
+        return res.status(502).json({
+          error: `Failed to remove VLAN from firewall: ${teardownRes.errors.map(sanitizeError).join('; ')}`,
+          errors: teardownRes.errors.map(sanitizeError),
+          details: teardownRes.errors.map(sanitizeError),
+        });
+      }
     } else {
-      // Legacy row (synced before the workflow engine) — original live-query path.
-      // policy_ids is a jsonb column — already an array.
       const policyIds = sync.policy_ids || [];
-      await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
+      const legacyRes = await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
         rootVdom: sync.root_vdom || 'root',
         trunkSwitchSerial: sync.trunk_switch_serial || '',
         trunkSwitchPort:   sync.trunk_switch_port   || '',
       });
+      if (legacyRes?.errors && legacyRes.errors.length > 0) {
+        console.warn(`[unsync-vlan] Legacy deprovision incomplete for VLAN ${vlanId} on firewall ${firewallId}:`, legacyRes.errors);
+        await logAudit(
+          req,
+          'admin_unsync_vlan_firewall_failed',
+          `VLAN ${vlanId}`,
+          `Firewall ${firewallId} teardown failed: ${legacyRes.errors.join('; ')}`
+        );
+        return res.status(502).json({
+          error: `Failed to remove VLAN from firewall: ${legacyRes.errors.map(sanitizeError).join('; ')}`,
+          errors: legacyRes.errors.map(sanitizeError),
+          details: legacyRes.errors.map(sanitizeError),
+        });
+      }
     }
-  } catch (err) {
-    console.error('Deprovision warning:', err.message);
+  } catch (err: any) {
+    console.error('Deprovision error:', err.message);
+    return res.status(502).json({ error: sanitizeError(err.message) });
   }
 
-  await db.delete(firewallVlanSync).where(and(eq(firewallVlanSync.vlan_id, Number(req.params.id)), eq(firewallVlanSync.firewall_id, Number(req.params.firewallId))));
-  await logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${req.params.id}`, `Firewall ${req.params.firewallId}`);
+  await db.delete(firewallVlanSync).where(and(eq(firewallVlanSync.vlan_id, vlanId), eq(firewallVlanSync.firewall_id, firewallId)));
+  await logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${vlanId}`, `Firewall ${firewallId}`);
   res.json({ ok: true });
+}
+
+router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
+  await handleVlanUnsync(req, res, req.params.id, req.params.firewallId);
+});
+
+router.post('/firewalls/:id/vlans/:vlanId/unsync', pVlans, async (req, res) => {
+  await handleVlanUnsync(req, res, req.params.vlanId, req.params.id);
+});
+
+router.delete('/firewalls/:id/vlans/:vlanId/sync', pVlans, async (req, res) => {
+  await handleVlanUnsync(req, res, req.params.vlanId, req.params.id);
 });
 
 // ─── Policy Engine ──────────────────────────────────────────────────────────
@@ -2962,10 +3002,21 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
     const { client, rootVdom } = getRootClient(fw);
 
     if (managed.artifacts) {
-      // Artifact-based teardown: delete exactly what the create run recorded,
-      // in reverse order (lab policy → root policy → VIP → lab address → services).
-      // artifacts is a jsonb column — already an object.
-      await teardownArtifacts(client, managed.artifacts);
+      const teardownRes = await teardownArtifacts(client, managed.artifacts);
+      if (teardownRes.errors && teardownRes.errors.length > 0) {
+        console.warn(`[vip-delete] Teardown incomplete for VIP ${vipName} on ${fw.name}:`, teardownRes.errors);
+        await logAudit(
+          req,
+          'admin_delete_port_forward_failed',
+          vipName,
+          `Firewall ${fw.name} teardown failed: ${teardownRes.errors.join('; ')}`
+        );
+        return res.status(502).json({
+          error: `Failed to remove port forward from firewall: ${teardownRes.errors.map(sanitizeError).join('; ')}`,
+          errors: teardownRes.errors.map(sanitizeError),
+          details: teardownRes.errors.map(sanitizeError),
+        });
+      }
     } else {
       // Legacy row (created before the workflow engine) — original delete path.
       // Delete lab VDOM policy first
