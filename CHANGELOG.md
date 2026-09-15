@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-14 — Ordinary file-manager mistakes no longer take the portal down with them
+
+- **Opening a folder that is not there, downloading a file that has been moved, creating a folder that already exists, or deleting something already gone used to hang the request — and could take the backend with it.** Four of the SFTP browser's operations reported upstream failures through a callback that had no way to report anything: the error handler referred to a variable that was never passed in, so instead of a "path not found" the request simply never answered, and the fault escaped every safety net the route had around it. Any signed-in user with a live SFTP session could trigger it by accident, on the first typo
+- **Those four now answer the way the rest of the file manager already did.** A missing path comes back as *The remote path was not found*, a folder that exists as *The remote path already exists*, a refusal from the remote host as *The remote server denied this file operation*, and anything else as a plain *The SFTP operation failed* — each with a request ID for the log, and none of them carrying the remote host, the path, or key material into the browser. The SSH connection behind the failed operation is closed either way, and the portal keeps serving
+
 ## 2026-09-14 — A VLAN change can only set a VLAN
 
 - **Changing a VM's VLAN now accepts a VLAN number and nothing else.** A Proxmox network card is configured as a comma-separated list of properties — `virtio=…,bridge=vmbr0,tag=100` — and the tag you submit was pasted into that list as-is while only its leading digits were checked against the VLANs assigned to you. A value written as `100,trunks=200` therefore passed the check as plain VLAN 100 and then went upstream carrying a second network property of its own choosing. The tag is now read as a whole number between 1 and 4094, and it is that number — never the text you typed — that is written to the network card, so what gets authorised and what gets configured can no longer differ
