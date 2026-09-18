@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import api from '../api.js';
 import ErrorCallout from './ErrorCallout.jsx';
 import { normalizeApiError } from '../utils/apiError.js';
+import { isSftpSessionExpired } from '../utils/sftpSession.js';
 
 function formatSize(bytes) {
   if (bytes == null) return '—';
@@ -31,11 +32,13 @@ function parentDir(path) {
   return parts.join('/') || '/';
 }
 
-export default function SFTPBrowser({ token }) {
+export default function SFTPBrowser({ token, onReconnect }) {
   const [currentPath, setCurrentPath] = useState('.');
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [mkdirName, setMkdirName] = useState('');
@@ -46,20 +49,40 @@ export default function SFTPBrowser({ token }) {
   const dropRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const loadDir = useCallback(async (path) => {
+  const loadDir = useCallback(async (path, activeToken = token) => {
     setLoading(true);
     setError('');
     try {
-      const { data } = await api.post('/sftp/ls', { token, path });
+      const { data } = await api.post('/sftp/ls', { token: activeToken, path });
       setEntries(data.entries);
       setCurrentPath(data.path || path);
+      setSessionExpired(false);
       setInitialLoaded(true);
     } catch (e) {
-      setError(normalizeApiError(e, 'Failed to list directory'));
+      if (isSftpSessionExpired(e)) {
+        setSessionExpired(true);
+      } else {
+        setError(normalizeApiError(e, 'Failed to list directory'));
+      }
     } finally {
       setLoading(false);
     }
   }, [token]);
+
+  const reconnect = async () => {
+    if (!onReconnect || reconnecting) return;
+    setReconnecting(true);
+    setError('');
+    try {
+      const nextToken = await onReconnect();
+      setSessionExpired(false);
+      await loadDir(currentPath, nextToken);
+    } catch (e) {
+      if (!isSftpSessionExpired(e)) setError(normalizeApiError(e, 'Failed to reconnect'));
+    } finally {
+      setReconnecting(false);
+    }
+  };
 
   // Load initial directory on mount
   useEffect(() => {
@@ -76,6 +99,15 @@ export default function SFTPBrowser({ token }) {
   };
 
   const [downloading, setDownloading] = useState(null);
+
+  const noteExpiredSession = (e, fallback) => {
+    if (isSftpSessionExpired(e)) {
+      setSessionExpired(true);
+      return true;
+    }
+    setError(normalizeApiError(e, fallback));
+    return false;
+  };
 
   const downloadFile = async (name) => {
     const filePath = joinPath(currentPath, name);
@@ -94,7 +126,7 @@ export default function SFTPBrowser({ token }) {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      setError(normalizeApiError(e, 'Download failed'));
+      noteExpiredSession(e, 'Download failed');
     } finally {
       setDownloading(null);
     }
@@ -126,7 +158,7 @@ export default function SFTPBrowser({ token }) {
       }
       await loadDir(currentPath);
     } catch (e) {
-      setError(normalizeApiError(e, 'Upload failed'));
+      noteExpiredSession(e, 'Upload failed');
     } finally {
       setUploading(false);
       setUploadProgress(null);
@@ -142,7 +174,7 @@ export default function SFTPBrowser({ token }) {
       setShowMkdir(false);
       await loadDir(currentPath);
     } catch (e) {
-      setError(normalizeApiError(e, 'Failed to create directory'));
+      noteExpiredSession(e, 'Failed to create directory');
     }
   };
 
@@ -157,7 +189,7 @@ export default function SFTPBrowser({ token }) {
       setDeleteConfirm(null);
       await loadDir(currentPath);
     } catch (e) {
-      setError(normalizeApiError(e, 'Failed to delete'));
+      noteExpiredSession(e, 'Failed to delete');
     }
   };
 
@@ -173,7 +205,7 @@ export default function SFTPBrowser({ token }) {
       await api.post('/sftp/rename', { token, path: joinPath(currentPath, name), name: nextName });
       await loadDir(currentPath);
     } catch (e) {
-      setError(normalizeApiError(e, 'Failed to rename'));
+      noteExpiredSession(e, 'Failed to rename');
     }
   };
 
@@ -325,6 +357,24 @@ export default function SFTPBrowser({ token }) {
       {error && (
         <div className="px-3 py-2">
           <ErrorCallout error={error} />
+        </div>
+      )}
+
+      {sessionExpired && (
+        <div className="px-3 py-2">
+          <div className="flex items-center gap-2.5 rounded-xl border border-yellow-800/30 bg-yellow-900/20 p-3 text-yellow-300">
+            <p className="min-w-0 flex-1 break-words text-xs font-medium">The file browser session expired. Reconnect to keep browsing.</p>
+            {onReconnect && (
+              <button
+                type="button"
+                onClick={reconnect}
+                disabled={reconnecting}
+                className="shrink-0 rounded-lg bg-yellow-600 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-yellow-500 disabled:opacity-50"
+              >
+                {reconnecting ? 'Reconnecting...' : 'Reconnect'}
+              </button>
+            )}
+          </div>
         </div>
       )}
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — An expired file-browser session no longer signs you out
+
+- **Leaving the SSH Files tab open past its session timeout threw the user back to the sign-in page.** Every SFTP operation answered `401` when its short-lived file-browser token had expired, even with a perfectly valid portal session. The single axios instance treats any `401` outside the signed-out routes as an expired session, so an idle Files tab discarded its state and forced a fresh login instead of reporting the timeout
+- **A stale file-browser token is now a reconnect prompt, not a session expiry.** The SFTP routes answer `403` with the machine-readable code `SFTP_SESSION_EXPIRED`, keeping `401` reserved for "not signed in". The Files tab stays put, shows an inline "session expired" notice with a Reconnect button, and mints a fresh token with the same key and passphrase. A regression test covers all six token paths, and genuinely signed-out callers still get `401` from `requireAuth`
+
 ## 2026-09-18 — Assigned LXC containers no longer show as errors in the VM list
 
 - **The dashboard showed every assigned LXC container as an error entry with a placeholder name.** `GET /api/vms` only queried the qemu status endpoint when building the user's VM list; for an assigned container that call fails, and the route fell straight through to the `status: 'error'` / `VM <id>` shape instead of trying the LXC endpoint
