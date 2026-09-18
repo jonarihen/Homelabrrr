@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Account pages no longer crash for sessions of deleted users
+
+- **Changing the password, starting 2FA setup, or registering a passkey with a deleted account's session crashed with a server error.** Deleting a user leaves their session rows live, and the per-request session re-hydration races the handler, so these routes could look up a user row that no longer exists and dereference it — answering `500` instead of treating the caller as signed out
+- **A missing user row is now answered as an expired session.** `change-password`, `2fa/setup`, and `passkeys/register/options` return `401` when their account no longer exists, matching `GET /api/auth/me`, so the browser redirects to sign-in. A regression test deletes the account mid-session and asserts all three routes answer `401`
+
 ## 2026-09-18 — An expired file-browser session no longer signs you out
 
 - **Leaving the SSH Files tab open past its session timeout threw the user back to the sign-in page.** Every SFTP operation answered `401` when its short-lived file-browser token had expired, even with a perfectly valid portal session. The single axios instance treats any `401` outside the signed-out routes as an expired session, so an idle Files tab discarded its state and forced a fresh login instead of reporting the timeout

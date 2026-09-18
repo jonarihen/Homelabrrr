@@ -515,6 +515,9 @@ router.put('/change-password', requireAuth, requireInteractiveSession, async (re
   catch (err: any) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
 
   const [user] = await db.select({ password: users.password }).from(users).where(eq(users.id, req.session.userId)).limit(1);
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   if (!bcrypt.compareSync(currentPassword, user.password)) {
     return res.status(403).json({ error: 'Current password is incorrect', code: CONFIRMATION_FAILED });
   }
@@ -551,6 +554,9 @@ router.post('/reauthenticate', requireAuth, requireInteractiveSession, async (re
 // Generate a new secret and return a QR code (does NOT enable 2FA yet)
 router.post('/2fa/setup', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
   const [user] = await db.select({ username: users.username, totp_enabled: users.totp_enabled }).from(users).where(eq(users.id, req.session.userId)).limit(1);
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   // Never let setup clobber an active second factor — otherwise a single call
   // silently disables 2FA (totp_enabled=false) even if enrollment is never finished.
   if (user.totp_enabled) {
@@ -660,6 +666,9 @@ router.get('/passkeys', requireAuth, requireInteractiveSession, async (req, res)
 
 router.post('/passkeys/register/options', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
   const [user] = await db.select({ id: users.id, username: users.username }).from(users).where(eq(users.id, req.session.userId)).limit(1);
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   const { rpID, rpName } = webauthnConfig(req);
   const options = await generateRegistrationOptions({
     rpName,
