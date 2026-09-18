@@ -210,7 +210,11 @@ function serializeServer(row, siteCount, firewall) {
 // ─── Lookups ───────────────────────────────────────────────────────────────────
 
 async function getServerRow(id) {
-  const [row] = await db.select().from(caddyServers).where(eq(caddyServers.id, Number(id))).limit(1);
+  // PostgreSQL rejects a NaN integer parameter, so parse defensively — a
+  // non-numeric route id resolves to "not found" (a 404), never a 500.
+  const parsed = Number.parseInt(id, 10);
+  if (!Number.isInteger(parsed)) return undefined;
+  const [row] = await db.select().from(caddyServers).where(eq(caddyServers.id, parsed)).limit(1);
   return row;
 }
 
@@ -271,7 +275,9 @@ function siteQuery() {
 }
 
 async function loadSiteForUser(req, id) {
-  const [row] = await siteQuery().where(eq(caddySites.id, Number(id))).limit(1);
+  const parsed = Number.parseInt(id, 10);
+  if (!Number.isInteger(parsed)) return { row: null };
+  const [row] = await siteQuery().where(eq(caddySites.id, parsed)).limit(1);
   if (!row) return { row: null };
   const owns = req.session.isAdmin || row.owner_user_id === req.session.userId;
   return { row, owns };
@@ -1049,7 +1055,9 @@ router.get('/firewalls', pWebsites, async (req, res) => {
 
 router.post('/admin/sites/:id/assign', pWebsites, async (req, res) => {
   const { userId } = req.body;
-  const [site] = await db.select().from(caddySites).where(eq(caddySites.id, Number(req.params.id))).limit(1);
+  const siteId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(siteId)) return res.status(404).json({ error: 'Site not found' });
+  const [site] = await db.select().from(caddySites).where(eq(caddySites.id, siteId)).limit(1);
   if (!site) return res.status(404).json({ error: 'Site not found' });
 
   let newOwner = null;
@@ -1059,13 +1067,15 @@ router.post('/admin/sites/:id/assign', pWebsites, async (req, res) => {
       .from(users).where(eq(users.id, newOwner)).limit(1);
     if (!target) return res.status(404).json({ error: 'User not found' });
   }
-  await db.update(caddySites).set({ owner_user_id: newOwner }).where(eq(caddySites.id, Number(req.params.id)));
+  await db.update(caddySites).set({ owner_user_id: newOwner }).where(eq(caddySites.id, siteId));
   await logAudit(req, 'website_assign_site', site.domain, `owner=${newOwner ?? 'none'}`);
   res.json({ ok: true });
 });
 
 router.delete('/admin/sites/:id', pWebsites, async (req, res) => {
-  const [site] = await db.select().from(caddySites).where(eq(caddySites.id, Number(req.params.id))).limit(1);
+  const siteId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(siteId)) return res.status(404).json({ error: 'Site not found' });
+  const [site] = await db.select().from(caddySites).where(eq(caddySites.id, siteId)).limit(1);
   if (!site) return res.status(404).json({ error: 'Site not found' });
   await removeSite(site, req);
   await logAudit(req, 'website_delete_site', site.domain, 'admin');
