@@ -1606,10 +1606,6 @@ router.get('/pve-hosts/:id/dependencies', pHosts, async (req, res) => {
 });
 
 router.delete('/pve-hosts/:id', pHosts, async (req, res) => {
-  const [{ count: hostCount }] = await db.select({ count: count() }).from(pveHosts);
-  if (hostCount <= 1) {
-    return res.status(400).json({ error: 'Cannot delete the last host' });
-  }
   const host = await getHost(Number.parseInt(req.params.id, 10));
   if (!host) return res.status(404).json({ error: 'Host not found' });
   try {
@@ -1617,6 +1613,9 @@ router.delete('/pve-hosts/:id', pHosts, async (req, res) => {
     await logAudit(req, 'pve_host_deleted', String(req.params.id), `name=${host.name}; host=${host.host}`);
     res.json({ ok: true });
   } catch (err) {
+    if (err.code === 'PVE_LAST_HOST') {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
     if (err.code === 'PVE_HOST_HAS_DEPENDENCIES') {
       return res.status(409).json({ error: err.message, code: err.code, ...err.report });
     }
