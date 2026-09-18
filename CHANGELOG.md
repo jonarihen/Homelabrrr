@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Malformed website links no longer crash with a server error
+
+- **Opening a website or server link with a non-numeric id answered `500`.** The lookup helpers passed the raw route parameter into an integer column, which PostgreSQL rejects — while the notifications, portal, and image routes already answered `404` for the same input
+- **Non-numeric ids now resolve to "not found".** The shared site/server lookups and the two admin site routes parse ids defensively, so `/sites/abc` and friends answer `404` like a numeric miss. A regression test covers all six affected endpoints
+
 ## 2026-09-18 — Double-submitted VM migrations no longer run twice
 
 - **Starting the same migration twice launched two competing transfers.** The already-running check and the migration insert were separate steps with seconds of Proxmox calls between them, so a double-click, retry, or script could pass the check twice and run duplicate cross-host copies with conflicting source rewrites
