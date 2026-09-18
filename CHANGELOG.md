@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Assigned LXC containers no longer show as errors in the VM list
+
+- **The dashboard showed every assigned LXC container as an error entry with a placeholder name.** `GET /api/vms` only queried the qemu status endpoint when building the user's VM list; for an assigned container that call fails, and the route fell straight through to the `status: 'error'` / `VM <id>` shape instead of trying the LXC endpoint
+- **The VM list now falls back to the LXC status endpoint, matching every other VM route.** If the qemu lookup fails the route retries through LXC (marked `type: 'lxc'`, qemu entries get `type: 'qemu'`), and only reports the error shape when both lookups fail. A regression test drives the fallback against a fake PVE API
+
 ## 2026-09-18 — Mistyping a confirmation password no longer signs you out
 
 - **Entering the wrong current password or authenticator code threw the user back to the sign-in page.** `PUT /api/auth/change-password` and `POST /api/auth/reauthenticate` answered `401` when the supplied confirmation credentials were wrong. The single axios instance treats any `401` outside the signed-out routes as an expired session and sends the browser to `/login`, so one typo in the Password card — or in the "Confirm your identity" dialog on the account and Operations pages — discarded the half-filled form and the pending action instead of reporting the mistake
