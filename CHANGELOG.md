@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Mistyping a confirmation password no longer signs you out
+
+- **Entering the wrong current password or authenticator code threw the user back to the sign-in page.** `PUT /api/auth/change-password` and `POST /api/auth/reauthenticate` answered `401` when the supplied confirmation credentials were wrong. The single axios instance treats any `401` outside the signed-out routes as an expired session and sends the browser to `/login`, so one typo in the Password card — or in the "Confirm your identity" dialog on the account and Operations pages — discarded the half-filled form and the pending action instead of reporting the mistake
+- **Wrong confirmation credentials are now a validation failure, not a session expiry.** Both endpoints return `403` with the machine-readable code `CONFIRMATION_FAILED`, so the page stays put and renders the existing "Current password is incorrect", "Password confirmation failed", or "Second-factor confirmation failed" message. `401` keeps its single meaning of "not signed in" — a genuinely expired session on these endpoints still redirects to the sign-in page
+
 ## 2026-09-18 — Invite links can only be redeemed once
 
 - **Simultaneous registrations could redeem the same invite more than once.** Redemption now locks the invite row inside the account-creation transaction before checking its status, so only one registration succeeds and competing requests receive the existing already-used response.

@@ -473,6 +473,14 @@ router.get('/me', async (req, res) => {
 
 // ─── Self-service account changes ────────────────────────────────────────
 
+// Wrong confirmation credentials supplied by an already-signed-in user are a
+// failed check on the request, not an expired session, so they answer 403 with
+// this code rather than 401. A 401 here is indistinguishable from a dead
+// session to the frontend's api.js interceptor, which bounces the user to
+// /login and throws away the form they were filling in. 401 remains reserved
+// for "you are not signed in".
+const CONFIRMATION_FAILED = 'CONFIRMATION_FAILED';
+
 router.put('/change-username', requireAuth, requireInteractiveSession, async (req, res) => {
   let username;
   try { username = validateUsername(req.body?.username); }
@@ -508,7 +516,7 @@ router.put('/change-password', requireAuth, requireInteractiveSession, async (re
 
   const [user] = await db.select({ password: users.password }).from(users).where(eq(users.id, req.session.userId)).limit(1);
   if (!bcrypt.compareSync(currentPassword, user.password)) {
-    return res.status(401).json({ error: 'Current password is incorrect' });
+    return res.status(403).json({ error: 'Current password is incorrect', code: CONFIRMATION_FAILED });
   }
 
   const hash = bcrypt.hashSync(newPassword, 10);
@@ -527,11 +535,11 @@ router.post('/reauthenticate', requireAuth, requireInteractiveSession, async (re
     .where(eq(users.id, req.session.userId))
     .limit(1);
   if (!user || !bcrypt.compareSync(String(password || ''), user.password)) {
-    return res.status(401).json({ error: 'Password confirmation failed' });
+    return res.status(403).json({ error: 'Password confirmation failed', code: CONFIRMATION_FAILED });
   }
   if (user.totp_enabled) {
     const valid = verifyTotp(code, decryptSecret(user.totp_secret));
-    if (!valid) return res.status(401).json({ error: 'Second-factor confirmation failed' });
+    if (!valid) return res.status(403).json({ error: 'Second-factor confirmation failed', code: CONFIRMATION_FAILED });
   }
   req.session.reauthenticatedAt = Date.now();
   await logAudit(req, 'session_reauthenticated', req.session.username, '');
