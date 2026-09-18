@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Concurrent Proxmox host deletes can no longer remove the last host
+
+- **Two simultaneous host deletions could wipe out every Proxmox host.** The last-host guard and the dependency check both ran outside the delete transaction, so two racing deletes each observed two hosts and each removed one — leaving zero hosts and no way to manage the cluster from the portal
+- **Host deletion now locks the host rows before counting.** The count, dependency check, and delete run in one transaction on locked rows, so the loser gets the existing "Cannot delete the last host" response. The route also handles that code directly instead of surfacing a server error. A concurrency regression test races two deletes and asserts exactly one wins
+
 ## 2026-09-18 — Account pages no longer crash for sessions of deleted users
 
 - **Changing the password, starting 2FA setup, or registering a passkey with a deleted account's session crashed with a server error.** Deleting a user leaves their session rows live, and the per-request session re-hydration races the handler, so these routes could look up a user row that no longer exists and dereference it — answering `500` instead of treating the caller as signed out
