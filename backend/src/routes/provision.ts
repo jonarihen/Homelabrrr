@@ -1077,6 +1077,8 @@ router.post('/admin/templates', requirePermission('can_manage_templates'), async
 router.put('/admin/templates/:id', requirePermission('can_manage_templates'), async (req: any, res: any) => {
   const { name, description, defaultCores, defaultMemory, defaultDiskGb, defaultStorage, cloudInit, enabled } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Template not found' });
   await db.update(vmTemplates).set({
     name, description: description || '',
     default_cores: parseInt(defaultCores) || 2,
@@ -1085,12 +1087,14 @@ router.put('/admin/templates/:id', requirePermission('can_manage_templates'), as
     default_storage: defaultStorage || 'local-lvm',
     cloud_init: !!cloudInit,
     enabled: enabled !== false,
-  }).where(eq(vmTemplates.id, Number(req.params.id)));
+  }).where(eq(vmTemplates.id, id));
   res.json({ ok: true });
 });
 
 router.delete('/admin/templates/:id', requirePermission('can_manage_templates'), async (req: any, res: any) => {
-  await db.delete(vmTemplates).where(eq(vmTemplates.id, Number(req.params.id)));
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Template not found' });
+  await db.delete(vmTemplates).where(eq(vmTemplates.id, id));
   res.json({ ok: true });
 });
 
