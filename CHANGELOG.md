@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Invite links can only be redeemed once
+
+- **Simultaneous registrations could redeem the same invite more than once.** Redemption now locks the invite row inside the account-creation transaction before checking its status, so only one registration succeeds and competing requests receive the existing already-used response.
+- **Failed registrations leave the invite available for retry.** PostgreSQL regression tests cover concurrent redemption and rollback after a duplicate username.
+
 ## 2026-09-15 — SSH Files tab now preserves selected key and passphrase
 
 - **Opening the Files tab in browser SSH sessions ignored the key and passphrase the user selected during connection.** When a user chose a non-default SSH key, or entered a passphrase for an encrypted key, the terminal would authenticate successfully but subsequent attempts to open the Files tab would silently use the first key from the list with an empty passphrase, causing authentication failures without any user-facing indication that the wrong credentials were used
