@@ -383,7 +383,7 @@ router.post('/invite/:token', inviteLimiter, async (req, res, next) => {
   try {
     newUser = await db.transaction(async (tx) => {
       // Re-check inside the transaction to close the double-redeem race.
-      const [fresh] = await tx.select().from(invites).where(eq(invites.id, invite!.id)).limit(1);
+      const [fresh] = await tx.select().from(invites).where(eq(invites.id, invite!.id)).limit(1).for('update');
       if (inviteStatus(fresh) !== 'open') {
         const err: any = new Error('INVITE_CONSUMED');
         err.code = 'INVITE_CONSUMED';
