@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Double-submitted VM migrations no longer run twice
+
+- **Starting the same migration twice launched two competing transfers.** The already-running check and the migration insert were separate steps with seconds of Proxmox calls between them, so a double-click, retry, or script could pass the check twice and run duplicate cross-host copies with conflicting source rewrites
+- **One VM can now have only one running migration at the database level.** A partial unique index enforces a single `running` row per VMID while leaving finished history untouched, and the loser gets the existing "already running" response. A regression test races two inserts and asserts exactly one wins
+
 ## 2026-09-18 — Concurrent Proxmox host deletes can no longer remove the last host
 
 - **Two simultaneous host deletions could wipe out every Proxmox host.** The last-host guard and the dependency check both ran outside the delete transaction, so two racing deletes each observed two hosts and each removed one — leaving zero hosts and no way to manage the cluster from the portal

@@ -1,4 +1,5 @@
 // Part of the Drizzle PostgreSQL schema (VM domain) — see docs/postgres-conventions.md for the transcription rules.
+import { sql } from 'drizzle-orm';
 import {
   pgTable,
   integer,
@@ -236,5 +237,8 @@ export const vmMigrations = pgTable(
     upstream_status: text('upstream_status').notNull().default(''),
     upstream_checked_at: timestamp('upstream_checked_at', { withTimezone: true, mode: 'date' }),
   },
-  (t) => [index('idx_vm_migrations_status').on(t.status)]
+  (t) => [
+    index('idx_vm_migrations_status').on(t.status),
+    uniqueIndex('vm_migrations_vmid_running_unique').on(t.vmid).where(sql`status = 'running'`),
+  ]
 );
