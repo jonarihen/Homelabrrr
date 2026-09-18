@@ -434,9 +434,14 @@ router.get('/', async (req, res) => {
     const hostName = await hostNameForNode(a.node);
     try {
       const status = await getVMStatus(a.node, a.vmid);
-      return { ...status, ...nodeIdentity, hostName, assignmentId: a.id, lease };
+      return { ...status, ...nodeIdentity, hostName, assignmentId: a.id, lease, type: 'qemu' };
     } catch {
-      return { vmid: a.vmid, ...nodeIdentity, hostName, name: `VM ${a.vmid}`, status: 'error', assignmentId: a.id, lease };
+      try {
+        const status = await getLXCStatus(a.node, a.vmid);
+        return { ...status, ...nodeIdentity, hostName, assignmentId: a.id, lease, type: 'lxc' };
+      } catch {
+        return { vmid: a.vmid, ...nodeIdentity, hostName, name: `VM ${a.vmid}`, status: 'error', assignmentId: a.id, lease };
+      }
     }
   }));
 
