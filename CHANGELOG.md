@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Malformed template links no longer crash with a server error
+
+- **Editing or deleting a provisioning template with a non-numeric id answered `500`.** The admin template routes passed the raw route parameter into an integer column, which PostgreSQL rejects — the same class as the website routes fixed just before
+- **Non-numeric template ids now answer `404`.** Both routes parse the id first and return "Template not found" for anything that isn't an integer. A regression test covers both endpoints
+
 ## 2026-09-18 — Malformed website links no longer crash with a server error
 
 - **Opening a website or server link with a non-numeric id answered `500`.** The lookup helpers passed the raw route parameter into an integer column, which PostgreSQL rejects — while the notifications, portal, and image routes already answered `404` for the same input
