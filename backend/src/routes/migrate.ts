@@ -13,6 +13,7 @@ import { readTaskProgress } from '../utils/taskProgress.ts';
 import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.ts';
 import { sharedStorageKey } from '../utils/sharedStorage.ts';
 import { requireAdmin } from '../middleware/auth.ts';
+import { isUniqueViolation } from '../db/errors.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { sendError } from '../utils/httpError.ts';
 import { logAudit } from '../utils/audit.ts';
@@ -1025,23 +1026,33 @@ router.post('/:node/:vmid', async (req, res) => {
       }
     }
 
-    const [inserted] = await db.insert(vmMigrations).values({
-      user_id: req.session.userId,
-      vmid,
-      name: vm.name || '',
-      vmtype,
-      source_node: sourceRef,
-      target_node: targetNode,
-      target_storage: migrateStorage || '',
-      target_bridge: targetBridge,
-      // online / delete_source are real booleans now.
-      online: mode === 'remote_migrate' && vmtype === 'qemu' && running && !!online,
-      delete_source: mode === 'adopt' ? false : !!deleteSource,
-      status: 'running',
-      upid: upid || '',
-      mode,
-      request_id: req.requestId || '',
-    }).returning({ id: vmMigrations.id });
+    let inserted;
+    try {
+      [inserted] = await db.insert(vmMigrations).values({
+        user_id: req.session.userId,
+        vmid,
+        name: vm.name || '',
+        vmtype,
+        source_node: sourceRef,
+        target_node: targetNode,
+        target_storage: migrateStorage || '',
+        target_bridge: targetBridge,
+        // online / delete_source are real booleans now.
+        online: mode === 'remote_migrate' && vmtype === 'qemu' && running && !!online,
+        delete_source: mode === 'adopt' ? false : !!deleteSource,
+        status: 'running',
+        upid: upid || '',
+        mode,
+        request_id: req.requestId || '',
+      }).returning({ id: vmMigrations.id });
+    } catch (err) {
+      // A concurrent request claimed this VM after the pre-check above — the
+      // partial unique index on running migrations is the arbiter.
+      if (isUniqueViolation(err)) {
+        return res.status(409).json({ error: 'A migration for this VM is already running' });
+      }
+      throw err;
+    }
     const migrationId = inserted.id;
 
     if (mode === 'adopt') {

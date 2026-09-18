@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "vm_migrations_vmid_running_unique" ON "vm_migrations" USING btree ("vmid") WHERE status = 'running';
