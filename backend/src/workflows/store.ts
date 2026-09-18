@@ -211,7 +211,11 @@ export async function getRun(id: number) {
 
 export async function listRuns({ firewallId, trigger, subjectType, subjectId, limit = 50 }: any = {}) {
   const clauses = [];
-  if (firewallId) clauses.push(eq(workflowRuns.firewall_id, Number(firewallId)));
+  if (firewallId !== undefined && firewallId !== null && firewallId !== '') {
+    const parsed = Number(firewallId);
+    if (!Number.isInteger(parsed)) return [];
+    clauses.push(eq(workflowRuns.firewall_id, parsed));
+  }
   if (trigger) clauses.push(eq(workflowRuns.trigger, trigger));
   if (subjectType) clauses.push(eq(workflowRuns.subject_type, subjectType));
   if (subjectId != null && subjectId !== '') clauses.push(eq(workflowRuns.subject_id, String(subjectId)));

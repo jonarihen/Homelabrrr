@@ -21,7 +21,9 @@ router.use(requireAuth);
 const pFirewalls = requirePermission('can_manage_firewalls');
 
 async function getFirewall(id: any) {
-  const [row] = await db.select().from(firewalls).where(eq(firewalls.id, Number(id))).limit(1);
+  const parsed = Number(id);
+  if (!Number.isInteger(parsed)) return undefined;
+  const [row] = await db.select().from(firewalls).where(eq(firewalls.id, parsed)).limit(1);
   return row;
 }
 
@@ -121,20 +123,26 @@ router.get('/runs', pFirewalls, async (req, res) => {
 });
 
 router.get('/runs/:id', pFirewalls, async (req, res) => {
-  const run = await getRun(Number(req.params.id));
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Run not found' });
+  const run = await getRun(id);
   if (!run) return res.status(404).json({ error: 'Run not found' });
   res.json(run);
 });
 
 router.get('/:id', pFirewalls, async (req, res) => {
-  const bundle = await getWorkflowById(Number(req.params.id));
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Workflow not found' });
+  const bundle = await getWorkflowById(id);
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
   res.json({ ...bundle.workflow, settings: workflowSettings(bundle.workflow), steps: bundle.steps });
 });
 
 // ─── Update workflow meta (name, enabled, settings) ───────────────────────────
 router.put('/:id', pFirewalls, async (req, res) => {
-  const bundle = await getWorkflowById(Number(req.params.id));
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Workflow not found' });
+  const bundle = await getWorkflowById(id);
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
   const { name, enabled, settings } = req.body;
   if (settings !== undefined && (typeof settings !== 'object' || settings === null || Array.isArray(settings))) {
@@ -147,7 +155,9 @@ router.put('/:id', pFirewalls, async (req, res) => {
 
 // ─── Replace steps ────────────────────────────────────────────────────────────
 router.put('/:id/steps', pFirewalls, async (req, res) => {
-  const bundle = await getWorkflowById(Number(req.params.id));
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Workflow not found' });
+  const bundle = await getWorkflowById(id);
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
   const { steps } = req.body;
   if (!Array.isArray(steps)) return res.status(400).json({ error: 'steps must be an array' });
@@ -185,7 +195,9 @@ router.put('/:id/steps', pFirewalls, async (req, res) => {
 
 // ─── Reset to built-in default ────────────────────────────────────────────────
 router.post('/:id/reset', pFirewalls, async (req, res) => {
-  const bundle = await getWorkflowById(Number(req.params.id));
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Workflow not found' });
+  const bundle = await getWorkflowById(id);
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
   await resetWorkflow(bundle.workflow.id);
   await logAudit(req, 'workflow_reset', `${bundle.workflow.trigger} (fw ${bundle.workflow.firewall_id})`, 'reset to default');
@@ -194,7 +206,9 @@ router.post('/:id/reset', pFirewalls, async (req, res) => {
 
 // ─── Dry-run preview ──────────────────────────────────────────────────────────
 router.post('/:id/dry-run', pFirewalls, async (req, res) => {
-  const bundle = await getWorkflowById(Number(req.params.id));
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Workflow not found' });
+  const bundle = await getWorkflowById(id);
   if (!bundle) return res.status(404).json({ error: 'Workflow not found' });
   const fw = await getFirewall(bundle.workflow.firewall_id);
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
