@@ -22,6 +22,8 @@ import { boundedString } from '../utils/validation.ts';
 const router = Router();
 router.use(requireAuth);
 
+const SFTP_SESSION_EXPIRED = 'SFTP_SESSION_EXPIRED';
+
 /**
  * The upload path settles its response by hand — it has to hang up rather than
  * drain gigabytes of a rejected transfer — so it needs the body without the
@@ -200,7 +202,7 @@ router.post('/connect', async (req, res) => {
 router.post('/ls', async (req, res) => {
   const { token, path: dirPath = '/' } = req.body;
   const sess = resolveSession(token);
-  if (!sess) return res.status(401).json({ error: 'SFTP session expired or invalid' });
+  if (!sess) return res.status(403).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
   if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
 
   let conn, sftp;
@@ -244,7 +246,7 @@ router.post('/ls', async (req, res) => {
 router.get('/download', async (req, res) => {
   const { token, path: filePath } = req.query;
   const sess = resolveSession(token);
-  if (!sess) return res.status(401).json({ error: 'SFTP session expired or invalid' });
+  if (!sess) return res.status(403).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
   if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
   if (!filePath) return res.status(400).json({ error: 'path is required' });
 
@@ -354,7 +356,7 @@ router.post('/upload', (req, res) => {
 
     if (!fields.token) return fail(400, 'token and path must be sent before the file part');
     const sess = resolveSession(fields.token);
-    if (!sess) return fail(401, 'SFTP session expired or invalid');
+    if (!sess) return fail(403, { error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
     if (sess.userId !== req.session.userId) return fail(403, 'Access denied');
 
     const filename = basename(info.filename || '');
@@ -415,7 +417,7 @@ router.post('/upload', (req, res) => {
 router.post('/mkdir', async (req, res) => {
   const { token, path: dirPath } = req.body;
   const sess = resolveSession(token);
-  if (!sess) return res.status(401).json({ error: 'SFTP session expired or invalid' });
+  if (!sess) return res.status(403).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
   if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
   if (!dirPath) return res.status(400).json({ error: 'path is required' });
 
@@ -440,7 +442,7 @@ router.post('/mkdir', async (req, res) => {
 router.post('/delete', async (req, res) => {
   const { token, path: targetPath, isDirectory = false } = req.body;
   const sess = resolveSession(token);
-  if (!sess) return res.status(401).json({ error: 'SFTP session expired or invalid' });
+  if (!sess) return res.status(403).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
   if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
   if (!targetPath) return res.status(400).json({ error: 'path is required' });
 
@@ -466,7 +468,7 @@ router.post('/delete', async (req, res) => {
 router.post('/rename', async (req, res) => {
   const { token, path: sourcePath } = req.body || {};
   const sess = resolveSession(token);
-  if (!sess) return res.status(401).json({ error: 'SFTP session expired or invalid' });
+  if (!sess) return res.status(403).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
   if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
   let name;
   try {

@@ -46,24 +46,28 @@ export default function SSHSessionPanel({ vm, visible = true }) {
     }
   };
 
+  const mintSftpToken = async () => {
+    const vmNode = routeNode(vm);
+    const { data } = await api.post('/sftp/connect', {
+      node: vmNode,
+      vmid: vm.vmid,
+      keyId: formRef.current.keyId,
+      passphrase: formRef.current.passphrase,
+    });
+    setSftpToken(data.token);
+    return data.token;
+  };
+
   const openFiles = async () => {
     if (sftpToken) {
       setActiveTab('files');
       return;
     }
 
-    const vmNode = routeNode(vm);
     setSftpConnecting(true);
     setSftpError('');
     try {
-      const { data } = await api.post('/sftp/connect', {
-        node: vmNode,
-        vmid: vm.vmid,
-        keyId: formRef.current.keyId,
-        passphrase: formRef.current.passphrase,
-      });
-
-      setSftpToken(data.token);
+      await mintSftpToken();
       setActiveTab('files');
     } catch (e) {
       setSftpError(e.response?.data?.error || 'Failed to connect SFTP');
@@ -115,7 +119,7 @@ export default function SSHSessionPanel({ vm, visible = true }) {
 
       {activeTab === 'files' && sftpToken && (
         <div className="min-h-0 flex-1 relative">
-          <SFTPBrowser token={sftpToken} />
+          <SFTPBrowser token={sftpToken} onReconnect={mintSftpToken} />
         </div>
       )}
     </div>
