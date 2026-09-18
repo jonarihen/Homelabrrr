@@ -120,7 +120,9 @@ router.post('/encryption/rotate', requireAdmin, requireRecentReauthentication, a
 });
 
 router.post('/provision/:id/reconcile', requireRecentReauthentication, async (req, res) => {
-  const [row] = await db.select().from(provisionedVms).where(eq(provisionedVms.id, Number(req.params.id))).limit(1);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Provisioning operation not found' });
+  const [row] = await db.select().from(provisionedVms).where(eq(provisionedVms.id, id)).limit(1);
   if (!row) return res.status(404).json({ error: 'Provisioning operation not found' });
   if (!row.upid) return res.status(400).json({ error: 'This operation has no upstream task identifier to reconcile' });
   try {
@@ -141,7 +143,9 @@ router.post('/provision/:id/reconcile', requireRecentReauthentication, async (re
 });
 
 router.post('/migration/:id/reconcile', requireRecentReauthentication, async (req, res) => {
-  const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, Number(req.params.id))).limit(1);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Migration operation not found' });
+  const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
   if (!row) return res.status(404).json({ error: 'Migration operation not found' });
   if (!row.upid) return res.status(400).json({ error: 'This operation has no upstream task identifier to reconcile' });
   try {
@@ -161,7 +165,9 @@ router.post('/migration/:id/reconcile', requireRecentReauthentication, async (re
 router.post('/migration/:id/resolve', requireRecentReauthentication, async (req, res) => {
   const status = req.body?.status;
   if (!['ok', 'error'].includes(status)) return res.status(400).json({ error: 'status must be ok or error' });
-  const [row] = await db.select({ id: vmMigrations.id, status: vmMigrations.status }).from(vmMigrations).where(eq(vmMigrations.id, Number(req.params.id))).limit(1);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Migration operation not found' });
+  const [row] = await db.select({ id: vmMigrations.id, status: vmMigrations.status }).from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
   if (!row) return res.status(404).json({ error: 'Migration operation not found' });
   if (row.status !== 'needs_review') return res.status(409).json({ error: 'Only interrupted migrations awaiting review can be resolved manually' });
   const detail = status === 'ok'
@@ -175,7 +181,9 @@ router.post('/migration/:id/resolve', requireRecentReauthentication, async (req,
 router.post('/provision/:id/resolve', requireRecentReauthentication, async (req, res) => {
   const status = req.body?.status;
   if (!['ready', 'error'].includes(status)) return res.status(400).json({ error: 'status must be ready or error' });
-  const [row] = await db.select({ id: provisionedVms.id, status: provisionedVms.status }).from(provisionedVms).where(eq(provisionedVms.id, Number(req.params.id))).limit(1);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'Provisioning operation not found' });
+  const [row] = await db.select({ id: provisionedVms.id, status: provisionedVms.status }).from(provisionedVms).where(eq(provisionedVms.id, id)).limit(1);
   if (!row) return res.status(404).json({ error: 'Provisioning operation not found' });
   if (row.status !== 'needs_review') return res.status(409).json({ error: 'Only interrupted provisioning awaiting review can be resolved manually' });
   const detail = status === 'ready' ? 'Manually verified by an administrator after reconciliation.' : 'Marked failed by an administrator after reconciliation.';
@@ -185,7 +193,11 @@ router.post('/provision/:id/resolve', requireRecentReauthentication, async (req,
 });
 
 async function cleanupOperation(req: any, res: any, type: string) {
-  const result = await cleanupOperationTracking(db, type, Number(req.params.id));
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    return res.status(404).json({ error: type === 'migration' ? 'Migration operation not found' : 'Provisioning operation not found' });
+  }
+  const result = await cleanupOperationTracking(db, type, id);
   // Repeated cleanup is intentionally harmless so an operator can safely retry
   // after a lost response.
   if (result.alreadyAbsent) return res.json(result);

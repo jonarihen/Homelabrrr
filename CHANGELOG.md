@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-18 — Malformed operation links no longer crash with a server error
+
+- **Opening an operation reconcile, resolve, or cleanup link with a non-numeric id answered `500`.** The operations routes passed the raw parameter into an integer column, which PostgreSQL rejects — the same class as the website, template, and workflow routes fixed just before
+- **Non-numeric operation ids now resolve to "not found".** All six endpoints answer their existing `404`. A regression test covers every route
+
 ## 2026-09-18 — Malformed workflow links no longer crash with a server error
 
 - **Opening a workflow, run, or firewall-scoped workflow link with a non-numeric id answered `500`.** The workflow routes and run-listing filter passed the raw parameter into an integer column, which PostgreSQL rejects — the same class as the website and template routes fixed just before
