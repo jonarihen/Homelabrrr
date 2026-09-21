@@ -1,3 +1,4 @@
 self-hosted-runner:
   labels:
     - homelabrrr-production
+    - dev-ci
