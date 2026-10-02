@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-02 — User edits are staged and applied together after a review
+
+- **Clicking a toggle in Manage User no longer changes the account instantly.** Role, permissions, Enforce 2FA, quotas, and VM/VLAN assignments are now staged locally; changed controls are marked as pending and a sticky "N pending changes — Discard / Review & Apply" bar appears. Closing the dialog with pending edits asks first
+- **A review step lists every change before it is saved.** Grants, revocations, field and quota changes are shown as a diff; high-impact changes (granting `Operate all VMs`, a role that grants it, or turning off Enforce 2FA) require typing the username to confirm
+- **All staged changes apply in one transaction.** The new `PATCH /api/admin/users/:id` validates the whole batch first, keeps each change behind its own permission check (assignment managers can still stage VM/VLAN changes but nothing privileged), audits every applied change, and rolls everything back if any part fails
+- **Two admins can no longer silently overwrite each other.** The dialog loads a version of the user's state; if someone else changed the user meanwhile, applying answers `409` and the dialog reloads the latest state
+
 ## 2026-10-02 — Role management: clone, holders, safer delete, and review before save
 
 - **Clone a role in one click.** Every role (built-ins included) has a Clone action that copies its permissions, quotas and description into a new editable role, named `<role> (copy)` unless you pick a name. Holders are not moved

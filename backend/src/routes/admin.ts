@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { createHash } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import {
   and, eq, ne, desc, inArray, sql, count, getTableColumns,
@@ -22,7 +23,7 @@ import {
 } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { sendError } from '../utils/httpError.ts';
-import { logAudit } from '../utils/audit.ts';
+import { logAudit, logAuditTx } from '../utils/audit.ts';
 import { encryptSecret } from '../utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { shortenVipName, PORT_FORWARD_NAME_MAX } from '../utils/vipName.ts';
@@ -553,6 +554,286 @@ router.put('/users/:id/quotas', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Staged user edits (batch apply) ──────────────────────────────────────────
+// The Manage User modal stages every change locally and applies them here in
+// one transaction. `version` is a digest of the editable state the client
+// loaded; a mismatch means someone else changed the user meanwhile (409).
+
+const roleRef = (id) => `role:${id}`;
+
+const USER_FLAG_KEYS = ['see_all_vms', 'can_provision', 'can_create_vms', ...TOGGLEABLE_PERMISSIONS] as const;
+const USER_PATCH_FIELDS = ['version', 'roleId', 'roleVersion', 'permissions', 'require2fa', 'quotas', 'vms', 'vlans'];
+const MAX_BATCH_ITEMS = 500;
+const roleDefinitionVersion = (role) => createHash('sha256').update(JSON.stringify(role)).digest('hex').slice(0, 24);
+
+class PatchError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function loadUserState(executor, userId, { lock = false } = {}) {
+  let q = executor.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (lock) q = q.for('update');
+  const [row] = await q;
+  if (!row) return null;
+  let roleQuery = executor.select().from(roles).orderBy(roles.id);
+  if (lock) roleQuery = roleQuery.for('share');
+  const roleRows = await roleQuery;
+  const rolePerms = await executor.select().from(rolePermissions)
+    .orderBy(rolePermissions.role_id, rolePermissions.permission);
+  const roleDefinitions = roleRows.map((r) => ({
+    id: r.id, name: r.name, permissions: rolePerms.filter((p) => p.role_id === r.id).map((p) => p.permission),
+    max_cores: r.max_cores, max_memory_gb: r.max_memory_gb, max_storage_gb: r.max_storage_gb,
+  }));
+  const vms = await executor.select({ id: vmAssignments.id, node: vmAssignments.node, vmid: vmAssignments.vmid })
+    .from(vmAssignments).where(eq(vmAssignments.user_id, userId)).orderBy(vmAssignments.id);
+  const vlanRows = await executor.select({ vlan_id: userVlans.vlan_id })
+    .from(userVlans).where(eq(userVlans.user_id, userId)).orderBy(userVlans.vlan_id);
+  const state = {
+    id: row.id,
+    username: row.username,
+    is_admin: !!row.is_admin,
+    role_id: row.role_id ?? null,
+    permissions: Object.fromEntries(USER_FLAG_KEYS.map((k) => [k, !!row[k]])),
+    require_2fa: !!row.require_2fa,
+    quotas: { max_cores: row.max_cores ?? null, max_memory_gb: row.max_memory_gb ?? null, max_storage_gb: row.max_storage_gb ?? null },
+    vms: vms.map((v) => ({ id: v.id, node: v.node, vmid: v.vmid })),
+    vlan_ids: vlanRows.map((v) => v.vlan_id),
+    roleDefinitions: roleDefinitions.map((r) => ({ ...r, version: roleDefinitionVersion(r) })),
+  };
+  const versionState = {
+    ...state,
+    roleDefinitions: state.roleDefinitions.filter((r) => r.id === state.role_id),
+  };
+  const version = createHash('sha256').update(JSON.stringify(versionState)).digest('hex').slice(0, 24);
+  return { ...state, version };
+}
+
+function patchSection(value, field, allowed, required = []) {
+  try { return validateObject(value, { fields: allowed, required }); }
+  catch (err) { throw new PatchError(400, `${field}: ${err.message}`); }
+}
+
+function parseIdList(value, field) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_BATCH_ITEMS) throw new PatchError(400, `${field} must be a list`);
+  const ids = value.map(parseRoleId);
+  if (ids.some((id) => id === null)) throw new PatchError(400, `${field} must contain integer ids`);
+  return [...new Set(ids)];
+}
+
+// Validates the whole body before anything is written and returns a normalized
+// plan. Each sub-change is gated on its own permission, not just the route's.
+function planUserPatch(body, isAdmin) {
+  try { validateObject(body, { fields: USER_PATCH_FIELDS }); }
+  catch (err) { throw new PatchError(400, err.message); }
+  const plan: any = { version: body.version };
+  const privileged = ['roleId', 'permissions', 'require2fa', 'quotas'].filter((k) => body[k] !== undefined);
+  if (privileged.length && !isAdmin) throw new PatchError(403, `Only admins can change ${privileged.join(', ')}`);
+
+  if (body.version !== undefined && typeof body.version !== 'string') throw new PatchError(400, 'version must be a string');
+
+  if (body.roleId !== undefined) {
+    if (body.roleId === null || body.roleId === '') plan.roleId = null;
+    else {
+      plan.roleId = parseRoleId(body.roleId);
+      if (plan.roleId === null) throw new PatchError(400, 'roleId must be an integer or null');
+      if (typeof body.roleVersion !== 'string' || !/^[a-f0-9]{24}$/.test(body.roleVersion)) {
+        throw new PatchError(400, 'roleVersion required when assigning a role');
+      }
+      plan.roleVersion = body.roleVersion;
+    }
+  } else if (body.roleVersion !== undefined) {
+    throw new PatchError(400, 'roleVersion requires roleId');
+  }
+  if (body.permissions !== undefined) {
+    if (!body.permissions || typeof body.permissions !== 'object' || Array.isArray(body.permissions)) {
+      throw new PatchError(400, 'permissions must be an object of key → boolean');
+    }
+    plan.permissions = {};
+    for (const [key, value] of Object.entries(body.permissions)) {
+      if (!(USER_FLAG_KEYS as readonly string[]).includes(key)) throw new PatchError(400, `Invalid permission: ${key}`);
+      if (typeof value !== 'boolean') throw new PatchError(400, `Permission ${key} must be true or false`);
+      plan.permissions[key] = value;
+    }
+  }
+  if (body.require2fa !== undefined) {
+    if (typeof body.require2fa !== 'boolean') throw new PatchError(400, 'require2fa must be true or false');
+    plan.require2fa = body.require2fa;
+  }
+  if (body.quotas !== undefined) {
+    const q = patchSection(body.quotas, 'quotas', ['maxCores', 'maxMemoryGb', 'maxStorageGb']);
+    if (Object.keys(q).length === 0) throw new PatchError(400, 'quotas must include a quota value');
+    plan.quotas = {};
+    for (const [key, column] of [['maxCores', 'max_cores'], ['maxMemoryGb', 'max_memory_gb'], ['maxStorageGb', 'max_storage_gb']]) {
+      if (!(key in q)) continue;
+      const value = parseQuotaValue(q[key]);
+      if (value === undefined) throw new PatchError(400, 'Quota values must be non-negative integers (empty = unlimited)');
+      plan.quotas[column] = value;
+    }
+  }
+  if (body.vms !== undefined) {
+    const v = patchSection(body.vms, 'vms', ['add', 'remove']);
+    const add = v.add === undefined ? [] : v.add;
+    if (!Array.isArray(add) || add.length > MAX_BATCH_ITEMS) throw new PatchError(400, 'vms.add must be a list');
+    plan.vmAdd = add.map((raw) => {
+      const item = patchSection(raw, 'vms.add item', ['node', 'vmid'], ['node', 'vmid']);
+      const node = typeof item.node === 'string' ? item.node.trim() : '';
+      const vmid = parseRoleId(item.vmid);
+      if (!node || node.length > 255 || vmid === null) throw new PatchError(400, 'Each VM needs a node and integer vmid');
+      return { node, vmid };
+    });
+    plan.vmRemove = parseIdList(v.remove, 'vms.remove');
+  }
+  if (body.vlans !== undefined) {
+    const v = patchSection(body.vlans, 'vlans', ['add', 'remove']);
+    plan.vlanAdd = parseIdList(v.add, 'vlans.add');
+    plan.vlanRemove = parseIdList(v.remove, 'vlans.remove');
+    if (plan.vlanAdd.some((id) => plan.vlanRemove.includes(id))) throw new PatchError(400, 'A VLAN cannot be both added and removed');
+  }
+  return plan;
+}
+
+router.get('/users/:id/state', pAssignments, async (req, res) => {
+  const userId = parseRoleId(req.params.id);
+  const state = userId === null ? null : await loadUserState(db, userId);
+  if (!state) return res.status(404).json({ error: 'User not found' });
+  res.json(state);
+});
+
+async function syncBatchVmTags(vms) {
+  const unique = [...new Map(vms.map((vm) => [`${vm.node}/${vm.vmid}`, vm])).values()];
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < unique.length) {
+      const vm = unique[cursor++];
+      await syncVmTagsSafe(vm.node, vm.vmid);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, unique.length) }, worker));
+}
+
+router.patch('/users/:id', pAssignments, async (req, res) => {
+  const userId = parseRoleId(req.params.id);
+  if (userId === null) return res.status(404).json({ error: 'User not found' });
+  const isAdmin = !!req.session.isAdmin;
+
+  let plan;
+  try { plan = planUserPatch(req.body, isAdmin); }
+  catch (err) {
+    if (err instanceof PatchError) return res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+
+  const audits = [];
+  const tagSync = [];
+  let after;
+  try {
+    after = await db.transaction(async (tx) => {
+      const before = await loadUserState(tx, userId, { lock: true });
+      if (!before) throw new PatchError(404, 'User not found');
+      if (before.is_admin && !isAdmin) throw new PatchError(403, 'Only admins can modify admin accounts');
+      if (plan.version !== undefined && plan.version !== before.version) {
+        throw new PatchError(409, 'This user was changed by someone else since you opened it — reload to see the latest state');
+      }
+      if (plan.roleVersion) {
+        const definition = before.roleDefinitions.find((r) => r.id === plan.roleId);
+        if (!definition) throw new PatchError(400, 'Role not found');
+        if (definition.version !== plan.roleVersion) {
+          throw new PatchError(409, 'The destination role changed since you reviewed it — reload and try again');
+        }
+      }
+
+      const patch: any = {};
+      if (plan.roleId !== undefined && plan.roleId !== before.role_id) {
+        let roleName = 'none';
+        if (plan.roleId !== null) {
+          const [role] = await tx.select({ id: roles.id, name: roles.name }).from(roles).where(eq(roles.id, plan.roleId)).limit(1);
+          if (!role) throw new PatchError(400, 'Role not found');
+          roleName = role.name;
+        }
+        patch.role_id = plan.roleId;
+        audits.push({ action: 'admin_assign_role', target: before.username, detail: roleName, targetRef: plan.roleId === null ? null : roleRef(plan.roleId) });
+        if (before.role_id != null) {
+          audits.push({
+            action: 'admin_unassign_role', target: before.username,
+            detail: plan.roleId === null ? 'role removed' : `moved to ${roleName}`,
+            targetRef: roleRef(before.role_id),
+          });
+        }
+      }
+      for (const [key, value] of Object.entries(plan.permissions || {})) {
+        if (before.permissions[key] === value) continue;
+        patch[key] = value;
+        audits.push({ action: 'admin_toggle_permission', target: String(userId), detail: `${key}=${value ? 1 : 0}` });
+      }
+      if (plan.require2fa !== undefined && plan.require2fa !== before.require_2fa) {
+        patch.require_2fa = plan.require2fa;
+        audits.push({ action: 'admin_toggle_permission', target: String(userId), detail: `require_2fa=${plan.require2fa ? 1 : 0}` });
+      }
+      if (plan.quotas) {
+        const q = { ...before.quotas, ...plan.quotas };
+        const changed = Object.keys(q).some((k) => q[k] !== before.quotas[k]);
+        if (changed) {
+          Object.assign(patch, plan.quotas);
+          audits.push({
+            action: 'admin_set_quotas', target: before.username,
+            detail: `cores=${q.max_cores ?? '∞'} memory=${q.max_memory_gb ?? '∞'}GB storage=${q.max_storage_gb ?? '∞'}GB`,
+          });
+        }
+      }
+      if (Object.keys(patch).length) await tx.update(users).set(patch).where(eq(users.id, userId));
+
+      if (plan.vmRemove?.length) {
+        const removed = await tx.delete(vmAssignments)
+          .where(and(eq(vmAssignments.user_id, userId), inArray(vmAssignments.id, plan.vmRemove)))
+          .returning({ node: vmAssignments.node, vmid: vmAssignments.vmid });
+        if (removed.length !== plan.vmRemove.length) throw new PatchError(409, 'A VM assignment to remove no longer exists — reload and try again');
+        for (const r of removed) {
+          tagSync.push(r);
+          audits.push({ action: 'admin_unassign_vm', target: before.username, detail: `${r.node}/${r.vmid}` });
+        }
+      }
+      for (const vm of plan.vmAdd || []) {
+        await tx.insert(vmAssignments).values({ user_id: userId, node: vm.node, vmid: vm.vmid });
+        tagSync.push(vm);
+        audits.push({ action: 'admin_assign_vm', target: before.username, detail: `${vm.node}/${vm.vmid}` });
+      }
+
+      if (plan.vlanRemove?.length) {
+        const removed = await tx.delete(userVlans)
+          .where(and(eq(userVlans.user_id, userId), inArray(userVlans.vlan_id, plan.vlanRemove)))
+          .returning({ vlan_id: userVlans.vlan_id });
+        if (removed.length !== plan.vlanRemove.length) throw new PatchError(409, 'A VLAN to remove is no longer assigned — reload and try again');
+        for (const r of removed) audits.push({ action: 'admin_unassign_vlan', target: before.username, detail: String(r.vlan_id) });
+      }
+      if (plan.vlanAdd?.length) {
+        await tx.insert(userVlans).values(plan.vlanAdd.map((vlanId) => ({ user_id: userId, vlan_id: vlanId })));
+        for (const id of plan.vlanAdd) audits.push({ action: 'admin_assign_vlan', target: before.username, detail: String(id) });
+      }
+
+      // Audit rows ride the same transaction: the trail and the change commit
+      // (or roll back) together.
+      await logAuditTx(tx, req, audits);
+      return loadUserState(tx, userId, {});
+    });
+  } catch (err) {
+    if (err instanceof PatchError) return res.status(err.status).json({ error: err.message });
+    if (err?.code === '40P01' || err?.cause?.code === '40P01') {
+      return res.status(409).json({ error: 'A concurrent role change conflicted with this edit — reload and try again' });
+    }
+    if (isUniqueViolation(err)) return res.status(400).json({ error: 'A VM or VLAN in this change is already assigned' });
+    if (isForeignKeyViolation(err)) return res.status(400).json({ error: 'A VLAN in this change no longer exists' });
+    throw err;
+  }
+
+  res.json({ ...after, applied: audits.length });
+  void syncBatchVmTags(tagSync);
+});
+
 // Per-user allocated usage for the Users page — one resource-list call
 // covers every user, so this stays cheap even with many accounts.
 router.get('/user-usage', pUsers, async (req, res) => {
@@ -633,7 +914,6 @@ function parseRoleId(value): number | null {
   return Number.isInteger(n) && n >= 1 && n <= PG_INT_MAX ? n : null;
 }
 
-const roleRef = (id) => `role:${id}`;
 
 class RoleConflict extends Error {
   status: number;

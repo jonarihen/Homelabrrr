@@ -1,0 +1,160 @@
+// Run with:  node --test src/utils/userDraft.test.js   (from frontend/)
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { draftFromState, buildUserPatch, describeUserChanges, invalidQuotaKeys } from './userDraft.js';
+
+const state = {
+  id: 5,
+  username: 'alice',
+  version: 'v1',
+  role_id: null,
+  permissions: { see_all_vms: false, can_operate_all_vms: false, can_manage_hosts: true },
+  require_2fa: true,
+  quotas: { max_cores: 4, max_memory_gb: null, max_storage_gb: null },
+  vms: [{ id: 11, node: '1~pve', vmid: 100 }],
+  vlan_ids: [3],
+  roleDefinitions: [
+    { id: 9, name: 'Ops', permissions: ['can_operate_all_vms'], max_cores: 8, max_memory_gb: null, max_storage_gb: null, version: 'a'.repeat(24) },
+    { id: 10, name: 'Viewer', permissions: ['see_all_vms'], max_cores: null, max_memory_gb: null, max_storage_gb: null, version: 'b'.repeat(24) },
+  ],
+};
+const allVMs = [
+  { vmid: 100, node: 'pve', nodeRef: '1~pve', name: 'web' },
+  { vmid: 101, node: 'pve', nodeRef: '1~pve', name: 'db' },
+];
+const allVLANs = [{ id: 3, name: 'lab', tag: 30 }, { id: 4, name: 'dmz', tag: 40 }];
+const roles = [{ id: 9, name: 'Ops', permissions: ['can_operate_all_vms'] }, { id: 10, name: 'Viewer', permissions: ['see_all_vms'] }];
+
+test('an untouched draft builds no patch and no changes', () => {
+  const d = draftFromState(state);
+  assert.equal(buildUserPatch(state, d, { allVMs }), null);
+  assert.deepEqual(describeUserChanges(state, d, { allVMs, allVLANs, roles }), []);
+});
+
+test('every staged section ends up in one patch with the version', () => {
+  const d = draftFromState(state);
+  d.roleId = '10';
+  d.permissions.can_operate_all_vms = true;
+  d.permissions.can_manage_hosts = false;
+  d.require2fa = false;
+  d.quotas.maxCores = '';
+  d.vmKeys.delete('1~pve-100');
+  d.vmKeys.add('1~pve-101');
+  d.vlanIds.delete(3);
+  d.vlanIds.add(4);
+  assert.deepEqual(buildUserPatch(state, d, { allVMs }), {
+    version: 'v1',
+    roleId: 10,
+    roleVersion: 'b'.repeat(24),
+    permissions: { can_operate_all_vms: true, can_manage_hosts: false },
+    require2fa: false,
+    quotas: { maxCores: '', maxMemoryGb: '', maxStorageGb: '' },
+    vms: { add: [{ node: '1~pve', vmid: 101 }], remove: [11] },
+    vlans: { add: [4], remove: [3] },
+  });
+});
+
+test('toggling back to the original value cancels the change', () => {
+  const d = draftFromState(state);
+  d.permissions.can_manage_hosts = false;
+  d.permissions.can_manage_hosts = true;
+  d.quotas.maxCores = '4';
+  assert.equal(buildUserPatch(state, d, { allVMs }), null);
+});
+
+test('the review list flags dangerous changes', () => {
+  const d = draftFromState(state);
+  d.permissions.can_operate_all_vms = true;
+  d.require2fa = false;
+  d.roleId = '9';
+  d.vmKeys.add('1~pve-101');
+  const changes = describeUserChanges(state, d, { allVMs, allVLANs, roles });
+  const danger = changes.filter((c) => c.danger).map((c) => c.label);
+  assert.deepEqual(danger.sort(), ['Enforce 2FA', 'Operate all VMs', 'Operate all VMs (per-user, masked by role)', 'Role']);
+  assert.ok(changes.some((c) => c.kind === 'grant' && c.label === 'VM db (pve · 101)'));
+});
+
+test('a role without risky permissions is not flagged', () => {
+  const d = draftFromState(state);
+  d.roleId = '10';
+  const [change] = describeUserChanges(state, d, { allVMs, allVLANs, roles });
+  assert.deepEqual(change, { kind: 'field', label: 'Role', from: 'No role', to: 'Viewer', danger: false });
+});
+
+test('removing a role surfaces dormant per-user flags that become effective', () => {
+  const holder = { ...state, role_id: 10, permissions: { ...state.permissions, can_operate_all_vms: true } };
+  const d = draftFromState(holder);
+  d.roleId = '';
+  const changes = describeUserChanges(holder, d, { allVMs, allVLANs, roles });
+  const role = changes.find((c) => c.label === 'Role');
+  assert.equal(role.danger, true, 'role removal that re-activates operate-all is high impact');
+  assert.ok(changes.some((c) => c.kind === 'grant' && c.key === 'can_operate_all_vms' && c.danger));
+  assert.ok(changes.some((c) => c.kind === 'revoke' && c.key === 'see_all_vms'), 'the role grant goes away');
+  assert.ok(changes.some((c) => c.kind === 'grant' && c.key === 'can_manage_hosts'), 'dormant flags re-activate');
+});
+
+test('assigning a role masks per-user flags and shows the effective diff', () => {
+  const d = draftFromState(state);
+  d.roleId = '9';
+  const changes = describeUserChanges(state, d, { allVMs, allVLANs, roles });
+  assert.deepEqual(changes.map((c) => `${c.kind}:${c.key || c.label}`), [
+    'field:Role', 'grant:can_operate_all_vms', 'revoke:can_manage_hosts',
+  ]);
+});
+
+test('toggling a flag hidden behind a role is listed but not as a grant', () => {
+  const holder = { ...state, role_id: 10 };
+  const d = draftFromState(holder);
+  d.permissions.can_operate_all_vms = true;
+  const changes = describeUserChanges(holder, d, { allVMs, allVLANs, roles });
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].kind, 'field');
+  assert.match(changes[0].label, /masked by role/);
+  assert.equal(changes[0].danger, true, 'a latent operate-all flag still needs deliberate confirmation');
+});
+
+test('mixed role and per-user edits disclose latent grants even when the role grants them too', () => {
+  const d = draftFromState(state);
+  d.roleId = '9';
+  d.permissions.can_operate_all_vms = true;
+  const changes = describeUserChanges(state, d, { allVMs, allVLANs, roles });
+  assert.ok(changes.some((c) => c.kind === 'grant' && c.key === 'can_operate_all_vms'));
+  assert.ok(changes.some((c) => c.kind === 'field'
+    && c.label === 'Operate all VMs (per-user, masked by role)'
+    && c.from === 'off' && c.to === 'on' && c.danger));
+});
+
+test('quota drafts must be empty or whole non-negative numbers', () => {
+  assert.deepEqual(invalidQuotaKeys({ maxCores: '', maxMemoryGb: '8', maxStorageGb: 0 }), []);
+  assert.deepEqual(invalidQuotaKeys({ maxCores: '1.5', maxMemoryGb: '1e2', maxStorageGb: '-1' }), ['maxCores', 'maxMemoryGb', 'maxStorageGb']);
+});
+
+test('quota drafts reject values above the PostgreSQL int32 limit', () => {
+  assert.deepEqual(invalidQuotaKeys({ maxCores: '2147483648', maxMemoryGb: '2147483647', maxStorageGb: '' }), ['maxCores']);
+});
+
+test('review shows effective quotas after role fallback, not unlimited', () => {
+  const holder = {
+    ...state, role_id: 9,
+    quotas: { max_cores: 4, max_memory_gb: null, max_storage_gb: null },
+  };
+  const d = draftFromState(holder);
+  d.quotas.maxCores = '';
+  const changes = describeUserChanges(holder, d, { allVMs, allVLANs, roles: holder.roleDefinitions });
+  assert.deepEqual(changes, [{ kind: 'field', label: 'Max CPU cores', from: '4', to: '8' }]);
+  const inherited = { ...holder, quotas: { ...holder.quotas, max_cores: null } };
+  const roleSwitch = draftFromState(inherited);
+  roleSwitch.roleId = '10';
+  const switched = describeUserChanges(inherited, roleSwitch, { allVMs, allVLANs, roles: inherited.roleDefinitions });
+  assert.ok(switched.some((c) => c.label === 'Max CPU cores' && c.from === '8' && c.to === 'unlimited'));
+});
+
+test('assignment drafts above the server batch limit are blocked before review', async () => {
+  const { oversizedAssignmentSections, MAX_BATCH_ITEMS } = await import('./userDraft.js');
+  assert.equal(MAX_BATCH_ITEMS, 500);
+  assert.deepEqual(oversizedAssignmentSections({ vms: { add: Array(500).fill(1), remove: [] } }), []);
+  assert.deepEqual(oversizedAssignmentSections({
+    vms: { add: Array(501).fill(1), remove: [] },
+    vlans: { add: [], remove: Array(501).fill(1) },
+  }), ['vms.add', 'vlans.remove']);
+});
