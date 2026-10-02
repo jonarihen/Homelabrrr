@@ -709,6 +709,9 @@ router.post('/roles/:id/clone', requireAdmin, async (req, res) => {
   let result;
   try {
     result = await db.transaction(async (tx) => {
+      if (explicitName === null) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(1213157460, ${source.id})`);
+      }
       const [locked] = await tx.select().from(roles).where(eq(roles.id, source.id)).limit(1).for('share');
       if (!locked) return null;
       const perms = await tx.select({ permission: rolePermissions.permission }).from(rolePermissions)
@@ -805,6 +808,10 @@ router.put('/roles/:id', requireAdmin, async (req, res) => {
   if (!role) return res.status(404).json({ error: 'Role not found' });
 
   const { name, description, permissions } = req.body;
+  const expectedHolders = req.body.expectedHolders;
+  if (expectedHolders !== undefined && (!Number.isInteger(expectedHolders) || expectedHolders < 0)) {
+    return res.status(400).json({ error: 'expectedHolders must be a non-negative integer' });
+  }
 
   // Validate every supplied field *before* writing anything: a rejection partway
   // through used to leave the earlier metadata/permission writes committed, so a
@@ -840,12 +847,19 @@ router.put('/roles/:id', requireAdmin, async (req, res) => {
   // in the update rolls the whole thing back.
   try {
     await db.transaction(async (tx) => {
+      const [locked] = await tx.select({ id: roles.id }).from(roles).where(eq(roles.id, role.id)).for('update');
+      if (!locked) throw new RoleConflict('Role was removed — reload and try again');
+      if (expectedHolders !== undefined) {
+        const [{ c }] = await tx.select({ c: count() }).from(users).where(eq(users.role_id, role.id));
+        if (c !== expectedHolders) throw new RoleConflict('Role holders changed — reload and review before saving');
+      }
       if (Object.keys(patch).length > 0) {
         await tx.update(roles).set(patch).where(eq(roles.id, role.id));
       }
       if (perms) await setRolePermissions(tx, role.id, perms);
     });
   } catch (err) {
+    if (err instanceof RoleConflict) return res.status(err.status).json({ error: err.message });
     if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
     throw err;
   }
@@ -913,26 +927,50 @@ router.delete('/roles/:id', requireAdmin, async (req, res) => {
   if (moved === null) return res.status(404).json({ error: 'Role not found' });
   await logAudit(req, 'admin_delete_role', role.name,
     moved.length > 0 ? `${moved.length} holder(s) ${target ? `reassigned to ${target.name}` : 'unassigned'}` : '', 'success', roleRef(role.id));
-  if (target) {
-    for (const u of moved) await logAudit(req, 'admin_assign_role', u.username, target.name, 'success', roleRef(target.id));
+  for (const u of moved) {
+    await logAudit(req, 'admin_unassign_role', u.username,
+      target ? `moved to ${target.name}` : 'role deleted', 'success', roleRef(role.id));
+    if (target) await logAudit(req, 'admin_assign_role', u.username, target.name, 'success', roleRef(target.id));
   }
   res.json({ ok: true, reassigned: target ? moved.length : 0, unassigned: target ? 0 : moved.length });
 });
 
 router.put('/users/:id/role', requireAdmin, async (req, res) => {
-  const [user] = await db.select({ id: users.id, username: users.username, role_id: users.role_id })
-    .from(users).where(eq(users.id, Number(req.params.id))).limit(1);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  const { roleId } = req.body;
-  if (roleId === null || roleId === undefined || roleId === '') {
-    await db.update(users).set({ role_id: null }).where(eq(users.id, user.id));
-    await auditRoleChange(req, user.username, user.role_id, null);
-    return res.json({ ok: true });
+  const userId = parseRoleId(req.params.id);
+  if (userId === null) return res.status(404).json({ error: 'User not found' });
+  const rawRoleId = req.body?.roleId;
+  const nextId = rawRoleId === null || rawRoleId === undefined || rawRoleId === '' ? null : parseRoleId(rawRoleId);
+  if (nextId === null && rawRoleId !== null && rawRoleId !== undefined && rawRoleId !== '') {
+    return res.status(400).json({ error: 'Role not found' });
   }
-  const role = await findRole(roleId);
-  if (!role) return res.status(400).json({ error: 'Role not found' });
-  await db.update(users).set({ role_id: role.id }).where(eq(users.id, user.id));
-  await auditRoleChange(req, user.username, user.role_id, role);
+
+  let result;
+  try {
+    result = await db.transaction(async (tx) => {
+      let role = null;
+      if (nextId !== null) {
+        const [r] = await tx.select({ id: roles.id, name: roles.name }).from(roles)
+          .where(eq(roles.id, nextId)).for('share');
+        if (!r) throw new RoleConflict('Role not found', 400);
+        role = r;
+      }
+      const [user] = await tx.select({ id: users.id, username: users.username, role_id: users.role_id })
+        .from(users).where(eq(users.id, userId)).for('update');
+      if (!user) return null;
+      if (user.role_id !== nextId) {
+        await tx.update(users).set({ role_id: nextId }).where(eq(users.id, user.id));
+      }
+      return { user, role };
+    });
+  } catch (err) {
+    if (err instanceof RoleConflict) return res.status(err.status).json({ error: err.message });
+    if (isForeignKeyViolation(err)) return res.status(409).json({ error: 'Role was removed — reload and try again' });
+    throw err;
+  }
+  if (!result) return res.status(404).json({ error: 'User not found' });
+  if (result.user.role_id !== nextId) {
+    await auditRoleChange(req, result.user.username, result.user.role_id, result.role);
+  }
   res.json({ ok: true });
 });
 

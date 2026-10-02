@@ -96,6 +96,16 @@ test('repeated clones pick the next free copy name', async () => {
   assert.equal(res.body.name, 'Operator (copy 2)');
 });
 
+test('concurrent automatic clones get different names instead of a collision error', async () => {
+  const [a, b] = await Promise.all([
+    request(app).post(`/roles/${builtInId}/clone`).send({}),
+    request(app).post(`/roles/${builtInId}/clone`).send({}),
+  ]);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  assert.notEqual(a.body.name, b.body.name);
+});
+
 test('clone accepts an explicit name and rejects a duplicate', async () => {
   const ok = await request(app).post(`/roles/${sourceId}/clone`).send({ name: 'Operator Lite' });
   assert.equal(ok.status, 200);
@@ -282,6 +292,27 @@ test('role quotas reject fractional and exponent values instead of truncating', 
   }
   const [row] = await testDb.db.select().from(roles).where(eq(roles.id, id));
   assert.equal(row.max_cores, 2);
+});
+
+test('a stale holder count aborts a role edit before changing permissions', async () => {
+  const doomed = await makeRole('Edit Count', ['can_manage_hosts']);
+  await testDb.db.update(users).set({ role_id: doomed }).where(eq(users.id, carol));
+  const res = await request(app).put(`/roles/${doomed}`).send({
+    permissions: ['can_operate_all_vms'], expectedHolders: 0,
+  });
+  assert.equal(res.status, 409);
+  assert.deepEqual(await permsOf(doomed), ['can_manage_hosts']);
+  assert.equal(await roleOf(carol), doomed);
+  await testDb.db.update(users).set({ role_id: null }).where(eq(users.id, carol));
+});
+
+test('delete logs each holder leaving the old role', async () => {
+  const doomed = await makeRole('Audit Delete');
+  await testDb.db.update(users).set({ role_id: doomed }).where(eq(users.id, carol));
+  const res = await request(app).delete(`/roles/${doomed}?expectedHolders=1`);
+  assert.equal(res.status, 200);
+  const history = await request(app).get('/audit-log').query({ targetRef: `role:${doomed}` });
+  assert.ok(history.body.rows.some((r) => r.action === 'admin_unassign_role' && r.target === 'carol'));
 });
 
 test('a stale holder count aborts deletion without unassigning anyone', async () => {

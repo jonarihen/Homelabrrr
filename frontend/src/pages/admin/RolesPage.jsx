@@ -307,6 +307,8 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  const [reviewHolders, setReviewHolders] = useState(null);
+  const [checkingHolders, setCheckingHolders] = useState(false);
 
   const draft = { name, description, permissions: [...perms], ...quotas };
   const unknownPerms = [...perms].filter((k) => !KNOWN_PERMS.has(k)).sort();
@@ -347,6 +349,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
     setError('');
     try {
       const payload = { name, description, permissions: [...perms], ...quotas };
+      if (editing) payload.expectedHolders = reviewHolders.length;
       if (editing) await api.put(`/admin/roles/${role.id}`, payload);
       else await api.post('/admin/roles', payload);
       onSaved();
@@ -359,24 +362,37 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
     }
   };
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     if (badQuotas.length) { setError('Quotas must be whole numbers (or empty for unlimited)'); return; }
     if (editing && changes.length === 0) { onClose(); return; }
     setError('');
+    if (editing) {
+      setCheckingHolders(true);
+      try {
+        const { data } = await api.get(`/admin/roles/${role.id}/users`);
+        setReviewHolders(data);
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to load role holders');
+        return;
+      } finally {
+        setCheckingHolders(false);
+      }
+    }
     setReviewing(true);
   };
 
   const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
   if (reviewing) {
-    const holders = editing ? role.userCount : 0;
+    const holders = editing ? reviewHolders.length : 0;
     return (
       <Modal title={editing ? `Review changes — ${role.name}` : 'Review new role'} onClose={() => setReviewing(false)} size="md">
         <div className="p-5 space-y-4">
-          {editing && holders > 0 && (
+          {editing && (
             <p className="text-xs text-amber-300 bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-2">
-              This role has <strong>{holders}</strong> holder{holders === 1 ? '' : 's'}. Non-admin holders' effective permissions and quotas may change; admins bypass both.
+              This role currently has <strong>{holders}</strong> holder{holders === 1 ? '' : 's'}. Non-admin holders' effective permissions and quotas may change; admins bypass both.
+              {holders > 0 && <span className="block mt-1 text-amber-300/70">{reviewHolders.map((u) => u.username).join(', ')}</span>}
             </p>
           )}
           <ChangeList changes={changes} />
@@ -520,11 +536,11 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <button
           type="submit"
-          disabled={saving || badQuotas.length > 0 || (editing && changes.length === 0)}
+          disabled={saving || checkingHolders || badQuotas.length > 0 || (editing && changes.length === 0)}
           className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
         >
           {editing
-            ? (changes.length === 0 ? 'No changes' : `Review ${changes.length} change${changes.length === 1 ? '' : 's'}`)
+            ? (checkingHolders ? 'Checking holders…' : changes.length === 0 ? 'No changes' : `Review ${changes.length} change${changes.length === 1 ? '' : 's'}`)
             : 'Review & create'}
         </button>
       </form>

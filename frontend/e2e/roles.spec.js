@@ -17,6 +17,7 @@ async function mockRoles(page, roles = baseRoles) {
 test('editing a role shows a review diff and impact before applying', async ({ page }) => {
   await mockRoles(page);
   let putBody = null;
+  await page.route('**/api/admin/roles/2/users', (route) => route.fulfill({ json: [{ id: 3, username: 'alice' }, { id: 4, username: 'bob' }] }));
   await page.route('**/api/admin/roles/2', (route) => {
     putBody = route.request().postDataJSON();
     return route.fulfill({ json: { ...baseRoles[1] } });
@@ -26,12 +27,13 @@ test('editing a role shows a review diff and impact before applying', async ({ p
   await page.getByText('Operate all VMs').click();
   await page.getByRole('button', { name: 'Review 1 change' }).click();
 
-  await expect(page.getByText(/This role has/)).toContainText('2');
+  await expect(page.getByText(/This role currently has/)).toContainText('2');
   await expect(page.getByText('+ Operate all VMs')).toBeVisible();
   expect(putBody).toBeNull();
 
   await page.getByRole('button', { name: 'Apply changes' }).click();
   await expect.poll(() => putBody?.permissions?.sort()).toEqual(['can_manage_vlans', 'can_operate_all_vms']);
+  expect(putBody.expectedHolders).toBe(2);
 });
 
 test('clone posts to the clone endpoint with the chosen name', async ({ page }) => {
