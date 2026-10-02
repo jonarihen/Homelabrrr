@@ -48,3 +48,10 @@ test('labels fall back to the raw key and only operate-all is dangerous', () => 
   assert.ok(isDangerPerm('can_operate_all_vms'));
   assert.ok(!isDangerPerm('see_all_vms'));
 });
+
+test('role quota validation matches the server: whole numbers or empty', async () => {
+  const { isValidQuota, invalidRoleQuotaKeys } = await import('./roleDiff.js');
+  for (const ok of ['', null, undefined, '0', '12', 8, ' 16 ']) assert.ok(isValidQuota(ok), `expected ${ok} to be valid`);
+  for (const bad of ['1e3', '1.5', '-1', '8abc', 1.5, '2147483648']) assert.ok(!isValidQuota(bad), `expected ${bad} to be invalid`);
+  assert.deepEqual(invalidRoleQuotaKeys({ maxCores: '1e3', maxMemoryGb: '', maxStorageGb: '4' }), ['maxCores']);
+});

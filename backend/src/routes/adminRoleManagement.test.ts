@@ -234,6 +234,56 @@ test('clone reads the source inside its transaction', async () => {
   assert.equal(leftovers.length, 0);
 });
 
+test('a concurrent assignment cannot slip past a reassigning delete', async () => {
+  const doomed = await makeRole('Doomed Race');
+  const heir = await makeRole('Heir Race');
+  const { db } = await import('../db/client.ts');
+  // An uncommitted assignment into the doomed role, held open across the
+  // delete request. Without the delete's FOR UPDATE on the role, the holder
+  // UPDATE skips carol (her new role_id isn't visible yet) and the DELETE
+  // later nulls her via ON DELETE SET NULL. With the lock, the delete waits
+  // for this transaction and then sees and moves her.
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const assignTx = db.transaction(async (tx) => {
+    await tx.update(users).set({ role_id: doomed }).where(eq(users.id, carol));
+    await gate;
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  const del = request(app).delete(`/roles/${doomed}?reassignTo=${heir}`).then((r) => r);
+  await new Promise((r) => setTimeout(r, 200));
+  release();
+  await assignTx;
+  const res = await del;
+  assert.equal(res.status, 200);
+  assert.equal(await roleOf(carol), heir, 'the concurrently-assigned holder is moved to the heir, not left role-less');
+  await testDb.db.update(users).set({ role_id: null }).where(eq(users.id, carol));
+});
+
+test('moving a user between roles is recorded in both roles\' history', async () => {
+  const from = await makeRole('Move From');
+  const to = await makeRole('Move To');
+  await testDb.db.update(users).set({ role_id: from }).where(eq(users.id, carol));
+
+  await request(app).post(`/roles/${to}/assign`).send({ userIds: [carol] }).expect(200);
+  const fromHistory = await request(app).get('/audit-log').query({ targetRef: `role:${from}` });
+  assert.deepEqual(fromHistory.body.rows.map((r) => [r.action, r.target]), [['admin_unassign_role', 'carol']]);
+
+  await request(app).put(`/users/${carol}/role`).send({ roleId: null }).expect(200);
+  const toHistory = await request(app).get('/audit-log').query({ targetRef: `role:${to}` });
+  assert.deepEqual(toHistory.body.rows.map((r) => r.action).sort(), ['admin_assign_role', 'admin_unassign_role']);
+});
+
+test('role quotas reject fractional and exponent values instead of truncating', async () => {
+  const id = await makeRole('Quota Strict', [], { max_cores: 2 });
+  for (const maxCores of ['1e3', '1.5', '8abc']) {
+    const res = await request(app).put(`/roles/${id}`).send({ maxCores, maxMemoryGb: '', maxStorageGb: '' });
+    assert.equal(res.status, 400, `expected 400 for ${maxCores}`);
+  }
+  const [row] = await testDb.db.select().from(roles).where(eq(roles.id, id));
+  assert.equal(row.max_cores, 2);
+});
+
 test('built-in roles still cannot be deleted', async () => {
   const res = await request(app).delete(`/roles/${builtInId}`);
   assert.equal(res.status, 400);

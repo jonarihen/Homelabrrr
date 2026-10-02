@@ -3,8 +3,9 @@ import { Link } from 'react-router-dom';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import useUnsavedChangesGuard from '../../hooks/useUnsavedChangesGuard.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
-import { PERM_GROUPS, permLabel, isDangerPerm, roleMatchesQuery, diffRole } from '../../utils/roleDiff.js';
+import { PERM_GROUPS, permLabel, isDangerPerm, roleMatchesQuery, diffRole, invalidRoleQuotaKeys } from '../../utils/roleDiff.js';
 
 const btnCls = 'text-xs px-2 py-1 rounded hover:bg-gray-700 transition-colors';
 const KNOWN_PERMS = new Set(PERM_GROUPS.flatMap((g) => g.perms.map((p) => p.key)));
@@ -300,6 +301,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
 
   const draft = { name, description, permissions: [...perms], ...quotas };
   const unknownPerms = [...perms].filter((k) => !KNOWN_PERMS.has(k)).sort();
+  const badQuotas = invalidRoleQuotaKeys(quotas);
   const changes = diffRole(editing ? role : null, draft);
   const dirty = editing
     ? changes.length > 0
@@ -310,12 +312,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
     onClose();
   };
 
-  useEffect(() => {
-    if (!dirty) return undefined;
-    const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, [dirty]);
+  useUnsavedChangesGuard(dirty && !saving, 'Discard unsaved changes to this role?');
 
   const toggle = (key) => {
     setPerms(prev => {
@@ -355,7 +352,9 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
 
   const submit = (e) => {
     e.preventDefault();
+    if (badQuotas.length) { setError('Quotas must be whole numbers (or empty for unlimited)'); return; }
     if (editing && changes.length === 0) { onClose(); return; }
+    setError('');
     setReviewing(true);
   };
 
@@ -497,10 +496,12 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
                 <input
                   type="number"
                   min="0"
+                  step="1"
                   placeholder="Unlimited"
                   value={quotas[q.key] ?? ''}
                   onChange={e => setQuotas(f => ({ ...f, [q.key]: e.target.value }))}
-                  className={inputCls}
+                  aria-invalid={badQuotas.includes(q.key)}
+                  className={`${inputCls} ${badQuotas.includes(q.key) ? 'border-red-500' : ''}`}
                 />
               </div>
             ))}
@@ -510,7 +511,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <button
           type="submit"
-          disabled={saving || (editing && changes.length === 0)}
+          disabled={saving || badQuotas.length > 0 || (editing && changes.length === 0)}
           className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
         >
           {editing

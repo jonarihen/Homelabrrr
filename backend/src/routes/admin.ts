@@ -524,10 +524,15 @@ router.put('/users/:id/permission', requireAdmin, async (req, res) => {
 
 // ─── Quotas ───────────────────────────────────────────────────────────────────
 
+// null = unlimited, undefined = invalid. Strict: "1.5", "1e3" or "8abc" are
+// rejected rather than truncated, so the saved quota is exactly what was sent.
 function parseQuotaValue(value) {
   if (value === null || value === undefined || value === '') return null;
-  const n = parseInt(value, 10);
-  return Number.isInteger(n) && n >= 0 ? n : undefined; // undefined = invalid
+  let n;
+  if (typeof value === 'number') n = value;
+  else if (typeof value === 'string' && /^\d{1,10}$/.test(value.trim())) n = Number(value.trim());
+  else return undefined;
+  return Number.isInteger(n) && n >= 0 && n <= 2147483647 ? n : undefined;
 }
 
 router.put('/users/:id/quotas', requireAdmin, async (req, res) => {
@@ -630,6 +635,22 @@ function parseRoleId(value): number | null {
 
 const roleRef = (id) => `role:${id}`;
 
+class RoleConflict extends Error {}
+
+// A membership change shows up in both roles' history: the destination gets
+// `admin_assign_role`, the role the user left gets `admin_unassign_role`.
+async function auditRoleChange(req, username, previousRoleId, nextRole) {
+  if (nextRole) {
+    await logAudit(req, 'admin_assign_role', username, nextRole.name, 'success', roleRef(nextRole.id));
+  } else {
+    await logAudit(req, 'admin_assign_role', username, 'none');
+  }
+  if (previousRoleId != null && previousRoleId !== nextRole?.id) {
+    await logAudit(req, 'admin_unassign_role', username,
+      nextRole ? `moved to ${nextRole.name}` : 'role removed', 'success', roleRef(previousRoleId));
+  }
+}
+
 async function findRole(id) {
   const roleId = parseRoleId(id);
   if (roleId === null) return null;
@@ -729,7 +750,7 @@ router.post('/roles/:id/assign', requireAdmin, async (req, res) => {
       if (isForeignKeyViolation(err)) return res.status(409).json({ error: 'Role was removed — reload and try again' });
       throw err;
     }
-    for (const u of changing) await logAudit(req, 'admin_assign_role', u.username, role.name, 'success', roleRef(role.id));
+    for (const u of changing) await auditRoleChange(req, u.username, u.role_id, role);
   }
   res.json({ ok: true, assigned: changing.length });
 });
@@ -838,33 +859,53 @@ router.delete('/roles/:id', requireAdmin, async (req, res) => {
   let moved;
   try {
     moved = await db.transaction(async (tx) => {
+      // Lock the doomed role first: a concurrent assignment to it then waits
+      // (its FK check needs a KEY SHARE lock) and fails once the row is gone,
+      // instead of slipping in after the holder move and being silently
+      // nulled by ON DELETE SET NULL. The target is share-locked so it can't
+      // vanish mid-move.
+      const [locked] = await tx.select({ id: roles.id }).from(roles).where(eq(roles.id, role.id)).for('update');
+      if (!locked) return null;
+      if (target) {
+        const [t] = await tx.select({ id: roles.id }).from(roles).where(eq(roles.id, target.id)).for('share');
+        if (!t) throw new RoleConflict('Reassignment role was removed — reload and try again');
+      }
       const holders = await tx.update(users).set({ role_id: target ? target.id : null })
-        .where(eq(users.role_id, role.id)).returning({ id: users.id });
+        .where(eq(users.role_id, role.id)).returning({ id: users.id, username: users.username });
       await tx.delete(roles).where(eq(roles.id, role.id));
-      return holders.length;
+      return holders;
     });
   } catch (err) {
+    if (err instanceof RoleConflict) return res.status(409).json({ error: err.message });
+    if (err?.code === '40P01' || err?.cause?.code === '40P01') {
+      return res.status(409).json({ error: 'A concurrent role assignment conflicted with this delete — retry' });
+    }
     if (isForeignKeyViolation(err)) return res.status(409).json({ error: 'Reassignment role was removed — reload and try again' });
     throw err;
   }
+  if (moved === null) return res.status(404).json({ error: 'Role not found' });
   await logAudit(req, 'admin_delete_role', role.name,
-    moved > 0 ? `${moved} holder(s) ${target ? `reassigned to ${target.name}` : 'unassigned'}` : '', 'success', roleRef(role.id));
-  res.json({ ok: true, reassigned: target ? moved : 0, unassigned: target ? 0 : moved });
+    moved.length > 0 ? `${moved.length} holder(s) ${target ? `reassigned to ${target.name}` : 'unassigned'}` : '', 'success', roleRef(role.id));
+  if (target) {
+    for (const u of moved) await logAudit(req, 'admin_assign_role', u.username, target.name, 'success', roleRef(target.id));
+  }
+  res.json({ ok: true, reassigned: target ? moved.length : 0, unassigned: target ? 0 : moved.length });
 });
 
 router.put('/users/:id/role', requireAdmin, async (req, res) => {
-  const [user] = await db.select({ id: users.id, username: users.username }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
+  const [user] = await db.select({ id: users.id, username: users.username, role_id: users.role_id })
+    .from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { roleId } = req.body;
   if (roleId === null || roleId === undefined || roleId === '') {
     await db.update(users).set({ role_id: null }).where(eq(users.id, user.id));
-    await logAudit(req, 'admin_assign_role', user.username, 'none');
+    await auditRoleChange(req, user.username, user.role_id, null);
     return res.json({ ok: true });
   }
-  const [role] = await db.select({ id: roles.id, name: roles.name }).from(roles).where(eq(roles.id, Number(roleId))).limit(1);
+  const role = await findRole(roleId);
   if (!role) return res.status(400).json({ error: 'Role not found' });
   await db.update(users).set({ role_id: role.id }).where(eq(users.id, user.id));
-  await logAudit(req, 'admin_assign_role', user.username, role.name, 'success', roleRef(role.id));
+  await auditRoleChange(req, user.username, user.role_id, role);
   res.json({ ok: true });
 });
 

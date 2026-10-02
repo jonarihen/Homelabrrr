@@ -64,6 +64,17 @@ function normQuota(v) {
   return Number.isFinite(n) ? n : v;
 }
 
+// Quotas must be empty (unlimited) or a whole non-negative number — the same
+// rule the server enforces — so what the review shows is what gets saved.
+export function isValidQuota(v) {
+  if (v === null || v === undefined || v === '') return true;
+  return /^\d{1,10}$/.test(String(v).trim()) && Number(String(v).trim()) <= 2147483647;
+}
+
+export function invalidRoleQuotaKeys(draft) {
+  return QUOTA_FIELDS.filter((q) => !isValidQuota(draft[q.key])).map((q) => q.key);
+}
+
 function fmtQuota(v, unit) {
   return v === null ? 'unlimited' : `${v}${unit}`;
 }

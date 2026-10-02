@@ -70,3 +70,19 @@ test('the filter narrows roles by permission label', async ({ page }) => {
   await expect(page.getByRole('row', { name: /Operator/ })).toBeVisible();
   await expect(page.getByRole('row', { name: /Administrator/ })).toHaveCount(0);
 });
+
+test('in-app navigation away from a dirty role editor asks first', async ({ page }) => {
+  await mockRoles(page);
+  await page.route('**/api/admin/audit-log**', (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
+  await page.goto('/admin/audit-log');
+  await page.goto('/admin/roles');
+  await page.getByRole('row', { name: /Operator/ }).getByRole('button', { name: 'Manage' }).click();
+  await page.getByText('Manage PVE Hosts').click();
+
+  let prompts = 0;
+  page.on('dialog', (d) => { prompts += 1; d.dismiss(); });
+  await page.evaluate(() => window.history.back());
+  await expect.poll(() => prompts).toBe(1);
+  await expect(page).toHaveURL(/\/admin\/roles$/);
+  await expect(page.getByRole('button', { name: 'Review 1 change' })).toBeVisible();
+});
