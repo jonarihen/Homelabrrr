@@ -616,14 +616,19 @@ async function setRolePermissions(tx, roleId, permissions) {
   }
 }
 
-// A non-numeric id becomes null so lookups answer 404 instead of letting
-// PostgreSQL reject the integer parameter with a 500.
+// Ids are PostgreSQL `integer` columns. Anything that isn't a positive int32 —
+// non-numeric, fractional, or out of range — becomes null so lookups answer
+// 404/400 instead of letting PostgreSQL reject the bound parameter with a 500.
+const PG_INT_MAX = 2147483647;
 function parseRoleId(value): number | null {
-  if (typeof value === 'number') return Number.isInteger(value) ? value : null;
-  if (typeof value !== 'string' || !/^\d+$/.test(value.trim())) return null;
-  const n = Number(value.trim());
-  return Number.isSafeInteger(n) ? n : null;
+  let n;
+  if (typeof value === 'number') n = value;
+  else if (typeof value === 'string' && /^\d{1,10}$/.test(value.trim())) n = Number(value.trim());
+  else return null;
+  return Number.isInteger(n) && n >= 1 && n <= PG_INT_MAX ? n : null;
 }
+
+const roleRef = (id) => `role:${id}`;
 
 async function findRole(id) {
   const roleId = parseRoleId(id);
@@ -635,9 +640,9 @@ async function findRole(id) {
 const ROLE_NAME_MAX = 100;
 
 // "<base> (copy)", then "<base> (copy 2)", … — the first name nobody holds.
-async function nextCopyName(base) {
+async function nextCopyName(tx, base) {
   const stem = `${base} (copy`;
-  const taken = new Set((await db.select({ name: roles.name }).from(roles)
+  const taken = new Set((await tx.select({ name: roles.name }).from(roles)
     .where(sql`${roles.name} LIKE ${`${stem.replace(/[\\%_]/g, '\\$&')}%`}`)).map((r) => r.name));
   if (!taken.has(`${stem})`)) return `${stem})`;
   for (let i = 2; ; i += 1) {
@@ -665,34 +670,40 @@ router.post('/roles/:id/clone', requireAdmin, async (req, res) => {
   const source = await findRole(req.params.id);
   if (!source) return res.status(404).json({ error: 'Role not found' });
 
-  let name;
+  let explicitName = null;
   if (req.body?.name !== undefined && req.body?.name !== null && req.body?.name !== '') {
-    try { name = boundedString(req.body.name, { field: 'name', min: 1, max: ROLE_NAME_MAX }); }
+    try { explicitName = boundedString(req.body.name, { field: 'name', min: 1, max: ROLE_NAME_MAX }); }
     catch (err) { return res.status(400).json({ error: err.message, field: err.field }); }
-  } else {
-    name = await nextCopyName(source.name);
   }
 
+  // The source row is locked and its permissions read inside the clone
+  // transaction, so a concurrent edit or delete can't produce a half-old copy
+  // (or an empty one, after the permission rows cascade away).
+  let result;
   try {
-    const created = await db.transaction(async (tx) => {
+    result = await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(roles).where(eq(roles.id, source.id)).limit(1).for('share');
+      if (!locked) return null;
       const perms = await tx.select({ permission: rolePermissions.permission }).from(rolePermissions)
-        .where(eq(rolePermissions.role_id, source.id));
+        .where(eq(rolePermissions.role_id, locked.id));
+      const name = explicitName ?? await nextCopyName(tx, locked.name);
       const [row] = await tx.insert(roles).values({
         name,
-        description: source.description || '',
-        max_cores: source.max_cores,
-        max_memory_gb: source.max_memory_gb,
-        max_storage_gb: source.max_storage_gb,
+        description: locked.description || '',
+        max_cores: locked.max_cores,
+        max_memory_gb: locked.max_memory_gb,
+        max_storage_gb: locked.max_storage_gb,
       }).returning();
       await setRolePermissions(tx, row.id, perms.map((p) => p.permission));
-      return row;
+      return { row, sourceName: locked.name };
     });
-    await logAudit(req, 'admin_clone_role', name, `from: ${source.name}`);
-    res.json(await serializeRole(created));
   } catch (err) {
     if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
     throw err;
   }
+  if (!result) return res.status(404).json({ error: 'Role not found' });
+  await logAudit(req, 'admin_clone_role', result.row.name, `from: ${result.sourceName}`, 'success', roleRef(result.row.id));
+  res.json(await serializeRole(result.row));
 });
 
 // Assigns one role to several users at once — all-or-nothing.
@@ -718,7 +729,7 @@ router.post('/roles/:id/assign', requireAdmin, async (req, res) => {
       if (isForeignKeyViolation(err)) return res.status(409).json({ error: 'Role was removed — reload and try again' });
       throw err;
     }
-    for (const u of changing) await logAudit(req, 'admin_assign_role', u.username, role.name);
+    for (const u of changing) await logAudit(req, 'admin_assign_role', u.username, role.name, 'success', roleRef(role.id));
   }
   res.json({ ok: true, assigned: changing.length });
 });
@@ -743,7 +754,7 @@ router.post('/roles', requireAdmin, async (req, res) => {
       await setRolePermissions(tx, row.id, perms);
       return row;
     });
-    await logAudit(req, 'admin_create_role', String(name).trim(), perms.join(','));
+    await logAudit(req, 'admin_create_role', String(name).trim(), perms.join(','), 'success', roleRef(r.id));
     const [created] = await db.select().from(roles).where(eq(roles.id, r.id)).limit(1);
     res.json(await serializeRole(created));
   } catch (err) {
@@ -801,7 +812,10 @@ router.put('/roles/:id', requireAdmin, async (req, res) => {
     if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
     throw err;
   }
-  await logAudit(req, 'admin_update_role', role.name, Array.isArray(permissions) ? permissions.join(',') : '');
+  await logAudit(req, 'admin_update_role', role.name,
+    [patch.name && patch.name !== role.name ? `renamed to: ${patch.name}` : '', Array.isArray(permissions) ? permissions.join(',') : '']
+      .filter(Boolean).join('; '),
+    'success', roleRef(role.id));
   const [updated] = await db.select().from(roles).where(eq(roles.id, role.id)).limit(1);
   res.json(await serializeRole(updated));
 });
@@ -834,7 +848,7 @@ router.delete('/roles/:id', requireAdmin, async (req, res) => {
     throw err;
   }
   await logAudit(req, 'admin_delete_role', role.name,
-    moved > 0 ? `${moved} holder(s) ${target ? `reassigned to ${target.name}` : 'unassigned'}` : '');
+    moved > 0 ? `${moved} holder(s) ${target ? `reassigned to ${target.name}` : 'unassigned'}` : '', 'success', roleRef(role.id));
   res.json({ ok: true, reassigned: target ? moved : 0, unassigned: target ? 0 : moved });
 });
 
@@ -850,7 +864,7 @@ router.put('/users/:id/role', requireAdmin, async (req, res) => {
   const [role] = await db.select({ id: roles.id, name: roles.name }).from(roles).where(eq(roles.id, Number(roleId))).limit(1);
   if (!role) return res.status(400).json({ error: 'Role not found' });
   await db.update(users).set({ role_id: role.id }).where(eq(users.id, user.id));
-  await logAudit(req, 'admin_assign_role', user.username, role.name);
+  await logAudit(req, 'admin_assign_role', user.username, role.name, 'success', roleRef(role.id));
   res.json({ ok: true });
 });
 
@@ -3222,12 +3236,14 @@ router.get('/audit-log', pAudit, async (req, res) => {
   const offset = (page - 1) * limit;
   const action = typeof req.query.action === 'string' ? req.query.action : '';
   const target = typeof req.query.target === 'string' ? req.query.target : '';
+  const targetRef = typeof req.query.targetRef === 'string' ? req.query.targetRef : '';
 
-  // Optional action/target filters, then a stable created_at DESC page. User
-  // input is bound as parameters, never interpolated into SQL.
+  // Optional action/target/targetRef filters, then a stable created_at DESC
+  // page. User input is bound as parameters, never interpolated into SQL.
   const filters = [
     action ? eq(auditLog.action, action) : undefined,
     target ? eq(auditLog.target, target) : undefined,
+    targetRef ? eq(auditLog.target_ref, targetRef) : undefined,
   ].filter(Boolean);
   const whereClause = filters.length ? and(...filters) : undefined;
   const [{ total }] = await db.select({ total: count() }).from(auditLog).where(whereClause);

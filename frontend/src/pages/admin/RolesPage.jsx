@@ -7,6 +7,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { PERM_GROUPS, permLabel, isDangerPerm, roleMatchesQuery, diffRole } from '../../utils/roleDiff.js';
 
 const btnCls = 'text-xs px-2 py-1 rounded hover:bg-gray-700 transition-colors';
+const KNOWN_PERMS = new Set(PERM_GROUPS.flatMap((g) => g.perms.map((p) => p.key)));
 
 export default function RolesPage() {
   useDocumentTitle('Roles');
@@ -14,6 +15,7 @@ export default function RolesPage() {
   const isAdmin = !!currentUser?.isAdmin;
   const canViewAudit = isAdmin || !!currentUser?.permissions?.canViewAuditLog;
   const [roles, setRoles] = useState([]);
+  const [permissionKeys, setPermissionKeys] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [manageRole, setManageRole] = useState(null);
@@ -30,6 +32,7 @@ export default function RolesPage() {
     try {
       const r = await api.get('/admin/roles');
       setRoles(r.data.roles || []);
+      setPermissionKeys(r.data.permissionKeys || []);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to load roles');
     } finally {
@@ -210,7 +213,7 @@ export default function RolesPage() {
                         </button>
                         {canViewAudit && (
                           <Link
-                            to={`/admin/audit-log?target=${encodeURIComponent(role.name)}`}
+                            to={`/admin/audit-log?targetRef=${encodeURIComponent(`role:${role.id}`)}&label=${encodeURIComponent(role.name)}`}
                             className={`${btnCls} text-gray-400 hover:text-white`}
                           >
                             History
@@ -243,7 +246,7 @@ export default function RolesPage() {
       {holdersRole && <HoldersModal role={holdersRole} isAdmin={isAdmin} onClose={() => setHoldersRole(null)} onChanged={load} />}
       {deletingRole && <DeleteRoleModal role={deletingRole} roles={roles} onClose={() => setDeletingRole(null)} onDeleted={load} />}
       {compareOpen && <CompareRolesModal roles={roles} onClose={() => setCompareOpen(false)} />}
-      {importOpen && <ImportRoleModal onClose={() => setImportOpen(false)} onImported={(prefill) => { setImportOpen(false); setCreateOpen(prefill); }} />}
+      {importOpen && <ImportRoleModal permissionKeys={permissionKeys} onClose={() => setImportOpen(false)} onImported={(prefill) => { setImportOpen(false); setCreateOpen(prefill); }} />}
     </div>
   );
 }
@@ -296,6 +299,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
   const [reviewing, setReviewing] = useState(false);
 
   const draft = { name, description, permissions: [...perms], ...quotas };
+  const unknownPerms = [...perms].filter((k) => !KNOWN_PERMS.has(k)).sort();
   const changes = diffRole(editing ? role : null, draft);
   const dirty = editing
     ? changes.length > 0
@@ -464,6 +468,18 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
             </div>
           );
         })}
+
+        {unknownPerms.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Unrecognised permissions</p>
+            {unknownPerms.map((key) => (
+              <div key={key} className="flex items-center justify-between rounded-lg px-4 py-2.5 bg-red-900/15 border border-red-800/40">
+                <p className="text-sm font-mono text-red-300">{key}</p>
+                <button type="button" onClick={() => toggle(key)} className="text-xs text-red-400 hover:text-red-300">Remove</button>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="space-y-1">
           <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Resource Quotas</p>
@@ -788,7 +804,7 @@ function CompareRolesModal({ roles, onClose }) {
   );
 }
 
-function ImportRoleModal({ onClose, onImported }) {
+function ImportRoleModal({ permissionKeys, onClose, onImported }) {
   const [text, setText] = useState('');
   const [error, setError] = useState('');
 
@@ -800,10 +816,16 @@ function ImportRoleModal({ onClose, onImported }) {
       setError('Not a Homelabrrr role export');
       return;
     }
+    const known = new Set(permissionKeys);
+    const requested = data.permissions.filter((p) => typeof p === 'string');
+    const unknown = requested.filter((p) => !known.has(p));
+    if (unknown.length && !confirm(`This instance does not know ${unknown.length} permission${unknown.length === 1 ? '' : 's'} in the export (${unknown.join(', ')}). Import without ${unknown.length === 1 ? 'it' : 'them'}?`)) {
+      return;
+    }
     onImported({
       name: data.name,
       description: typeof data.description === 'string' ? data.description : '',
-      permissions: data.permissions.filter((p) => typeof p === 'string'),
+      permissions: requested.filter((p) => known.has(p)),
       maxCores: data.maxCores ?? '',
       maxMemoryGb: data.maxMemoryGb ?? '',
       maxStorageGb: data.maxStorageGb ?? '',
@@ -819,7 +841,7 @@ function ImportRoleModal({ onClose, onImported }) {
     <Modal title="Import role" onClose={onClose} size="md">
       <div className="p-5 space-y-4">
         <p className="text-xs text-gray-400">
-          Paste or load a role exported from another Homelabrrr instance. It opens in the create form so you can review it before saving; unknown permission keys are rejected by the server.
+          Paste or load a role exported from another Homelabrrr instance. It opens in the create form so you can review it before saving; permissions this instance does not know are dropped (you are asked first).
         </p>
         <input type="file" accept="application/json,.json" onChange={readFile} className="text-xs text-gray-400" />
         <textarea

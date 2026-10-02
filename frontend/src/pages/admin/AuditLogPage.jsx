@@ -31,6 +31,8 @@ export default function AuditLogPage() {
   const [limit] = useState(50);
   const [actionFilter, setActionFilter] = useState(() => searchParams.get('action') || '');
   const targetFilter = searchParams.get('target') || '';
+  const targetRefFilter = searchParams.get('targetRef') || '';
+  const filterLabel = searchParams.get('label') || targetRefFilter || targetFilter;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -43,6 +45,7 @@ export default function AuditLogPage() {
       const params = { page, limit };
       if (actionFilter) params.action = actionFilter;
       if (targetFilter) params.target = targetFilter;
+      if (targetRefFilter) params.targetRef = targetRefFilter;
       const res = await api.get('/admin/audit-log', { params });
       setRows(res.data.rows);
       setTotal(res.data.total);
@@ -51,7 +54,7 @@ export default function AuditLogPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, actionFilter, targetFilter]);
+  }, [page, limit, actionFilter, targetFilter, targetRefFilter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -63,6 +66,8 @@ export default function AuditLogPage() {
   const clearTarget = () => {
     const next = new URLSearchParams(searchParams);
     next.delete('target');
+    next.delete('targetRef');
+    next.delete('label');
     setSearchParams(next);
     setPage(1);
   };
@@ -75,13 +80,13 @@ export default function AuditLogPage() {
           <p className="text-sm text-gray-500 mt-1">{total} total entries</p>
         </div>
         <div className="flex items-center gap-2">
-          {targetFilter && (
+          {(targetFilter || targetRefFilter) && (
             <button
               onClick={clearTarget}
               className="text-xs bg-gray-800 border border-gray-700 text-gray-300 rounded-lg px-3 py-2 hover:bg-gray-700 transition-colors"
               title="Clear target filter"
             >
-              Target: <span className="font-mono text-white">{targetFilter}</span> ✕
+              Target: <span className="font-mono text-white">{filterLabel}</span> ✕
             </button>
           )}
           <select

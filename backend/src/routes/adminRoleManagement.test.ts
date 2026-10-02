@@ -186,6 +186,54 @@ test('delete with an invalid reassignment target changes nothing', async () => {
   assert.ok(still, 'the role survives a rejected delete');
 });
 
+test('ids beyond the PostgreSQL integer range answer 404/400, not 500', async () => {
+  const huge = '2147483648';
+  assert.equal((await request(app).post(`/roles/${huge}/clone`).send({})).status, 404);
+  assert.equal((await request(app).get(`/roles/${huge}/users`)).status, 404);
+  assert.equal((await request(app).put(`/roles/${huge}`).send({})).status, 404);
+  assert.equal((await request(app).delete(`/roles/${huge}`)).status, 404);
+  assert.equal((await request(app).delete(`/roles/${sourceId}?reassignTo=${huge}`)).status, 400);
+  assert.equal((await request(app).post(`/roles/${sourceId}/assign`).send({ userIds: [2147483648] })).status, 400);
+  assert.equal((await request(app).post(`/roles/${sourceId}/assign`).send({ userIds: [Number.MAX_SAFE_INTEGER + 2] })).status, 400);
+  assert.equal((await request(app).post(`/roles/${sourceId}/assign`).send({ userIds: [0] })).status, 400);
+});
+
+test('role history follows the role id across renames', async () => {
+  const id = await makeRole('History Before');
+  await request(app).put(`/roles/${id}`).send({ name: 'History After' }).expect(200);
+  await request(app).post(`/roles/${id}/assign`).send({ userIds: [carol] }).expect(200);
+
+  const res = await request(app).get('/audit-log').query({ targetRef: `role:${id}` });
+  assert.equal(res.status, 200);
+  const actions = res.body.rows.map((r) => r.action).sort();
+  assert.deepEqual(actions, ['admin_assign_role', 'admin_update_role']);
+  const update = res.body.rows.find((r) => r.action === 'admin_update_role');
+  assert.equal(update.target, 'History Before');
+  assert.match(update.detail, /renamed to: History After/);
+
+  await testDb.db.update(users).set({ role_id: null }).where(eq(users.id, carol));
+  await request(app).delete(`/roles/${id}`).expect(200);
+  const reused = await makeRole('History After');
+  const fresh = await request(app).get('/audit-log').query({ targetRef: `role:${reused}` });
+  assert.equal(fresh.body.rows.length, 0, 'a reused name does not inherit the old role\'s history');
+});
+
+test('clone reads the source inside its transaction', async () => {
+  const id = await makeRole('Racy', ['can_manage_hosts']);
+  const { db } = await import('../db/client.ts');
+  const tx = db.transaction(async (t) => {
+    await t.select().from(roles).where(eq(roles.id, id)).for('update');
+    await new Promise((r) => setTimeout(r, 300));
+    await t.delete(roles).where(eq(roles.id, id));
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  const res = await request(app).post(`/roles/${id}/clone`).send({});
+  await tx;
+  assert.equal(res.status, 404, 'a source deleted mid-clone must not produce an empty copy');
+  const leftovers = await testDb.db.select().from(roles).where(eq(roles.name, 'Racy (copy)'));
+  assert.equal(leftovers.length, 0);
+});
+
 test('built-in roles still cannot be deleted', async () => {
   const res = await request(app).delete(`/roles/${builtInId}`);
   assert.equal(res.status, 400);
