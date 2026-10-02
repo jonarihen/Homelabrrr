@@ -16,6 +16,7 @@ const state = {
   quotas: { max_cores: null, max_memory_gb: null, max_storage_gb: null },
   vms: [],
   vlan_ids: [],
+  roleDefinitions: [],
 };
 
 async function mockUsersPage(page, { onPatch, onLegacyWrite } = {}) {

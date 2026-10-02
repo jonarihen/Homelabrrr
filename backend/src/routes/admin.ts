@@ -562,8 +562,9 @@ router.put('/users/:id/quotas', requireAdmin, async (req, res) => {
 const roleRef = (id) => `role:${id}`;
 
 const USER_FLAG_KEYS = ['see_all_vms', 'can_provision', 'can_create_vms', ...TOGGLEABLE_PERMISSIONS] as const;
-const USER_PATCH_FIELDS = ['version', 'roleId', 'permissions', 'require2fa', 'quotas', 'vms', 'vlans'];
+const USER_PATCH_FIELDS = ['version', 'roleId', 'roleVersion', 'permissions', 'require2fa', 'quotas', 'vms', 'vlans'];
 const MAX_BATCH_ITEMS = 500;
+const roleDefinitionVersion = (role) => createHash('sha256').update(JSON.stringify(role)).digest('hex').slice(0, 24);
 
 class PatchError extends Error {
   status: number;
@@ -578,6 +579,15 @@ async function loadUserState(executor, userId, { lock = false } = {}) {
   if (lock) q = q.for('update');
   const [row] = await q;
   if (!row) return null;
+  let roleQuery = executor.select().from(roles).orderBy(roles.id);
+  if (lock) roleQuery = roleQuery.for('share');
+  const roleRows = await roleQuery;
+  const rolePerms = await executor.select().from(rolePermissions)
+    .orderBy(rolePermissions.role_id, rolePermissions.permission);
+  const roleDefinitions = roleRows.map((r) => ({
+    id: r.id, name: r.name, permissions: rolePerms.filter((p) => p.role_id === r.id).map((p) => p.permission),
+    max_cores: r.max_cores, max_memory_gb: r.max_memory_gb, max_storage_gb: r.max_storage_gb,
+  }));
   const vms = await executor.select({ id: vmAssignments.id, node: vmAssignments.node, vmid: vmAssignments.vmid })
     .from(vmAssignments).where(eq(vmAssignments.user_id, userId)).orderBy(vmAssignments.id);
   const vlanRows = await executor.select({ vlan_id: userVlans.vlan_id })
@@ -592,9 +602,19 @@ async function loadUserState(executor, userId, { lock = false } = {}) {
     quotas: { max_cores: row.max_cores ?? null, max_memory_gb: row.max_memory_gb ?? null, max_storage_gb: row.max_storage_gb ?? null },
     vms: vms.map((v) => ({ id: v.id, node: v.node, vmid: v.vmid })),
     vlan_ids: vlanRows.map((v) => v.vlan_id),
+    roleDefinitions: roleDefinitions.map((r) => ({ ...r, version: roleDefinitionVersion(r) })),
   };
-  const version = createHash('sha256').update(JSON.stringify({ ...state, username: undefined })).digest('hex').slice(0, 24);
+  const versionState = {
+    ...state,
+    roleDefinitions: state.roleDefinitions.filter((r) => r.id === state.role_id),
+  };
+  const version = createHash('sha256').update(JSON.stringify(versionState)).digest('hex').slice(0, 24);
   return { ...state, version };
+}
+
+function patchSection(value, field, allowed, required = []) {
+  try { return validateObject(value, { fields: allowed, required }); }
+  catch (err) { throw new PatchError(400, `${field}: ${err.message}`); }
 }
 
 function parseIdList(value, field) {
@@ -621,7 +641,13 @@ function planUserPatch(body, isAdmin) {
     else {
       plan.roleId = parseRoleId(body.roleId);
       if (plan.roleId === null) throw new PatchError(400, 'roleId must be an integer or null');
+      if (typeof body.roleVersion !== 'string' || !/^[a-f0-9]{24}$/.test(body.roleVersion)) {
+        throw new PatchError(400, 'roleVersion required when assigning a role');
+      }
+      plan.roleVersion = body.roleVersion;
     }
+  } else if (body.roleVersion !== undefined) {
+    throw new PatchError(400, 'roleVersion requires roleId');
   }
   if (body.permissions !== undefined) {
     if (!body.permissions || typeof body.permissions !== 'object' || Array.isArray(body.permissions)) {
@@ -639,29 +665,31 @@ function planUserPatch(body, isAdmin) {
     plan.require2fa = body.require2fa;
   }
   if (body.quotas !== undefined) {
-    const q = body.quotas || {};
-    const maxCores = parseQuotaValue(q.maxCores);
-    const maxMemoryGb = parseQuotaValue(q.maxMemoryGb);
-    const maxStorageGb = parseQuotaValue(q.maxStorageGb);
-    if (maxCores === undefined || maxMemoryGb === undefined || maxStorageGb === undefined) {
-      throw new PatchError(400, 'Quota values must be non-negative integers (empty = unlimited)');
+    const q = patchSection(body.quotas, 'quotas', ['maxCores', 'maxMemoryGb', 'maxStorageGb']);
+    if (Object.keys(q).length === 0) throw new PatchError(400, 'quotas must include a quota value');
+    plan.quotas = {};
+    for (const [key, column] of [['maxCores', 'max_cores'], ['maxMemoryGb', 'max_memory_gb'], ['maxStorageGb', 'max_storage_gb']]) {
+      if (!(key in q)) continue;
+      const value = parseQuotaValue(q[key]);
+      if (value === undefined) throw new PatchError(400, 'Quota values must be non-negative integers (empty = unlimited)');
+      plan.quotas[column] = value;
     }
-    plan.quotas = { max_cores: maxCores, max_memory_gb: maxMemoryGb, max_storage_gb: maxStorageGb };
   }
   if (body.vms !== undefined) {
-    const v = body.vms || {};
+    const v = patchSection(body.vms, 'vms', ['add', 'remove']);
     const add = v.add === undefined ? [] : v.add;
     if (!Array.isArray(add) || add.length > MAX_BATCH_ITEMS) throw new PatchError(400, 'vms.add must be a list');
-    plan.vmAdd = add.map((item) => {
-      const node = typeof item?.node === 'string' ? item.node.trim() : '';
-      const vmid = parseRoleId(item?.vmid);
+    plan.vmAdd = add.map((raw) => {
+      const item = patchSection(raw, 'vms.add item', ['node', 'vmid'], ['node', 'vmid']);
+      const node = typeof item.node === 'string' ? item.node.trim() : '';
+      const vmid = parseRoleId(item.vmid);
       if (!node || node.length > 255 || vmid === null) throw new PatchError(400, 'Each VM needs a node and integer vmid');
       return { node, vmid };
     });
     plan.vmRemove = parseIdList(v.remove, 'vms.remove');
   }
   if (body.vlans !== undefined) {
-    const v = body.vlans || {};
+    const v = patchSection(body.vlans, 'vlans', ['add', 'remove']);
     plan.vlanAdd = parseIdList(v.add, 'vlans.add');
     plan.vlanRemove = parseIdList(v.remove, 'vlans.remove');
     if (plan.vlanAdd.some((id) => plan.vlanRemove.includes(id))) throw new PatchError(400, 'A VLAN cannot be both added and removed');
@@ -675,6 +703,18 @@ router.get('/users/:id/state', pAssignments, async (req, res) => {
   if (!state) return res.status(404).json({ error: 'User not found' });
   res.json(state);
 });
+
+async function syncBatchVmTags(vms) {
+  const unique = [...new Map(vms.map((vm) => [`${vm.node}/${vm.vmid}`, vm])).values()];
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < unique.length) {
+      const vm = unique[cursor++];
+      await syncVmTagsSafe(vm.node, vm.vmid);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, unique.length) }, worker));
+}
 
 router.patch('/users/:id', pAssignments, async (req, res) => {
   const userId = parseRoleId(req.params.id);
@@ -698,6 +738,13 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
       if (before.is_admin && !isAdmin) throw new PatchError(403, 'Only admins can modify admin accounts');
       if (plan.version !== undefined && plan.version !== before.version) {
         throw new PatchError(409, 'This user was changed by someone else since you opened it — reload to see the latest state');
+      }
+      if (plan.roleVersion) {
+        const definition = before.roleDefinitions.find((r) => r.id === plan.roleId);
+        if (!definition) throw new PatchError(400, 'Role not found');
+        if (definition.version !== plan.roleVersion) {
+          throw new PatchError(409, 'The destination role changed since you reviewed it — reload and try again');
+        }
       }
 
       const patch: any = {};
@@ -728,10 +775,10 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
         audits.push({ action: 'admin_toggle_permission', target: String(userId), detail: `require_2fa=${plan.require2fa ? 1 : 0}` });
       }
       if (plan.quotas) {
-        const q = plan.quotas;
+        const q = { ...before.quotas, ...plan.quotas };
         const changed = Object.keys(q).some((k) => q[k] !== before.quotas[k]);
         if (changed) {
-          Object.assign(patch, q);
+          Object.assign(patch, plan.quotas);
           audits.push({
             action: 'admin_set_quotas', target: before.username,
             detail: `cores=${q.max_cores ?? '∞'} memory=${q.max_memory_gb ?? '∞'}GB storage=${q.max_storage_gb ?? '∞'}GB`,
@@ -771,7 +818,7 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
       // Audit rows ride the same transaction: the trail and the change commit
       // (or roll back) together.
       await logAuditTx(tx, req, audits);
-      return loadUserState(tx, userId);
+      return loadUserState(tx, userId, {});
     });
   } catch (err) {
     if (err instanceof PatchError) return res.status(err.status).json({ error: err.message });
@@ -780,8 +827,8 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
     throw err;
   }
 
-  for (const vm of tagSync) await syncVmTagsSafe(vm.node, vm.vmid);
   res.json({ ...after, applied: audits.length });
+  void syncBatchVmTags(tagSync);
 });
 
 // Per-user allocated usage for the Users page — one resource-list call

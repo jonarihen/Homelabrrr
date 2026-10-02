@@ -13,6 +13,10 @@ const state = {
   quotas: { max_cores: 4, max_memory_gb: null, max_storage_gb: null },
   vms: [{ id: 11, node: '1~pve', vmid: 100 }],
   vlan_ids: [3],
+  roleDefinitions: [
+    { id: 9, name: 'Ops', permissions: ['can_operate_all_vms'], max_cores: 8, max_memory_gb: null, max_storage_gb: null, version: 'a'.repeat(24) },
+    { id: 10, name: 'Viewer', permissions: ['see_all_vms'], max_cores: null, max_memory_gb: null, max_storage_gb: null, version: 'b'.repeat(24) },
+  ],
 };
 const allVMs = [
   { vmid: 100, node: 'pve', nodeRef: '1~pve', name: 'web' },
@@ -41,6 +45,7 @@ test('every staged section ends up in one patch with the version', () => {
   assert.deepEqual(buildUserPatch(state, d, { allVMs }), {
     version: 'v1',
     roleId: 10,
+    roleVersion: 'b'.repeat(24),
     permissions: { can_operate_all_vms: true, can_manage_hosts: false },
     require2fa: false,
     quotas: { maxCores: '', maxMemoryGb: '', maxStorageGb: '' },
@@ -110,4 +115,24 @@ test('toggling a flag hidden behind a role is listed but not as a grant', () => 
 test('quota drafts must be empty or whole non-negative numbers', () => {
   assert.deepEqual(invalidQuotaKeys({ maxCores: '', maxMemoryGb: '8', maxStorageGb: 0 }), []);
   assert.deepEqual(invalidQuotaKeys({ maxCores: '1.5', maxMemoryGb: '1e2', maxStorageGb: '-1' }), ['maxCores', 'maxMemoryGb', 'maxStorageGb']);
+});
+
+test('quota drafts reject values above the PostgreSQL int32 limit', () => {
+  assert.deepEqual(invalidQuotaKeys({ maxCores: '2147483648', maxMemoryGb: '2147483647', maxStorageGb: '' }), ['maxCores']);
+});
+
+test('review shows effective quotas after role fallback, not unlimited', () => {
+  const holder = {
+    ...state, role_id: 9,
+    quotas: { max_cores: 4, max_memory_gb: null, max_storage_gb: null },
+  };
+  const d = draftFromState(holder);
+  d.quotas.maxCores = '';
+  const changes = describeUserChanges(holder, d, { allVMs, allVLANs, roles: holder.roleDefinitions });
+  assert.deepEqual(changes, [{ kind: 'field', label: 'Max CPU cores', from: '4', to: '8' }]);
+  const inherited = { ...holder, quotas: { ...holder.quotas, max_cores: null } };
+  const roleSwitch = draftFromState(inherited);
+  roleSwitch.roleId = '10';
+  const switched = describeUserChanges(inherited, roleSwitch, { allVMs, allVLANs, roles: inherited.roleDefinitions });
+  assert.ok(switched.some((c) => c.label === 'Max CPU cores' && c.from === '8' && c.to === 'unlimited'));
 });

@@ -348,15 +348,16 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
   useEffect(() => { loadState(); }, [loadState]);
 
-  const ctx = { allVMs, allVLANs, roles };
+  const reviewedRoles = state?.roleDefinitions || roles;
+  const ctx = { allVMs, allVLANs, roles: reviewedRoles };
   const changes = state && draft ? describeUserChanges(state, draft, ctx) : [];
   const pending = changes.length;
   const badQuotas = draft ? invalidQuotaKeys(draft.quotas) : [];
 
-  useUnsavedChangesGuard(pending > 0, `Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${user.username}?`);
+  useUnsavedChangesGuard(pending > 0, `Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${state?.username || user.username}?`);
 
   const requestClose = () => {
-    if (pending && !confirm(`Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${user.username}?`)) return;
+    if (pending && !confirm(`Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${state?.username || user.username}?`)) return;
     onClose();
   };
 
@@ -418,9 +419,11 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
   const changeUsername = async (e) => {
     e.preventDefault();
+    if (pending && !confirm(`Changing the username applies immediately and discards ${pending} pending change${pending === 1 ? '' : 's'}. Continue?`)) return;
     try {
       await api.put(`/admin/users/${user.id}/username`, { username: newUsername });
-      setUsernameMsg('Username changed');
+      await loadState();
+      setUsernameMsg('Username changed. Any pending edits were discarded; review this account again before applying.');
     } catch (e) { setUsernameMsg('Failed: ' + (e.response?.data?.error || e.message)); }
   };
 
@@ -435,7 +438,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
   if (!state || !draft) {
     return (
-      <Modal title={`Manage — ${user.username}`} onClose={onClose} size="lg">
+      <Modal title={`Manage — ${state?.username || user.username}`} onClose={onClose} size="lg">
         <div className="p-5">
           {error
             ? <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>
@@ -467,7 +470,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   const operateAllVMs = !!draft.permissions.can_operate_all_vms;
 
   return (
-    <Modal title={`Manage — ${user.username}`} onClose={reviewing ? () => setReviewing(false) : requestClose} size="lg">
+    <Modal title={`Manage — ${state?.username || user.username}`} onClose={reviewing ? () => setReviewing(false) : requestClose} size="lg">
       <div className="flex border-b border-gray-700 overflow-x-auto">
         {[
           ...(canGrantPrivileges ? [{ id: 'permissions', label: 'Permissions' }] : []),
@@ -515,7 +518,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                       className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
                     >
                       <option value="">No role — per-user permissions only</option>
-                      {roles.map(r => (
+                      {reviewedRoles.map(r => (
                         <option key={r.id} value={r.id}>
                           {r.name} ({r.permissions.length} permission{r.permissions.length !== 1 ? 's' : ''})
                         </option>
@@ -532,7 +535,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                 {roleId ? (
                   <div className="bg-purple-900/15 border border-purple-800/30 rounded-lg px-4 py-3">
                     <p className="text-sm text-purple-300 font-medium">
-                      Permissions come from the “{roles.find(r => String(r.id) === String(roleId))?.name || 'assigned'}” role
+                      Permissions come from the “{reviewedRoles.find(r => String(r.id) === String(roleId))?.name || 'assigned'}” role
                     </p>
                     <p className="text-xs text-purple-400/70 mt-0.5">
                       Edit the role on the Roles page to change what everyone holding it can do — or remove the role above to manage this user individually.
@@ -612,7 +615,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
             invalid={badQuotas}
             onChange={setQuota}
             usage={usage}
-            role={roleId ? roles.find(r => String(r.id) === String(roleId)) : null}
+            role={roleId ? reviewedRoles.find(r => String(r.id) === String(roleId)) : null}
           />
         )}
 
@@ -833,7 +836,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
       {reviewing && (
         <ReviewUserChangesModal
-          user={user}
+          user={{ ...user, username: state.username }}
           state={state}
           draft={draft}
           changes={changes}

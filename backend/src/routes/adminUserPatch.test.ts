@@ -50,6 +50,12 @@ async function version(app, id) {
   return res.body.version;
 }
 
+async function roleVersion(app, id, roleId) {
+  const res = await request(app).get(`/users/${id}/state`);
+  assert.equal(res.status, 200);
+  return res.body.roleDefinitions.find((r) => r.id === roleId)?.version;
+}
+
 before(async () => {
   testDb = await createTestDatabase();
   process.env.DATABASE_URL = testDb.url;
@@ -94,7 +100,7 @@ test('a full batch applies every change and audits each one', async () => {
   const v = await version(adminApp, targetId);
   const res = await request(adminApp).patch(`/users/${targetId}`).send({
     version: v,
-    roleId,
+    roleId, roleVersion: await roleVersion(adminApp, targetId, roleId),
     permissions: { can_operate_all_vms: true, see_all_vms: true },
     require2fa: true,
     quotas: { maxCores: 4, maxMemoryGb: '', maxStorageGb: 50 },
@@ -244,13 +250,13 @@ test('audit rows commit with the batch and roll back with it', async () => {
 });
 
 test('role assignment audits carry stable refs for both the new and old role', async () => {
-  const res = await request(adminApp).patch(`/users/${otherId}`).send({ roleId });
+  const res = await request(adminApp).patch(`/users/${otherId}`).send({ roleId, roleVersion: await roleVersion(adminApp, otherId, roleId) });
   assert.equal(res.status, 200);
   const rows = await testDb.db.select().from(auditLog).where(eq(auditLog.target_ref, `role:${roleId}`));
   assert.ok(rows.some((r) => r.action === 'admin_assign_role' && r.target === 'other'));
 
   const [oldRole] = await testDb.db.insert(roles).values({ name: 'PriorRole' }).returning({ id: roles.id });
-  const moved = await request(adminApp).patch(`/users/${otherId}`).send({ roleId: oldRole.id });
+  const moved = await request(adminApp).patch(`/users/${otherId}`).send({ roleId: oldRole.id, roleVersion: await roleVersion(adminApp, otherId, oldRole.id) });
   assert.equal(moved.status, 200);
   const priorHistory = await testDb.db.select().from(auditLog).where(eq(auditLog.target_ref, `role:${roleId}`));
   assert.ok(priorHistory.some((r) => r.action === 'admin_unassign_role' && r.target === 'other'));
@@ -268,10 +274,60 @@ test('fractional or exponential quotas are rejected, not truncated', async () =>
   assert.equal((await readUser(targetId)).row.max_cores, 12);
 });
 
+test('malformed nested sections reject the whole batch', async () => {
+  const before = await readUser(targetId);
+  const bad = [
+    { quotas: { maxCore: 4 } },
+    { quotas: 'invalid' },
+    { quotas: {} },
+    { vms: { adds: [{ node: '1~pve', vmid: 99 }] } },
+    { vms: 'invalid' },
+    { vms: { add: [{ node: '1~pve', vmid: 99, extra: true }] } },
+    { vlans: { adds: [vlanA] } },
+    { vlans: [] },
+  ];
+  for (const section of bad) {
+    const res = await request(adminApp).patch(`/users/${targetId}`).send({ permissions: { can_manage_hosts: true }, ...section });
+    assert.equal(res.status, 400, JSON.stringify(section));
+  }
+  assert.equal((await readUser(targetId)).row.can_manage_hosts, before.row.can_manage_hosts);
+});
+
+test('a renamed user rejects the stale version', async () => {
+  const v = await version(adminApp, targetId);
+  await testDb.db.update(users).set({ username: 'target-renamed' }).where(eq(users.id, targetId));
+  const res = await request(adminApp).patch(`/users/${targetId}`).send({ version: v, permissions: { can_manage_hosts: true } });
+  assert.equal(res.status, 409);
+  await testDb.db.update(users).set({ username: 'target' }).where(eq(users.id, targetId));
+});
+
+test('a changed role definition rejects assignment reviewed against the old version', async () => {
+  const stateRes = await request(adminApp).get(`/users/${targetId}/state`);
+  const definition = stateRes.body.roleDefinitions.find((r) => r.id === roleId);
+  assert.ok(definition?.version);
+  const changed = await testDb.db.insert(roles).values({ name: 'VersionedRole' }).returning({ id: roles.id });
+  const fresh = await request(adminApp).get(`/users/${targetId}/state`);
+  const dest = fresh.body.roleDefinitions.find((r) => r.id === changed[0].id);
+  const { rolePermissions } = await import('../db/schema/index.ts');
+  await testDb.db.insert(rolePermissions).values({ role_id: dest.id, permission: 'can_operate_all_vms' });
+
+  const res = await request(adminApp).patch(`/users/${targetId}`).send({ roleId: dest.id, roleVersion: dest.version });
+  assert.equal(res.status, 409);
+  assert.equal((await readUser(targetId)).row.role_id, roleId);
+});
+
+test('a changed current role definition makes the user state stale', async () => {
+  const v = await version(adminApp, targetId);
+  await testDb.db.update(roles).set({ max_cores: 99 }).where(eq(roles.id, roleId));
+  const res = await request(adminApp).patch(`/users/${targetId}`).send({ version: v, permissions: { can_manage_hosts: true } });
+  assert.equal(res.status, 409);
+  await testDb.db.update(roles).set({ max_cores: null }).where(eq(roles.id, roleId));
+});
+
 test('an unknown role is rejected without writing', async () => {
   const before = await readUser(targetId);
   const res = await request(adminApp).patch(`/users/${targetId}`)
-    .send({ roleId: 999999, permissions: { can_manage_hosts: !before.row.can_manage_hosts } });
+    .send({ roleId: 999999, roleVersion: 'a'.repeat(24), permissions: { can_manage_hosts: !before.row.can_manage_hosts } });
   assert.equal(res.status, 400);
   const afterState = await readUser(targetId);
   assert.equal(afterState.row.can_manage_hosts, before.row.can_manage_hosts);

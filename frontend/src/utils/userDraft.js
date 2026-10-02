@@ -22,7 +22,7 @@ export function invalidQuotaKeys(quotas) {
   return QUOTA_KEYS.filter((q) => {
     const v = quotas[q.key];
     if (v === null || v === undefined || v === '') return false;
-    return !/^\d+$/.test(String(v).trim());
+    return !/^\d{1,10}$/.test(String(v).trim()) || Number(String(v).trim()) > 2147483647;
   }).map((q) => q.key);
 }
 
@@ -56,7 +56,13 @@ function vmLabel(vm) {
 export function buildUserPatch(state, draft, { allVMs = [] } = {}) {
   const body = {};
   const baseRole = state.role_id == null ? '' : String(state.role_id);
-  if (draft.roleId !== baseRole) body.roleId = draft.roleId === '' ? null : Number(draft.roleId);
+  if (draft.roleId !== baseRole) {
+    body.roleId = draft.roleId === '' ? null : Number(draft.roleId);
+    if (body.roleId !== null) {
+      const definition = state.roleDefinitions?.find((r) => String(r.id) === draft.roleId);
+      body.roleVersion = definition?.version;
+    }
+  }
 
   const perms = {};
   for (const [k, v] of Object.entries(draft.permissions)) {
@@ -120,10 +126,14 @@ export function describeUserChanges(state, draft, { allVMs = [], allVLANs = [], 
       danger: !draft.require2fa,
     });
   }
+  const beforeRole = roles.find((r) => String(r.id) === baseRole);
+  const afterRole = roles.find((r) => String(r.id) === draft.roleId);
   for (const q of QUOTA_KEYS) {
-    const from = quotaValue(state.quotas[q.column]);
-    const to = quotaValue(draft.quotas[q.key]);
-    if (from !== to) {
+    const rawFrom = quotaValue(state.quotas[q.column]);
+    const rawTo = quotaValue(draft.quotas[q.key]);
+    const from = rawFrom ?? quotaValue(beforeRole?.[q.column]);
+    const to = rawTo ?? quotaValue(afterRole?.[q.column]);
+    if (from !== to || rawFrom !== rawTo) {
       const fmt = (v) => (v === null ? 'unlimited' : `${v}${q.unit}`);
       changes.push({ kind: 'field', label: q.label, from: fmt(from), to: fmt(to) });
     }
