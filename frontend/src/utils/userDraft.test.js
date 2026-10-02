@@ -136,3 +136,13 @@ test('review shows effective quotas after role fallback, not unlimited', () => {
   const switched = describeUserChanges(inherited, roleSwitch, { allVMs, allVLANs, roles: inherited.roleDefinitions });
   assert.ok(switched.some((c) => c.label === 'Max CPU cores' && c.from === '8' && c.to === 'unlimited'));
 });
+
+test('assignment drafts above the server batch limit are blocked before review', async () => {
+  const { oversizedAssignmentSections, MAX_BATCH_ITEMS } = await import('./userDraft.js');
+  assert.equal(MAX_BATCH_ITEMS, 500);
+  assert.deepEqual(oversizedAssignmentSections({ vms: { add: Array(500).fill(1), remove: [] } }), []);
+  assert.deepEqual(oversizedAssignmentSections({
+    vms: { add: Array(501).fill(1), remove: [] },
+    vlans: { add: [], remove: Array(501).fill(1) },
+  }), ['vms.add', 'vlans.remove']);
+});

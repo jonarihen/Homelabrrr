@@ -53,6 +53,14 @@ function vmLabel(vm) {
 
 // Returns the minimal patch — only the sections that differ — or null when the
 // draft matches the server state.
+export const MAX_BATCH_ITEMS = 500;
+
+export function oversizedAssignmentSections(patch) {
+  return ['vms', 'vlans'].flatMap((section) => ['add', 'remove']
+    .filter((key) => (patch?.[section]?.[key]?.length || 0) > MAX_BATCH_ITEMS)
+    .map((key) => `${section}.${key}`));
+}
+
 export function buildUserPatch(state, draft, { allVMs = [] } = {}) {
   const body = {};
   const baseRole = state.role_id == null ? '' : String(state.role_id);

@@ -822,6 +822,9 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
     });
   } catch (err) {
     if (err instanceof PatchError) return res.status(err.status).json({ error: err.message });
+    if (err?.code === '40P01' || err?.cause?.code === '40P01') {
+      return res.status(409).json({ error: 'A concurrent role change conflicted with this edit — reload and try again' });
+    }
     if (isUniqueViolation(err)) return res.status(400).json({ error: 'A VM or VLAN in this change is already assigned' });
     if (isForeignKeyViolation(err)) return res.status(400).json({ error: 'A VLAN in this change no longer exists' });
     throw err;
