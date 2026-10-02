@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 
@@ -7,6 +8,7 @@ const ACTION_TYPES = [
   'vm_restore', 'vlan_change', 'vm_clone', 'vm_create',
   'admin_create_user', 'admin_delete_user', 'admin_reset_2fa',
   'admin_unlock_user', 'admin_reset_password',
+  'admin_create_role', 'admin_update_role', 'admin_clone_role', 'admin_delete_role', 'admin_assign_role',
   'admin_create_firewall', 'admin_update_firewall', 'admin_delete_firewall',
   'admin_sync_vlan_firewall', 'admin_unsync_vlan_firewall', 'admin_delete_vlan',
 ];
@@ -22,11 +24,13 @@ function actionBadgeClass(action) {
 export default function AuditLogPage() {
   useDocumentTitle('Audit Log');
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [limit] = useState(50);
-  const [actionFilter, setActionFilter] = useState('');
+  const [actionFilter, setActionFilter] = useState(() => searchParams.get('action') || '');
+  const targetFilter = searchParams.get('target') || '';
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -38,6 +42,7 @@ export default function AuditLogPage() {
     try {
       const params = { page, limit };
       if (actionFilter) params.action = actionFilter;
+      if (targetFilter) params.target = targetFilter;
       const res = await api.get('/admin/audit-log', { params });
       setRows(res.data.rows);
       setTotal(res.data.total);
@@ -46,12 +51,19 @@ export default function AuditLogPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, actionFilter]);
+  }, [page, limit, actionFilter, targetFilter]);
 
   useEffect(() => { load(); }, [load]);
 
   const handleFilterChange = (e) => {
     setActionFilter(e.target.value);
+    setPage(1);
+  };
+
+  const clearTarget = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('target');
+    setSearchParams(next);
     setPage(1);
   };
 
@@ -62,7 +74,16 @@ export default function AuditLogPage() {
           <h1 className="aaris-display text-xl text-gray-100">Audit Log</h1>
           <p className="text-sm text-gray-500 mt-1">{total} total entries</p>
         </div>
-        <div>
+        <div className="flex items-center gap-2">
+          {targetFilter && (
+            <button
+              onClick={clearTarget}
+              className="text-xs bg-gray-800 border border-gray-700 text-gray-300 rounded-lg px-3 py-2 hover:bg-gray-700 transition-colors"
+              title="Clear target filter"
+            >
+              Target: <span className="font-mono text-white">{targetFilter}</span> ✕
+            </button>
+          )}
           <select
             value={actionFilter}
             onChange={handleFilterChange}

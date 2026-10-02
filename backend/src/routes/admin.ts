@@ -12,7 +12,7 @@ import {
   caddyServers, caddySites, notificationWebhooks, vmTemplates, cloudImages,
   vmLeases, auditLog, settings, loginAttempts,
 } from '../db/schema/index.ts';
-import { isUniqueViolation } from '../db/errors.ts';
+import { isUniqueViolation, isForeignKeyViolation } from '../db/errors.ts';
 import { setSetting } from '../db/settings.ts';
 import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools } from '../proxmox.ts';
 import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibility.ts';
@@ -616,9 +616,111 @@ async function setRolePermissions(tx, roleId, permissions) {
   }
 }
 
+// A non-numeric id becomes null so lookups answer 404 instead of letting
+// PostgreSQL reject the integer parameter with a 500.
+function parseRoleId(value): number | null {
+  if (typeof value === 'number') return Number.isInteger(value) ? value : null;
+  if (typeof value !== 'string' || !/^\d+$/.test(value.trim())) return null;
+  const n = Number(value.trim());
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+async function findRole(id) {
+  const roleId = parseRoleId(id);
+  if (roleId === null) return null;
+  const [role] = await db.select().from(roles).where(eq(roles.id, roleId)).limit(1);
+  return role || null;
+}
+
+const ROLE_NAME_MAX = 100;
+
+// "<base> (copy)", then "<base> (copy 2)", … — the first name nobody holds.
+async function nextCopyName(base) {
+  const stem = `${base} (copy`;
+  const taken = new Set((await db.select({ name: roles.name }).from(roles)
+    .where(sql`${roles.name} LIKE ${`${stem.replace(/[\\%_]/g, '\\$&')}%`}`)).map((r) => r.name));
+  if (!taken.has(`${stem})`)) return `${stem})`;
+  for (let i = 2; ; i += 1) {
+    const candidate = `${stem} ${i})`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 router.get('/roles', pUsers, async (req, res) => {
   const roleRows = await db.select().from(roles).orderBy(desc(roles.built_in), roles.name);
   res.json({ roles: await Promise.all(roleRows.map(serializeRole)), permissionKeys: PERMISSION_KEYS });
+});
+
+router.get('/roles/:id/users', pUsers, async (req, res) => {
+  const role = await findRole(req.params.id);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+  const holders = await db.select({ id: users.id, username: users.username, is_admin: users.is_admin })
+    .from(users).where(eq(users.role_id, role.id)).orderBy(users.username);
+  res.json(holders);
+});
+
+// Duplicates a role's description, permissions and quotas under a new name.
+// Built-in roles can be cloned; the copy is always a regular, editable role.
+router.post('/roles/:id/clone', requireAdmin, async (req, res) => {
+  const source = await findRole(req.params.id);
+  if (!source) return res.status(404).json({ error: 'Role not found' });
+
+  let name;
+  if (req.body?.name !== undefined && req.body?.name !== null && req.body?.name !== '') {
+    try { name = boundedString(req.body.name, { field: 'name', min: 1, max: ROLE_NAME_MAX }); }
+    catch (err) { return res.status(400).json({ error: err.message, field: err.field }); }
+  } else {
+    name = await nextCopyName(source.name);
+  }
+
+  try {
+    const created = await db.transaction(async (tx) => {
+      const perms = await tx.select({ permission: rolePermissions.permission }).from(rolePermissions)
+        .where(eq(rolePermissions.role_id, source.id));
+      const [row] = await tx.insert(roles).values({
+        name,
+        description: source.description || '',
+        max_cores: source.max_cores,
+        max_memory_gb: source.max_memory_gb,
+        max_storage_gb: source.max_storage_gb,
+      }).returning();
+      await setRolePermissions(tx, row.id, perms.map((p) => p.permission));
+      return row;
+    });
+    await logAudit(req, 'admin_clone_role', name, `from: ${source.name}`);
+    res.json(await serializeRole(created));
+  } catch (err) {
+    if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
+    throw err;
+  }
+});
+
+// Assigns one role to several users at once — all-or-nothing.
+router.post('/roles/:id/assign', requireAdmin, async (req, res) => {
+  const role = await findRole(req.params.id);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+  const { userIds } = req.body || {};
+  if (!Array.isArray(userIds) || userIds.length === 0 || userIds.length > 500) {
+    return res.status(400).json({ error: 'userIds must be a non-empty list' });
+  }
+  const ids = [...new Set(userIds.map(parseRoleId))];
+  if (ids.some((id) => id === null)) return res.status(400).json({ error: 'userIds must be integers' });
+
+  const targets = await db.select({ id: users.id, username: users.username, role_id: users.role_id })
+    .from(users).where(inArray(users.id, ids));
+  if (targets.length !== ids.length) return res.status(400).json({ error: 'One or more users not found' });
+
+  const changing = targets.filter((u) => u.role_id !== role.id);
+  if (changing.length > 0) {
+    try {
+      await db.update(users).set({ role_id: role.id }).where(inArray(users.id, changing.map((u) => u.id)));
+    } catch (err) {
+      if (isForeignKeyViolation(err)) return res.status(409).json({ error: 'Role was removed — reload and try again' });
+      throw err;
+    }
+    for (const u of changing) await logAudit(req, 'admin_assign_role', u.username, role.name);
+  }
+  res.json({ ok: true, assigned: changing.length });
 });
 
 router.post('/roles', requireAdmin, async (req, res) => {
@@ -651,7 +753,7 @@ router.post('/roles', requireAdmin, async (req, res) => {
 });
 
 router.put('/roles/:id', requireAdmin, async (req, res) => {
-  const [role] = await db.select().from(roles).where(eq(roles.id, Number(req.params.id))).limit(1);
+  const role = await findRole(req.params.id);
   if (!role) return res.status(404).json({ error: 'Role not found' });
 
   const { name, description, permissions } = req.body;
@@ -704,15 +806,36 @@ router.put('/roles/:id', requireAdmin, async (req, res) => {
   res.json(await serializeRole(updated));
 });
 
+// Holders are unassigned, or moved to `?reassignTo=<roleId>`, in the same
+// transaction as the delete — a failure leaves the role and its holders intact.
 router.delete('/roles/:id', requireAdmin, async (req, res) => {
-  const [role] = await db.select().from(roles).where(eq(roles.id, Number(req.params.id))).limit(1);
+  const role = await findRole(req.params.id);
   if (!role) return res.status(404).json({ error: 'Role not found' });
   if (role.built_in) return res.status(400).json({ error: 'Built-in roles cannot be deleted' });
-  // Unassign holders first, then delete (role_permissions cascade away)
-  await db.update(users).set({ role_id: null }).where(eq(users.role_id, role.id));
-  await db.delete(roles).where(eq(roles.id, role.id));
-  await logAudit(req, 'admin_delete_role', role.name, '');
-  res.json({ ok: true });
+
+  let target = null;
+  const reassignTo = req.query.reassignTo;
+  if (reassignTo !== undefined && reassignTo !== '') {
+    target = await findRole(reassignTo);
+    if (!target) return res.status(400).json({ error: 'Reassignment role not found' });
+    if (target.id === role.id) return res.status(400).json({ error: 'Cannot reassign holders to the role being deleted' });
+  }
+
+  let moved;
+  try {
+    moved = await db.transaction(async (tx) => {
+      const holders = await tx.update(users).set({ role_id: target ? target.id : null })
+        .where(eq(users.role_id, role.id)).returning({ id: users.id });
+      await tx.delete(roles).where(eq(roles.id, role.id));
+      return holders.length;
+    });
+  } catch (err) {
+    if (isForeignKeyViolation(err)) return res.status(409).json({ error: 'Reassignment role was removed — reload and try again' });
+    throw err;
+  }
+  await logAudit(req, 'admin_delete_role', role.name,
+    moved > 0 ? `${moved} holder(s) ${target ? `reassigned to ${target.name}` : 'unassigned'}` : '');
+  res.json({ ok: true, reassigned: target ? moved : 0, unassigned: target ? 0 : moved });
 });
 
 router.put('/users/:id/role', requireAdmin, async (req, res) => {
@@ -3097,11 +3220,16 @@ router.get('/audit-log', pAudit, async (req, res) => {
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.max(Math.min(parseInt(req.query.limit, 10) || 50, 200), 1);
   const offset = (page - 1) * limit;
-  const action = req.query.action || '';
+  const action = typeof req.query.action === 'string' ? req.query.action : '';
+  const target = typeof req.query.target === 'string' ? req.query.target : '';
 
-  // Optional action filter, then a stable created_at DESC page. User input
-  // (action/limit/offset) is bound as parameters, never interpolated into SQL.
-  const whereClause = action ? eq(auditLog.action, action) : undefined;
+  // Optional action/target filters, then a stable created_at DESC page. User
+  // input is bound as parameters, never interpolated into SQL.
+  const filters = [
+    action ? eq(auditLog.action, action) : undefined,
+    target ? eq(auditLog.target, target) : undefined,
+  ].filter(Boolean);
+  const whereClause = filters.length ? and(...filters) : undefined;
   const [{ total }] = await db.select({ total: count() }).from(auditLog).where(whereClause);
   const rows = await db.select().from(auditLog).where(whereClause)
     .orderBy(desc(auditLog.created_at)).limit(limit).offset(offset);
