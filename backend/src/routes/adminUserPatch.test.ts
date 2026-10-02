@@ -227,6 +227,41 @@ test('unknown and malformed user ids answer 404', async () => {
   assert.equal((await request(adminApp).get('/users/abc/state')).status, 404);
 });
 
+test('audit rows commit with the batch and roll back with it', async () => {
+  const countAudits = async () => (await testDb.db.select().from(auditLog)).length;
+  const beforeCount = await countAudits();
+  const failed = await request(adminApp).patch(`/users/${targetId}`).send({
+    permissions: { can_manage_templates: true },
+    vms: { add: [{ node: '1~pve', vmid: 900 }] },
+  });
+  assert.equal(failed.status, 400);
+  assert.equal(await countAudits(), beforeCount, 'a rolled-back batch leaves no audit rows behind');
+
+  const ok = await request(adminApp).patch(`/users/${targetId}`).send({ permissions: { can_manage_templates: true } });
+  assert.equal(ok.status, 200);
+  const rows = await testDb.db.select().from(auditLog).where(eq(auditLog.action, 'admin_toggle_permission'));
+  assert.ok(rows.some((r) => r.detail === 'can_manage_templates=1' && r.username === 'patch-admin'));
+});
+
+test('role assignment audits carry the stable role reference', async () => {
+  const res = await request(adminApp).patch(`/users/${otherId}`).send({ roleId });
+  assert.equal(res.status, 200);
+  const rows = await testDb.db.select().from(auditLog).where(eq(auditLog.target_ref, `role:${roleId}`));
+  assert.ok(rows.some((r) => r.action === 'admin_assign_role' && r.target === 'other'));
+});
+
+test('fractional or exponential quotas are rejected, not truncated', async () => {
+  const before = await readUser(targetId);
+  for (const maxCores of ['1.5', '1e2', '8abc', 1.5, '2147483648']) {
+    const res = await request(adminApp).patch(`/users/${targetId}`).send({ quotas: { maxCores } });
+    assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(maxCores)}`);
+  }
+  assert.equal((await readUser(targetId)).row.max_cores, before.row.max_cores);
+  const ok = await request(adminApp).patch(`/users/${targetId}`).send({ quotas: { maxCores: ' 12 ' } });
+  assert.equal(ok.status, 200);
+  assert.equal((await readUser(targetId)).row.max_cores, 12);
+});
+
 test('an unknown role is rejected without writing', async () => {
   const before = await readUser(targetId);
   const res = await request(adminApp).patch(`/users/${targetId}`)

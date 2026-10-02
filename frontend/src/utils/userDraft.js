@@ -16,6 +16,26 @@ function quotaValue(v) {
   return Number.isFinite(n) ? n : v;
 }
 
+// Quotas must be empty (unlimited/inherit) or a non-negative whole number —
+// the same rule the server enforces — so the reviewed value is the saved one.
+export function invalidQuotaKeys(quotas) {
+  return QUOTA_KEYS.filter((q) => {
+    const v = quotas[q.key];
+    if (v === null || v === undefined || v === '') return false;
+    return !/^\d+$/.test(String(v).trim());
+  }).map((q) => q.key);
+}
+
+// Mirrors backend resolveEffectivePermissions: a role, when assigned, fully
+// defines the set; without one the per-user flags apply.
+export function effectivePermissionSet(roleId, flags, roles) {
+  if (roleId !== '' && roleId != null) {
+    const role = roles.find((r) => String(r.id) === String(roleId));
+    return new Set(role?.permissions || []);
+  }
+  return new Set(Object.entries(flags).filter(([, on]) => on).map(([k]) => k));
+}
+
 export function draftFromState(state) {
   return {
     roleId: state.role_id == null ? '' : String(state.role_id),
@@ -71,16 +91,28 @@ export function describeUserChanges(state, draft, { allVMs = [], allVLANs = [], 
   const changes = [];
   const roleName = (id) => (id === '' || id == null ? 'No role' : roles.find((r) => String(r.id) === String(id))?.name || `#${id}`);
   const baseRole = state.role_id == null ? '' : String(state.role_id);
+  // Diff what the user can actually do, not the raw columns: removing a role
+  // re-activates dormant per-user flags, and adding one masks them.
+  const before = effectivePermissionSet(baseRole, state.permissions, roles);
+  const after = effectivePermissionSet(draft.roleId, draft.permissions, roles);
+  const granted = [...after].filter((k) => !before.has(k)).sort();
+  const revoked = [...before].filter((k) => !after.has(k)).sort();
   if (draft.roleId !== baseRole) {
-    const newRole = roles.find((r) => String(r.id) === draft.roleId);
-    const grantsDanger = !!newRole?.permissions?.some(isDangerPerm);
-    changes.push({ kind: 'field', label: 'Role', from: roleName(baseRole), to: roleName(draft.roleId), danger: grantsDanger });
+    changes.push({
+      kind: 'field', label: 'Role', from: roleName(baseRole), to: roleName(draft.roleId),
+      danger: granted.some(isDangerPerm),
+    });
   }
-  for (const [k, v] of Object.entries(draft.permissions).sort(([a], [b]) => a.localeCompare(b))) {
-    if (!!state.permissions[k] === !!v) continue;
-    changes.push(v
-      ? { kind: 'grant', label: permLabel(k), key: k, danger: isDangerPerm(k) }
-      : { kind: 'revoke', label: permLabel(k), key: k });
+  for (const k of granted) changes.push({ kind: 'grant', label: permLabel(k), key: k, danger: isDangerPerm(k) });
+  for (const k of revoked) changes.push({ kind: 'revoke', label: permLabel(k), key: k });
+  const dormant = Object.keys(draft.permissions)
+    .filter((k) => !!draft.permissions[k] !== !!state.permissions[k] && after.has(k) === before.has(k))
+    .sort();
+  for (const k of dormant) {
+    changes.push({
+      kind: 'field', label: `${permLabel(k)} (per-user, masked by role)`,
+      from: state.permissions[k] ? 'on' : 'off', to: draft.permissions[k] ? 'on' : 'off',
+    });
   }
   if (draft.require2fa !== !!state.require_2fa) {
     changes.push({

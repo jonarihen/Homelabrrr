@@ -1,7 +1,7 @@
 // Run with:  node --test src/utils/userDraft.test.js   (from frontend/)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { draftFromState, buildUserPatch, describeUserChanges } from './userDraft.js';
+import { draftFromState, buildUserPatch, describeUserChanges, invalidQuotaKeys } from './userDraft.js';
 
 const state = {
   id: 5,
@@ -74,4 +74,40 @@ test('a role without risky permissions is not flagged', () => {
   d.roleId = '10';
   const [change] = describeUserChanges(state, d, { allVMs, allVLANs, roles });
   assert.deepEqual(change, { kind: 'field', label: 'Role', from: 'No role', to: 'Viewer', danger: false });
+});
+
+test('removing a role surfaces dormant per-user flags that become effective', () => {
+  const holder = { ...state, role_id: 10, permissions: { ...state.permissions, can_operate_all_vms: true } };
+  const d = draftFromState(holder);
+  d.roleId = '';
+  const changes = describeUserChanges(holder, d, { allVMs, allVLANs, roles });
+  const role = changes.find((c) => c.label === 'Role');
+  assert.equal(role.danger, true, 'role removal that re-activates operate-all is high impact');
+  assert.ok(changes.some((c) => c.kind === 'grant' && c.key === 'can_operate_all_vms' && c.danger));
+  assert.ok(changes.some((c) => c.kind === 'revoke' && c.key === 'see_all_vms'), 'the role grant goes away');
+  assert.ok(changes.some((c) => c.kind === 'grant' && c.key === 'can_manage_hosts'), 'dormant flags re-activate');
+});
+
+test('assigning a role masks per-user flags and shows the effective diff', () => {
+  const d = draftFromState(state);
+  d.roleId = '9';
+  const changes = describeUserChanges(state, d, { allVMs, allVLANs, roles });
+  assert.deepEqual(changes.map((c) => `${c.kind}:${c.key || c.label}`), [
+    'field:Role', 'grant:can_operate_all_vms', 'revoke:can_manage_hosts',
+  ]);
+});
+
+test('toggling a flag hidden behind a role is listed but not as a grant', () => {
+  const holder = { ...state, role_id: 10 };
+  const d = draftFromState(holder);
+  d.permissions.can_operate_all_vms = true;
+  const changes = describeUserChanges(holder, d, { allVMs, allVLANs, roles });
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].kind, 'field');
+  assert.match(changes[0].label, /masked by role/);
+});
+
+test('quota drafts must be empty or whole non-negative numbers', () => {
+  assert.deepEqual(invalidQuotaKeys({ maxCores: '', maxMemoryGb: '8', maxStorageGb: 0 }), []);
+  assert.deepEqual(invalidQuotaKeys({ maxCores: '1.5', maxMemoryGb: '1e2', maxStorageGb: '-1' }), ['maxCores', 'maxMemoryGb', 'maxStorageGb']);
 });

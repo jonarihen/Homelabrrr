@@ -4,7 +4,7 @@ import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { displayNode, vmIdentityKey } from '../../utils/nodeRef.js';
-import { draftFromState, buildUserPatch, describeUserChanges } from '../../utils/userDraft.js';
+import { draftFromState, buildUserPatch, describeUserChanges, invalidQuotaKeys } from '../../utils/userDraft.js';
 
 export default function UsersPage() {
   useDocumentTitle('Users');
@@ -350,6 +350,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   const ctx = { allVMs, allVLANs, roles };
   const changes = state && draft ? describeUserChanges(state, draft, ctx) : [];
   const pending = changes.length;
+  const badQuotas = draft ? invalidQuotaKeys(draft.quotas) : [];
 
   useEffect(() => {
     if (!pending) return undefined;
@@ -612,6 +613,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
             user={user}
             state={state}
             quotas={draft.quotas}
+            invalid={badQuotas}
             onChange={setQuota}
             usage={usage}
             role={roleId ? roles.find(r => String(r.id) === String(roleId)) : null}
@@ -815,12 +817,18 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
           <p className="text-sm text-amber-300">
             <span className="aaris-led aaris-led--warning aaris-led--pulse inline-block mr-2 align-middle" />
             {pending} pending change{pending === 1 ? '' : 's'}
+            {badQuotas.length > 0 && <span className="ml-2 text-red-400">— fix quota values (whole numbers only)</span>}
           </p>
           <div className="flex gap-2">
             <button onClick={discard} className="text-sm px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors">
               Discard
             </button>
-            <button onClick={() => setReviewing(true)} className="text-sm px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors">
+            <button
+              onClick={() => setReviewing(true)}
+              disabled={badQuotas.length > 0}
+              title={badQuotas.length ? 'Quotas must be whole numbers (or empty)' : undefined}
+              className="text-sm px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-medium transition-colors"
+            >
               Review &amp; Apply
             </button>
           </div>
@@ -923,7 +931,7 @@ function ReviewUserChangesModal({ user, state, draft, changes, allVMs, onBack, o
 
 // ─── Quotas tab ───────────────────────────────────────────────────────────────
 
-function QuotasTab({ user, state, quotas, onChange, usage, role }) {
+function QuotasTab({ user, state, quotas, invalid = [], onChange, usage, role }) {
   const rows = [
     { key: 'maxCores', column: 'max_cores', label: 'Max CPU cores', unit: 'cores', used: usage?.cores },
     { key: 'maxMemoryGb', column: 'max_memory_gb', label: 'Max memory', unit: 'GB', used: usage?.memoryGb },
@@ -963,11 +971,14 @@ function QuotasTab({ user, state, quotas, onChange, usage, role }) {
             <input
               type="number"
               min="0"
+              step="1"
               placeholder={roleDefault != null ? `${roleDefault} (from role)` : 'Unlimited'}
               value={value}
               onChange={e => onChange(row.key, e.target.value)}
-              className={inputCls}
+              aria-invalid={invalid.includes(row.key)}
+              className={`${inputCls} ${invalid.includes(row.key) ? 'border-red-500' : ''}`}
             />
+            {invalid.includes(row.key) && <p className="text-xs text-red-400 mt-1">Whole number of {row.unit}, or empty.</p>}
           </div>
         );
       })}

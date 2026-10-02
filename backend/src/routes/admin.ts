@@ -23,7 +23,7 @@ import {
 } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { sendError } from '../utils/httpError.ts';
-import { logAudit } from '../utils/audit.ts';
+import { logAudit, logAuditTx } from '../utils/audit.ts';
 import { encryptSecret } from '../utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { shortenVipName, PORT_FORWARD_NAME_MAX } from '../utils/vipName.ts';
@@ -559,6 +559,8 @@ router.put('/users/:id/quotas', requireAdmin, async (req, res) => {
 // one transaction. `version` is a digest of the editable state the client
 // loaded; a mismatch means someone else changed the user meanwhile (409).
 
+const roleRef = (id) => `role:${id}`;
+
 const USER_FLAG_KEYS = ['see_all_vms', 'can_provision', 'can_create_vms', ...TOGGLEABLE_PERMISSIONS] as const;
 const USER_PATCH_FIELDS = ['version', 'roleId', 'permissions', 'require2fa', 'quotas', 'vms', 'vlans'];
 const MAX_BATCH_ITEMS = 500;
@@ -707,24 +709,26 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
           roleName = role.name;
         }
         patch.role_id = plan.roleId;
-        audits.push(['admin_assign_role', before.username, roleName]);
+        audits.push({ action: 'admin_assign_role', target: before.username, detail: roleName, targetRef: plan.roleId === null ? null : roleRef(plan.roleId) });
       }
       for (const [key, value] of Object.entries(plan.permissions || {})) {
         if (before.permissions[key] === value) continue;
         patch[key] = value;
-        audits.push(['admin_toggle_permission', String(userId), `${key}=${value ? 1 : 0}`]);
+        audits.push({ action: 'admin_toggle_permission', target: String(userId), detail: `${key}=${value ? 1 : 0}` });
       }
       if (plan.require2fa !== undefined && plan.require2fa !== before.require_2fa) {
         patch.require_2fa = plan.require2fa;
-        audits.push(['admin_toggle_permission', String(userId), `require_2fa=${plan.require2fa ? 1 : 0}`]);
+        audits.push({ action: 'admin_toggle_permission', target: String(userId), detail: `require_2fa=${plan.require2fa ? 1 : 0}` });
       }
       if (plan.quotas) {
         const q = plan.quotas;
         const changed = Object.keys(q).some((k) => q[k] !== before.quotas[k]);
         if (changed) {
           Object.assign(patch, q);
-          audits.push(['admin_set_quotas', before.username,
-            `cores=${q.max_cores ?? '∞'} memory=${q.max_memory_gb ?? '∞'}GB storage=${q.max_storage_gb ?? '∞'}GB`]);
+          audits.push({
+            action: 'admin_set_quotas', target: before.username,
+            detail: `cores=${q.max_cores ?? '∞'} memory=${q.max_memory_gb ?? '∞'}GB storage=${q.max_storage_gb ?? '∞'}GB`,
+          });
         }
       }
       if (Object.keys(patch).length) await tx.update(users).set(patch).where(eq(users.id, userId));
@@ -736,13 +740,13 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
         if (removed.length !== plan.vmRemove.length) throw new PatchError(409, 'A VM assignment to remove no longer exists — reload and try again');
         for (const r of removed) {
           tagSync.push(r);
-          audits.push(['admin_unassign_vm', before.username, `${r.node}/${r.vmid}`]);
+          audits.push({ action: 'admin_unassign_vm', target: before.username, detail: `${r.node}/${r.vmid}` });
         }
       }
       for (const vm of plan.vmAdd || []) {
         await tx.insert(vmAssignments).values({ user_id: userId, node: vm.node, vmid: vm.vmid });
         tagSync.push(vm);
-        audits.push(['admin_assign_vm', before.username, `${vm.node}/${vm.vmid}`]);
+        audits.push({ action: 'admin_assign_vm', target: before.username, detail: `${vm.node}/${vm.vmid}` });
       }
 
       if (plan.vlanRemove?.length) {
@@ -750,13 +754,16 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
           .where(and(eq(userVlans.user_id, userId), inArray(userVlans.vlan_id, plan.vlanRemove)))
           .returning({ vlan_id: userVlans.vlan_id });
         if (removed.length !== plan.vlanRemove.length) throw new PatchError(409, 'A VLAN to remove is no longer assigned — reload and try again');
-        for (const r of removed) audits.push(['admin_unassign_vlan', before.username, String(r.vlan_id)]);
+        for (const r of removed) audits.push({ action: 'admin_unassign_vlan', target: before.username, detail: String(r.vlan_id) });
       }
       if (plan.vlanAdd?.length) {
         await tx.insert(userVlans).values(plan.vlanAdd.map((vlanId) => ({ user_id: userId, vlan_id: vlanId })));
-        for (const id of plan.vlanAdd) audits.push(['admin_assign_vlan', before.username, String(id)]);
+        for (const id of plan.vlanAdd) audits.push({ action: 'admin_assign_vlan', target: before.username, detail: String(id) });
       }
 
+      // Audit rows ride the same transaction: the trail and the change commit
+      // (or roll back) together.
+      await logAuditTx(tx, req, audits);
       return loadUserState(tx, userId);
     });
   } catch (err) {
@@ -766,7 +773,6 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
     throw err;
   }
 
-  for (const [action, target, detail] of audits) await logAudit(req, action, target, detail);
   for (const vm of tagSync) await syncVmTagsSafe(vm.node, vm.vmid);
   res.json({ ...after, applied: audits.length });
 });
@@ -851,7 +857,6 @@ function parseRoleId(value): number | null {
   return Number.isInteger(n) && n >= 1 && n <= PG_INT_MAX ? n : null;
 }
 
-const roleRef = (id) => `role:${id}`;
 
 class RoleConflict extends Error {
   status: number;
