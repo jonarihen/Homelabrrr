@@ -635,7 +635,13 @@ function parseRoleId(value): number | null {
 
 const roleRef = (id) => `role:${id}`;
 
-class RoleConflict extends Error {}
+class RoleConflict extends Error {
+  status: number;
+  constructor(message, status = 409) {
+    super(message);
+    this.status = status;
+  }
+}
 
 // A membership change shows up in both roles' history: the destination gets
 // `admin_assign_role`, the role the user left gets `admin_unassign_role`.
@@ -738,20 +744,30 @@ router.post('/roles/:id/assign', requireAdmin, async (req, res) => {
   const ids = [...new Set(userIds.map(parseRoleId))];
   if (ids.some((id) => id === null)) return res.status(400).json({ error: 'userIds must be integers' });
 
-  const targets = await db.select({ id: users.id, username: users.username, role_id: users.role_id })
-    .from(users).where(inArray(users.id, ids));
-  if (targets.length !== ids.length) return res.status(400).json({ error: 'One or more users not found' });
-
-  const changing = targets.filter((u) => u.role_id !== role.id);
-  if (changing.length > 0) {
-    try {
-      await db.update(users).set({ role_id: role.id }).where(inArray(users.id, changing.map((u) => u.id)));
-    } catch (err) {
-      if (isForeignKeyViolation(err)) return res.status(409).json({ error: 'Role was removed — reload and try again' });
-      throw err;
+  let changing;
+  try {
+    changing = await db.transaction(async (tx) => {
+      const [currentRole] = await tx.select({ id: roles.id }).from(roles)
+        .where(eq(roles.id, role.id)).for('share');
+      if (!currentRole) throw new RoleConflict('Role was removed — reload and try again');
+      const targets = await tx.select({ id: users.id, username: users.username, role_id: users.role_id })
+        .from(users).where(inArray(users.id, ids)).orderBy(users.id).for('update');
+      if (targets.length !== ids.length) throw new RoleConflict('One or more users not found', 400);
+      const changed = targets.filter((u) => u.role_id !== role.id);
+      if (changed.length) {
+        await tx.update(users).set({ role_id: role.id }).where(inArray(users.id, changed.map((u) => u.id)));
+      }
+      return changed;
+    });
+  } catch (err) {
+    if (err instanceof RoleConflict) return res.status(err.status).json({ error: err.message });
+    if (isForeignKeyViolation(err)) return res.status(409).json({ error: 'Role was removed — reload and try again' });
+    if (err?.code === '40P01' || err?.cause?.code === '40P01') {
+      return res.status(409).json({ error: 'Concurrent role change — retry' });
     }
-    for (const u of changing) await auditRoleChange(req, u.username, u.role_id, role);
+    throw err;
   }
+  for (const u of changing) await auditRoleChange(req, u.username, u.role_id, role);
   res.json({ ok: true, assigned: changing.length });
 });
 
@@ -849,6 +865,10 @@ router.delete('/roles/:id', requireAdmin, async (req, res) => {
   if (role.built_in) return res.status(400).json({ error: 'Built-in roles cannot be deleted' });
 
   let target = null;
+  const expectedHolders = req.query.expectedHolders === undefined ? null : Number(req.query.expectedHolders);
+  if (expectedHolders !== null && (!Number.isInteger(expectedHolders) || expectedHolders < 0)) {
+    return res.status(400).json({ error: 'expectedHolders must be a non-negative integer' });
+  }
   const reassignTo = req.query.reassignTo;
   if (reassignTo !== undefined && reassignTo !== '') {
     target = await findRole(reassignTo);
@@ -870,8 +890,15 @@ router.delete('/roles/:id', requireAdmin, async (req, res) => {
         const [t] = await tx.select({ id: roles.id }).from(roles).where(eq(roles.id, target.id)).for('share');
         if (!t) throw new RoleConflict('Reassignment role was removed — reload and try again');
       }
+      if (expectedHolders !== null) {
+        const [{ c }] = await tx.select({ c: count() }).from(users).where(eq(users.role_id, role.id));
+        if (c !== expectedHolders) throw new RoleConflict('Role holders changed — reload and review before deleting');
+      }
       const holders = await tx.update(users).set({ role_id: target ? target.id : null })
         .where(eq(users.role_id, role.id)).returning({ id: users.id, username: users.username });
+      if (expectedHolders !== null && holders.length !== expectedHolders) {
+        throw new RoleConflict('Role holders changed — reload and review before deleting');
+      }
       await tx.delete(roles).where(eq(roles.id, role.id));
       return holders;
     });
@@ -3278,13 +3305,16 @@ router.get('/audit-log', pAudit, async (req, res) => {
   const action = typeof req.query.action === 'string' ? req.query.action : '';
   const target = typeof req.query.target === 'string' ? req.query.target : '';
   const targetRef = typeof req.query.targetRef === 'string' ? req.query.targetRef : '';
+  const legacy = req.query.legacy === 'true';
 
-  // Optional action/target/targetRef filters, then a stable created_at DESC
-  // page. User input is bound as parameters, never interpolated into SQL.
+  // Legacy role events predate stable refs and cannot always be attributed to
+  // a specific role after a rename/name reuse. Keep them in a separate, clearly
+  // labelled name-matched view rather than mixing them into ID-linked history.
   const filters = [
     action ? eq(auditLog.action, action) : undefined,
     target ? eq(auditLog.target, target) : undefined,
     targetRef ? eq(auditLog.target_ref, targetRef) : undefined,
+    legacy ? and(sql`${auditLog.target_ref} IS NULL`, inArray(auditLog.action, ['admin_create_role', 'admin_update_role', 'admin_delete_role'])) : undefined,
   ].filter(Boolean);
   const whereClause = filters.length ? and(...filters) : undefined;
   const [{ total }] = await db.select({ total: count() }).from(auditLog).where(whereClause);

@@ -8,7 +8,7 @@ const ACTION_TYPES = [
   'vm_restore', 'vlan_change', 'vm_clone', 'vm_create',
   'admin_create_user', 'admin_delete_user', 'admin_reset_2fa',
   'admin_unlock_user', 'admin_reset_password',
-  'admin_create_role', 'admin_update_role', 'admin_clone_role', 'admin_delete_role', 'admin_assign_role',
+  'admin_create_role', 'admin_update_role', 'admin_clone_role', 'admin_delete_role', 'admin_assign_role', 'admin_unassign_role',
   'admin_create_firewall', 'admin_update_firewall', 'admin_delete_firewall',
   'admin_sync_vlan_firewall', 'admin_unsync_vlan_firewall', 'admin_delete_vlan',
 ];
@@ -32,6 +32,7 @@ export default function AuditLogPage() {
   const [actionFilter, setActionFilter] = useState(() => searchParams.get('action') || '');
   const targetFilter = searchParams.get('target') || '';
   const targetRefFilter = searchParams.get('targetRef') || '';
+  const legacyFilter = searchParams.get('legacy') === 'true';
   const filterLabel = searchParams.get('label') || targetRefFilter || targetFilter;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -46,6 +47,7 @@ export default function AuditLogPage() {
       if (actionFilter) params.action = actionFilter;
       if (targetFilter) params.target = targetFilter;
       if (targetRefFilter) params.targetRef = targetRefFilter;
+      if (legacyFilter) params.legacy = true;
       const res = await api.get('/admin/audit-log', { params });
       setRows(res.data.rows);
       setTotal(res.data.total);
@@ -54,7 +56,7 @@ export default function AuditLogPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, actionFilter, targetFilter, targetRefFilter]);
+  }, [page, limit, actionFilter, targetFilter, targetRefFilter, legacyFilter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -68,6 +70,7 @@ export default function AuditLogPage() {
     next.delete('target');
     next.delete('targetRef');
     next.delete('label');
+    next.delete('legacy');
     setSearchParams(next);
     setPage(1);
   };
@@ -86,7 +89,7 @@ export default function AuditLogPage() {
               className="text-xs bg-gray-800 border border-gray-700 text-gray-300 rounded-lg px-3 py-2 hover:bg-gray-700 transition-colors"
               title="Clear target filter"
             >
-              Target: <span className="font-mono text-white">{filterLabel}</span> ✕
+              {legacyFilter ? 'Legacy name match' : 'Target'}: <span className="font-mono text-white">{filterLabel}</span> ✕
             </button>
           )}
           <select
@@ -101,6 +104,12 @@ export default function AuditLogPage() {
           </select>
         </div>
       </div>
+
+      {legacyFilter && (
+        <p className="text-xs text-amber-300 bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-2">
+          Legacy role events were recorded by name, not ID. These entries may include a different role that once used this name; verify dates before relying on them.
+        </p>
+      )}
 
       {error && (
         <div className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 text-sm text-red-400">

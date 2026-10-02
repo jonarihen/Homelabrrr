@@ -284,6 +284,28 @@ test('role quotas reject fractional and exponent values instead of truncating', 
   assert.equal(row.max_cores, 2);
 });
 
+test('a stale holder count aborts deletion without unassigning anyone', async () => {
+  const doomed = await makeRole('Count Stale');
+  await testDb.db.update(users).set({ role_id: doomed }).where(eq(users.id, carol));
+  const res = await request(app).delete(`/roles/${doomed}?expectedHolders=0`);
+  assert.equal(res.status, 409);
+  assert.equal(await roleOf(carol), doomed);
+  const [still] = await testDb.db.select().from(roles).where(eq(roles.id, doomed));
+  assert.ok(still);
+  const ok = await request(app).delete(`/roles/${doomed}?expectedHolders=1`);
+  assert.equal(ok.status, 200);
+  assert.equal(await roleOf(carol), null);
+});
+
+test('legacy role audit rows are listed separately from stable-id history', async () => {
+  await testDb.db.insert(auditLog).values({ username: 'old-admin', action: 'admin_create_role', target: 'Operator', detail: 'legacy' });
+  const history = await request(app).get('/audit-log').query({ targetRef: `role:${sourceId}` });
+  assert.ok(history.body.rows.every((r) => r.target_ref === `role:${sourceId}`));
+  const legacy = await request(app).get('/audit-log').query({ target: 'Operator', legacy: true });
+  assert.ok(legacy.body.rows.some((r) => r.detail === 'legacy' && r.target_ref === null));
+  assert.ok(legacy.body.rows.every((r) => r.target_ref === null));
+});
+
 test('built-in roles still cannot be deleted', async () => {
   const res = await request(app).delete(`/roles/${builtInId}`);
   assert.equal(res.status, 400);

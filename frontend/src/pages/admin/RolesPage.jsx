@@ -213,12 +213,21 @@ export default function RolesPage() {
                           Export
                         </button>
                         {canViewAudit && (
-                          <Link
-                            to={`/admin/audit-log?targetRef=${encodeURIComponent(`role:${role.id}`)}&label=${encodeURIComponent(role.name)}`}
-                            className={`${btnCls} text-gray-400 hover:text-white`}
-                          >
-                            History
-                          </Link>
+                          <>
+                            <Link
+                              to={`/admin/audit-log?targetRef=${encodeURIComponent(`role:${role.id}`)}&label=${encodeURIComponent(role.name)}`}
+                              className={`${btnCls} text-gray-400 hover:text-white`}
+                            >
+                              History
+                            </Link>
+                            <Link
+                              to={`/admin/audit-log?target=${encodeURIComponent(role.name)}&legacy=true&label=${encodeURIComponent(role.name)}`}
+                              title="Older entries matched by name; may include a previous role with this name"
+                              className={`${btnCls} text-gray-500 hover:text-gray-300`}
+                            >
+                              Legacy
+                            </Link>
+                          </>
                         )}
                         {isAdmin && !role.builtIn && (
                           <button onClick={() => setDeletingRole(role)} className={`${btnCls} text-red-500 hover:text-red-400`}>
@@ -367,7 +376,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
         <div className="p-5 space-y-4">
           {editing && holders > 0 && (
             <p className="text-xs text-amber-300 bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-2">
-              This changes effective permissions for <strong>{holders}</strong> user{holders === 1 ? '' : 's'} holding this role.
+              This role has <strong>{holders}</strong> holder{holders === 1 ? '' : 's'}. Non-admin holders' effective permissions and quotas may change; admins bypass both.
             </p>
           )}
           <ChangeList changes={changes} />
@@ -682,19 +691,35 @@ function HoldersModal({ role, isAdmin, onClose, onChanged }) {
 
 function DeleteRoleModal({ role, roles, onClose, onDeleted }) {
   const [reassignTo, setReassignTo] = useState('');
+  const [holders, setHolders] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const others = roles.filter((r) => r.id !== role.id);
 
+  const loadHolders = async () => {
+    try {
+      const { data } = await api.get(`/admin/roles/${role.id}/users`);
+      setHolders(data);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to load role holders');
+    }
+  };
+
+  useEffect(() => { loadHolders(); }, [role.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const submit = async () => {
+    if (holders === null) return;
     setBusy(true);
     setError('');
     try {
-      await api.delete(`/admin/roles/${role.id}`, { params: reassignTo ? { reassignTo } : {} });
+      await api.delete(`/admin/roles/${role.id}`, {
+        params: { expectedHolders: holders.length, ...(reassignTo ? { reassignTo } : {}) },
+      });
       onDeleted();
       onClose();
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to delete role');
+      if (e.response?.status === 409) await loadHolders();
     } finally {
       setBusy(false);
     }
@@ -705,37 +730,34 @@ function DeleteRoleModal({ role, roles, onClose, onDeleted }) {
   return (
     <Modal title={`Delete role — ${role.name}`} onClose={onClose} size="sm">
       <div className="p-5 space-y-4">
-        {role.userCount > 0 ? (
-          <>
-            <p className="text-sm text-gray-300">
-              <strong className="text-white">{role.userCount}</strong> user{role.userCount === 1 ? '' : 's'} hold this role.
-            </p>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5">Move them to</label>
-              <select
-                value={reassignTo}
-                onChange={(e) => setReassignTo(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
-              >
-                <option value="">No role (per-user permissions only)</option>
-                {others.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-              </select>
-            </div>
-            <p className="text-xs text-gray-500">
-              {target
-                ? `Holders will get the permissions and quotas of “${target.name}”.`
-                : 'Holders fall back to their per-user permissions and quotas.'}
-            </p>
-          </>
-        ) : (
-          <p className="text-sm text-gray-300">Nobody holds this role.</p>
-        )}
+        <p className="text-sm text-gray-300">
+          {holders === null ? 'Checking current role holders…' : (
+            <><strong className="text-white">{holders.length}</strong> user{holders.length === 1 ? '' : 's'} currently hold this role.</>
+          )}
+        </p>
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">Move any holders to</label>
+          <select
+            value={reassignTo}
+            onChange={(e) => setReassignTo(e.target.value)}
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+          >
+            <option value="">No role (per-user permissions only)</option>
+            {others.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+        </div>
+        <p className="text-xs text-gray-500">
+          {target
+            ? `Holders will get the permissions and quotas of “${target.name}”.`
+            : 'Holders fall back to their per-user permissions and quotas.'}
+          {' '}If the holder count changes before you confirm, deletion is cancelled so you can review it again.
+        </p>
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <div className="flex gap-2">
           <button onClick={onClose} className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg py-2 text-sm transition-colors">Cancel</button>
           <button
             onClick={submit}
-            disabled={busy}
+            disabled={busy || holders === null}
             className="flex-1 bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white rounded-lg py-2 text-sm font-medium transition-colors"
           >
             {busy ? 'Deleting…' : 'Delete role'}

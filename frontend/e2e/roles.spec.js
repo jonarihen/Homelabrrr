@@ -26,7 +26,7 @@ test('editing a role shows a review diff and impact before applying', async ({ p
   await page.getByText('Operate all VMs').click();
   await page.getByRole('button', { name: 'Review 1 change' }).click();
 
-  await expect(page.getByText(/changes effective permissions for/)).toContainText('2');
+  await expect(page.getByText(/This role has/)).toContainText('2');
   await expect(page.getByText('+ Operate all VMs')).toBeVisible();
   expect(putBody).toBeNull();
 
@@ -50,6 +50,7 @@ test('clone posts to the clone endpoint with the chosen name', async ({ page }) 
 
 test('deleting a held role can reassign holders', async ({ page }) => {
   await mockRoles(page);
+  await page.route('**/api/admin/roles/2/users', (route) => route.fulfill({ json: [{ id: 3, username: 'alice' }, { id: 4, username: 'bob' }] }));
   let deleteUrl = null;
   await page.route('**/api/admin/roles/2?**', (route) => {
     deleteUrl = route.request().url();
@@ -61,6 +62,7 @@ test('deleting a held role can reassign holders', async ({ page }) => {
   await page.getByRole('combobox').selectOption({ label: 'Administrator' });
   await page.getByRole('button', { name: 'Delete role' }).click();
   await expect.poll(() => deleteUrl).toContain('reassignTo=1');
+  expect(deleteUrl).toContain('expectedHolders=2');
 });
 
 test('the filter narrows roles by permission label', async ({ page }) => {

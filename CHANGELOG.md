@@ -7,7 +7,7 @@
 - **Deleting a held role can move its users instead of stranding them.** The delete dialog shows how many users hold the role and lets you reassign them to another role; the move and the delete now run in one transaction
 - **Role edits are reviewed before they apply.** Saving a role shows a diff of granted/revoked permissions and quota changes, plus how many users it affects, and `Operate all VMs` is flagged as high blast radius. Closing the editor with unsaved edits asks first
 - **Quality-of-life extras.** Expand a row to see its granted permissions, filter roles by name or permission, select/clear a whole permission group, compare two roles side by side, export/import a role as JSON (permissions unknown to this instance are dropped after asking), and jump to a role's audit history
-- **Role history survives renames.** Audit entries now carry a stable `target_ref` (e.g. `role:12`, new migration `0002`), so a role's History link keeps its rename and earlier entries and never picks up a different role that later reused the name. Renames are recorded in the entry detail
+- **Role history survives renames.** New audit entries carry a stable `target_ref` (e.g. `role:12`, migration `0002`), so a role's History link keeps its rename and later entries without picking up another role that reused its name. Pre-upgrade events were recorded by name only; a separate **Legacy** link shows name-matched entries with a warning that they may belong to a former role. Renames are recorded in the new entry detail
 
 ## 2026-09-18 — Malformed workflow links no longer crash with a server error
 
