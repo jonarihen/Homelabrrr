@@ -70,7 +70,7 @@ test('the review list flags dangerous changes', () => {
   d.vmKeys.add('1~pve-101');
   const changes = describeUserChanges(state, d, { allVMs, allVLANs, roles });
   const danger = changes.filter((c) => c.danger).map((c) => c.label);
-  assert.deepEqual(danger.sort(), ['Enforce 2FA', 'Operate all VMs', 'Role']);
+  assert.deepEqual(danger.sort(), ['Enforce 2FA', 'Operate all VMs', 'Operate all VMs (per-user, masked by role)', 'Role']);
   assert.ok(changes.some((c) => c.kind === 'grant' && c.label === 'VM db (pve · 101)'));
 });
 
@@ -110,6 +110,18 @@ test('toggling a flag hidden behind a role is listed but not as a grant', () => 
   assert.equal(changes.length, 1);
   assert.equal(changes[0].kind, 'field');
   assert.match(changes[0].label, /masked by role/);
+  assert.equal(changes[0].danger, true, 'a latent operate-all flag still needs deliberate confirmation');
+});
+
+test('mixed role and per-user edits disclose latent grants even when the role grants them too', () => {
+  const d = draftFromState(state);
+  d.roleId = '9';
+  d.permissions.can_operate_all_vms = true;
+  const changes = describeUserChanges(state, d, { allVMs, allVLANs, roles });
+  assert.ok(changes.some((c) => c.kind === 'grant' && c.key === 'can_operate_all_vms'));
+  assert.ok(changes.some((c) => c.kind === 'field'
+    && c.label === 'Operate all VMs (per-user, masked by role)'
+    && c.from === 'off' && c.to === 'on' && c.danger));
 });
 
 test('quota drafts must be empty or whole non-negative numbers', () => {

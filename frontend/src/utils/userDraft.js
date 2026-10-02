@@ -119,13 +119,20 @@ export function describeUserChanges(state, draft, { allVMs = [], allVLANs = [], 
   }
   for (const k of granted) changes.push({ kind: 'grant', label: permLabel(k), key: k, danger: isDangerPerm(k) });
   for (const k of revoked) changes.push({ kind: 'revoke', label: permLabel(k), key: k });
-  const dormant = Object.keys(draft.permissions)
-    .filter((k) => !!draft.permissions[k] !== !!state.permissions[k] && after.has(k) === before.has(k))
-    .sort();
-  for (const k of dormant) {
+  // Without a role on either side the raw flags *are* the effective set, so the
+  // grant/revoke lines above already cover them. Once a role is involved, a raw
+  // flag can diverge from effective access (masked now, active if the role is
+  // later removed), so every raw edit is disclosed on its own line.
+  const roleInvolved = baseRole !== '' || draft.roleId !== '';
+  const changedRaw = roleInvolved
+    ? Object.keys(draft.permissions).filter((k) => !!draft.permissions[k] !== !!state.permissions[k]).sort()
+    : [];
+  for (const k of changedRaw) {
+    const masked = draft.roleId !== '';
     changes.push({
-      kind: 'field', label: `${permLabel(k)} (per-user, masked by role)`,
+      kind: 'field', label: `${permLabel(k)} (per-user${masked ? ', masked by role' : ''})`,
       from: state.permissions[k] ? 'on' : 'off', to: draft.permissions[k] ? 'on' : 'off',
+      danger: !!draft.permissions[k] && isDangerPerm(k),
     });
   }
   if (draft.require2fa !== !!state.require_2fa) {
