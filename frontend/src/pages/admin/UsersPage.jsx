@@ -3,7 +3,8 @@ import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
-import { displayNode, routeNode, vmIdentityKey } from '../../utils/nodeRef.js';
+import { displayNode, vmIdentityKey } from '../../utils/nodeRef.js';
+import { draftFromState, buildUserPatch, describeUserChanges } from '../../utils/userDraft.js';
 
 export default function UsersPage() {
   useDocumentTitle('Users');
@@ -321,19 +322,9 @@ const PERM_DEFS = [
 function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usage, onClose }) {
   const canGrantPrivileges = !!currentUser?.isAdmin;
   const [tab, setTab]           = useState(() => canGrantPrivileges ? 'permissions' : 'vms');
-  const [userVMs, setUserVMs]   = useState([]);
-  const [userVLANs, setUserVLANs] = useState([]);
-  const [roleId, setRoleId]     = useState(user.role_id || '');
-  const [seeAllVMs, setSeeAllVMs] = useState(!!user.see_all_vms);
-  const [operateAllVMs, setOperateAllVMs] = useState(!!user.can_operate_all_vms);
-  const [canProvision, setCanProvision] = useState(!!user.canProvision);
-  const [canCreateVms, setCanCreateVms] = useState(!!user.canCreateVms);
-  const [require2fa, setRequire2fa] = useState(!!user.require2fa);
-  const [perms, setPerms]       = useState(() => {
-    const p = {};
-    PERM_DEFS.forEach(d => { p[d.key] = !!user[d.key]; });
-    return p;
-  });
+  const [state, setState]       = useState(null);
+  const [draft, setDraft]       = useState(null);
+  const [reviewing, setReviewing] = useState(false);
   const [newPw, setNewPw]       = useState('');
   const [pwMsg, setPwMsg]       = useState('');
   const [newUsername, setNewUsername] = useState(user.username);
@@ -344,16 +335,35 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   const [tokensLoaded, setTokensLoaded] = useState(false);
   const [tokenMsg, setTokenMsg] = useState('');
 
-  const loadUserData = useCallback(async () => {
-    const [vms, vlans] = await Promise.all([
-      api.get(`/admin/users/${user.id}/vms`),
-      api.get(`/admin/users/${user.id}/vlans`),
-    ]);
-    setUserVMs(vms.data);
-    setUserVLANs(vlans.data);
+  const loadState = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/admin/users/${user.id}/state`);
+      setState(data);
+      setDraft(draftFromState(data));
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to load user');
+    }
   }, [user.id]);
 
-  useEffect(() => { loadUserData(); }, [loadUserData]);
+  useEffect(() => { loadState(); }, [loadState]);
+
+  const ctx = { allVMs, allVLANs, roles };
+  const changes = state && draft ? describeUserChanges(state, draft, ctx) : [];
+  const pending = changes.length;
+
+  useEffect(() => {
+    if (!pending) return undefined;
+    const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [pending]);
+
+  const requestClose = () => {
+    if (pending && !confirm(`Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${user.username}?`)) return;
+    onClose();
+  };
+
+  const discard = () => { if (state) setDraft(draftFromState(state)); setError(''); };
 
   const loadTokens = useCallback(async () => {
     try {
@@ -380,81 +390,25 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
     }
   };
 
-  const changeRole = async (value) => {
-    try {
-      await api.put(`/admin/users/${user.id}/role`, { roleId: value === '' ? null : parseInt(value, 10) });
-      setRoleId(value);
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
+  const setPerm = (key, enabled) => setDraft((d) => ({ ...d, permissions: { ...d.permissions, [key]: enabled } }));
+  const setRole = (value) => setDraft((d) => ({ ...d, roleId: value }));
+  const setRequire2fa = (enabled) => setDraft((d) => ({ ...d, require2fa: enabled }));
+  const setQuota = (key, value) => setDraft((d) => ({ ...d, quotas: { ...d.quotas, [key]: value } }));
+  const toggleVm = (vm, on) => setDraft((d) => {
+    const next = new Set(d.vmKeys);
+    if (on) next.add(vmIdentityKey(vm)); else next.delete(vmIdentityKey(vm));
+    return { ...d, vmKeys: next };
+  });
+  const toggleVlan = (vlan, on) => setDraft((d) => {
+    const next = new Set(d.vlanIds);
+    if (on) next.add(vlan.id); else next.delete(vlan.id);
+    return { ...d, vlanIds: next };
+  });
 
-  const toggleSeeAllVMs = async (enabled) => {
-    try {
-      await api.put(`/admin/users/${user.id}/see-all-vms`, { enabled });
-      setSeeAllVMs(enabled);
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const toggleOperateAllVMs = async (enabled) => {
-    try {
-      await api.put(`/admin/users/${user.id}/permission`, { permission: 'can_operate_all_vms', enabled });
-      setOperateAllVMs(enabled);
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const toggleCanProvision = async (enabled) => {
-    try {
-      await api.put(`/admin/users/${user.id}/can-provision`, { enabled });
-      setCanProvision(enabled);
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const toggleCanCreateVms = async (enabled) => {
-    try {
-      await api.put(`/admin/users/${user.id}/can-create-vms`, { enabled });
-      setCanCreateVms(enabled);
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const togglePermission = async (permission, enabled) => {
-    try {
-      await api.put(`/admin/users/${user.id}/permission`, { permission, enabled });
-      setPerms(prev => ({ ...prev, [permission]: enabled }));
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const toggleRequire2fa = async (enabled) => {
-    try {
-      await api.put(`/admin/users/${user.id}/require-2fa`, { enabled });
-      setRequire2fa(enabled);
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const assignVM = async (vm) => {
-    try {
-      await api.post('/admin/assignments', { userId: user.id, node: routeNode(vm), vmid: vm.vmid });
-      loadUserData();
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const unassignVM = async (assignment) => {
-    try {
-      await api.delete(`/admin/assignments/${assignment.id}`);
-      loadUserData();
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const assignVLAN = async (vlan) => {
-    try {
-      await api.post(`/admin/users/${user.id}/vlans`, { vlanId: vlan.id });
-      loadUserData();
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
-  };
-
-  const unassignVLAN = async (vlan) => {
-    try {
-      await api.delete(`/admin/users/${user.id}/vlans/${vlan.id}`);
-      loadUserData();
-    } catch (e) { setError(e.response?.data?.error || 'Failed'); }
+  const applied = (data) => {
+    setState(data);
+    setDraft(draftFromState(data));
+    setReviewing(false);
   };
 
   const resetTwoFactor = async () => {
@@ -482,14 +436,41 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
     } catch (e) { setPwMsg('Failed: ' + (e.response?.data?.error || e.message)); }
   };
 
-  const assignedVMIds = new Set(userVMs.map(vmIdentityKey));
-  const assignedVLANIds = new Set(userVLANs.map(v => v.id));
+  if (!state || !draft) {
+    return (
+      <Modal title={`Manage — ${user.username}`} onClose={onClose} size="lg">
+        <div className="p-5">
+          {error
+            ? <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>
+            : <div className="h-24 bg-gray-800/60 rounded-lg animate-pulse" />}
+        </div>
+      </Modal>
+    );
+  }
 
-  const unassignedVMs = allVMs.filter(v => !assignedVMIds.has(vmIdentityKey(v)));
-  const unassignedVLANs = allVLANs.filter(v => !assignedVLANIds.has(v.id));
+  const isDirty = {
+    role: draft.roleId !== (state.role_id == null ? '' : String(state.role_id)),
+    perm: (k) => !!draft.permissions[k] !== !!state.permissions[k],
+    require2fa: draft.require2fa !== !!state.require_2fa,
+  };
+  const baseVmKeys = new Set(state.vms.map(vmIdentityKey));
+  const baseVlans = new Set(state.vlan_ids);
+  const draftVMs = [
+    ...state.vms.map((a) => ({ ...a, ...(allVMs.find((v) => vmIdentityKey(v) === vmIdentityKey(a)) || {}), assignmentId: a.id, node: a.node })),
+    ...allVMs.filter((v) => draft.vmKeys.has(vmIdentityKey(v)) && !baseVmKeys.has(vmIdentityKey(v))),
+  ];
+  const assignedVMs = draftVMs.filter((v) => draft.vmKeys.has(vmIdentityKey(v)));
+  const removedVMs = draftVMs.filter((v) => !draft.vmKeys.has(vmIdentityKey(v)));
+  const unassignedVMs = allVMs.filter((v) => !draft.vmKeys.has(vmIdentityKey(v)) && !baseVmKeys.has(vmIdentityKey(v)));
+  const assignedVLANs = allVLANs.filter((v) => draft.vlanIds.has(v.id));
+  const removedVLANs = allVLANs.filter((v) => baseVlans.has(v.id) && !draft.vlanIds.has(v.id));
+  const unassignedVLANs = allVLANs.filter((v) => !draft.vlanIds.has(v.id) && !baseVlans.has(v.id));
+  const roleId = draft.roleId;
+  const seeAllVMs = !!draft.permissions.see_all_vms;
+  const operateAllVMs = !!draft.permissions.can_operate_all_vms;
 
   return (
-    <Modal title={`Manage — ${user.username}`} onClose={onClose} size="lg">
+    <Modal title={`Manage — ${user.username}`} onClose={reviewing ? () => setReviewing(false) : requestClose} size="lg">
       <div className="flex border-b border-gray-700 overflow-x-auto">
         {[
           ...(canGrantPrivileges ? [{ id: 'permissions', label: 'Permissions' }] : []),
@@ -525,14 +506,15 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
               </div>
             ) : (
               <>
-                <p className="text-xs text-gray-500">Control which admin features this user can access. Admins always have full access.</p>
+                <p className="text-xs text-gray-500">Control which admin features this user can access. Changes are staged — nothing is saved until you review and apply.</p>
 
                 <div className="space-y-1">
                   <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Role</p>
-                  <div className="bg-gray-800 rounded-lg px-4 py-3">
+                  <div className={`bg-gray-800 rounded-lg px-4 py-3 ${isDirty.role ? STAGED_CLS : ''}`}>
                     <select
                       value={roleId}
-                      onChange={e => changeRole(e.target.value)}
+                      onChange={e => setRole(e.target.value)}
+                      aria-label="Role"
                       className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
                     >
                       <option value="">No role — per-user permissions only</option>
@@ -567,26 +549,30 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                         label="View all VMs (read-only)"
                         desc="See every VM on Proxmox without individual assignments — status, config, graphs and backup listings only. No power, console or edit rights."
                         checked={seeAllVMs}
-                        onChange={toggleSeeAllVMs}
+                        staged={isDirty.perm('see_all_vms')}
+                        onChange={(v) => setPerm('see_all_vms', v)}
                       />
                       <PermToggle
                         label="Operate all VMs"
                         desc="Full operator control of every VM: VNC console, SSH and SFTP shell, power on/off/reboot, snapshots, backups, VLAN and hardware changes. Console + SSH on the whole fleet is effectively root on the fleet."
                         checked={operateAllVMs}
-                        onChange={toggleOperateAllVMs}
+                        staged={isDirty.perm('can_operate_all_vms')}
+                        onChange={(v) => setPerm('can_operate_all_vms', v)}
                         danger
                       />
                       <PermToggle
                         label="Provision VMs"
                         desc="Allow this user to create VMs from templates"
-                        checked={canProvision}
-                        onChange={toggleCanProvision}
+                        checked={!!draft.permissions.can_provision}
+                        staged={isDirty.perm('can_provision')}
+                        onChange={(v) => setPerm('can_provision', v)}
                       />
                       <PermToggle
                         label="Create VMs"
                         desc="Build VMs from scratch / from an available ISO (self-assigned, default bridge)"
-                        checked={canCreateVms}
-                        onChange={toggleCanCreateVms}
+                        checked={!!draft.permissions.can_create_vms}
+                        staged={isDirty.perm('can_create_vms')}
+                        onChange={(v) => setPerm('can_create_vms', v)}
                       />
                     </div>
 
@@ -597,8 +583,9 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                           key={pDef.key}
                           label={pDef.label}
                           desc={pDef.desc}
-                          checked={perms[pDef.key]}
-                          onChange={(enabled) => togglePermission(pDef.key, enabled)}
+                          checked={!!draft.permissions[pDef.key]}
+                          staged={isDirty.perm(pDef.key)}
+                          onChange={(enabled) => setPerm(pDef.key, enabled)}
                         />
                       ))}
                     </div>
@@ -610,8 +597,9 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                   <PermToggle
                     label="Enforce 2FA"
                     desc="Force this user to enable two-factor authentication"
-                    checked={require2fa}
-                    onChange={toggleRequire2fa}
+                    checked={draft.require2fa}
+                    staged={isDirty.require2fa}
+                    onChange={setRequire2fa}
                   />
                 </div>
               </>
@@ -622,9 +610,11 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
         {canGrantPrivileges && tab === 'quotas' && (
           <QuotasTab
             user={user}
+            state={state}
+            quotas={draft.quotas}
+            onChange={setQuota}
             usage={usage}
             role={roleId ? roles.find(r => String(r.id) === String(roleId)) : null}
-            onError={setError}
           />
         )}
 
@@ -641,20 +631,29 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
               </div>
             )}
             <Section title="Assigned VMs">
-              {userVMs.length === 0
+              {assignedVMs.length === 0 && removedVMs.length === 0
                 ? <Empty text="No VMs assigned" />
-                : userVMs.map(a => {
-                  const vm = allVMs.find(v => vmIdentityKey(v) === vmIdentityKey(a));
-                  return (
+                : [
+                  ...assignedVMs.map(vm => (
                     <Row
-                      key={a.id}
-                      label={vm?.name || `VM ${a.vmid}`}
-                      sub={`${displayNode(a.node)} · VMID ${a.vmid}`}
-                      badge={vm?.status}
-                      action={<DangerBtn onClick={() => unassignVM(a)}>Remove</DangerBtn>}
+                      key={vmIdentityKey(vm)}
+                      label={vm.name || `VM ${vm.vmid}`}
+                      sub={`${displayNode(vm.node)} · VMID ${vm.vmid}`}
+                      badge={vm.status}
+                      staged={baseVmKeys.has(vmIdentityKey(vm)) ? null : 'add'}
+                      action={<DangerBtn onClick={() => toggleVm(vm, false)}>Remove</DangerBtn>}
                     />
-                  );
-                })
+                  )),
+                  ...removedVMs.map(vm => (
+                    <Row
+                      key={vmIdentityKey(vm)}
+                      label={vm.name || `VM ${vm.vmid}`}
+                      sub={`${displayNode(vm.node)} · VMID ${vm.vmid}`}
+                      staged="remove"
+                      action={<GhostBtn onClick={() => toggleVm(vm, true)}>Undo</GhostBtn>}
+                    />
+                  )),
+                ]
               }
             </Section>
             <Section title="Available VMs">
@@ -666,7 +665,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                     label={vm.name || `VM ${vm.vmid}`}
                     sub={`${displayNode(vm.node)} · VMID ${vm.vmid}`}
                     badge={vm.status}
-                    action={<BlueBtn onClick={() => assignVM(vm)}>Assign</BlueBtn>}
+                    action={<BlueBtn onClick={() => toggleVm(vm, true)}>Assign</BlueBtn>}
                   />
                 ))
               }
@@ -677,16 +676,28 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
         {tab === 'vlans' && (
           <div className="space-y-4">
             <Section title="Assigned VLANs">
-              {userVLANs.length === 0
+              {assignedVLANs.length === 0 && removedVLANs.length === 0
                 ? <Empty text="No VLANs assigned" />
-                : userVLANs.map(v => (
-                  <Row
-                    key={v.id}
-                    label={v.name}
-                    sub={`Tag ${v.tag}${v.description ? ' · ' + v.description : ''}`}
-                    action={<DangerBtn onClick={() => unassignVLAN(v)}>Remove</DangerBtn>}
-                  />
-                ))
+                : [
+                  ...assignedVLANs.map(v => (
+                    <Row
+                      key={v.id}
+                      label={v.name}
+                      sub={`Tag ${v.tag}${v.description ? ' · ' + v.description : ''}`}
+                      staged={baseVlans.has(v.id) ? null : 'add'}
+                      action={<DangerBtn onClick={() => toggleVlan(v, false)}>Remove</DangerBtn>}
+                    />
+                  )),
+                  ...removedVLANs.map(v => (
+                    <Row
+                      key={v.id}
+                      label={v.name}
+                      sub={`Tag ${v.tag}${v.description ? ' · ' + v.description : ''}`}
+                      staged="remove"
+                      action={<GhostBtn onClick={() => toggleVlan(v, true)}>Undo</GhostBtn>}
+                    />
+                  )),
+                ]
               }
             </Section>
             <Section title="Available VLANs">
@@ -697,7 +708,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                     key={v.id}
                     label={v.name}
                     sub={`Tag ${v.tag}${v.description ? ' · ' + v.description : ''}`}
-                    action={<BlueBtn onClick={() => assignVLAN(v)}>Assign</BlueBtn>}
+                    action={<BlueBtn onClick={() => toggleVlan(v, true)}>Assign</BlueBtn>}
                   />
                 ))
               }
@@ -738,6 +749,9 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
         {tab === 'account' && (
           <div className="space-y-6 max-w-sm">
+            <p className="text-xs text-gray-500 bg-gray-800/60 rounded-lg px-3 py-2">
+              Account actions below apply immediately and are not part of the staged changes.
+            </p>
             <form onSubmit={changeUsername} className="space-y-4">
               <p className="text-xs text-gray-500 uppercase tracking-wider">Change Username</p>
               <Field label="Username">
@@ -795,43 +809,129 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
           </div>
         )}
       </div>
+
+      {pending > 0 && (
+        <div className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-amber-800/40 bg-gray-900/95 backdrop-blur px-5 py-3">
+          <p className="text-sm text-amber-300">
+            <span className="aaris-led aaris-led--warning aaris-led--pulse inline-block mr-2 align-middle" />
+            {pending} pending change{pending === 1 ? '' : 's'}
+          </p>
+          <div className="flex gap-2">
+            <button onClick={discard} className="text-sm px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors">
+              Discard
+            </button>
+            <button onClick={() => setReviewing(true)} className="text-sm px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors">
+              Review &amp; Apply
+            </button>
+          </div>
+        </div>
+      )}
+
+      {reviewing && (
+        <ReviewUserChangesModal
+          user={user}
+          state={state}
+          draft={draft}
+          changes={changes}
+          allVMs={allVMs}
+          onBack={() => setReviewing(false)}
+          onApplied={applied}
+          onStale={async (msg) => { setReviewing(false); setError(msg); await loadState(); }}
+        />
+      )}
+    </Modal>
+  );
+}
+
+function ReviewUserChangesModal({ user, state, draft, changes, allVMs, onBack, onApplied, onStale }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [typed, setTyped] = useState('');
+  const dangerous = changes.some((c) => c.danger);
+  const confirmed = !dangerous || typed.trim() === user.username;
+
+  const apply = async () => {
+    const body = buildUserPatch(state, draft, { allVMs });
+    if (!body) { onBack(); return; }
+    setBusy(true);
+    setError('');
+    try {
+      const { data } = await api.patch(`/admin/users/${user.id}`, body);
+      onApplied(data);
+    } catch (e) {
+      if (e.response?.status === 409) {
+        onStale(`${e.response.data?.error || 'This user changed meanwhile.'} Your staged changes were discarded.`);
+        return;
+      }
+      setError(e.response?.data?.error || 'Failed to apply changes');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`Review changes — ${user.username}`} onClose={onBack} size="md">
+      <div className="p-5 space-y-4">
+        <p className="text-xs text-gray-400">
+          These {changes.length} change{changes.length === 1 ? '' : 's'} apply together in one step — if any part fails, nothing is saved.
+        </p>
+        <ul className="space-y-1 font-mono text-xs bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+          {changes.map((c, i) => (
+            <li
+              key={i}
+              className={c.danger ? 'text-amber-300' : c.kind === 'grant' ? 'text-green-400' : c.kind === 'revoke' ? 'text-red-400' : 'text-gray-300'}
+            >
+              {c.kind === 'grant' && <>+ {c.label}</>}
+              {c.kind === 'revoke' && <>− {c.label}</>}
+              {c.kind === 'field' && <>~ {c.label}: <span className="text-gray-500">{c.from}</span> → <span className="text-white">{c.to}</span></>}
+              {c.danger && <span className="ml-2 text-[10px] uppercase tracking-wider">high blast radius</span>}
+            </li>
+          ))}
+        </ul>
+        {dangerous && (
+          <div className="bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-3 space-y-2">
+            <p className="text-xs text-amber-300">
+              This includes a high-impact change. Type <span className="font-mono text-white">{user.username}</span> to confirm.
+            </p>
+            <input
+              type="text"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              aria-label="Confirm username"
+              autoFocus
+              className={inputCls}
+            />
+          </div>
+        )}
+        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        <div className="flex gap-2">
+          <button onClick={onBack} className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg py-2.5 text-sm transition-colors">
+            Back
+          </button>
+          <button
+            onClick={apply}
+            disabled={busy || !confirmed}
+            className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+          >
+            {busy ? 'Applying…' : `Apply ${changes.length} change${changes.length === 1 ? '' : 's'}`}
+          </button>
+        </div>
+      </div>
     </Modal>
   );
 }
 
 // ─── Quotas tab ───────────────────────────────────────────────────────────────
 
-function QuotasTab({ user, usage, role, onError }) {
-  const [form, setForm] = useState({
-    maxCores: user.max_cores ?? '',
-    maxMemoryGb: user.max_memory_gb ?? '',
-    maxStorageGb: user.max_storage_gb ?? '',
-  });
-  const [msg, setMsg] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  const save = async (e) => {
-    e.preventDefault();
-    setSaving(true);
-    setMsg('');
-    try {
-      await api.put(`/admin/users/${user.id}/quotas`, form);
-      setMsg('Quotas saved');
-    } catch (err) {
-      onError(err.response?.data?.error || 'Failed to save quotas');
-    } finally {
-      setSaving(false);
-    }
-  };
-
+function QuotasTab({ user, state, quotas, onChange, usage, role }) {
   const rows = [
-    { key: 'maxCores', label: 'Max CPU cores', unit: 'cores', used: usage?.cores },
-    { key: 'maxMemoryGb', label: 'Max memory', unit: 'GB', used: usage?.memoryGb },
-    { key: 'maxStorageGb', label: 'Max storage', unit: 'GB', used: usage?.diskGb },
+    { key: 'maxCores', column: 'max_cores', label: 'Max CPU cores', unit: 'cores', used: usage?.cores },
+    { key: 'maxMemoryGb', column: 'max_memory_gb', label: 'Max memory', unit: 'GB', used: usage?.memoryGb },
+    { key: 'maxStorageGb', column: 'max_storage_gb', label: 'Max storage', unit: 'GB', used: usage?.diskGb },
   ];
 
   return (
-    <form onSubmit={save} className="space-y-4 max-w-md">
+    <div className="space-y-4 max-w-md">
       {user.is_admin ? (
         <div className="bg-blue-900/20 border border-blue-800/30 rounded-lg px-4 py-3">
           <p className="text-sm text-blue-300 font-medium">This user is an admin</p>
@@ -845,13 +945,13 @@ function QuotasTab({ user, usage, role, onError }) {
       )}
 
       {rows.map(row => {
-        // Role default applies when the per-user field is empty
-        const roleKey = { maxCores: 'max_cores', maxMemoryGb: 'max_memory_gb', maxStorageGb: 'max_storage_gb' }[row.key];
-        const roleDefault = role?.[roleKey];
-        const effective = form[row.key] !== '' ? parseInt(form[row.key], 10) : roleDefault;
+        const roleDefault = role?.[row.column];
+        const value = quotas[row.key] ?? '';
+        const effective = value !== '' ? parseInt(value, 10) : roleDefault;
         const overQuota = effective != null && row.used != null && row.used >= effective;
+        const staged = String(value) !== String(state.quotas[row.column] ?? '');
         return (
-          <div key={row.key} className="bg-gray-800 rounded-lg px-4 py-3">
+          <div key={row.key} className={`bg-gray-800 rounded-lg px-4 py-3 ${staged ? STAGED_CLS : ''}`}>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-sm text-white">{row.label}</label>
               {row.used != null && (
@@ -864,19 +964,15 @@ function QuotasTab({ user, usage, role, onError }) {
               type="number"
               min="0"
               placeholder={roleDefault != null ? `${roleDefault} (from role)` : 'Unlimited'}
-              value={form[row.key]}
-              onChange={e => { setForm(f => ({ ...f, [row.key]: e.target.value })); setMsg(''); }}
+              value={value}
+              onChange={e => onChange(row.key, e.target.value)}
               className={inputCls}
             />
           </div>
         );
       })}
-
-      {msg && <p className="text-xs text-green-400">{msg}</p>}
-      <button type="submit" disabled={saving} className={btnCls}>
-        {saving ? 'Saving...' : 'Save Quotas'}
-      </button>
-    </form>
+      <p className="text-xs text-gray-500">Quota edits are staged with the rest — use Review &amp; Apply below.</p>
+    </div>
   );
 }
 
@@ -1276,18 +1372,25 @@ function Section({ title, children }) {
   );
 }
 
-function Row({ label, sub, badge, action }) {
+const STAGED_CLS = 'border-l-2 border-l-amber-400';
+
+function Row({ label, sub, badge, action, staged = null }) {
   const badgeColors = {
     running: 'bg-green-900 text-green-300',
     stopped: 'bg-red-900 text-red-300',
   };
   return (
-    <div className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2.5">
+    <div className={`flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2.5 ${staged ? STAGED_CLS : ''} ${staged === 'remove' ? 'opacity-60' : ''}`}>
       <div>
-        <p className="text-sm text-white">{label}</p>
+        <p className={`text-sm text-white ${staged === 'remove' ? 'line-through' : ''}`}>{label}</p>
         <p className="text-xs text-gray-500">{sub}</p>
       </div>
       <div className="flex items-center gap-2">
+        {staged && (
+          <span className="text-[10px] uppercase tracking-wider text-amber-400">
+            {staged === 'add' ? 'pending add' : 'pending remove'}
+          </span>
+        )}
         {badge && <span className={`text-xs px-2 py-0.5 rounded ${badgeColors[badge] || 'bg-gray-700 text-gray-400'}`}>{badge}</span>}
         {action}
       </div>
@@ -1331,6 +1434,14 @@ function BlueBtn({ children, onClick }) {
   );
 }
 
+function GhostBtn({ children, onClick }) {
+  return (
+    <button onClick={onClick} className="text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors">
+      {children}
+    </button>
+  );
+}
+
 function DangerBtn({ children, onClick }) {
   return (
     <button onClick={onClick} className="text-xs px-3 py-1 bg-red-800 hover:bg-red-700 text-white rounded transition-colors">
@@ -1339,16 +1450,17 @@ function DangerBtn({ children, onClick }) {
   );
 }
 
-function PermToggle({ label, desc, checked, onChange, danger = false }) {
+function PermToggle({ label, desc, checked, onChange, danger = false, staged = false }) {
   const hot = danger && checked;
   return (
     <label className={`flex items-center justify-between rounded-lg px-4 py-2.5 cursor-pointer transition-colors ${
       hot ? 'bg-amber-900/20 border border-amber-800/40 hover:bg-amber-900/25' : 'bg-gray-800 hover:bg-gray-800/80'
-    }`}>
+    } ${staged ? STAGED_CLS : ''}`}>
       <div>
         <p className="text-sm text-white">
           {label}
           {danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+          {staged && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">pending</span>}
         </p>
         {desc && <p className={`text-xs ${hot ? 'text-amber-300/80' : 'text-gray-500'}`}>{desc}</p>}
       </div>
