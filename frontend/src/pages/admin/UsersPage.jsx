@@ -1,4 +1,5 @@
 import { useCallback, useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
@@ -20,6 +21,7 @@ export default function UsersPage() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [manageUser, setManageUser] = useState(null);
   const [error, setError]           = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const load = async () => {
     try {
@@ -49,6 +51,21 @@ export default function UsersPage() {
   };
 
   useEffect(() => { load(); }, []);
+
+  // ?user=<id> opens that account straight away — the Roles page links here from
+  // its holder list. The parameter is dropped once it has been honored so a
+  // later reload doesn't reopen the dialog.
+  const requestedUserId = searchParams.get('user');
+  useEffect(() => {
+    if (!requestedUserId || users.length === 0) return;
+    const match = users.find(u => String(u.id) === requestedUserId);
+    if (match) setManageUser(match);
+    setSearchParams(params => {
+      const next = new URLSearchParams(params);
+      next.delete('user');
+      return next;
+    }, { replace: true });
+  }, [requestedUserId, users, setSearchParams]);
 
   const deleteUser = async (id) => {
     if (!confirm('Delete this user? This will also remove their VM and VLAN assignments.')) return;
