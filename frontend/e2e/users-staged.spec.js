@@ -101,3 +101,19 @@ test('a 409 conflict reloads the latest state and reports it', async ({ page }) 
   await expect(page.getByText(/changed by someone else/)).toBeVisible();
   await expect(page.getByText(/pending change/)).toHaveCount(0);
 });
+
+test('browser Back asks before discarding staged user changes', async ({ page }) => {
+  await mockUsersPage(page);
+  await page.route('**/api/admin/audit-log**', (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
+  await page.goto('/admin/audit-log');
+  await page.goto('/admin/users');
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByText('Manage PVE Hosts').click();
+
+  let prompts = 0;
+  page.on('dialog', (d) => { prompts += 1; d.dismiss(); });
+  await page.evaluate(() => window.history.back());
+  await expect.poll(() => prompts).toBe(1);
+  await expect(page).toHaveURL(/\/admin\/users$/);
+  await expect(page.getByText('1 pending change')).toBeVisible();
+});

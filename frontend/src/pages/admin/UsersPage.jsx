@@ -2,6 +2,7 @@ import { useCallback, useState, useEffect } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import useUnsavedChangesGuard from '../../hooks/useUnsavedChangesGuard.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { displayNode, vmIdentityKey } from '../../utils/nodeRef.js';
 import { draftFromState, buildUserPatch, describeUserChanges, invalidQuotaKeys } from '../../utils/userDraft.js';
@@ -352,12 +353,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   const pending = changes.length;
   const badQuotas = draft ? invalidQuotaKeys(draft.quotas) : [];
 
-  useEffect(() => {
-    if (!pending) return undefined;
-    const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, [pending]);
+  useUnsavedChangesGuard(pending > 0, `Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${user.username}?`);
 
   const requestClose = () => {
     if (pending && !confirm(`Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${user.username}?`)) return;

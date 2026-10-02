@@ -710,6 +710,13 @@ router.patch('/users/:id', pAssignments, async (req, res) => {
         }
         patch.role_id = plan.roleId;
         audits.push({ action: 'admin_assign_role', target: before.username, detail: roleName, targetRef: plan.roleId === null ? null : roleRef(plan.roleId) });
+        if (before.role_id != null) {
+          audits.push({
+            action: 'admin_unassign_role', target: before.username,
+            detail: plan.roleId === null ? 'role removed' : `moved to ${roleName}`,
+            targetRef: roleRef(before.role_id),
+          });
+        }
       }
       for (const [key, value] of Object.entries(plan.permissions || {})) {
         if (before.permissions[key] === value) continue;

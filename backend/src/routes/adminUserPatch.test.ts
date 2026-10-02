@@ -243,11 +243,17 @@ test('audit rows commit with the batch and roll back with it', async () => {
   assert.ok(rows.some((r) => r.detail === 'can_manage_templates=1' && r.username === 'patch-admin'));
 });
 
-test('role assignment audits carry the stable role reference', async () => {
+test('role assignment audits carry stable refs for both the new and old role', async () => {
   const res = await request(adminApp).patch(`/users/${otherId}`).send({ roleId });
   assert.equal(res.status, 200);
   const rows = await testDb.db.select().from(auditLog).where(eq(auditLog.target_ref, `role:${roleId}`));
   assert.ok(rows.some((r) => r.action === 'admin_assign_role' && r.target === 'other'));
+
+  const [oldRole] = await testDb.db.insert(roles).values({ name: 'PriorRole' }).returning({ id: roles.id });
+  const moved = await request(adminApp).patch(`/users/${otherId}`).send({ roleId: oldRole.id });
+  assert.equal(moved.status, 200);
+  const priorHistory = await testDb.db.select().from(auditLog).where(eq(auditLog.target_ref, `role:${roleId}`));
+  assert.ok(priorHistory.some((r) => r.action === 'admin_unassign_role' && r.target === 'other'));
 });
 
 test('fractional or exponential quotas are rejected, not truncated', async () => {
