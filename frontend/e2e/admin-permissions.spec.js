@@ -4,6 +4,14 @@ const user = (permissions) => ({
   id: 7, username: 'operator', isAdmin: false, twoFactorEnabled: true, require2fa: false, permissions,
 });
 
+async function mockUsersPageData(page) {
+  await page.route('**/api/admin/vms', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/admin/vlans', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/admin/roles', (route) => route.fulfill({ json: { roles: [], permissionKeys: [] } }));
+  await page.route('**/api/admin/invites', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/admin/user-usage', (route) => route.fulfill({ json: {} }));
+}
+
 test('a user can sign in and reach the authenticated welcome flow', async ({ page }) => {
   await page.route('**/api/auth/me', (route) => route.fulfill({ status: 401, json: { error: 'Unauthorized' } }));
   await page.route('**/api/auth/login', (route) => route.fulfill({ json: user({}) }));
@@ -28,6 +36,7 @@ test('a direct admin URL is blocked before unauthorized page data loads', async 
 });
 
 test('a delegated user can open the matching admin route', async ({ page }) => {
+  await mockUsersPageData(page);
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: user({ canManageUsers: true }) }));
   await page.route('**/api/admin/users', (route) => route.fulfill({ json: [] }));
   await page.goto('/admin/users');
@@ -35,6 +44,7 @@ test('a delegated user can open the matching admin route', async ({ page }) => {
 });
 
 test('refresh applies a permission change before protected page data is requested', async ({ page }) => {
+  await mockUsersPageData(page);
   let canManageUsers = true;
   let usersRequests = 0;
   // Keep one unrelated admin-area permission so revoking canManageUsers tests

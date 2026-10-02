@@ -15,6 +15,13 @@
       "when": 1789727963950,
       "tag": "0001_spotty_harrier",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790948889326,
+      "tag": "0002_audit_target_ref",
+      "breakpoints": true
     }
   ]
 }

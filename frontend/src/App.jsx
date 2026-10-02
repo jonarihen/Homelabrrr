@@ -1,4 +1,6 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import {
+  createBrowserRouter, createRoutesFromElements, RouterProvider, Route, Navigate, Outlet,
+} from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
 import { ConsoleSessionsProvider } from './contexts/ConsoleSessionsContext.jsx';
 import Login from './pages/Login.jsx';
@@ -94,52 +96,62 @@ function RootRedirect() {
   return <Navigate to="/welcome" replace />;
 }
 
+// A data router (rather than <BrowserRouter>) so pages can block in-app
+// navigation while they hold unsaved changes (useBlocker).
+function RootLayout() {
+  return (
+    <ConsoleSessionsProvider>
+      <Outlet />
+    </ConsoleSessionsProvider>
+  );
+}
+
+const router = createBrowserRouter(createRoutesFromElements(
+  <Route element={<RootLayout />}>
+    <Route path="/login" element={<Login />} />
+    {/* Public one-time invite redemption — outside PrivateRoute */}
+    <Route path="/invite/:token" element={<AcceptInvite />} />
+
+    <Route path="/" element={<PrivateRoute><RootRedirect /></PrivateRoute>} />
+
+    <Route path="/welcome" element={<PrivateRoute><WelcomePage /></PrivateRoute>} />
+    <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
+
+    <Route path="/vm/:node/:vmid" element={<PrivateRoute><VMPage /></PrivateRoute>} />
+    <Route path="/vnc/:node/:vmid" element={<PrivateRoute><VNCPage /></PrivateRoute>} />
+    <Route path="/ssh/:node/:vmid" element={<PrivateRoute><SSHPage /></PrivateRoute>} />
+    <Route path="/provision" element={<PrivateRoute><ProvisionPage /></PrivateRoute>} />
+    <Route path="/websites" element={<PrivateRoute><WebsitesPage /></PrivateRoute>} />
+    <Route path="/ssh-keys" element={<PrivateRoute><SSHKeysPage /></PrivateRoute>} />
+    <Route path="/account" element={<PrivateRoute allow2faBypass><AccountPage /></PrivateRoute>} />
+
+    <Route path="/admin" element={<AdminRoute><AdminLayout /></AdminRoute>}>
+      <Route index element={<AdminIndexRedirect />} />
+      <Route path="users" element={<AdminPermissionRoute path="/admin/users"><UsersPage /></AdminPermissionRoute>} />
+      <Route path="roles" element={<AdminPermissionRoute path="/admin/roles"><RolesPage /></AdminPermissionRoute>} />
+      <Route path="vlans" element={<AdminPermissionRoute path="/admin/vlans"><VLANsPage /></AdminPermissionRoute>} />
+      <Route path="assignments" element={<AdminPermissionRoute path="/admin/assignments"><AssignmentsPage /></AdminPermissionRoute>} />
+      <Route path="hosts" element={<AdminPermissionRoute path="/admin/hosts"><PVEHostsPage /></AdminPermissionRoute>} />
+      <Route path="operations" element={<AdminPermissionRoute path="/admin/operations"><OperationsPage /></AdminPermissionRoute>} />
+      <Route path="firewalls" element={<AdminPermissionRoute path="/admin/firewalls"><FirewallsPage /></AdminPermissionRoute>} />
+      <Route path="workflows" element={<AdminPermissionRoute path="/admin/workflows"><WorkflowsPage /></AdminPermissionRoute>} />
+      <Route path="policies" element={<AdminPermissionRoute path="/admin/policies"><PoliciesPage /></AdminPermissionRoute>} />
+      <Route path="port-forwarding" element={<AdminPermissionRoute path="/admin/port-forwarding"><PortForwardingPage /></AdminPermissionRoute>} />
+      <Route path="websites" element={<AdminPermissionRoute path="/admin/websites"><AdminWebsitesPage /></AdminPermissionRoute>} />
+      <Route path="templates" element={<AdminPermissionRoute path="/admin/templates"><TemplatesPage /></AdminPermissionRoute>} />
+      <Route path="leases" element={<AdminPermissionRoute path="/admin/leases"><LeasesPage /></AdminPermissionRoute>} />
+      <Route path="notifications" element={<AdminPermissionRoute path="/admin/notifications"><NotificationsPage /></AdminPermissionRoute>} />
+      <Route path="audit-log" element={<AdminPermissionRoute path="/admin/audit-log"><AuditLogPage /></AdminPermissionRoute>} />
+    </Route>
+
+    <Route path="*" element={<Navigate to="/" replace />} />
+  </Route>,
+));
+
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
-        <ConsoleSessionsProvider>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            {/* Public one-time invite redemption — outside PrivateRoute */}
-            <Route path="/invite/:token" element={<AcceptInvite />} />
-
-            <Route path="/" element={<PrivateRoute><RootRedirect /></PrivateRoute>} />
-
-            <Route path="/welcome" element={<PrivateRoute><WelcomePage /></PrivateRoute>} />
-            <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
-
-            <Route path="/vm/:node/:vmid" element={<PrivateRoute><VMPage /></PrivateRoute>} />
-            <Route path="/vnc/:node/:vmid" element={<PrivateRoute><VNCPage /></PrivateRoute>} />
-            <Route path="/ssh/:node/:vmid" element={<PrivateRoute><SSHPage /></PrivateRoute>} />
-            <Route path="/provision" element={<PrivateRoute><ProvisionPage /></PrivateRoute>} />
-            <Route path="/websites" element={<PrivateRoute><WebsitesPage /></PrivateRoute>} />
-            <Route path="/ssh-keys" element={<PrivateRoute><SSHKeysPage /></PrivateRoute>} />
-            <Route path="/account" element={<PrivateRoute allow2faBypass><AccountPage /></PrivateRoute>} />
-
-            <Route path="/admin" element={<AdminRoute><AdminLayout /></AdminRoute>}>
-              <Route index element={<AdminIndexRedirect />} />
-              <Route path="users" element={<AdminPermissionRoute path="/admin/users"><UsersPage /></AdminPermissionRoute>} />
-              <Route path="roles" element={<AdminPermissionRoute path="/admin/roles"><RolesPage /></AdminPermissionRoute>} />
-              <Route path="vlans" element={<AdminPermissionRoute path="/admin/vlans"><VLANsPage /></AdminPermissionRoute>} />
-              <Route path="assignments" element={<AdminPermissionRoute path="/admin/assignments"><AssignmentsPage /></AdminPermissionRoute>} />
-              <Route path="hosts" element={<AdminPermissionRoute path="/admin/hosts"><PVEHostsPage /></AdminPermissionRoute>} />
-              <Route path="operations" element={<AdminPermissionRoute path="/admin/operations"><OperationsPage /></AdminPermissionRoute>} />
-              <Route path="firewalls" element={<AdminPermissionRoute path="/admin/firewalls"><FirewallsPage /></AdminPermissionRoute>} />
-              <Route path="workflows" element={<AdminPermissionRoute path="/admin/workflows"><WorkflowsPage /></AdminPermissionRoute>} />
-              <Route path="policies" element={<AdminPermissionRoute path="/admin/policies"><PoliciesPage /></AdminPermissionRoute>} />
-              <Route path="port-forwarding" element={<AdminPermissionRoute path="/admin/port-forwarding"><PortForwardingPage /></AdminPermissionRoute>} />
-              <Route path="websites" element={<AdminPermissionRoute path="/admin/websites"><AdminWebsitesPage /></AdminPermissionRoute>} />
-              <Route path="templates" element={<AdminPermissionRoute path="/admin/templates"><TemplatesPage /></AdminPermissionRoute>} />
-              <Route path="leases" element={<AdminPermissionRoute path="/admin/leases"><LeasesPage /></AdminPermissionRoute>} />
-              <Route path="notifications" element={<AdminPermissionRoute path="/admin/notifications"><NotificationsPage /></AdminPermissionRoute>} />
-              <Route path="audit-log" element={<AdminPermissionRoute path="/admin/audit-log"><AuditLogPage /></AdminPermissionRoute>} />
-            </Route>
-
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </ConsoleSessionsProvider>
-      </BrowserRouter>
+      <RouterProvider router={router} />
     </AuthProvider>
   );
 }

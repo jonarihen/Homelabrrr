@@ -27,10 +27,14 @@ export const auditLog = pgTable(
     created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow(),
     request_id: text('request_id').notNull().default(''),
     outcome: text('outcome').notNull().default('success'),
+    // Stable reference to the audited entity (e.g. `role:12`). `target` holds a
+    // human-readable name that can change or be reused; this does not.
+    target_ref: text('target_ref'),
   },
   (t) => [
     index('idx_audit_log_created').on(t.created_at),
     index('idx_audit_log_user').on(t.user_id),
+    index('idx_audit_log_target_ref').on(t.target_ref),
   ]
 );
 

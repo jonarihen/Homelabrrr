@@ -1,53 +1,39 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import useUnsavedChangesGuard from '../../hooks/useUnsavedChangesGuard.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { PERM_GROUPS, permLabel, isDangerPerm, roleMatchesQuery, diffRole, invalidRoleQuotaKeys } from '../../utils/roleDiff.js';
 
-// Grouped presentation of the permission keys the backend exposes
-const PERM_GROUPS = [
-  {
-    label: 'VM Access',
-    perms: [
-      { key: 'see_all_vms',    label: 'View all VMs (read-only)',  desc: 'See every VM on Proxmox without individual assignments — status, config, graphs and backup listings only. Grants no power, console or edit rights.' },
-      { key: 'can_operate_all_vms', label: 'Operate all VMs', desc: 'Full operator control of every VM: VNC console, SSH and SFTP shell, power on/off/reboot, snapshots, backups, VLAN and hardware changes. Console + SSH on the whole fleet is effectively root on the fleet.', danger: true },
-      { key: 'can_provision',  label: 'Provision VMs',   desc: 'Create VMs from templates and cloud images' },
-      { key: 'can_create_vms', label: 'Create VMs',      desc: 'Build VMs from scratch / from an available ISO' },
-      { key: 'can_edit_vm_hardware', label: 'Edit VM Hardware', desc: 'Change CPU, memory, and disk size on assigned VMs' },
-    ],
-  },
-  {
-    label: 'Admin Features',
-    perms: [
-      { key: 'can_manage_hosts',       label: 'Manage PVE Hosts',   desc: 'Add, edit, and remove Proxmox hypervisor connections' },
-      { key: 'can_manage_firewalls',   label: 'Manage Firewalls',   desc: 'Configure FortiGate firewalls and switch discovery' },
-      { key: 'can_manage_port_forwards', label: 'Manage Port Forwards', desc: 'Create and remove scoped WAN port forwards' },
-      { key: 'can_manage_vlans',       label: 'Manage VLANs',       desc: 'Create, edit, delete VLANs and sync to firewalls' },
-      { key: 'can_manage_policies',    label: 'Manage Policies',    desc: 'Create and remove firewall policies between VLANs' },
-      { key: 'can_manage_templates',   label: 'Manage Templates',   desc: 'Register and configure VM provisioning templates' },
-      { key: 'can_manage_users',       label: 'Manage Users',       desc: 'Create, edit, delete user accounts and permissions' },
-      { key: 'can_manage_assignments', label: 'Manage Assignments', desc: 'Assign VMs and VLANs to users' },
-      { key: 'can_view_audit_log',     label: 'View Audit Log',     desc: 'Read the system audit log' },
-      { key: 'can_manage_websites',    label: 'Manage Websites',    desc: 'Register the Caddy reverse proxy, see all published sites, and assign site ownership' },
-      { key: 'can_manage_public_ips',  label: 'Manage Public IPs',  desc: 'Register public IP pools, reserve addresses, and assign dedicated public IPs to users' },
-    ],
-  },
-];
+const btnCls = 'text-xs px-2 py-1 rounded hover:bg-gray-700 transition-colors';
+const KNOWN_PERMS = new Set(PERM_GROUPS.flatMap((g) => g.perms.map((p) => p.key)));
 
 export default function RolesPage() {
   useDocumentTitle('Roles');
   const { user: currentUser } = useAuth();
   const isAdmin = !!currentUser?.isAdmin;
+  const canViewAudit = isAdmin || !!currentUser?.permissions?.canViewAuditLog;
   const [roles, setRoles] = useState([]);
+  const [permissionKeys, setPermissionKeys] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [manageRole, setManageRole] = useState(null);
+  const [cloneSource, setCloneSource] = useState(null);
+  const [holdersRole, setHoldersRole] = useState(null);
+  const [deletingRole, setDeletingRole] = useState(null);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [query, setQuery] = useState('');
   const [error, setError] = useState('');
 
   const load = async () => {
     try {
       const r = await api.get('/admin/roles');
       setRoles(r.data.roles || []);
+      setPermissionKeys(r.data.permissionKeys || []);
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to load roles');
     } finally {
@@ -57,36 +43,83 @@ export default function RolesPage() {
 
   useEffect(() => { load(); }, []);
 
-  const deleteRole = async (role) => {
-    if (!confirm(`Delete the role "${role.name}"? Users holding it fall back to their per-user permissions.`)) return;
-    try {
-      await api.delete(`/admin/roles/${role.id}`);
-      load();
-    } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete role');
-    }
+  const visible = useMemo(() => roles.filter((r) => roleMatchesQuery(r, query)), [roles, query]);
+
+  const toggleExpanded = (id) => setExpanded((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const exportRole = (role) => {
+    const payload = {
+      kind: 'homelabrrr-role',
+      version: 1,
+      name: role.name,
+      description: role.description || '',
+      permissions: [...role.permissions].sort(),
+      maxCores: role.max_cores,
+      maxMemoryGb: role.max_memory_gb,
+      maxStorageGb: role.max_storage_gb,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `role-${role.name.replace(/[^a-z0-9-_]+/gi, '_')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 gap-4 flex-wrap">
         <div>
           <h1 className="aaris-display text-lg text-gray-100">Roles</h1>
           <p className="text-sm text-gray-500 mt-0.5">
             Named permission sets — assign a role to a user on the Users page. Editing a role updates everyone who holds it.
           </p>
         </div>
-        {isAdmin && (
-          <button
-            onClick={() => setCreateOpen(true)}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-          >
-            + New Role
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {roles.length > 1 && (
+            <button
+              onClick={() => setCompareOpen(true)}
+              className="text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-2 rounded-lg transition-colors"
+            >
+              Compare
+            </button>
+          )}
+          {isAdmin && (
+            <>
+              <button
+                onClick={() => setImportOpen(true)}
+                className="text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-2 rounded-lg transition-colors"
+              >
+                Import
+              </button>
+              <button
+                onClick={() => setCreateOpen(true)}
+                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                + New Role
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {error && <p className="text-red-400 text-sm mb-4 bg-red-900/20 rounded p-3">{error}</p>}
+
+      {!loading && roles.length > 0 && (
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter by name, description or permission…"
+          aria-label="Filter roles"
+          className="w-full sm:w-80 mb-4 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+        />
+      )}
 
       {loading ? (
         <div className="space-y-3">
@@ -104,54 +137,108 @@ export default function RolesPage() {
               </tr>
             </thead>
             <tbody>
-              {roles.map(role => (
-                <tr key={role.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 transition-colors">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-white font-medium">{role.name}</span>
-                      {role.builtIn && <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded">Built-in</span>}
-                    </div>
-                    {role.description && <p className="text-xs text-gray-500 mt-0.5">{role.description}</p>}
-                  </td>
-                  <td className="px-4 py-3">
-                    {role.permissions.length > 0
-                      ? <span className="text-xs text-purple-400">{role.permissions.length} granted</span>
-                      : <span className="text-xs text-gray-600">None</span>}
-                    {(role.max_cores != null || role.max_memory_gb != null || role.max_storage_gb != null) && (
-                      <p className="text-xs text-gray-500 font-mono mt-0.5">
-                        {[
-                          role.max_cores != null ? `${role.max_cores}c` : null,
-                          role.max_memory_gb != null ? `${role.max_memory_gb}G mem` : null,
-                          role.max_storage_gb != null ? `${role.max_storage_gb}G disk` : null,
-                        ].filter(Boolean).join(' · ')}
-                      </p>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-gray-400">{role.userCount}</td>
-                  <td className="px-4 py-3 text-right">
-                    {isAdmin ? (
-                      <div className="flex items-center justify-end gap-2">
+              {visible.length === 0 && (
+                <tr><td colSpan="4" className="px-4 py-6 text-center text-gray-500 text-sm">No roles match “{query}”.</td></tr>
+              )}
+              {visible.map(role => {
+                const open = expanded.has(role.id);
+                const hasDanger = role.permissions.some(isDangerPerm);
+                return (
+                  <tr key={role.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50 transition-colors align-top">
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-white font-medium">{role.name}</span>
+                        {role.builtIn && <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded">Built-in</span>}
+                      </div>
+                      {role.description && <p className="text-xs text-gray-500 mt-0.5">{role.description}</p>}
+                    </td>
+                    <td className="px-4 py-3">
+                      {role.permissions.length > 0 ? (
                         <button
-                          onClick={() => setManageRole(role)}
-                          className="text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-gray-700 transition-colors"
+                          onClick={() => toggleExpanded(role.id)}
+                          aria-expanded={open}
+                          className="text-xs text-purple-400 hover:text-purple-300 inline-flex items-center gap-1"
                         >
-                          Manage
+                          <span className="font-mono">{open ? '▾' : '▸'}</span>
+                          {role.permissions.length} granted
+                          {hasDanger && <span className="ml-1 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
                         </button>
-                        {!role.builtIn && (
-                          <button
-                            onClick={() => deleteRole(role)}
-                            className="text-xs text-red-500 hover:text-red-400 px-2 py-1 rounded hover:bg-gray-700 transition-colors"
-                          >
+                      ) : <span className="text-xs text-gray-600">None</span>}
+                      {open && (
+                        <ul className="mt-2 flex flex-wrap gap-1">
+                          {[...role.permissions].sort().map((k) => (
+                            <li
+                              key={k}
+                              className={`text-[11px] px-2 py-0.5 rounded border ${isDangerPerm(k)
+                                ? 'bg-amber-900/20 border-amber-800/40 text-amber-300'
+                                : 'bg-gray-800 border-gray-700 text-gray-300'}`}
+                            >
+                              {permLabel(k)}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {(role.max_cores != null || role.max_memory_gb != null || role.max_storage_gb != null) && (
+                        <p className="text-xs text-gray-500 font-mono mt-0.5">
+                          {[
+                            role.max_cores != null ? `${role.max_cores}c` : null,
+                            role.max_memory_gb != null ? `${role.max_memory_gb}G mem` : null,
+                            role.max_storage_gb != null ? `${role.max_storage_gb}G disk` : null,
+                          ].filter(Boolean).join(' · ')}
+                        </p>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => setHoldersRole(role)}
+                        className="text-gray-300 hover:text-white underline decoration-dotted underline-offset-4"
+                        title="Show users holding this role"
+                      >
+                        {role.userCount}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1 flex-wrap">
+                        {isAdmin && (
+                          <button onClick={() => setManageRole(role)} className={`${btnCls} text-blue-400 hover:text-blue-300`}>
+                            Manage
+                          </button>
+                        )}
+                        {isAdmin && (
+                          <button onClick={() => setCloneSource(role)} className={`${btnCls} text-gray-300 hover:text-white`}>
+                            Clone
+                          </button>
+                        )}
+                        <button onClick={() => exportRole(role)} className={`${btnCls} text-gray-400 hover:text-white`}>
+                          Export
+                        </button>
+                        {canViewAudit && (
+                          <>
+                            <Link
+                              to={`/admin/audit-log?targetRef=${encodeURIComponent(`role:${role.id}`)}&label=${encodeURIComponent(role.name)}`}
+                              className={`${btnCls} text-gray-400 hover:text-white`}
+                            >
+                              History
+                            </Link>
+                            <Link
+                              to={`/admin/audit-log?target=${encodeURIComponent(role.name)}&legacy=true&label=${encodeURIComponent(role.name)}`}
+                              title="Older entries matched by name; may include a previous role with this name"
+                              className={`${btnCls} text-gray-500 hover:text-gray-300`}
+                            >
+                              Legacy
+                            </Link>
+                          </>
+                        )}
+                        {isAdmin && !role.builtIn && (
+                          <button onClick={() => setDeletingRole(role)} className={`${btnCls} text-red-500 hover:text-red-400`}>
                             Delete
                           </button>
                         )}
                       </div>
-                    ) : (
-                      <span className="text-xs text-gray-600">Admin only</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -159,34 +246,84 @@ export default function RolesPage() {
 
       {createOpen && (
         <RoleModal
+          prefill={typeof createOpen === 'object' ? createOpen : undefined}
           onClose={() => setCreateOpen(false)}
           onSaved={load}
         />
       )}
-      {manageRole && (
-        <RoleModal
-          role={manageRole}
-          onClose={() => setManageRole(null)}
-          onSaved={load}
-        />
-      )}
+      {manageRole && <RoleModal role={manageRole} onClose={() => setManageRole(null)} onSaved={load} />}
+      {cloneSource && <CloneRoleModal source={cloneSource} onClose={() => setCloneSource(null)} onSaved={load} />}
+      {holdersRole && <HoldersModal role={holdersRole} isAdmin={isAdmin} onClose={() => setHoldersRole(null)} onChanged={load} />}
+      {deletingRole && <DeleteRoleModal role={deletingRole} roles={roles} onClose={() => setDeletingRole(null)} onDeleted={load} />}
+      {compareOpen && <CompareRolesModal roles={roles} onClose={() => setCompareOpen(false)} />}
+      {importOpen && <ImportRoleModal permissionKeys={permissionKeys} onClose={() => setImportOpen(false)} onImported={(prefill) => { setImportOpen(false); setCreateOpen(prefill); }} />}
     </div>
   );
 }
 
-// Create + edit share one modal; `role` present = edit mode
-function RoleModal({ role, onClose, onSaved }) {
+function ChangeList({ changes }) {
+  if (changes.length === 0) return <p className="text-xs text-gray-500">No changes.</p>;
+  return (
+    <ul className="space-y-1 font-mono text-xs">
+      {changes.map((c, i) => (
+        <li
+          key={i}
+          className={
+            c.kind === 'grant'
+              ? (c.danger ? 'text-amber-300' : 'text-green-400')
+              : c.kind === 'revoke' ? 'text-red-400' : 'text-gray-300'
+          }
+        >
+          {c.kind === 'grant' && <>+ {c.label}{c.danger && <span className="ml-2 text-[10px] uppercase tracking-wider">high blast radius</span>}</>}
+          {c.kind === 'revoke' && <>− {c.label}</>}
+          {c.kind === 'field' && <>~ {c.label}: <span className="text-gray-500">{c.from}</span> → <span className="text-white">{c.to}</span></>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Create + edit share one modal; `role` present = edit mode. `prefill` seeds a
+// new role (used by Import).
+function RoleModal({ role, prefill, onClose, onSaved }) {
   const editing = !!role;
-  const [name, setName] = useState(role?.name || '');
-  const [description, setDescription] = useState(role?.description || '');
-  const [perms, setPerms] = useState(() => new Set(role?.permissions || []));
+  const seed = role || prefill || null;
+  const initial = useMemo(() => ({
+    name: seed?.name || '',
+    description: seed?.description || '',
+    permissions: [...(seed?.permissions || [])].sort(),
+    maxCores: seed?.max_cores ?? seed?.maxCores ?? '',
+    maxMemoryGb: seed?.max_memory_gb ?? seed?.maxMemoryGb ?? '',
+    maxStorageGb: seed?.max_storage_gb ?? seed?.maxStorageGb ?? '',
+  }), [seed]);
+  const [name, setName] = useState(initial.name);
+  const [description, setDescription] = useState(initial.description);
+  const [perms, setPerms] = useState(() => new Set(initial.permissions));
   const [quotas, setQuotas] = useState({
-    maxCores: role?.max_cores ?? '',
-    maxMemoryGb: role?.max_memory_gb ?? '',
-    maxStorageGb: role?.max_storage_gb ?? '',
+    maxCores: initial.maxCores,
+    maxMemoryGb: initial.maxMemoryGb,
+    maxStorageGb: initial.maxStorageGb,
   });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
+  const [reviewHolders, setReviewHolders] = useState(null);
+  const [checkingHolders, setCheckingHolders] = useState(false);
+
+  const draft = { name, description, permissions: [...perms], ...quotas };
+  const unknownPerms = [...perms].filter((k) => !KNOWN_PERMS.has(k)).sort();
+  const badQuotas = invalidRoleQuotaKeys(quotas);
+  const changes = diffRole(editing ? role : null, draft);
+  const dirty = editing
+    ? changes.length > 0
+    : JSON.stringify({ ...draft, permissions: [...perms].sort() }) !== JSON.stringify(initial) || !!prefill;
+
+  const requestClose = () => {
+    if (dirty && !saving && !confirm('Discard unsaved changes to this role?')) return;
+    onClose();
+  };
+
+  useUnsavedChangesGuard(dirty && !saving, 'Discard unsaved changes to this role?');
 
   const toggle = (key) => {
     setPerms(prev => {
@@ -197,27 +334,93 @@ function RoleModal({ role, onClose, onSaved }) {
     });
   };
 
-  const submit = async (e) => {
-    e.preventDefault();
+  const setGroup = (group, on) => {
+    setPerms(prev => {
+      const next = new Set(prev);
+      for (const p of group.perms) {
+        if (on) next.add(p.key); else next.delete(p.key);
+      }
+      return next;
+    });
+  };
+
+  const save = async () => {
     setSaving(true);
     setError('');
     try {
       const payload = { name, description, permissions: [...perms], ...quotas };
+      if (editing) payload.expectedHolders = reviewHolders.length;
       if (editing) await api.put(`/admin/roles/${role.id}`, payload);
       else await api.post('/admin/roles', payload);
       onSaved();
       onClose();
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to save role');
+      setReviewing(false);
     } finally {
       setSaving(false);
     }
   };
 
+  const submit = async (e) => {
+    e.preventDefault();
+    if (badQuotas.length) { setError('Quotas must be whole numbers (or empty for unlimited)'); return; }
+    if (editing && changes.length === 0) { onClose(); return; }
+    setError('');
+    if (editing) {
+      setCheckingHolders(true);
+      try {
+        const { data } = await api.get(`/admin/roles/${role.id}/users`);
+        setReviewHolders(data);
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to load role holders');
+        return;
+      } finally {
+        setCheckingHolders(false);
+      }
+    }
+    setReviewing(true);
+  };
+
   const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
+  if (reviewing) {
+    const holders = editing ? reviewHolders.length : 0;
+    return (
+      <Modal title={editing ? `Review changes — ${role.name}` : 'Review new role'} onClose={() => setReviewing(false)} size="md">
+        <div className="p-5 space-y-4">
+          {editing && (
+            <p className="text-xs text-amber-300 bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-2">
+              This role currently has <strong>{holders}</strong> holder{holders === 1 ? '' : 's'}. Non-admin holders' effective permissions and quotas may change; admins bypass both.
+              {holders > 0 && <span className="block mt-1 text-amber-300/70">{reviewHolders.map((u) => u.username).join(', ')}</span>}
+            </p>
+          )}
+          <ChangeList changes={changes} />
+          {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setReviewing(false)}
+              className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg py-2.5 text-sm transition-colors"
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving}
+              className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+            >
+              {saving ? 'Applying…' : editing ? 'Apply changes' : 'Create role'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
   return (
-    <Modal title={editing ? `Role — ${role.name}` : 'Create Role'} onClose={onClose} size="lg">
+    <Modal title={editing ? `Role — ${role.name}` : 'Create Role'} onClose={requestClose} size="lg">
       <form onSubmit={submit} className="p-5 space-y-5">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
@@ -249,35 +452,58 @@ function RoleModal({ role, onClose, onSaved }) {
           </p>
         )}
 
-        {PERM_GROUPS.map(group => (
-          <div key={group.label} className="space-y-1">
-            <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">{group.label}</p>
-            {group.perms.map(p => (
-              <label
-                key={p.key}
-                className={`flex items-center justify-between rounded-lg px-4 py-2.5 cursor-pointer transition-colors ${
-                  p.danger && perms.has(p.key)
-                    ? 'bg-amber-900/20 border border-amber-800/40 hover:bg-amber-900/25'
-                    : 'bg-gray-800 hover:bg-gray-800/80'
-                }`}
-              >
-                <div>
-                  <p className="text-sm text-white">
-                    {p.label}
-                    {p.danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
-                  </p>
-                  <p className={`text-xs ${p.danger && perms.has(p.key) ? 'text-amber-300/80' : 'text-gray-500'}`}>{p.desc}</p>
+        {PERM_GROUPS.map(group => {
+          const all = group.perms.every((p) => perms.has(p.key));
+          const none = group.perms.every((p) => !perms.has(p.key));
+          return (
+            <div key={group.label} className="space-y-1">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs text-gray-500 uppercase tracking-wider">{group.label}</p>
+                <div className="flex gap-2 text-xs">
+                  <button type="button" disabled={all} onClick={() => setGroup(group, true)} className="text-blue-400 hover:text-blue-300 disabled:text-gray-600">Select all</button>
+                  <span className="text-gray-700">·</span>
+                  <button type="button" disabled={none} onClick={() => setGroup(group, false)} className="text-blue-400 hover:text-blue-300 disabled:text-gray-600">Clear</button>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={perms.has(p.key)}
-                  onChange={() => toggle(p.key)}
-                  className="accent-blue-500 w-4 h-4 shrink-0 ml-3"
-                />
-              </label>
+              </div>
+              {group.perms.map(p => (
+                <label
+                  key={p.key}
+                  className={`flex items-center justify-between rounded-lg px-4 py-2.5 cursor-pointer transition-colors ${
+                    p.danger && perms.has(p.key)
+                      ? 'bg-amber-900/20 border border-amber-800/40 hover:bg-amber-900/25'
+                      : 'bg-gray-800 hover:bg-gray-800/80'
+                  }`}
+                >
+                  <div>
+                    <p className="text-sm text-white">
+                      {p.label}
+                      {p.danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+                    </p>
+                    <p className={`text-xs ${p.danger && perms.has(p.key) ? 'text-amber-300/80' : 'text-gray-500'}`}>{p.desc}</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={perms.has(p.key)}
+                    onChange={() => toggle(p.key)}
+                    className="accent-blue-500 w-4 h-4 shrink-0 ml-3"
+                  />
+                </label>
+              ))}
+            </div>
+          );
+        })}
+
+        {unknownPerms.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Unrecognised permissions</p>
+            {unknownPerms.map((key) => (
+              <div key={key} className="flex items-center justify-between rounded-lg px-4 py-2.5 bg-red-900/15 border border-red-800/40">
+                <p className="text-sm font-mono text-red-300">{key}</p>
+                <button type="button" onClick={() => toggle(key)} className="text-xs text-red-400 hover:text-red-300">Remove</button>
+              </div>
             ))}
           </div>
-        ))}
+        )}
 
         <div className="space-y-1">
           <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Resource Quotas</p>
@@ -295,10 +521,12 @@ function RoleModal({ role, onClose, onSaved }) {
                 <input
                   type="number"
                   min="0"
+                  step="1"
                   placeholder="Unlimited"
-                  value={quotas[q.key]}
+                  value={quotas[q.key] ?? ''}
                   onChange={e => setQuotas(f => ({ ...f, [q.key]: e.target.value }))}
-                  className={inputCls}
+                  aria-invalid={badQuotas.includes(q.key)}
+                  className={`${inputCls} ${badQuotas.includes(q.key) ? 'border-red-500' : ''}`}
                 />
               </div>
             ))}
@@ -308,12 +536,369 @@ function RoleModal({ role, onClose, onSaved }) {
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
         <button
           type="submit"
+          disabled={saving || checkingHolders || badQuotas.length > 0 || (editing && changes.length === 0)}
+          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+        >
+          {editing
+            ? (checkingHolders ? 'Checking holders…' : changes.length === 0 ? 'No changes' : `Review ${changes.length} change${changes.length === 1 ? '' : 's'}`)
+            : 'Review & create'}
+        </button>
+      </form>
+    </Modal>
+  );
+}
+
+function CloneRoleModal({ source, onClose, onSaved }) {
+  const [name, setName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setError('');
+    try {
+      await api.post(`/admin/roles/${source.id}/clone`, name.trim() ? { name: name.trim() } : {});
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to clone role');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal title={`Clone — ${source.name}`} onClose={onClose} size="sm">
+      <form onSubmit={submit} className="p-5 space-y-4">
+        <p className="text-xs text-gray-400">
+          Copies {source.permissions.length} permission{source.permissions.length === 1 ? '' : 's'}, quotas and description into a new, editable role. Users holding “{source.name}” are not moved.
+        </p>
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">New role name</label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={`${source.name} (copy)`}
+            autoFocus
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+          />
+          <p className="text-[11px] text-gray-500 mt-1">Leave empty to use the next free “(copy)” name.</p>
+        </div>
+        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        <button
+          type="submit"
           disabled={saving}
           className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
         >
-          {saving ? 'Saving...' : editing ? 'Save Role' : 'Create Role'}
+          {saving ? 'Cloning…' : 'Clone role'}
         </button>
       </form>
+    </Modal>
+  );
+}
+
+function HoldersModal({ role, isAdmin, onClose, onChanged }) {
+  const [holders, setHolders] = useState(null);
+  const [allUsers, setAllUsers] = useState([]);
+  const [selected, setSelected] = useState(() => new Set());
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      const [h, u] = await Promise.all([
+        api.get(`/admin/roles/${role.id}/users`),
+        isAdmin ? api.get('/admin/users') : Promise.resolve({ data: [] }),
+      ]);
+      setHolders(h.data);
+      setAllUsers(u.data || []);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to load holders');
+    }
+  };
+
+  useEffect(() => { load(); }, [role.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const holderIds = new Set((holders || []).map((u) => u.id));
+  const candidates = allUsers.filter((u) => !holderIds.has(u.id));
+
+  const assign = async () => {
+    if (selected.size === 0) return;
+    const names = candidates.filter((u) => selected.has(u.id)).map((u) => u.username);
+    const moving = candidates.filter((u) => selected.has(u.id) && u.role_id).length;
+    if (!confirm(`Assign “${role.name}” to ${names.length} user${names.length === 1 ? '' : 's'} (${names.join(', ')})?${moving ? `\n\n${moving} of them will lose their current role.` : ''}`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.post(`/admin/roles/${role.id}/assign`, { userIds: [...selected] });
+      setSelected(new Set());
+      await load();
+      onChanged();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to assign role');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`Holders — ${role.name}`} onClose={onClose} size="md">
+      <div className="p-5 space-y-5">
+        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        <div>
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Current holders</p>
+          {holders === null ? (
+            <div className="h-10 bg-gray-800 rounded-lg animate-pulse" />
+          ) : holders.length === 0 ? (
+            <p className="text-sm text-gray-500">Nobody holds this role.</p>
+          ) : (
+            <ul className="divide-y divide-gray-800 border border-gray-800 rounded-lg">
+              {holders.map((u) => (
+                <li key={u.id} className="flex items-center justify-between px-3 py-2 text-sm">
+                  <span className="text-white">{u.username}</span>
+                  {u.is_admin && <span className="text-[10px] uppercase tracking-wider text-blue-400">admin</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+          <Link to="/admin/users" className="inline-block mt-2 text-xs text-blue-400 hover:text-blue-300">Open Users page →</Link>
+        </div>
+
+        {isAdmin && candidates.length > 0 && (
+          <div>
+            <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Assign to more users</p>
+            <ul className="max-h-56 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800">
+              {candidates.map((u) => (
+                <li key={u.id}>
+                  <label className="flex items-center justify-between px-3 py-2 text-sm cursor-pointer hover:bg-gray-800/60">
+                    <span className="text-gray-200">
+                      {u.username}
+                      {u.role_name && <span className="ml-2 text-xs text-gray-500">currently {u.role_name}</span>}
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={selected.has(u.id)}
+                      onChange={() => setSelected((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(u.id)) next.delete(u.id); else next.add(u.id);
+                        return next;
+                      })}
+                      className="accent-blue-500 w-4 h-4"
+                    />
+                  </label>
+                </li>
+              ))}
+            </ul>
+            <button
+              onClick={assign}
+              disabled={busy || selected.size === 0}
+              className="mt-3 w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2 text-sm font-medium transition-colors"
+            >
+              {busy ? 'Assigning…' : `Assign to ${selected.size} selected`}
+            </button>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function DeleteRoleModal({ role, roles, onClose, onDeleted }) {
+  const [reassignTo, setReassignTo] = useState('');
+  const [holders, setHolders] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const others = roles.filter((r) => r.id !== role.id);
+
+  const loadHolders = async () => {
+    try {
+      const { data } = await api.get(`/admin/roles/${role.id}/users`);
+      setHolders(data);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to load role holders');
+    }
+  };
+
+  useEffect(() => { loadHolders(); }, [role.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const submit = async () => {
+    if (holders === null) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.delete(`/admin/roles/${role.id}`, {
+        params: { expectedHolders: holders.length, ...(reassignTo ? { reassignTo } : {}) },
+      });
+      onDeleted();
+      onClose();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to delete role');
+      if (e.response?.status === 409) await loadHolders();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const target = others.find((r) => String(r.id) === String(reassignTo));
+
+  return (
+    <Modal title={`Delete role — ${role.name}`} onClose={onClose} size="sm">
+      <div className="p-5 space-y-4">
+        <p className="text-sm text-gray-300">
+          {holders === null ? 'Checking current role holders…' : (
+            <><strong className="text-white">{holders.length}</strong> user{holders.length === 1 ? '' : 's'} currently hold this role.</>
+          )}
+        </p>
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">Move any holders to</label>
+          <select
+            value={reassignTo}
+            onChange={(e) => setReassignTo(e.target.value)}
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+          >
+            <option value="">No role (per-user permissions only)</option>
+            {others.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+        </div>
+        <p className="text-xs text-gray-500">
+          {target
+            ? `Holders will get the permissions and quotas of “${target.name}”.`
+            : 'Holders fall back to their per-user permissions and quotas.'}
+          {' '}If the holder count changes before you confirm, deletion is cancelled so you can review it again.
+        </p>
+        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        <div className="flex gap-2">
+          <button onClick={onClose} className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg py-2 text-sm transition-colors">Cancel</button>
+          <button
+            onClick={submit}
+            disabled={busy || holders === null}
+            className="flex-1 bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white rounded-lg py-2 text-sm font-medium transition-colors"
+          >
+            {busy ? 'Deleting…' : 'Delete role'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function CompareRolesModal({ roles, onClose }) {
+  const [leftId, setLeftId] = useState(String(roles[0]?.id ?? ''));
+  const [rightId, setRightId] = useState(String(roles[1]?.id ?? ''));
+  const left = roles.find((r) => String(r.id) === leftId);
+  const right = roles.find((r) => String(r.id) === rightId);
+
+  const selectCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500';
+  const quota = (r, col, unit) => (r?.[col] == null ? '∞' : `${r[col]}${unit}`);
+  const rows = [
+    ...PERM_GROUPS.flatMap((g) => g.perms.map((p) => ({
+      key: p.key, label: p.label, danger: p.danger,
+      a: left?.permissions.includes(p.key) ? '✓' : '—',
+      b: right?.permissions.includes(p.key) ? '✓' : '—',
+    }))),
+    { key: 'q1', label: 'Max CPU cores', a: quota(left, 'max_cores', ''), b: quota(right, 'max_cores', '') },
+    { key: 'q2', label: 'Max memory', a: quota(left, 'max_memory_gb', ' GB'), b: quota(right, 'max_memory_gb', ' GB') },
+    { key: 'q3', label: 'Max storage', a: quota(left, 'max_storage_gb', ' GB'), b: quota(right, 'max_storage_gb', ' GB') },
+  ];
+
+  return (
+    <Modal title="Compare roles" onClose={onClose} size="lg">
+      <div className="p-5 space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          <select value={leftId} onChange={(e) => setLeftId(e.target.value)} className={selectCls} aria-label="Left role">
+            {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+          <select value={rightId} onChange={(e) => setRightId(e.target.value)} className={selectCls} aria-label="Right role">
+            {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+        </div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
+              <th className="text-left py-2">Permission / quota</th>
+              <th className="text-center py-2 w-32 truncate">{left?.name}</th>
+              <th className="text-center py-2 w-32 truncate">{right?.name}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const differs = r.a !== r.b;
+              return (
+                <tr key={r.key} className={`border-b border-gray-800/60 ${differs ? 'bg-blue-900/10' : ''}`}>
+                  <td className={`py-1.5 ${differs ? 'text-white' : 'text-gray-500'}`}>
+                    {r.label}
+                    {r.danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+                  </td>
+                  <td className={`text-center font-mono ${differs ? 'text-white' : 'text-gray-600'}`}>{r.a}</td>
+                  <td className={`text-center font-mono ${differs ? 'text-white' : 'text-gray-600'}`}>{r.b}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Modal>
+  );
+}
+
+function ImportRoleModal({ permissionKeys, onClose, onImported }) {
+  const [text, setText] = useState('');
+  const [error, setError] = useState('');
+
+  const parse = () => {
+    setError('');
+    let data;
+    try { data = JSON.parse(text); } catch { setError('Not valid JSON'); return; }
+    if (!data || data.kind !== 'homelabrrr-role' || typeof data.name !== 'string' || !Array.isArray(data.permissions)) {
+      setError('Not a Homelabrrr role export');
+      return;
+    }
+    const known = new Set(permissionKeys);
+    const requested = data.permissions.filter((p) => typeof p === 'string');
+    const unknown = requested.filter((p) => !known.has(p));
+    if (unknown.length && !confirm(`This instance does not know ${unknown.length} permission${unknown.length === 1 ? '' : 's'} in the export (${unknown.join(', ')}). Import without ${unknown.length === 1 ? 'it' : 'them'}?`)) {
+      return;
+    }
+    onImported({
+      name: data.name,
+      description: typeof data.description === 'string' ? data.description : '',
+      permissions: requested.filter((p) => known.has(p)),
+      maxCores: data.maxCores ?? '',
+      maxMemoryGb: data.maxMemoryGb ?? '',
+      maxStorageGb: data.maxStorageGb ?? '',
+    });
+  };
+
+  const readFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (file) setText(await file.text());
+  };
+
+  return (
+    <Modal title="Import role" onClose={onClose} size="md">
+      <div className="p-5 space-y-4">
+        <p className="text-xs text-gray-400">
+          Paste or load a role exported from another Homelabrrr instance. It opens in the create form so you can review it before saving; permissions this instance does not know are dropped (you are asked first).
+        </p>
+        <input type="file" accept="application/json,.json" onChange={readFile} className="text-xs text-gray-400" />
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={10}
+          spellCheck={false}
+          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+        />
+        {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
+        <button
+          onClick={parse}
+          disabled={!text.trim()}
+          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+        >
+          Continue
+        </button>
+      </div>
     </Modal>
   );
 }
