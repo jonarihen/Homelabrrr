@@ -616,6 +616,28 @@ async function setRolePermissions(tx, roleId, permissions) {
   }
 }
 
+// The default name a clone gets when the caller doesn't supply one: `<name>
+// (copy)`, then `(copy 2)`, `(copy 3)`… — the first spelling the roles table
+// doesn't already hold. A concurrent insert can still win the race, which the
+// clone route reports as the usual duplicate-name 400.
+async function uniqueCopyName(sourceName) {
+  const taken = new Set((await db.select({ name: roles.name }).from(roles)).map((r) => r.name));
+  let candidate = `${sourceName} (copy)`;
+  let n = 2;
+  while (taken.has(candidate)) {
+    candidate = `${sourceName} (copy ${n})`;
+    n += 1;
+  }
+  return candidate;
+}
+
+// Role ids come straight off the URL — reject junk here rather than handing a
+// NaN to the query builder (which fails as a 500 instead of a 404).
+function parseRoleId(value) {
+  const id = Number(value);
+  return Number.isInteger(id) ? id : null;
+}
+
 router.get('/roles', pUsers, async (req, res) => {
   const roleRows = await db.select().from(roles).orderBy(desc(roles.built_in), roles.name);
   res.json({ roles: await Promise.all(roleRows.map(serializeRole)), permissionKeys: PERMISSION_KEYS });
@@ -648,6 +670,82 @@ router.post('/roles', requireAdmin, async (req, res) => {
     if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
     throw err;
   }
+});
+
+// Clone a role: a brand-new, never-built-in role carrying the source's
+// permissions, quotas and description. Every field is an optional override, so
+// an empty body is a straight copy and the admin UI can send the edits it
+// collected in one request. One transaction, so a clone is all-or-nothing.
+router.post('/roles/:id/clone', requireAdmin, async (req, res) => {
+  const sourceId = parseRoleId(req.params.id);
+  if (sourceId === null) return res.status(404).json({ error: 'Role not found' });
+  const [source] = await db.select().from(roles).where(eq(roles.id, sourceId)).limit(1);
+  if (!source) return res.status(404).json({ error: 'Role not found' });
+
+  // A bodyless POST is a straight copy — express 5 hands the route an undefined
+  // body when no JSON arrived at all.
+  const body = req.body || {};
+
+  let name;
+  if (body.name === undefined) {
+    name = await uniqueCopyName(source.name);
+  } else {
+    name = String(body.name).trim();
+    if (!name) return res.status(400).json({ error: 'Role name required' });
+  }
+
+  let perms;
+  if (body.permissions === undefined) {
+    perms = (await db.select({ permission: rolePermissions.permission }).from(rolePermissions)
+      .where(eq(rolePermissions.role_id, source.id))).map((r) => r.permission);
+  } else {
+    perms = validatePermissionList(body.permissions);
+    if (!perms) return res.status(400).json({ error: 'Invalid permission list' });
+  }
+
+  const description = body.description === undefined ? (source.description ?? '') : String(body.description);
+
+  // Quotas copy across one metric at a time, so overriding memory alone keeps
+  // the source's cores and storage.
+  const quotas = {
+    max_cores: source.max_cores, max_memory_gb: source.max_memory_gb, max_storage_gb: source.max_storage_gb,
+  };
+  for (const [field, column] of [['maxCores', 'max_cores'], ['maxMemoryGb', 'max_memory_gb'], ['maxStorageGb', 'max_storage_gb']]) {
+    if (body[field] === undefined) continue;
+    const value = parseQuotaValue(body[field]);
+    if (value === undefined) {
+      return res.status(400).json({ error: 'Quota values must be non-negative integers (empty = unlimited)' });
+    }
+    quotas[column] = value;
+  }
+
+  try {
+    const clone = await db.transaction(async (tx) => {
+      // built_in is left at its default false — the clone of a built-in role is
+      // an ordinary role with an editable name and description.
+      const [row] = await tx.insert(roles).values({ name, description, ...quotas }).returning({ id: roles.id });
+      await setRolePermissions(tx, row.id, perms);
+      return row;
+    });
+    await logAudit(req, 'admin_clone_role', name, `from=${source.name} ${perms.join(',')}`.trim());
+    const [created] = await db.select().from(roles).where(eq(roles.id, clone.id)).limit(1);
+    res.json(await serializeRole(created));
+  } catch (err) {
+    if (isUniqueViolation(err)) return res.status(400).json({ error: 'Role name already exists' });
+    throw err;
+  }
+});
+
+// Who holds this role — backs the clickable user count on the Roles page, and
+// the holder list the delete dialog shows before it drops or reassigns them.
+router.get('/roles/:id/users', pUsers, async (req, res) => {
+  const roleId = parseRoleId(req.params.id);
+  if (roleId === null) return res.status(404).json({ error: 'Role not found' });
+  const [role] = await db.select({ id: roles.id }).from(roles).where(eq(roles.id, roleId)).limit(1);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+  const holders = await db.select({ id: users.id, username: users.username, is_admin: users.is_admin })
+    .from(users).where(eq(users.role_id, role.id)).orderBy(users.username);
+  res.json({ users: holders });
 });
 
 router.put('/roles/:id', requireAdmin, async (req, res) => {
@@ -705,13 +803,33 @@ router.put('/roles/:id', requireAdmin, async (req, res) => {
 });
 
 router.delete('/roles/:id', requireAdmin, async (req, res) => {
-  const [role] = await db.select().from(roles).where(eq(roles.id, Number(req.params.id))).limit(1);
+  const roleId = parseRoleId(req.params.id);
+  if (roleId === null) return res.status(404).json({ error: 'Role not found' });
+  const [role] = await db.select().from(roles).where(eq(roles.id, roleId)).limit(1);
   if (!role) return res.status(404).json({ error: 'Role not found' });
   if (role.built_in) return res.status(400).json({ error: 'Built-in roles cannot be deleted' });
-  // Unassign holders first, then delete (role_permissions cascade away)
-  await db.update(users).set({ role_id: null }).where(eq(users.role_id, role.id));
-  await db.delete(roles).where(eq(roles.id, role.id));
-  await logAudit(req, 'admin_delete_role', role.name, '');
+
+  // ?reassignTo=<roleId> moves the holders onto another role instead of
+  // dropping them to their per-user permissions. Resolve it before writing
+  // anything so a bad target is a 400 with the role still intact.
+  let target = null;
+  const { reassignTo } = req.query;
+  if (reassignTo !== undefined && reassignTo !== '') {
+    const targetId = parseRoleId(reassignTo);
+    if (targetId === null) return res.status(400).json({ error: 'Reassignment role not found' });
+    if (targetId === role.id) return res.status(400).json({ error: 'Cannot reassign holders to the role being deleted' });
+    [target] = await db.select({ id: roles.id, name: roles.name }).from(roles).where(eq(roles.id, targetId)).limit(1);
+    if (!target) return res.status(400).json({ error: 'Reassignment role not found' });
+  }
+
+  // Move the holders and delete in one transaction (role_permissions cascade
+  // away). These used to be two statements on `db`, so a failure between them
+  // could leave holders pointing at a role that was already gone.
+  await db.transaction(async (tx) => {
+    await tx.update(users).set({ role_id: target ? target.id : null }).where(eq(users.role_id, role.id));
+    await tx.delete(roles).where(eq(roles.id, role.id));
+  });
+  await logAudit(req, 'admin_delete_role', role.name, target ? `holders reassigned to ${target.name}` : '');
   res.json({ ok: true });
 });
 

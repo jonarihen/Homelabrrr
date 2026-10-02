@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-02 — Roles can be cloned, and deleting one no longer strands its holders
+
+- **Making a variant of a role meant re-ticking every permission by hand.** Each row on the Roles page now has a **Clone** action — built-in roles included — that opens the create dialog prefilled with the source's permissions, quotas, and description, named `<role> (copy)` and stepping on to `(copy 2)` if that is taken. Nothing is written until you save, and the clone is always an ordinary role with an editable name
+- **The user count on a role now opens its holders.** Clicking it lists the users holding the role, each linking straight to that account on the Users page
+- **Deleting a role says who it affects, and can hand them to another role.** The confirm dialog reports how many users hold the role and offers to reassign them instead of dropping them to their per-user permissions. The reassignment and the delete now run in one transaction, where they used to be two separate statements
+
 ## 2026-09-18 — Malformed workflow links no longer crash with a server error
 
 - **Opening a workflow, run, or firewall-scoped workflow link with a non-numeric id answered `500`.** The workflow routes and run-listing filter passed the raw parameter into an integer column, which PostgreSQL rejects — the same class as the website and template routes fixed just before
