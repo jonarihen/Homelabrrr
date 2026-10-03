@@ -2,7 +2,9 @@ import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { vmLeases, vmSchedules, vmMigrations } from '../db/schema/index.ts';
+import { vmLeases, vmSchedules, vmMigrations, users, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms, pveHosts } from '../db/schema/index.ts';
+import https from 'node:https';
+import { EventEmitter } from 'node:events';
 import express from 'express';
 import request from 'supertest';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -14,6 +16,7 @@ let finalizeMigrationSuccess: typeof import('./migrate.ts').finalizeMigrationSuc
 let finalizeMigration: typeof import('./migrate.ts').finalizeMigration;
 let createLeaseForVm: typeof import('../utils/leases.ts').createLeaseForVm;
 let app: express.Express;
+let recordMigrationProgress: typeof import('./migrate.ts').recordMigrationProgress;
 
 const lease = {
   lease_days: 14,
@@ -46,15 +49,23 @@ const schedule = {
 before(async () => {
   testDb = await createTestDatabase();
   process.env.DATABASE_URL = testDb.url;
+  process.env.SECRET_ENCRYPTION_KEY ||= '44'.repeat(32);
   client = await import('../db/client.ts');
-  ({ repointVmRows, finalizeMigrationSuccess, finalizeMigration } = await import('./migrate.ts'));
+  ({ repointVmRows, finalizeMigrationSuccess, finalizeMigration, recordMigrationProgress } = await import('./migrate.ts'));
+  process.env.SECRET_ENCRYPTION_KEY ||= '44'.repeat(32);
+  await testDb.db.insert(users).values([
+    { id: 1, username: 'migration-admin', password: 'x', is_admin: true },
+    { id: 2, username: 'other-owner', password: 'x' },
+  ]);
   ({ createLeaseForVm } = await import('../utils/leases.ts'));
   app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    req.session = { userId: 1, isAdmin: true } as never;
+    req.session = { userId: 1, isAdmin: true, username: 'migration-admin', reauthenticatedAt: Date.now() } as never;
     next();
   });
+  app.use('/admin', (await import('./admin.ts')).default);
+  app.use('/operations', (await import('./operations.ts')).default);
   app.use((await import('./vms.ts')).default);
 });
 
@@ -67,6 +78,11 @@ beforeEach(async () => {
   await testDb.db.delete(vmLeases);
   await testDb.db.delete(vmSchedules);
   await testDb.db.delete(vmMigrations);
+  await testDb.db.delete(provisionedVms);
+  await testDb.db.delete(vmTemplates);
+  await testDb.db.delete(vmAssignments);
+  await testDb.db.delete(vmSshConfigs);
+  await testDb.db.delete(vmSshUserConfigs);
 });
 
 async function seedPolicies(node: string, vmid = 101, source = false) {
@@ -281,4 +297,145 @@ test('automatic finalization remains contained when the database cannot persist 
   assert.equal(await finalizeMigration(migration.id, true), false);
   assert.deepEqual((await testDb.db.select().from(vmMigrations))[0], migration);
   assert.deepEqual(await readPolicies(), original);
+});
+
+for (const status of ['running', 'needs_review']) {
+  test(`admin lease adjustments and renewals preserve intentional 409 conflicts (${status})`, async () => {
+    const migration = await seedMigration();
+    await testDb.db.update(vmMigrations).set({ status }).where(eq(vmMigrations.id, migration.id));
+    for (const response of [
+      await request(app).put('/admin/leases/1~pve1/101').send({ leaseDays: 7 }),
+      await request(app).post('/admin/leases/1~pve1/101/renew'),
+    ]) {
+      assert.equal(response.status, 409, JSON.stringify(response.body));
+      assert.match(response.body.error, /migration.*completion or review/i);
+    }
+    assert.deepEqual(await readPolicies(), { leases: [], schedules: [] });
+  });
+}
+
+test('equivalent unambiguous bare target references support lease and schedule writes', async () => {
+  const migration = await seedMigration();
+  await finalizeMigrationSuccess(client.db, migration.id);
+  assert.ok(await createLeaseForVm('pve2', 101));
+  assert.equal((await request(app).post('/admin/leases/pve2/101/renew')).status, 200);
+  assert.equal((await request(app).put('/pve2/101/schedule').send({ stopTime: '23:00', startTime: '07:00' })).status, 200);
+  await assert.rejects(createLeaseForVm('1~pve2', 101), { statusCode: 409 });
+  await createLeaseForVm('2~pve2', 101);
+  await request(app).put('/2~pve2/101/schedule').send({ stopTime: '22:00', startTime: '07:00' });
+  const policies = await readPolicies();
+  assert.equal(policies.leases.length, 1);
+  assert.equal(policies.schedules.length, 1);
+  assert.equal(policies.leases[0].node, '2~pve2');
+  assert.equal(policies.schedules[0].node, '2~pve2');
+});
+
+test('manual production verification repoints lease and schedule after bookkeeping review', async () => {
+  const source = await seedPolicies('1~pve1', 101, true);
+  const migration = await seedMigration();
+  await testDb.db.update(vmMigrations).set({ status: 'needs_review' }).where(eq(vmMigrations.id, migration.id));
+  const response = await request(app).post(`/operations/migration/${migration.id}/resolve`).send({ status: 'ok' });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  await assertRepointed(source, '2~pve2');
+  assert.equal((await request(app).post(`/operations/migration/${migration.id}/resolve`).send({ status: 'error' })).status, 409);
+});
+
+test('all unique linked tables collapse qualified/bare aliases and target conflicts while retaining source identity', async () => {
+  const migration = await seedMigration();
+  for (const table of [vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates] as any[]) {
+    const values = (node, userId = 1) => ({ node, vmid: 101,
+      ...(table === vmAssignments || table === vmSshUserConfigs ? { user_id: userId } : {}),
+      ...(table === vmSshConfigs ? { host: '192.0.2.1' } : {}),
+      ...(table === vmTemplates ? { name: node } : {}),
+    });
+    const [source] = await testDb.db.insert(table).values(values('1~pve1')).returning();
+    const duplicates = await testDb.db.insert(table).values(['pve1', '2~pve2', 'pve2'].map((node) => values(node))).returning();
+    const [unrelated] = await testDb.db.insert(table).values(values('3~pve1')).returning();
+    if (table === vmTemplates) {
+      for (const row of [source, ...duplicates]) {
+        await testDb.db.insert(provisionedVms).values({ user_id: 1, node: row.node, vmid: 101, name: 'history', template_id: row.id });
+      }
+    }
+    let otherSource;
+    if (table === vmSshUserConfigs) {
+      [otherSource] = await testDb.db.insert(table).values(values('pve1', 2)).returning();
+      await testDb.db.insert(table).values(values('2~pve2', 2));
+    }
+    await repointVmRows('1~pve1', 101, '2~pve2');
+    const rows = await testDb.db.select().from(table).orderBy(table.id);
+    assert.deepEqual(rows, [{ ...source, node: '2~pve2' }, unrelated, ...(otherSource ? [{ ...otherSource, node: '2~pve2' }] : [])]);
+    if (table === vmTemplates) {
+      assert.ok((await testDb.db.select().from(provisionedVms)).every((row) => row.template_id === source.id));
+    }
+  }
+  assert.equal(await finalizeMigrationSuccess(client.db, migration.id), true);
+});
+
+test('progress queued behind finalization cannot resurrect a terminal step or offset', async (t) => {
+  const migration = await seedMigration();
+  const claimed = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const transaction = testDb.db.transaction.bind(testDb.db);
+  t.mock.method(testDb.db, 'transaction', (callback) => transaction(async (tx) => {
+    const update = tx.update.bind(tx);
+    t.mock.method(tx, 'update', (table) => {
+      const builder = update(table);
+      if (table !== vmMigrations) return builder;
+      const set = builder.set.bind(builder);
+      builder.set = (values) => {
+        const query = set(values);
+        if (values.status !== 'ok') return query;
+        const returning = query.returning.bind(query);
+        query.returning = async () => {
+          const rows = await returning();
+          claimed.resolve();
+          await release.promise;
+          return rows;
+        };
+        return query;
+      };
+      return builder;
+    });
+    return callback(tx);
+  }));
+  const finish = finalizeMigrationSuccess(testDb.db, migration.id);
+  await claimed.promise;
+  const progress = recordMigrationProgress(migration.id, { log_offset: 99, progress: 70, progress_detail: 'copying' }, { key: 'finalize', note: 'stale' });
+  release.resolve();
+  assert.equal(await finish, true);
+  await progress;
+  const [row] = await testDb.db.select().from(vmMigrations);
+  assert.equal(row.status, 'ok');
+  assert.equal(row.log_offset, 0);
+  assert.equal(row.progress, null);
+  assert.deepEqual(row.steps, [{ key: 'finalize', status: 'done' }]);
+});
+
+test('deleting a migrated guest removes obsolete location history so its VMID can be reused', async (t) => {
+  const migration = await seedMigration();
+  await finalizeMigrationSuccess(client.db, migration.id);
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  await testDb.db.insert(pveHosts).values({ id: 2, name: 'target', host: 'target.invalid', token_id: 'test', token_secret: encryptSecret('test'), verify_tls: true });
+  t.mock.method(https, 'request', (url, options, callback) => {
+    const req = new EventEmitter() as any;
+    req.setTimeout = () => {};
+    req.write = () => {};
+    req.destroy = (err) => req.emit('error', err);
+    req.end = () => {
+      const data = url.pathname.endsWith('/status/current') ? { status: 'stopped' }
+        : url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' }
+          : options.method === 'DELETE' ? 'UPID:pve2:delete' : [];
+      const res = new EventEmitter() as any;
+      res.statusCode = 200;
+      callback(res);
+      res.emit('data', JSON.stringify({ data }));
+      res.emit('end');
+    };
+    return req;
+  });
+  const response = await request(app).delete('/2~pve2/101');
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.deepEqual(await testDb.db.select().from(vmMigrations), []);
+  const replacement = await createLeaseForVm('3~replacement', 101);
+  assert.equal(replacement?.node, '3~replacement');
 });

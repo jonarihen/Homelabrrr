@@ -12,11 +12,12 @@
 // wrapped so one failure never crashes the loop — it's simply retried next tick.
 
 import { and, count, eq } from 'drizzle-orm';
-import { db } from './db/client.ts';
+import { db, pool } from './db/client.ts';
 import { vmSchedules } from './db/schema/index.ts';
 import { getAllVMs, scheduledStopVM, scheduledStartVM } from './proxmox.ts';
 import { logAuditEntry } from './utils/audit.ts';
 import { nodeLookupCandidates } from './utils/nodeRef.ts';
+import { withMigrationSafeSchedule } from './utils/vmMigrationLock.ts';
 import {
   isValidTime, isValidTimezone, timeToMinutes, zonedParts, offWindowContains,
 } from './utils/schedule.ts';
@@ -50,47 +51,57 @@ function findVmStatus(vms: any[], node: any, vmid: any) {
   return vm ? vm.status : null;
 }
 
-async function markAction(id: number, action: string, detail: string) {
+async function markAction(schedule, action: string, detail: string) {
   await db.update(vmSchedules)
     .set({ last_action: `${action}${detail ? `:${detail}` : ''}`, last_action_at: Date.now() })
-    .where(eq(vmSchedules.id, id));
+    .where(and(eq(vmSchedules.id, schedule.id), eq(vmSchedules.node, schedule.node), eq(vmSchedules.vmid, schedule.vmid)));
 }
 
 // Execute a stop/start out of band so a slow graceful shutdown doesn't stall the
 // tick or other VMs. Updates bookkeeping + audit on completion.
-function runAction(schedule: any, action: 'stop' | 'start') {
+function runAction(schedule: any, action: 'stop' | 'start', flags) {
   if (stopping) return;
   const key = `${schedule.node}/${schedule.vmid}`;
-  if (inFlight.has(key)) return;
+  if (inFlight.has(key) || inFlight.size >= Math.max(1, pool.options.max - 1)) return;
   inFlight.add(key);
 
   const target = `${schedule.node}/${schedule.vmid}`;
-  const run = action === 'stop'
-    ? scheduledStopVM(schedule.node, schedule.vmid, { timeoutMs: SHUTDOWN_TIMEOUT_MS })
-    : scheduledStartVM(schedule.node, schedule.vmid);
+  const run = withMigrationSafeSchedule(schedule, async (tx) => {
+    const claimed = await tx.update(vmSchedules).set(flags).where(and(
+      eq(vmSchedules.id, schedule.id), eq(vmSchedules.node, schedule.node), eq(vmSchedules.vmid, schedule.vmid),
+      eq(vmSchedules.last_off, schedule.last_off),
+      eq(vmSchedules.running_due_to_manual, Boolean(schedule.running_due_to_manual)),
+      eq(vmSchedules.stopped_this_window, Boolean(schedule.stopped_this_window)),
+    ));
+    if (claimed.rowCount !== 1) return;
+    return action === 'stop'
+      ? scheduledStopVM(schedule.node, schedule.vmid, { timeoutMs: SHUTDOWN_TIMEOUT_MS })
+      : scheduledStartVM(schedule.node, schedule.vmid);
+  });
 
   run.then(async (result: any) => {
+    if (!result) return;
     if (action === 'stop') {
       // One atomic write: record that the scheduler stopped the VM this window
       // (so a later manual start is recognised as an override rather than a
       // failed stop) together with the action bookkeeping.
       await db.update(vmSchedules)
         .set({ stopped_this_window: true, last_action: `stop:${result.method}`, last_action_at: Date.now() })
-        .where(eq(vmSchedules.id, schedule.id));
+        .where(and(eq(vmSchedules.id, schedule.id), eq(vmSchedules.node, schedule.node), eq(vmSchedules.vmid, schedule.vmid)));
       systemAudit('vm_schedule_stop', target, `method=${result.method}`);
     } else {
-      await markAction(schedule.id, 'start', result.method);
+      await markAction(schedule, 'start', result.method);
       systemAudit('vm_schedule_start', target, `method=${result.method}`);
     }
   }).catch(async (err: any) => {
-    await markAction(schedule.id, `${action}_failed`, '').catch(() => {});
+    await markAction(schedule, `${action}_failed`, '').catch(() => {});
     systemAudit(`vm_schedule_${action}_failed`, target, String(err.message || err).slice(0, 300));
   }).finally(() => {
     inFlight.delete(key);
   });
 }
 
-async function tick() {
+export async function runScheduleTick() {
   if (ticking || stopping) return;
   ticking = true;
   try {
@@ -148,6 +159,7 @@ async function tick() {
 
         let manual = Boolean(s.running_due_to_manual);
         let stoppedThisWindow = Boolean(s.stopped_this_window);
+        let action: 'stop' | 'start' | null = null;
 
         // A fresh window boundary resets the per-window override/stop flags.
         if (enteringOff || leavingOff) {
@@ -165,7 +177,7 @@ async function tick() {
                   manual = true;
                   systemAudit('vm_schedule_manual_override', `${s.node}/${s.vmid}`, 'running inside off-window');
                 } else if (!inFlight.has(`${s.node}/${s.vmid}`)) {
-                  runAction(s, 'stop');
+                  action = 'stop';
                 }
               } else if (isStopped) {
                 // Already off during the window — treat the window as satisfied
@@ -176,7 +188,7 @@ async function tick() {
           } else if (leavingOff && isStopped && !inFlight.has(`${s.node}/${s.vmid}`)) {
             // Start edge: only act at the transition so a manual daytime
             // shutdown outside the window is not fought.
-            runAction(s, 'start');
+            action = 'start';
           }
         }
 
@@ -186,19 +198,22 @@ async function tick() {
         // stopped_this_window, etc.), rowCount is 0 and we skip — the next 60s
         // tick reconverges from the fresh row, and the state machine is
         // idempotent, so nothing is lost. (last_off stays smallint -1/0/1.)
-        const res = await db.update(vmSchedules)
-          .set({
-            last_off: off ? 1 : 0,
-            running_due_to_manual: manual,
-            stopped_this_window: stoppedThisWindow,
-          })
+        const flags = { last_off: off ? 1 : 0, running_due_to_manual: manual, stopped_this_window: stoppedThisWindow };
+        if (action) {
+          runAction(s, action, flags);
+          continue;
+        }
+        const res = await withMigrationSafeSchedule(s, (tx) => tx.update(vmSchedules)
+          .set(flags)
           .where(and(
             eq(vmSchedules.id, s.id),
+            eq(vmSchedules.node, s.node),
+            eq(vmSchedules.vmid, s.vmid),
             eq(vmSchedules.last_off, prevOff),
             eq(vmSchedules.running_due_to_manual, Boolean(s.running_due_to_manual)),
             eq(vmSchedules.stopped_this_window, Boolean(s.stopped_this_window)),
-          ));
-        if (res.rowCount === 0) continue;
+          )));
+        if (!res || res.rowCount === 0) continue;
       } catch (err: any) {
         // One bad schedule must never abort the sweep.
         console.warn(`[scheduler] error evaluating schedule ${s.node}/${s.vmid}: ${err.message}`);
@@ -214,8 +229,8 @@ async function tick() {
 export function startScheduler() {
   stopping = false;
   firstRunTimer = setTimeout(() => {
-    tick();
-    intervalTimer = setInterval(tick, TICK_MS);
+    runScheduleTick();
+    intervalTimer = setInterval(runScheduleTick, TICK_MS);
   }, FIRST_RUN_DELAY_MS);
   console.log('[scheduler] VM power schedule loop armed');
   return stopScheduler;

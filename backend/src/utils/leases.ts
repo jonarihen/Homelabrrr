@@ -78,7 +78,7 @@ export async function createLeaseForVm(node: unknown, vmid: unknown, { createdBy
   const parsed = Number.parseInt(vmid as string, 10);
   if (!node || !Number.isInteger(parsed)) return null;
 
-  return withVmPolicyWrite(node, parsed, (tx) => createLeaseRow(tx, node, parsed, { createdBy, leaseDays }));
+  return withVmPolicyWrite(node, parsed, (tx, currentNode) => createLeaseRow(tx, currentNode, parsed, { createdBy, leaseDays }));
 }
 
 async function createLeaseRow(database: DbOrTx, node: unknown, parsed: number, { createdBy = '', leaseDays }: { createdBy?: string; leaseDays?: unknown } = {}) {
@@ -107,8 +107,8 @@ async function createLeaseRow(database: DbOrTx, node: unknown, parsed: number, {
 export async function renewLease(node: unknown, vmid: unknown, { createdBy = '' }: { createdBy?: string } = {}) {
   const parsed = Number.parseInt(vmid as string, 10);
   if (!node || !Number.isInteger(parsed)) return null;
-  return withVmPolicyWrite(node, parsed, async (database) => {
-    const row = await createLeaseRow(database, node, parsed, { createdBy });
+  return withVmPolicyWrite(node, parsed, async (database, currentNode) => {
+    const row = await createLeaseRow(database, currentNode, parsed, { createdBy });
     if (!row) return null;
 
     const { defaultDays } = await getLeaseSettings(database);
@@ -127,7 +127,7 @@ export async function renewLease(node: unknown, vmid: unknown, { createdBy = '' 
       auto_stopped: false,
     }).where(eq(vmLeases.id, row.id));
 
-    return getLeaseRow(node, parsed, database);
+    return getLeaseRow(currentNode, parsed, database);
   });
 }
 
@@ -137,8 +137,8 @@ export async function renewLease(node: unknown, vmid: unknown, { createdBy = '' 
 export async function updateLease(node: unknown, vmid: unknown, { exempt, leaseDays, extendDays, createdBy = '' }: { exempt?: unknown; leaseDays?: unknown; extendDays?: unknown; createdBy?: string } = {}) {
   const parsed = Number.parseInt(vmid as string, 10);
   if (!node || !Number.isInteger(parsed)) return null;
-  return withVmPolicyWrite(node, parsed, async (database) => {
-    const row = await createLeaseRow(database, node, parsed, { createdBy });
+  return withVmPolicyWrite(node, parsed, async (database, currentNode) => {
+    const row = await createLeaseRow(database, currentNode, parsed, { createdBy });
     if (!row) return null;
 
     if (exempt !== undefined) {
@@ -177,7 +177,7 @@ export async function updateLease(node: unknown, vmid: unknown, { exempt, leaseD
       }
     }
 
-    return getLeaseRow(node, parsed, database);
+    return getLeaseRow(currentNode, parsed, database);
   });
 }
 
