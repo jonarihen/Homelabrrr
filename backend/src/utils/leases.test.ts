@@ -15,6 +15,8 @@ let renewLease: typeof import('./leases.ts').renewLease;
 let updateLease: typeof import('./leases.ts').updateLease;
 let repointVmRows: typeof import('../routes/migrate.ts').repointVmRows;
 let resourceNode = 'pve1';
+let visible = true;
+let presenceStatus = 404;
 
 let onGetAllVMs: (() => Promise<void>) | null = null;
 let onShutdown: (() => Promise<void>) | null = null;
@@ -64,8 +66,14 @@ before(async () => {
         res.statusCode = 200;
         if (cb) cb(res);
         res.emit('data', JSON.stringify({
-          data: [{ vmid: 100, node: resourceNode, type: 'qemu', status: 'running' }],
+          data: visible ? [{ vmid: 100, node: resourceNode, type: 'qemu', status: 'running' }] : [],
         }));
+        res.emit('end');
+      } else if (targetUrl.pathname.includes('/status/current')) {
+        const res = new EventEmitter() as EventEmitter & { statusCode: number };
+        res.statusCode = presenceStatus;
+        if (cb) cb(res);
+        res.emit('data', JSON.stringify({ data: presenceStatus === 200 ? { status: 'stopped' } : null }));
         res.emit('end');
       } else if (targetUrl.pathname.includes('/status/shutdown')) {
         shutdownCalls.push(targetUrl.pathname);
@@ -94,6 +102,8 @@ beforeEach(async () => {
   onShutdown = null;
   shutdownCalls = [];
   resourceNode = 'pve1';
+  visible = true;
+  presenceStatus = 404;
   await testDb.db.delete(vmLeases);
   await testDb.db.delete(vmMigrations);
 });
@@ -247,4 +257,44 @@ test('expiry enforcement defers running or reviewable migrations without flaggin
     assert.equal((await testDb.db.select().from(vmLeases))[0].expired, false);
   }
   assert.deepEqual(shutdownCalls, []);
+});
+
+test('confirmed absent guests expire without a power action and become reclaimable', async () => {
+  await seedDueLease();
+  visible = false;
+  await runLeaseSweep();
+  const [lease] = await testDb.db.select().from(vmLeases);
+  assert.equal(lease.expired, true);
+  assert.equal(lease.auto_stopped, false);
+  assert.ok(lease.expired_at instanceof Date);
+  const { computeLeaseView } = await import('./leases.ts');
+  assert.equal((await computeLeaseView(lease, 0)).reclaimable, true);
+  assert.deepEqual(shutdownCalls, []);
+});
+
+for (const status of [503, 200]) {
+  test(`missing inventory does not expire a guest with probe status ${status}`, async () => {
+    await seedDueLease();
+    visible = false;
+    presenceStatus = status;
+    await runLeaseSweep();
+    assert.equal((await testDb.db.select().from(vmLeases))[0].expired, false);
+    assert.deepEqual(shutdownCalls, []);
+  });
+}
+
+test('lease expiry uses the held transaction for host resolution', async (t) => {
+  await seedDueLease();
+  const { pool } = await import('../db/client.ts');
+  const query = pool.query.bind(pool);
+  let inventoryRead = false;
+  t.mock.method(pool, 'query', (...args: any[]) => {
+    const text = args[0]?.text || args[0];
+    if (String(text).includes('from "pve_hosts"')) {
+      assert.equal(inventoryRead, false, 'shutdown host lookup must use the held lease transaction');
+      inventoryRead = true;
+    }
+    return (query as any)(...args);
+  });
+  assert.equal((await runLeaseSweep()).stopped, 1);
 });

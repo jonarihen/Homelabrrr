@@ -102,6 +102,12 @@ export async function finalizeMigrationSuccess(
       .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, expectedStatus)))
       .returning();
     if (!claimed) return;
+    if (expectedStatus === 'needs_review' && claimed.upid) {
+      const task = await getTaskStatus(claimed.source_node, claimed.upid, tx);
+      if (task?.status !== 'stopped' || task.exitstatus !== 'OK') {
+        throw httpError(409, 'Upstream migration task must be stopped with an OK result before successful verification');
+      }
+    }
     if (claimed.mode !== 'adopt') await closeSteps(id, true, detail, tx);
     await repointVmRowsInTransaction(claimed.source_node, claimed.vmid, claimed.target_node, tx);
     return claimed;
@@ -109,6 +115,14 @@ export async function finalizeMigrationSuccess(
   if (!row) return false;
   console.log(`[migrate] VM ${row.vmid} migrated ${row.source_node} → ${row.target_node} (${row.mode})`);
   return true;
+}
+
+export async function recordMigrationStartFailure(id: number, uncertain: boolean) {
+  if (!uncertain) return finalizeMigration(id, false, 'Upstream migration could not be started');
+  await db.update(vmMigrations).set({
+    status: 'needs_review', status_detail: 'Migration submission outcome is unknown; verify source, target and upstream tasks before resolving',
+    upstream_status: 'submission:unknown',
+  }).where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
 }
 
 export async function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
@@ -1075,6 +1089,7 @@ router.post('/:node/:vmid', async (req, res) => {
           console.log(`[migrate] VM ${vmid}: ejected local CD-ROM ${ejected.map((e) => `${e.key}=${e.volid}`).join(', ')}`);
         }
       }
+      let submitted = false;
       try {
         inserted = await claimMigration();
         upid = await remoteMigrateVm(sourceRef, vmid, vmtype, targetHost, {
@@ -1085,11 +1100,11 @@ router.post('/:node/:vmid', async (req, res) => {
           online: vmtype === 'qemu' && running && !!online,
           restart: vmtype === 'lxc' && running,
           deleteSource: !!deleteSource,
+          onSubmit: () => { submitted = true; },
         });
       } catch (err) {
-        // The migration never started — put the ISOs back so the VM is left
-        // exactly as it was found.
-        if (ejected.length > 0) {
+        const uncertain = submitted && ![400, 401, 403, 404, 405, 409, 422].includes(err.upstreamStatus);
+        if (!uncertain && ejected.length > 0) {
           try {
             await updateVMConfig(sourceRef, vmid, Object.fromEntries(ejected.map((e) => [e.key, e.value])));
             ejected = [];
@@ -1097,7 +1112,7 @@ router.post('/:node/:vmid', async (req, res) => {
             console.warn(`[migrate] VM ${vmid}: could not re-attach ejected CD-ROM ISOs: ${restoreErr.message}`);
           }
         }
-        if (inserted) await finalizeMigration(inserted.id, false, 'Upstream migration could not be started');
+        if (inserted) await recordMigrationStartFailure(inserted.id, uncertain);
         throw err;
       }
     } else {

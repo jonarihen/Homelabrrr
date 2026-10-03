@@ -1,11 +1,23 @@
-import { useEffect } from 'react';
+import { useId, useLayoutEffect, useRef } from 'react';
+import { activateModal, isTopModal, refreshModalFocus } from '../utils/modalFocus.js';
 
 export default function Modal({ title, onClose, children, size = 'md' }) {
-  useEffect(() => {
-    const handler = (e) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [onClose]);
+  const titleId = useId();
+  const dialogRef = useRef(null);
+  const contentRef = useRef(null);
+  const triggerRef = useRef(document.activeElement);
+  const onCloseRef = useRef(onClose);
+
+  useLayoutEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+
+  useLayoutEffect(() => activateModal({
+    dialog: dialogRef.current,
+    content: contentRef.current,
+    trigger: triggerRef.current,
+    onClose: () => onCloseRef.current(),
+  }), []);
+
+  useLayoutEffect(() => { refreshModalFocus(dialogRef.current); });
 
   const sizes = {
     sm: 'max-w-md',
@@ -18,21 +30,30 @@ export default function Modal({ title, onClose, children, size = 'md' }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onClick={(e) => { if (e.target === e.currentTarget && isTopModal(dialogRef.current)) onClose(); }}
     >
-      <div className={`w-full ${sizes[size]} bg-gray-900 border border-gray-700 rounded-xl shadow-2xl flex flex-col max-h-[90vh]`}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className={`w-full ${sizes[size]} bg-gray-900 border border-gray-700 rounded-xl shadow-2xl flex flex-col max-h-[90vh]`}
+      >
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700 shrink-0">
-          <h2 className="aaris-display text-sm text-gray-100">{title}</h2>
+          <h2 id={titleId} className="aaris-display text-sm text-gray-100">{title}</h2>
           <button
+            type="button"
+            aria-label="Close"
             onClick={onClose}
             className="text-gray-500 hover:text-white transition-colors p-1 rounded hover:bg-gray-700"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
-        <div className="overflow-y-auto flex-1 min-h-0">
+        <div ref={contentRef} className="overflow-y-auto flex-1 min-h-0">
           {children}
         </div>
       </div>

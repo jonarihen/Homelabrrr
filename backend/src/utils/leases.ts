@@ -1,10 +1,10 @@
 import { and, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
-import { vmLeases, provisionedVms, vmAssignments } from '../db/schema/index.ts';
+import { vmLeases, provisionedVms, vmAssignments, pveHosts } from '../db/schema/index.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
 import { lockVmMigration, vmMigrationPending, withVmPolicyWrite } from './vmMigrationLock.ts';
 import { logAuditEntry } from './audit.ts';
-import { getAllVMs, vmAction, lxcAction } from '../proxmox.ts';
+import { getAllVMs, vmAction, lxcAction, guestPresence } from '../proxmox.ts';
 import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
 
 // ─── VM leases (per-VM TTL / expiry) ─────────────────────────────────────────
@@ -276,13 +276,17 @@ export async function runLeaseSweep() {
         const candidates = nodeLookupCandidates(current.node);
         const live = vms.find(v => Number(v.vmid) === current.vmid
           && (candidates.includes(v.nodeRef) || (decodeNodeRef(current.node).hostId === null && candidates.includes(v.node))));
-        if (!live) return;
+        if (!live) {
+          const { hostId } = decodeNodeRef(current.node);
+          const [registered] = hostId === null ? [true] : await tx.select({ id: pveHosts.id }).from(pveHosts).where(eq(pveHosts.id, hostId));
+          if (registered && await guestPresence(current.node, current.vmid, tx)) return;
+        }
         const target = `${current.node}/${current.vmid}`;
         let autoStopped = false;
-        if (live.status === 'running') {
+        if (live?.status === 'running') {
           try {
-            if (live.type === 'lxc') await lxcAction(current.node, current.vmid, 'shutdown');
-            else await vmAction(current.node, current.vmid, 'shutdown');
+            if (live.type === 'lxc') await lxcAction(current.node, current.vmid, 'shutdown', tx);
+            else await vmAction(current.node, current.vmid, 'shutdown', tx);
             autoStopped = true;
             stopped += 1;
             audits.push(['lease_expired_autostop', target, 'Lease expired — VM gracefully shut down']);
@@ -291,7 +295,7 @@ export async function runLeaseSweep() {
             return;
           }
         } else {
-          audits.push(['lease_expired', target, 'VM already stopped']);
+          audits.push(['lease_expired', target, live ? 'VM already stopped' : 'VM not found in cluster']);
         }
 
         const [latest] = await tx.select().from(vmLeases).where(eq(vmLeases.id, current.id)).for('update').limit(1);

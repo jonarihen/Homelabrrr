@@ -38,7 +38,7 @@ import { parseUpid, inProgressVolids } from '../utils/backupTask.ts';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.ts';
 import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.ts';
 import { validatePassword } from '../utils/validation.ts';
-import { lockVmMigration, withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
+import { assertVmPolicyLocation, vmMigrationPending, withVmMigrationLock, withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -530,78 +530,63 @@ router.delete('/:node/:vmid', async (req, res) => {
     return res.status(403).json({ error: 'You can only delete VMs assigned to you' });
   }
 
-  // Never destroy the kept-behind source copy of a shared-storage migration —
-  // its disks are the SAME volumes the migrated VM uses on the other host.
-  // (PVE's protection flag also blocks this; this check gives a clear message
-  // instead of a raw upstream error.)
-  const [latestMigration] = await db
-    .select({
-      source_node: vmMigrations.source_node,
-      target_node: vmMigrations.target_node,
-      kept_source: vmMigrations.kept_source,
-    })
-    .from(vmMigrations)
-    .where(and(eq(vmMigrations.vmid, parseInt(vmid, 10)), eq(vmMigrations.status, 'ok')))
-    .orderBy(desc(vmMigrations.id))
-    .limit(1);
-  if (latestMigration?.kept_source) {
-    const requested = decodeNodeRef(node);
-    const sourceCandidates = nodeLookupCandidates(latestMigration.source_node);
-    if (requested.nodeRef === latestMigration.source_node
-      || (requested.hostId === null && sourceCandidates.includes(requested.nodeRef))) {
-      return res.status(400).json({
-        error: `This is the migrated-away source copy — its disks belong to the live VM on the other host. Remove only its config from the source host shell: rm /etc/pve/qemu-server/${parseInt(vmid, 10)}.conf`,
-      });
-    }
-  }
-
   try {
-    // Collect backups first — after destruction the VMID no longer resolves to a host
-    let backups = [];
-    try {
-      backups = await getVMBackups(node, vmid);
-    } catch (err) {
-      console.warn(`[vm-delete] Could not list backups for ${node}/${vmid}: ${err.message}`);
-    }
-
-    await deleteVM(node, vmid);
-
-    // Purge every backup of this VMID so a future VM reusing the ID never inherits them
-    let deletedBackups = 0;
-    const failedBackups = [];
-    for (const backup of backups) {
-      try {
-        await deleteVMBackup(node, backup.storage, backup.volid);
-        deletedBackups += 1;
-      } catch (err) {
-        console.warn(`[vm-delete] Failed to delete backup ${backup.volid}: ${err.message}`);
-        failedBackups.push(backup.volid);
-      }
-    }
-
-    // Clean up portal records tied to this VM
     const parsedVmid = parseInt(vmid, 10);
-    const candidates = nodeLookupCandidates(node);
-    if (candidates.length > 0) {
-      // Each of these tables keys rows on (node, vmid); loop over the table
-      // objects rather than interpolating names into SQL.
-      const cleanupTables: any[] = [
-        vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules, backupTasks,
-      ];
-      await db.transaction(async (tx) => {
-        await lockVmMigration(tx, parsedVmid);
-        for (const table of cleanupTables) {
-          await tx.delete(table).where(and(eq(table.vmid, parsedVmid), inArray(table.node, candidates)));
+    const result = await withVmMigrationLock(parsedVmid, async (database) => {
+      if (await vmMigrationPending(database, parsedVmid)) {
+        throw httpError(409, 'VM migration is running or awaiting review; deletion is blocked');
+      }
+      if (!req.session.isAdmin) {
+        const [actor] = await database.select({ is_admin: users.is_admin }).from(users).where(eq(users.id, req.session.userId));
+        const candidates = nodeLookupCandidates(node);
+        const [assignment] = candidates.length === 0 ? [] : await database.select({ id: vmAssignments.id }).from(vmAssignments)
+          .where(and(eq(vmAssignments.user_id, req.session.userId), eq(vmAssignments.vmid, parsedVmid), inArray(vmAssignments.node, candidates)));
+        if (!actor || (!actor.is_admin && !assignment)) throw httpError(403, 'You can only delete VMs assigned to you');
+      }
+      const [latestMigration] = await database.select().from(vmMigrations)
+        .where(and(eq(vmMigrations.vmid, parsedVmid), eq(vmMigrations.status, 'ok')))
+        .orderBy(desc(vmMigrations.id)).limit(1);
+      if (latestMigration?.kept_source) {
+        const requested = decodeNodeRef(node);
+        const source = decodeNodeRef(latestMigration.source_node);
+        const target = decodeNodeRef(latestMigration.target_node);
+        const isSource = source.nodeName === requested.nodeName
+          && (source.hostId === null ? requested.nodeRef !== target.nodeRef : requested.hostId === null || requested.hostId === source.hostId);
+        if (isSource) throw httpError(400, 'This is the migrated-away source copy; remove only its config, not its shared disks');
+      }
+      await assertVmPolicyLocation(database, node, parsedVmid);
+      let backups = [];
+      try {
+        backups = await getVMBackups(node, vmid, database);
+      } catch (err) {
+        console.warn(`[vm-delete] Could not list backups for ${node}/${vmid}: ${err.message}`);
+      }
+      const deleted = await deleteVM(node, vmid, { allowMissing: true }, database);
+      let deletedBackups = 0;
+      const failedBackups = [];
+      for (const backup of backups) {
+        try {
+          await deleteVMBackup(node, backup.storage, backup.volid, database);
+          deletedBackups += 1;
+        } catch (err) {
+          console.warn(`[vm-delete] Failed to delete backup ${backup.volid}: ${err.message}`);
+          failedBackups.push(backup.volid);
         }
-        await tx.delete(vmMigrations).where(eq(vmMigrations.vmid, parsedVmid));
-      });
-    }
-
-    await logAudit(req, 'vm_delete', `${node}/${vmid}`, `backups_deleted=${deletedBackups}${failedBackups.length > 0 ? ` backups_failed=${failedBackups.length}` : ''}`);
-    res.json({ ok: true, deletedBackups, failedBackups });
-  } catch (err) {
-    sendError(res, err);
-  }
+      }
+      const candidates = nodeLookupCandidates(node);
+      if (candidates.length > 0) {
+        await database.transaction(async (tx) => {
+          for (const table of [vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules, backupTasks] as any[]) {
+            await tx.delete(table).where(and(eq(table.vmid, parsedVmid), inArray(table.node, candidates)));
+          }
+          await tx.delete(vmMigrations).where(and(eq(vmMigrations.vmid, parsedVmid), inArray(vmMigrations.status, ['ok', 'error', 'failed', 'timeout'])));
+        });
+      }
+      return { ok: true, deletedBackups, failedBackups, alreadyAbsent: Boolean(deleted.alreadyAbsent) };
+    });
+    await logAudit(req, 'vm_delete', `${node}/${vmid}`, `backups_deleted=${result.deletedBackups}; already_absent=${result.alreadyAbsent}`);
+    res.json(result);
+  } catch (err) { sendError(res, err); }
 });
 
 // ─── VM RRD data ──────────────────────────────────────────────────────────────
