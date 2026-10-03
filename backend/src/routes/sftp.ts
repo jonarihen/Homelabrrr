@@ -107,7 +107,7 @@ async function getUserSshConfig(userId, node, vmid) {
 async function resolveSession(req, token, deny) {
   const sess = sftpSessions.get(token);
   const expired = () => {
-    deny(403, { error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
+    deny(410, { error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
     return null;
   };
   if (!sess || sess.expires <= Date.now() || sess.absoluteExpires <= Date.now()) {
@@ -385,7 +385,6 @@ router.post('/upload', (req, res) => {
     if (settled || sawFile || name !== 'file') return fileStream.resume();
     sawFile = true;
 
-    if (!fields.token) return fail(400, 'token and path must be sent before the file part');
     const filename = basename(info.filename || '');
     if (!filename) return fail(400, 'No file uploaded');
     const remotePath = posix.join(fields.path || '/', filename);

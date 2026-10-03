@@ -128,15 +128,22 @@ for (const [name, send] of operations) {
     const res = await send(app(OTHER_SID));
     assert.equal(res.status, 403);
     assert.equal(res.body.error, 'Access denied');
+    assert.equal(res.body.code, undefined);
     assert.equal(sess.expires, expires);
     assert.equal(sftpSessions.get(TOKEN), sess);
     assert.equal(connections, before);
   });
 
   test(`${name} rejects a different user`, async () => {
-    seedToken();
+    const sess = seedToken();
+    const expires = sess.expires;
     const before = connections;
-    assert.equal((await send(app(SID, ADMIN_ID, true))).status, 403);
+    const res = await send(app(SID, ADMIN_ID, true));
+    assert.equal(res.status, 403);
+    assert.equal(res.body.error, 'Access denied');
+    assert.equal(res.body.code, undefined);
+    assert.equal(sess.expires, expires);
+    assert.equal(sftpSessions.get(TOKEN), sess);
     assert.equal(connections, before);
   });
 
@@ -147,10 +154,13 @@ for (const [name, send] of operations) {
     const res = await send(app());
     assert.equal(res.status, 403);
     assert.equal(res.body.error, 'Access denied');
+    assert.equal(res.body.code, undefined);
     assert.equal(sftpSessions.has(TOKEN), false);
     assert.equal(connections, before);
     await testDb.db.insert(vmAssignments).values({ user_id: USER_ID, node: NODE, vmid: VMID });
-    assert.equal((await send(app())).body.code, 'SFTP_SESSION_EXPIRED');
+    const expired = await send(app());
+    assert.equal(expired.status, 410);
+    assert.equal(expired.body.code, 'SFTP_SESSION_EXPIRED');
   });
 
   test(`${name} rejects idle and absolute expiry before SSH`, async () => {
@@ -158,7 +168,7 @@ for (const [name, send] of operations) {
     for (const expiry of ['expires', 'absoluteExpires']) {
       seedToken()[expiry] = Date.now();
       const res = await send(app());
-      assert.equal(res.status, 403);
+      assert.equal(res.status, 410);
       assert.equal(res.body.code, 'SFTP_SESSION_EXPIRED');
       assert.equal(sftpSessions.has(TOKEN), false);
     }
@@ -269,7 +279,7 @@ test('missing, expired, mismatched, or enrollment-only stored portal sessions re
     seedToken();
     await update();
     const res = await request(app()).post('/api/sftp/ls').send({ token: TOKEN });
-    assert.equal(res.status, 403);
+    assert.equal(res.status, 410);
     assert.equal(res.body.code, 'SFTP_SESSION_EXPIRED');
     assert.equal(sftpSessions.has(TOKEN), false);
   }
@@ -282,7 +292,9 @@ test('logout destroys only tokens belonging to the current portal session', asyn
   assert.equal((await request(app()).post('/api/auth/logout')).status, 200);
   assert.equal(sftpSessions.has(TOKEN), false);
   assert.equal(sftpSessions.has('other-token'), true);
-  assert.equal((await request(app(OTHER_SID)).post('/api/sftp/ls').send({ token: TOKEN })).status, 403);
+  const expired = await request(app(OTHER_SID)).post('/api/sftp/ls').send({ token: TOKEN });
+  assert.equal(expired.status, 410);
+  assert.equal(expired.body.code, 'SFTP_SESSION_EXPIRED');
 });
 
 test('single session revocation removes its SFTP tokens and preserves the current session', async () => {
@@ -323,7 +335,7 @@ test('a deleted live user revokes even a token carrying a stale admin session', 
   seedToken('other-token', OTHER_SID);
   await testDb.db.delete(users).where(eq(users.id, USER_ID));
   const res = await request(app(SID, USER_ID, true)).post('/api/sftp/ls').send({ token: TOKEN });
-  assert.equal(res.status, 403);
+  assert.equal(res.status, 410);
   assert.equal(res.body.code, 'SFTP_SESSION_EXPIRED');
   assert.equal(sftpSessions.has(TOKEN), false);
   assert.equal(sftpSessions.has('other-token'), false);
