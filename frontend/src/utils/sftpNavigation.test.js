@@ -5,7 +5,11 @@ import { createSftpNavigation } from './sftpNavigation.js';
 function createBrowser() {
   const navigation = createSftpNavigation();
   const state = { path: '.', entries: [], loading: false, error: null, initialLoaded: false };
-  const load = (path, response) => navigation.load(path, () => response, {
+  const signals = [];
+  const load = (path, response, token) => navigation.load(path, (signal) => {
+    signals.push(signal);
+    return response;
+  }, {
     onStart: () => { state.loading = true; state.error = null; },
     onSuccess: (data, confirmedPath) => {
       state.entries = data.entries;
@@ -14,8 +18,8 @@ function createBrowser() {
     },
     onError: (error) => { state.error = error; },
     onFinish: () => { state.loading = false; },
-  });
-  return { navigation, state, load };
+  }, token);
+  return { navigation, state, load, signals };
 }
 
 const listing = (path) => ({ path, entries: [{ name: `${path}/file`, type: 'file' }] });
@@ -125,6 +129,7 @@ test('a mutation retains its target but cannot refresh it after a newer navigati
   const next = load('/b', b.promise);
   assert.equal(target.path, '/a');
   assert.equal(target.isCurrent(), false);
+  assert.equal(target.isSessionCurrent(), true);
   assert.equal(navigation.getMutationTarget('/a'), null);
   b.resolve(listing('/b'));
   await next;
@@ -232,6 +237,68 @@ for (const destinationLoaded of [false, true]) {
     assert.equal(state.loading, false);
   });
 }
+
+test('superseding navigation aborts the active listing without reporting a cancellation error', async () => {
+  const { state, load, signals } = createBrowser();
+  const cancelled = Promise.withResolvers();
+  const first = load('/a', cancelled.promise, 'token-1');
+  const firstSignal = signals[0];
+  firstSignal.addEventListener('abort', () => cancelled.reject(new Error('cancelled')));
+  const second = load('/b', Promise.resolve(listing('/b')), 'token-1');
+  assert.equal(firstSignal.aborted, true);
+  await Promise.all([first, second]);
+  assert.equal(state.error, null);
+  assert.equal(state.path, '/b');
+  assert.equal(state.loading, false);
+});
+
+for (const lateResult of ['success', 'expiry']) {
+  test(`a token change cancels the old listing and rejects its late ${lateResult} and mutation target`, async () => {
+    const { navigation, state, load, signals } = createBrowser();
+    await load('/a', Promise.resolve(listing('/a')), 'token-1');
+    const target = navigation.getMutationTarget('/a', 'token-1');
+    const pending = Promise.withResolvers();
+    const stale = load('/a', pending.promise, 'token-1');
+    const oldSignal = signals.at(-1);
+    assert.equal(navigation.setToken('token-2'), true);
+    assert.equal(navigation.setToken('token-2'), false);
+    assert.equal(oldSignal.aborted, true);
+    assert.equal(target.isCurrent(), false);
+    assert.equal(target.isSessionCurrent(), false);
+    assert.equal(navigation.getMutationTarget('/a', 'token-2'), null);
+    const fresh = { path: '/a', entries: [{ name: 'reconnected.txt', type: 'file' }] };
+    await load('/a', Promise.resolve(fresh), 'token-2');
+    if (lateResult === 'success') pending.resolve(listing('/stale'));
+    else pending.reject({ response: { status: 410, data: { code: 'SFTP_SESSION_EXPIRED' } } });
+    await stale;
+    assert.equal(state.path, '/a');
+    assert.deepEqual(state.entries, fresh.entries);
+    assert.equal(state.error, null);
+    assert.equal(state.loading, false);
+    assert.equal(target.isCurrent(), false);
+    assert.equal(navigation.getMutationTarget('/a', 'token-1'), null);
+    assert.equal(navigation.getMutationTarget('/a', 'token-2').isCurrent(), true);
+  });
+}
+
+test('expiry invalidates same-token mutation targets and cancels a pending listing before reconnect', async () => {
+  const { navigation, state, load, signals } = createBrowser();
+  await load('/a', Promise.resolve(listing('/a')), 'token-1');
+  const target = navigation.getMutationTarget('/a', 'token-1');
+  const pending = Promise.withResolvers();
+  const stale = load('/a', pending.promise, 'token-1');
+  const oldSignal = signals.at(-1);
+  navigation.invalidate();
+  assert.equal(oldSignal.aborted, true);
+  assert.equal(target.isCurrent(), false);
+  assert.equal(navigation.getMutationTarget('/a', 'token-1'), null);
+  await load('/a', Promise.resolve(listing('/a')), 'token-2');
+  pending.resolve(listing('/stale'));
+  await stale;
+  assert.equal(state.path, '/a');
+  assert.equal(state.error, null);
+  assert.equal(target.isCurrent(), false);
+});
 
 test('cleanup invalidates pending listings and mutation targets', async () => {
   const { navigation, state, load } = createBrowser();

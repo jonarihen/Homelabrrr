@@ -50,11 +50,12 @@ export default function SFTPBrowser({ token, onReconnect }) {
   const dropRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const navigationRef = useRef(createSftpNavigation());
-  const mutationsDisabled = loading || !initialLoaded;
+  const currentPathRef = useRef(currentPath);
+  const mutationsDisabled = loading || !initialLoaded || sessionExpired || reconnecting;
 
   const loadDir = useCallback(async (path, activeToken = token) => {
-    await navigationRef.current.load(path, async () => {
-      const { data } = await api.post('/sftp/ls', { token: activeToken, path });
+    await navigationRef.current.load(path, async (signal) => {
+      const { data } = await api.post('/sftp/ls', { token: activeToken, path }, { signal });
       return data;
     }, {
       onStart: () => {
@@ -67,29 +68,34 @@ export default function SFTPBrowser({ token, onReconnect }) {
       },
       onSuccess: (data, confirmedPath) => {
         setEntries(data.entries);
+        currentPathRef.current = confirmedPath;
         setCurrentPath(confirmedPath);
         setSessionExpired(false);
         setInitialLoaded(true);
       },
       onError: (e) => {
         if (isSftpSessionExpired(e)) {
+          navigationRef.current.invalidate();
+          setLoading(false);
           setSessionExpired(true);
         } else {
           setError(normalizeApiError(e, 'Failed to list directory'));
         }
       },
       onFinish: () => setLoading(false),
-    });
+    }, activeToken);
   }, [token]);
 
   const reconnect = async () => {
     if (!onReconnect || reconnecting) return;
+    navigationRef.current.invalidate();
+    setLoading(false);
     setReconnecting(true);
     setError('');
     try {
       const nextToken = await onReconnect();
       setSessionExpired(false);
-      await loadDir(currentPath, nextToken);
+      await loadDir(currentPathRef.current, nextToken);
     } catch (e) {
       if (!isSftpSessionExpired(e)) setError(normalizeApiError(e, 'Failed to reconnect'));
     } finally {
@@ -97,12 +103,14 @@ export default function SFTPBrowser({ token, onReconnect }) {
     }
   };
 
-  // Load initial directory on mount
+  useEffect(() => {
+    if (navigationRef.current.setToken(token)) loadDir(currentPathRef.current);
+  }, [loadDir, token]);
+
   useEffect(() => {
     const navigation = navigationRef.current;
-    loadDir(currentPath);
     return () => navigation.invalidate();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const navigate = (name) => {
     loadDir(joinPath(currentPath, name));
@@ -115,17 +123,22 @@ export default function SFTPBrowser({ token, onReconnect }) {
 
   const [downloading, setDownloading] = useState(null);
 
-  const noteExpiredSession = (e, fallback) => {
+  const noteExpiredSession = (e, fallback, target) => {
+    if (!target.isSessionCurrent()) return false;
     if (isSftpSessionExpired(e)) {
+      navigationRef.current.invalidate();
+      setLoading(false);
       setSessionExpired(true);
       return true;
     }
-    setError(normalizeApiError(e, fallback));
+    if (target.isCurrent()) setError(normalizeApiError(e, fallback));
     return false;
   };
 
   const downloadFile = async (name) => {
-    const filePath = joinPath(currentPath, name);
+    const target = navigationRef.current.getMutationTarget(currentPath, token);
+    if (!target) return;
+    const filePath = joinPath(target.path, name);
     setDownloading(name);
     try {
       const res = await api.get('/sftp/download', {
@@ -141,14 +154,14 @@ export default function SFTPBrowser({ token, onReconnect }) {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      noteExpiredSession(e, 'Download failed');
+      noteExpiredSession(e, 'Download failed', target);
     } finally {
       setDownloading(null);
     }
   };
 
   const uploadFiles = async (files) => {
-    const target = navigationRef.current.getMutationTarget(currentPath);
+    const target = navigationRef.current.getMutationTarget(currentPath, token);
     if (!target || uploading) return;
     const queue = Array.from(files || []);
     if (queue.length === 0) return;
@@ -156,6 +169,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
     setError('');
     try {
       for (const [i, file] of queue.entries()) {
+        if (!target.isCurrent()) return;
         // `token` and `path` go in first: the backend reads them off the front
         // of the multipart stream to authorize the upload before it forwards
         // any of the file itself.
@@ -175,7 +189,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
       }
       if (target.isCurrent()) await loadDir(target.path);
     } catch (e) {
-      noteExpiredSession(e, 'Upload failed');
+      noteExpiredSession(e, 'Upload failed', target);
     } finally {
       setUploading(false);
       setUploadProgress(null);
@@ -183,7 +197,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
   };
 
   const createDir = async () => {
-    const target = navigationRef.current.getMutationTarget(currentPath);
+    const target = navigationRef.current.getMutationTarget(currentPath, token);
     if (!target || !mkdirName.trim()) return;
     setError('');
     try {
@@ -193,12 +207,12 @@ export default function SFTPBrowser({ token, onReconnect }) {
       setShowMkdir(false);
       await loadDir(target.path);
     } catch (e) {
-      noteExpiredSession(e, 'Failed to create directory');
+      noteExpiredSession(e, 'Failed to create directory', target);
     }
   };
 
   const deleteEntry = async (name, isDirectory) => {
-    const target = navigationRef.current.getMutationTarget(currentPath);
+    const target = navigationRef.current.getMutationTarget(currentPath, token);
     if (!target) return;
     setError('');
     try {
@@ -211,12 +225,12 @@ export default function SFTPBrowser({ token, onReconnect }) {
       setDeleteConfirm(null);
       await loadDir(target.path);
     } catch (e) {
-      noteExpiredSession(e, 'Failed to delete');
+      noteExpiredSession(e, 'Failed to delete', target);
     }
   };
 
   const renameEntry = async (name) => {
-    const target = navigationRef.current.getMutationTarget(currentPath);
+    const target = navigationRef.current.getMutationTarget(currentPath, token);
     if (!target) return;
     const nextName = window.prompt(`Rename ${name} to:`, name)?.trim();
     if (!target.isCurrent() || !nextName || nextName === name) return;
@@ -229,13 +243,13 @@ export default function SFTPBrowser({ token, onReconnect }) {
       await api.post('/sftp/rename', { token, path: joinPath(target.path, name), name: nextName });
       if (target.isCurrent()) await loadDir(target.path);
     } catch (e) {
-      noteExpiredSession(e, 'Failed to rename');
+      noteExpiredSession(e, 'Failed to rename', target);
     }
   };
 
   const onDragOver = (e) => {
     e.preventDefault();
-    if (navigationRef.current.getMutationTarget(currentPath) && !uploading) setDragOver(true);
+    if (navigationRef.current.getMutationTarget(currentPath, token) && !uploading) setDragOver(true);
   };
   const onDragLeave = () => setDragOver(false);
   const onDrop = (e) => {
@@ -472,7 +486,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
                         <button
                           type="button"
                           onClick={() => downloadFile(entry.name)}
-                          disabled={downloading === entry.name}
+                          disabled={mutationsDisabled || downloading === entry.name}
                           className="rounded p-1 text-gray-500 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors"
                           title="Download"
                         >
