@@ -4,8 +4,8 @@ import Busboy from 'busboy';
 import { basename, posix } from 'path';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { sshKeys, vmSshConfigs, vmSshUserConfigs } from '../db/schema/index.ts';
-import { requireAuth } from '../middleware/auth.ts';
+import { sessions, sshKeys, users, vmSshConfigs, vmSshUserConfigs } from '../db/schema/index.ts';
+import { requireAuth, requireInteractiveSession } from '../middleware/auth.ts';
 import { userCanPerformVmOp } from '../utils/vmAccess.ts';
 import { nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { normalizeSshHostFingerprint } from '../utils/sshHostKey.ts';
@@ -18,9 +18,12 @@ import { logAudit } from '../utils/audit.ts';
 import { sftpClientError } from '../utils/sftpError.ts';
 import { log } from '../utils/logger.ts';
 import { boundedString } from '../utils/validation.ts';
+import { sftpSessions, revokeUserSftpSessions } from '../utils/sftpSessions.ts';
+
+export { sftpSessions } from '../utils/sftpSessions.ts';
 
 const router = Router();
-router.use(requireAuth);
+router.use(requireAuth, requireInteractiveSession);
 
 const SFTP_SESSION_EXPIRED = 'SFTP_SESSION_EXPIRED';
 
@@ -45,9 +48,8 @@ function sendSftpError(req, res, err) {
 
 // ─── SFTP session store ─────────────────────────────────────────────────────
 
-export const sftpSessions = new Map();
-
-const TOKEN_TTL = 30 * 60 * 1000; // 30 minutes
+const TOKEN_TTL = 30 * 60 * 1000;
+const TOKEN_MAX_LIFETIME = 8 * 60 * 60 * 1000;
 
 function pathAuditMetadata(value) {
   const depth = String(value || '').split('/').filter(Boolean).length;
@@ -57,7 +59,7 @@ function pathAuditMetadata(value) {
 function purgeExpired() {
   const now = Date.now();
   for (const [k, v] of sftpSessions) {
-    if (v.expires < now) sftpSessions.delete(k);
+    if (v.expires <= now || v.absoluteExpires <= now) sftpSessions.delete(k);
   }
 }
 
@@ -102,15 +104,43 @@ async function getUserSshConfig(userId, node, vmid) {
   return null;
 }
 
-function resolveSession(token) {
-  if (!token) return null;
+async function resolveSession(req, token, deny) {
   const sess = sftpSessions.get(token);
-  if (!sess || sess.expires < Date.now()) {
+  const expired = () => {
+    deny(410, { error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
+    return null;
+  };
+  if (!sess || sess.expires <= Date.now() || sess.absoluteExpires <= Date.now()) {
     if (sess) sftpSessions.delete(token);
+    return expired();
+  }
+  if (sess.userId !== req.session.userId || !sess.sessionId || sess.sessionId !== req.sessionID) {
+    deny(403, { error: 'Access denied' });
     return null;
   }
-  // Extend expiry on activity
-  sess.expires = Date.now() + TOKEN_TTL;
+
+  const [user] = await db.select({ is_admin: users.is_admin }).from(users).where(eq(users.id, sess.userId)).limit(1);
+  if (!user) {
+    revokeUserSftpSessions(sess.userId);
+    return expired();
+  }
+  const [portalSession] = await db.select({ sess: sessions.sess, expire: sessions.expire })
+    .from(sessions).where(eq(sessions.sid, sess.sessionId)).limit(1);
+  const stored = portalSession?.sess as { userId?: number; twoFactorEnrollmentOnly?: boolean } | undefined;
+  if (!portalSession || portalSession.expire.getTime() <= Date.now() || stored?.userId !== sess.userId || stored.twoFactorEnrollmentOnly) {
+    sftpSessions.delete(token);
+    return expired();
+  }
+  if (!await userCanPerformVmOp(sess.userId, sess.node, sess.vmid, user.is_admin === true, 'vm.sftp.connect')) {
+    sftpSessions.delete(token);
+    deny(403, { error: 'Access denied' });
+    return null;
+  }
+  if (sftpSessions.get(token) !== sess || sess.expires <= Date.now() || sess.absoluteExpires <= Date.now()) {
+    sftpSessions.delete(token);
+    return expired();
+  }
+  sess.expires = Math.min(Date.now() + TOKEN_TTL, sess.absoluteExpires);
   return sess;
 }
 
@@ -140,6 +170,7 @@ async function openSftp(sess) {
 
 /** Create an SFTP session token. */
 router.post('/connect', async (req, res) => {
+  if (!req.sessionID) return res.status(403).json({ error: 'An interactive portal session is required' });
   const { node, vmid, keyId, passphrase = '' } = req.body;
   if (!node || !vmid || !keyId) {
     return res.status(400).json({ error: 'node, vmid, and keyId are required' });
@@ -180,6 +211,7 @@ router.post('/connect', async (req, res) => {
   purgeExpired();
 
   const token = uuidv4();
+  const now = Date.now();
   sftpSessions.set(token, {
     userId: req.session.userId,
     sessionId: req.sessionID,
@@ -191,7 +223,8 @@ router.post('/connect', async (req, res) => {
     hostFingerprint: normalizeSshHostFingerprint(global.host_fingerprint),
     privateKey: decryptSecret(key.private_key),
     passphrase,
-    expires: Date.now() + TOKEN_TTL,
+    expires: now + TOKEN_TTL,
+    absoluteExpires: now + TOKEN_MAX_LIFETIME,
   });
 
   await logAudit(req, 'sftp_session_created', `${node}/${vmid}`, `port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
@@ -201,9 +234,8 @@ router.post('/connect', async (req, res) => {
 /** List a remote directory. */
 router.post('/ls', async (req, res) => {
   const { token, path: dirPath = '/' } = req.body;
-  const sess = resolveSession(token);
-  if (!sess) return res.status(410).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
-  if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
+  const sess = await resolveSession(req, token, (status, body) => res.status(status).json(body));
+  if (!sess) return;
 
   let conn, sftp;
   try {
@@ -245,9 +277,8 @@ router.post('/ls', async (req, res) => {
 /** Download a remote file. */
 router.get('/download', async (req, res) => {
   const { token, path: filePath } = req.query;
-  const sess = resolveSession(token);
-  if (!sess) return res.status(410).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
-  if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
+  const sess = await resolveSession(req, token, (status, body) => res.status(status).json(body));
+  if (!sess) return;
   if (!filePath) return res.status(400).json({ error: 'path is required' });
 
   let conn, sftp;
@@ -326,7 +357,7 @@ router.post('/upload', (req, res) => {
   const succeed = (body) => settle(() => {
     conn?.end();
     conn = null;
-    const sess = resolveSession(fields.token);
+    const sess = sftpSessions.get(fields.token);
     // Fire-and-forget: the upload has already completed and the response is
     // being sent from a non-async stream callback, so the audit write cannot be
     // awaited — never let an audit failure disrupt the reply (M13).
@@ -354,10 +385,6 @@ router.post('/upload', (req, res) => {
     if (settled || sawFile || name !== 'file') return fileStream.resume();
     sawFile = true;
 
-    const sess = resolveSession(fields.token);
-    if (!sess) return fail(410, { error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
-    if (sess.userId !== req.session.userId) return fail(403, 'Access denied');
-
     const filename = basename(info.filename || '');
     if (!filename) return fail(400, 'No file uploaded');
     const remotePath = posix.join(fields.path || '/', filename);
@@ -366,7 +393,9 @@ router.post('/upload', (req, res) => {
     // from running ahead of us.
     fileStream.pause();
 
-    openSftp(sess).then(({ conn: sshConn, sftp }) => {
+    resolveSession(req, fields.token, fail).then(async (sess) => {
+      if (!sess || settled) return;
+      const { conn: sshConn, sftp } = await openSftp(sess);
       if (settled) return sshConn.end();
       conn = sshConn;
 
@@ -383,7 +412,7 @@ router.post('/upload', (req, res) => {
         const now = Date.now();
         if (now - touched > 60_000) {
           touched = now;
-          sess.expires = now + TOKEN_TTL;
+          sess.expires = Math.min(now + TOKEN_TTL, sess.absoluteExpires);
         }
       });
 
@@ -415,9 +444,8 @@ router.post('/upload', (req, res) => {
 /** Create a remote directory. */
 router.post('/mkdir', async (req, res) => {
   const { token, path: dirPath } = req.body;
-  const sess = resolveSession(token);
-  if (!sess) return res.status(410).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
-  if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
+  const sess = await resolveSession(req, token, (status, body) => res.status(status).json(body));
+  if (!sess) return;
   if (!dirPath) return res.status(400).json({ error: 'path is required' });
 
   let conn, sftp;
@@ -440,9 +468,8 @@ router.post('/mkdir', async (req, res) => {
 /** Delete a remote file or directory. */
 router.post('/delete', async (req, res) => {
   const { token, path: targetPath, isDirectory = false } = req.body;
-  const sess = resolveSession(token);
-  if (!sess) return res.status(410).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
-  if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
+  const sess = await resolveSession(req, token, (status, body) => res.status(status).json(body));
+  if (!sess) return;
   if (!targetPath) return res.status(400).json({ error: 'path is required' });
 
   let conn, sftp;
@@ -466,9 +493,8 @@ router.post('/delete', async (req, res) => {
 /** Rename a remote file or directory within its current directory. */
 router.post('/rename', async (req, res) => {
   const { token, path: sourcePath } = req.body || {};
-  const sess = resolveSession(token);
-  if (!sess) return res.status(410).json({ error: 'SFTP session expired or invalid', code: SFTP_SESSION_EXPIRED });
-  if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Access denied' });
+  const sess = await resolveSession(req, token, (status, body) => res.status(status).json(body));
+  if (!sess) return;
   let name;
   try {
     name = boundedString(req.body?.name, { field: 'name', min: 1, max: 255 });

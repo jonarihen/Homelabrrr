@@ -6,12 +6,29 @@ import { requestContext } from '../utils/logger.ts';
 
 process.env.SECRET_ENCRYPTION_KEY = '66'.repeat(32);
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
+import { sessions, users, vmAssignments } from '../db/schema/index.ts';
 
 const testDb = await createTestDatabase();
 process.env.DATABASE_URL = testDb.url;
 const { default: sftpRouter, sftpSessions } = await import('./sftp.ts');
 
 const USER_ID = 11;
+const SID = 'test-session';
+const NODE = '1~pve';
+const VMID = 101;
+
+await testDb.db.insert(users).values({ id: USER_ID, username: 'operator', password: 'unused' });
+await testDb.db.insert(sessions).values({ sid: SID, sess: { userId: USER_ID }, expire: new Date(Date.now() + 60 * 60 * 1000) });
+await testDb.db.insert(vmAssignments).values({ user_id: USER_ID, node: NODE, vmid: VMID });
+
+function seedToken(token) {
+  sftpSessions.set(token, {
+    userId: USER_ID, sessionId: SID, node: NODE, vmid: VMID,
+    expires: Date.now() + 30 * 60 * 1000,
+    absoluteExpires: Date.now() + 8 * 60 * 60 * 1000,
+  });
+  return sftpSessions.get(token);
+}
 
 test.after(async () => {
   sftpSessions.clear();
@@ -22,7 +39,7 @@ function app(authenticated = true) {
   const instance = express();
   instance.use(requestContext, express.json());
   instance.use((req, _res, next) => {
-    req.sessionID = 'test-session';
+    req.sessionID = SID;
     req.session = authenticated ? { userId: USER_ID, username: 'operator', isAdmin: false } : {};
     next();
   });
@@ -51,7 +68,7 @@ for (const operation of operations) {
     test(`${operation.name} returns SFTP_SESSION_EXPIRED with 410 for a ${state} token`, async () => {
       const token = state === 'missing' ? undefined : state === 'empty' ? '' : `${operation.name}-${state}`;
       if (state === 'expired') {
-        sftpSessions.set(token, { userId: USER_ID, sessionId: 'test-session', expires: Date.now() - 1 });
+        seedToken(token).expires = Date.now() - 1;
       }
       const res = await operation.send(app(), token);
       assert.equal(res.status, 410);
@@ -76,7 +93,7 @@ test('connect still returns portal-auth 401 without a signed-in session', async 
 
 test('an upload with its token after the file part returns the expiry response', async () => {
   const token = 'late-upload-token';
-  sftpSessions.set(token, { userId: USER_ID, sessionId: 'test-session', expires: Date.now() + 60_000 });
+  seedToken(token);
   try {
     const res = await request(app()).post('/api/sftp/upload')
       .field('path', '/')

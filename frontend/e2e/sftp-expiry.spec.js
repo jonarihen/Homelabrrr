@@ -93,6 +93,28 @@ for (const operation of ['ls', 'download', 'upload', 'mkdir', 'delete', 'rename'
   });
 }
 
+test('a revoked-access download stays on the portal without offering token reconnect', async ({ page }) => {
+  const { connectBodies } = await openFiles(page);
+  await page.route('**/api/sftp/download?*', route => route.fulfill({ status: 403, json: { error: 'Access denied' } }));
+  await page.getByRole('button', { name: 'Download', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Access denied');
+  await expect(page.getByRole('button', { name: 'Reconnect', exact: true })).toHaveCount(0);
+  await expect(page).toHaveURL(/\/ssh\/1~pve\/101$/);
+  expect(connectBodies).toHaveLength(1);
+  expect(await page.evaluate(() => window.sftpPageMarker)).toBe('still-mounted');
+});
+
+test('a real portal-auth 401 during token reconnect still leaves for login', async ({ page }) => {
+  await openFiles(page);
+  await page.route('**/api/sftp/ls', route => route.fulfill({ status: 410, json: expired }));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByText('The file browser session expired. Reconnect to keep browsing.')).toBeVisible();
+  await page.route('**/api/auth/me', route => route.fulfill({ status: 401, json: { error: 'Unauthorized' } }));
+  await page.route('**/api/sftp/connect', route => route.fulfill({ status: 401, json: { error: 'Unauthorized' } }));
+  await page.getByRole('button', { name: 'Reconnect', exact: true }).click();
+  await expect(page).toHaveURL(/\/login$/);
+});
+
 test('a real portal-auth 401 from a Blob download still leaves for login', async ({ page }) => {
   await openFiles(page);
   await page.route('**/api/auth/me', route => route.fulfill({ status: 401, json: { error: 'Unauthorized' } }));

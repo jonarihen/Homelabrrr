@@ -60,11 +60,16 @@ for (const pathname of ['/login', '/invite/token']) {
   });
 }
 
-test('remote permission denial is not mistaken for token expiry', async t => {
-  const err = await rejectResponse(t, { status: 403, data: { code: 'SFTP_PERMISSION_DENIED' } });
-  assert.equal(window.location.href, '/dashboard');
-  assert.equal(isSftpSessionExpired(err), false);
-});
+for (const body of [{ code: 'SFTP_PERMISSION_DENIED' }, { error: 'Access denied' }]) {
+  for (const blob of [false, true]) {
+    test(`permission denial is not mistaken for token expiry (${JSON.stringify(body)}, ${blob ? 'Blob' : 'JSON'})`, async t => {
+      const data = blob ? new Blob([JSON.stringify(body)], { type: 'application/json' }) : body;
+      const err = await rejectResponse(t, { status: 403, data });
+      assert.equal(window.location.href, '/dashboard');
+      assert.equal(isSftpSessionExpired(err), false);
+    });
+  }
+}
 
 for (const type of ['application/json', 'application/octet-stream']) {
   test(`an unparseable ${type} Blob does not swallow a real 401`, async t => {

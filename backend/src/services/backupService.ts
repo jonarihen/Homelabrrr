@@ -1,15 +1,16 @@
 import crypto from 'node:crypto';
-import { copyFile, mkdir, readdir, stat, unlink } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, isNotNull, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { backupRuns } from '../db/schema/index.ts';
 import { log } from '../utils/logger.ts';
 import { notify, portalLink } from '../utils/notify.ts';
-import { encryptBackupFile, verifyEncryptedBackup } from '../utils/encryptedBackup.ts';
+import { decryptBackupFile, encryptBackupFile, verifyEncryptedBackup } from '../utils/encryptedBackup.ts';
+import { readBackupSanity } from '../utils/backupSanity.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -43,11 +44,14 @@ async function enforceRetention(directory: string, retentionDays: number) {
 export async function backupStatus() {
   const settings = config();
   const [latest] = await db.select().from(backupRuns).orderBy(desc(backupRuns.id)).limit(1);
+  const [lastFullRestore] = await db.select({ verified_at: backupRuns.full_restore_verified_at }).from(backupRuns)
+    .where(isNotNull(backupRuns.full_restore_verified_at)).orderBy(desc(backupRuns.full_restore_verified_at)).limit(1);
   return {
     enabled: settings.enabled,
     retentionDays: settings.retentionDays,
     running: !!runningTask,
     latest: latest ?? null,
+    lastFullRestoreVerifiedAt: lastFullRestore?.verified_at ?? null,
   };
 }
 
@@ -83,34 +87,41 @@ export async function createVerifiedBackup({ requestId = '' }: { requestId?: str
       runId = inserted.id;
       await mkdir(settings.directory, { recursive: true, mode: 0o700 });
       await mkdir(settings.offsiteDirectory, { recursive: true, mode: 0o700 });
-      // Custom-format dump of the live database. execFile rejects on a non-zero
-      // pg_dump exit, so a failed dump lands in the catch below.
-      await execFileAsync('pg_dump', [
-        '--format=custom',
-        '--no-owner',
-        '--dbname', String(process.env.DATABASE_URL),
-        '--file', plain,
-      ]);
+      await writeFile(plain, '', { mode: 0o600, flag: 'wx' });
+      const expected = await db.transaction(async (tx) => {
+        const snapshot = await tx.execute(sql`SELECT pg_export_snapshot() AS snapshot`);
+        const sanity = await readBackupSanity(tx);
+        try {
+          await execFileAsync('pg_dump', [
+            '--format=custom', '--no-owner', '--no-privileges',
+            '--snapshot', String(snapshot.rows[0].snapshot),
+            '--dbname', String(process.env.DATABASE_URL),
+            '--file', plain,
+          ], { timeout: 30 * 60 * 1000, maxBuffer: 1024 * 1024 });
+        } catch {
+          throw new Error('PostgreSQL backup dump failed');
+        }
+        return sanity;
+      }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
       if ((await stat(plain)).size <= 0) throw new Error('pg_dump produced an empty archive');
       await encryptBackupFile(plain, localTarget, settings.passphrase);
       await copyFile(localTarget, offsiteTarget);
-      // Verify BOTH the staging artifact and the disaster-recovery copy by
-      // decrypting each and reading its pg_dump table of contents — a backup
-      // that cannot be listed is worthless, and the off-host copy is the one
-      // that actually gets restored.
-      await verifyEncryptedBackup(localTarget, settings.passphrase);
-      await verifyEncryptedBackup(offsiteTarget, settings.passphrase);
+      await decryptBackupFile(localTarget, plain, settings.passphrase);
+      await verifyEncryptedBackup(offsiteTarget, settings.passphrase, {
+        databaseUrl: String(process.env.DATABASE_URL), expected,
+      });
       const size = (await stat(offsiteTarget)).size;
       if (size <= 0) throw new Error('Off-host backup copy is empty');
-      await db
-        .update(backupRuns)
-        .set({ status: 'verified', size_bytes: size, verified_at: new Date() })
-        .where(eq(backupRuns.id, runId));
+      const verifiedAt = new Date();
       await enforceRetention(settings.directory, settings.retentionDays);
       await enforceRetention(settings.offsiteDirectory, settings.retentionDays);
+      await db
+        .update(backupRuns)
+        .set({ status: 'verified', size_bytes: size, verified_at: verifiedAt, full_restore_verified_at: verifiedAt })
+        .where(eq(backupRuns.id, runId));
       const [result] = await db.select().from(backupRuns).where(eq(backupRuns.id, runId)).limit(1);
       notify('backup.created', {
-        domain: 'Portal database', status: 'verified', detail: `Encrypted off-host backup verified (${size} bytes)`,
+        domain: 'Portal database', status: 'verified', detail: `Encrypted off-host backup full restore verified (${size} bytes)`,
         url: portalLink('/admin/operations'),
       });
       return result;
@@ -118,7 +129,7 @@ export async function createVerifiedBackup({ requestId = '' }: { requestId?: str
       if (runId !== null) {
         await db
           .update(backupRuns)
-          .set({ status: 'error', detail: String(err?.message || err).slice(0, 1000) })
+          .set({ status: 'error', verified_at: null, full_restore_verified_at: null, detail: String(err?.message || err).slice(0, 1000) })
           .where(eq(backupRuns.id, runId));
       }
       if (localTarget) await unlink(localTarget).catch(() => {});
