@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { and, desc, eq, inArray, ne } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmMigrations, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms,
   vmLeases, vmSchedules,
@@ -14,12 +14,12 @@ import { readTaskProgress } from '../utils/taskProgress.ts';
 import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.ts';
 import { sharedStorageKey } from '../utils/sharedStorage.ts';
 import { requireAdmin } from '../middleware/auth.ts';
-import { isUniqueViolation } from '../db/errors.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
-import { sendError } from '../utils/httpError.ts';
+import { httpError, sendError } from '../utils/httpError.ts';
 import { logAudit } from '../utils/audit.ts';
 import { decodeNodeRef, nodeLookupCandidates, isValidNodeName } from '../utils/nodeRef.ts';
 import { assertNodeCapacity } from '../utils/capacity.ts';
+import { lockVmMigration, vmMigrationPending } from '../utils/vmMigrationLock.ts';
 import { planCdromDetach, checkStorageCompatibility } from '../utils/migrationPreflight.ts';
 import {
   normalizeDiskStorages, resolveDiskTargets, planStorageMapping, sizeByTargetStorage,
@@ -61,48 +61,78 @@ const NODE_KEYED_TABLES: [string, any][] = [
 const DISK_KEY_RE = /^(?:scsi|virtio|sata|ide)\d+$|^(?:efidisk|tpmstate)\d+$/;
 const IDENT_RE = /^[a-zA-Z0-9._-]+$/;
 
-export async function repointVmRows(sourceNode, vmid, targetNode) {
+export async function repointVmRows(sourceNode, vmid, targetNode, database: DbOrTx = db) {
+  await database.transaction(async (tx) => {
+    await lockVmMigration(tx, Number(vmid));
+    await repointVmRowsInTransaction(sourceNode, vmid, targetNode, tx);
+  });
+}
+
+async function repointVmRowsInTransaction(sourceNode, vmid, targetNode, tx: DbOrTx) {
   const candidates = nodeLookupCandidates(sourceNode);
   if (candidates.length === 0) return;
   const policyCandidates = [...new Set([...candidates, ...nodeLookupCandidates(targetNode)])];
-  await db.transaction(async (tx) => {
-    for (const table of [vmLeases, vmSchedules]) {
-      const rows = await tx.select({ id: table.id, node: table.node }).from(table)
-        .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)))
-        .orderBy(table.id).for('update');
-      const source = candidates.map((node) => rows.find((row) => row.node === node)).find(Boolean);
-      if (!source) continue;
-      await tx.delete(table).where(and(
-        eq(table.vmid, Number(vmid)), inArray(table.node, policyCandidates), ne(table.id, source.id),
-      ));
-      await tx.update(table).set({ node: targetNode }).where(eq(table.id, source.id));
-    }
-  });
-  for (const [label, table] of NODE_KEYED_TABLES) {
-    try {
-      await db.update(table).set({ node: targetNode })
-        .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)));
-    } catch (err) {
-      console.warn(`[migrate] failed to re-point ${label} for VM ${vmid}: ${err.message}`);
-    }
+  for (const table of [vmLeases, vmSchedules]) {
+    const rows = await tx.select({ id: table.id, node: table.node }).from(table)
+      .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)))
+      .orderBy(table.id).for('update');
+    const source = candidates.map((node) => rows.find((row) => row.node === node)).find(Boolean);
+    if (!source) continue;
+    await tx.delete(table).where(and(
+      eq(table.vmid, Number(vmid)), inArray(table.node, policyCandidates), ne(table.id, source.id),
+    ));
+    await tx.update(table).set({ node: targetNode }).where(eq(table.id, source.id));
+  }
+  for (const [, table] of NODE_KEYED_TABLES) {
+    await tx.update(table).set({ node: targetNode })
+      .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)));
   }
 }
 
-// Idempotent: the status transition guard means only the first caller (the
-// background job/poller or a lazy status check after a restart) finalizes.
-async function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
-  // Atomic claim: only the first caller to flip a still-'running' row finalizes.
+export async function finalizeMigrationSuccess(
+  database: DbOrTx,
+  id: number,
+  detail = '',
+  { expectedStatus = 'running', keptSource }: { expectedStatus?: 'running' | 'needs_review'; keptSource?: boolean } = {},
+): Promise<boolean> {
+  const row = await database.transaction(async (tx) => {
+    const [snapshot] = await tx.select({ vmid: vmMigrations.vmid }).from(vmMigrations).where(eq(vmMigrations.id, id));
+    if (!snapshot) return;
+    await lockVmMigration(tx, snapshot.vmid);
+    const [claimed] = await tx.update(vmMigrations)
+      .set({ status: 'ok', status_detail: detail, finished_at: new Date(), ...(keptSource === undefined ? {} : { kept_source: keptSource }) })
+      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, expectedStatus)))
+      .returning();
+    if (!claimed) return;
+    if (claimed.mode !== 'adopt') await closeSteps(id, true, detail, tx);
+    await repointVmRowsInTransaction(claimed.source_node, claimed.vmid, claimed.target_node, tx);
+    return claimed;
+  });
+  if (!row) return false;
+  console.log(`[migrate] VM ${row.vmid} migrated ${row.source_node} → ${row.target_node} (${row.mode})`);
+  return true;
+}
+
+export async function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
+  if (ok) {
+    try {
+      return await finalizeMigrationSuccess(db, id, detail, { keptSource });
+    } catch (err) {
+      console.error(`[migrate] portal finalization ${id} failed:`, err.message);
+      await db.update(vmMigrations).set({
+        status: 'needs_review',
+        status_detail: `Upstream migration completed, but portal bookkeeping failed. Review and retry verification. ${detail}`.trim(),
+        upstream_status: 'stopped:OK', kept_source: keptSource, finished_at: new Date(),
+      }).where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
+      return false;
+    }
+  }
   const claimed = await db.update(vmMigrations)
-    .set({ status: ok ? 'ok' : 'error', status_detail: detail, kept_source: keptSource, finished_at: new Date() })
+    .set({ status: 'error', status_detail: detail, kept_source: keptSource, finished_at: new Date() })
     .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
   if (claimed.rowCount === 0) return;
   const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
-  // Adopt drives its own steps as it goes; remote_migrate only learns the
-  // outcome here, so its seeded steps are resolved from the final status.
-  if (row.mode !== 'adopt') await closeSteps(id, ok, detail);
-  if (!ok) return;
-  await repointVmRows(row.source_node, row.vmid, row.target_node);
-  console.log(`[migrate] VM ${row.vmid} migrated ${row.source_node} → ${row.target_node} (${row.mode})`);
+  if (row.mode !== 'adopt') await closeSteps(id, false, detail);
 }
 
 // ─── Step tracking (same shape as provisioned_vms.steps) ─────────────────────
@@ -114,8 +144,8 @@ async function seedSteps(id, steps) {
     .where(eq(vmMigrations.id, id));
 }
 
-async function readSteps(id) {
-  const [row] = await db.select({ steps: vmMigrations.steps }).from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
+async function readSteps(id, database: DbOrTx = db) {
+  const [row] = await database.select({ steps: vmMigrations.steps }).from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
   return Array.isArray(row?.steps) ? row.steps : [];
 }
 
@@ -130,8 +160,8 @@ async function setStep(id, key, status, note) {
 
 // Resolve every unfinished step when a migration ends: all done on success, the
 // step that was running marked failed otherwise.
-async function closeSteps(id, ok, detail) {
-  const steps = await readSteps(id);
+async function closeSteps(id, ok, detail, database: DbOrTx = db) {
+  const steps = await readSteps(id, database);
   if (steps.length === 0) return;
   for (const step of steps) {
     if (step.status === 'done' || step.status === 'skipped' || step.status === 'error') continue;
@@ -141,7 +171,7 @@ async function closeSteps(id, ok, detail) {
       if (detail) step.note = detail;
     }
   }
-  await db.update(vmMigrations).set({ steps }).where(eq(vmMigrations.id, id));
+  await database.update(vmMigrations).set({ steps }).where(eq(vmMigrations.id, id));
 }
 
 // ─── Transfer progress ───────────────────────────────────────────────────────
@@ -958,9 +988,23 @@ router.post('/:node/:vmid', async (req, res) => {
       }
     }
 
+    const claimMigration = () => db.transaction(async (tx) => {
+      await lockVmMigration(tx, vmid);
+      if (await vmMigrationPending(tx, vmid)) throw httpError(409, 'A migration for this VM is already running or awaiting review');
+      const [inserted] = await tx.insert(vmMigrations).values({
+        user_id: req.session.userId, vmid, name: vm.name || '', vmtype,
+        source_node: sourceRef, target_node: targetNode,
+        target_storage: migrateStorage || '', target_bridge: targetBridge,
+        online: mode === 'remote_migrate' && vmtype === 'qemu' && running && !!online,
+        delete_source: mode === 'adopt' ? false : !!deleteSource, status: 'running', mode,
+        request_id: req.requestId || '',
+      }).returning({ id: vmMigrations.id });
+      return inserted;
+    });
     let upid = '';
     let bootFix = '';
     let ejected = [];
+    let inserted;
     if (mode === 'remote_migrate') {
       // Proxmox ships the ACTIVE (on-disk) source config for a cross-host
       // migration, so a stale boot-order entry (device removed/rebused but
@@ -1017,6 +1061,7 @@ router.post('/:node/:vmid', async (req, res) => {
         }
       }
       try {
+        inserted = await claimMigration();
         upid = await remoteMigrateVm(sourceRef, vmid, vmtype, targetHost, {
           // A bare storage id when everything lands in one pool, otherwise the
           // `src:tgt,…` pair list that spreads the disks.
@@ -1037,38 +1082,20 @@ router.post('/:node/:vmid', async (req, res) => {
             console.warn(`[migrate] VM ${vmid}: could not re-attach ejected CD-ROM ISOs: ${restoreErr.message}`);
           }
         }
+        if (inserted) await finalizeMigration(inserted.id, false, 'Upstream migration could not be started');
         throw err;
       }
-    }
-
-    let inserted;
-    try {
-      [inserted] = await db.insert(vmMigrations).values({
-        user_id: req.session.userId,
-        vmid,
-        name: vm.name || '',
-        vmtype,
-        source_node: sourceRef,
-        target_node: targetNode,
-        target_storage: migrateStorage || '',
-        target_bridge: targetBridge,
-        // online / delete_source are real booleans now.
-        online: mode === 'remote_migrate' && vmtype === 'qemu' && running && !!online,
-        delete_source: mode === 'adopt' ? false : !!deleteSource,
-        status: 'running',
-        upid: upid || '',
-        mode,
-        request_id: req.requestId || '',
-      }).returning({ id: vmMigrations.id });
-    } catch (err) {
-      // A concurrent request claimed this VM after the pre-check above — the
-      // partial unique index on running migrations is the arbiter.
-      if (isUniqueViolation(err)) {
-        return res.status(409).json({ error: 'A migration for this VM is already running' });
-      }
-      throw err;
+    } else {
+      inserted = await claimMigration();
     }
     const migrationId = inserted.id;
+    try {
+      await db.update(vmMigrations).set({ upid: upid || '' }).where(eq(vmMigrations.id, migrationId));
+    } catch (err) {
+      await db.update(vmMigrations).set({ status: 'needs_review', status_detail: 'Migration started but its task identifier could not be saved; review upstream state' })
+        .where(and(eq(vmMigrations.id, migrationId), eq(vmMigrations.status, 'running')));
+      throw err;
+    }
 
     if (mode === 'adopt') {
       await seedSteps(migrationId, [

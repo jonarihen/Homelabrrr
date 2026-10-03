@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmSchedules, pveHosts, vmSshConfigs, vmSshUserConfigs, vlans, firewallVlanSync, firewalls,
   vmAssignments, vmMigrations, vmLeases, provisionedVms, backupTasks,
@@ -38,6 +38,7 @@ import { parseUpid, inProgressVolids } from '../utils/backupTask.ts';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.ts';
 import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.ts';
 import { validatePassword } from '../utils/validation.ts';
+import { withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -1737,10 +1738,10 @@ router.post('/:node/:vmid/snapshots/:snapname/rollback', async (req, res) => {
 // Owners (and admins) define an automatic OFF window — stop_time/start_time on a
 // set of days in a timezone — enforced by the background scheduler (scheduler.js).
 
-async function loadScheduleRow(node, vmid) {
+async function loadScheduleRow(node, vmid, database: DbOrTx = db) {
   const candidates = nodeLookupCandidates(node);
   if (candidates.length === 0) return null;
-  const [row] = await db
+  const [row] = await database
     .select()
     .from(vmSchedules)
     .where(and(inArray(vmSchedules.node, candidates), eq(vmSchedules.vmid, parseInt(vmid, 10))))
@@ -1790,39 +1791,25 @@ router.put('/:node/:vmid/schedule', async (req, res) => {
   const parsedVmid = parseInt(vmid, 10);
   const enabledBool = !!enabled;
 
-  // Reset scheduler bookkeeping so a re-defined window is evaluated fresh.
-  // last_off (-1) and days stay numeric; the rest of the flags are booleans.
-  await db.insert(vmSchedules).values({
-    node,
-    vmid: parsedVmid,
-    enabled: enabledBool,
-    stop_time: stopTime,
-    start_time: startTime,
-    days: daysMask,
-    timezone,
-    skip_until: 0,
-    running_due_to_manual: false,
-    stopped_this_window: false,
-    last_off: -1,
-    updated_at: new Date(),
-  }).onConflictDoUpdate({
-    target: [vmSchedules.node, vmSchedules.vmid],
-    set: {
-      enabled: enabledBool,
-      stop_time: stopTime,
-      start_time: startTime,
-      days: daysMask,
-      timezone,
-      skip_until: 0,
-      running_due_to_manual: false,
-      stopped_this_window: false,
-      last_off: -1,
-      updated_at: new Date(),
-    },
-  });
-
-  await logAudit(req, 'vm_schedule_set', `${node}/${vmid}`, `${enabledBool ? 'on' : 'off'} stop=${stopTime} start=${startTime} days=${daysMask} tz=${timezone}`);
-  res.json({ schedule: serializeSchedule(await loadScheduleRow(node, vmid)) });
+  try {
+    const row = await withVmPolicyWrite(node, parsedVmid, async (tx) => {
+      const existing = await loadScheduleRow(node, vmid, tx);
+      const set = {
+        enabled: enabledBool, stop_time: stopTime, start_time: startTime, days: daysMask, timezone,
+        skip_until: 0, running_due_to_manual: false, stopped_this_window: false,
+        last_off: -1, updated_at: new Date(),
+      };
+      if (existing) {
+        const [updated] = await tx.update(vmSchedules).set(set).where(eq(vmSchedules.id, existing.id)).returning();
+        return updated;
+      }
+      const [inserted] = await tx.insert(vmSchedules).values({ node, vmid: parsedVmid, ...set })
+        .onConflictDoUpdate({ target: [vmSchedules.node, vmSchedules.vmid], set }).returning();
+      return inserted;
+    });
+    await logAudit(req, 'vm_schedule_set', `${node}/${vmid}`, `${enabledBool ? 'on' : 'off'} stop=${stopTime} start=${startTime} days=${daysMask} tz=${timezone}`);
+    res.json({ schedule: serializeSchedule(row) });
+  } catch (err) { sendError(res, err); }
 });
 
 // Delete the schedule entirely.
@@ -1833,11 +1820,14 @@ router.delete('/:node/:vmid/schedule', async (req, res) => {
   }
   const candidates = nodeLookupCandidates(node);
   const parsedVmid = parseInt(vmid, 10);
-  if (candidates.length > 0) {
-    await db.delete(vmSchedules).where(and(eq(vmSchedules.vmid, parsedVmid), inArray(vmSchedules.node, candidates)));
-  }
-  await logAudit(req, 'vm_schedule_delete', `${node}/${vmid}`, '');
-  res.json({ ok: true });
+  try {
+    if (candidates.length > 0) {
+      await withVmPolicyWrite(node, parsedVmid, (tx) =>
+        tx.delete(vmSchedules).where(and(eq(vmSchedules.vmid, parsedVmid), inArray(vmSchedules.node, candidates))));
+    }
+    await logAudit(req, 'vm_schedule_delete', `${node}/${vmid}`, '');
+    res.json({ ok: true });
+  } catch (err) { sendError(res, err); }
 });
 
 // "Skip tonight": suppress scheduler actions until the next start_time so the
@@ -1847,14 +1837,19 @@ router.post('/:node/:vmid/schedule/skip', async (req, res) => {
   if (!(await canEditSchedule(req, node, vmid))) {
     return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
   }
-  const row = await loadScheduleRow(node, vmid);
-  if (!row || !row.enabled || !isValidTime(row.start_time) || !isValidTimezone(row.timezone)) {
-    return res.status(400).json({ error: 'No active schedule to skip' });
-  }
-  const skipUntil = nextTimeOccurrence(Date.now(), row.timezone, timeToMinutes(row.start_time));
-  await db.update(vmSchedules).set({ skip_until: skipUntil }).where(eq(vmSchedules.id, row.id));
-  await logAudit(req, 'vm_schedule_skip', `${node}/${vmid}`, new Date(skipUntil).toISOString());
-  res.json({ schedule: serializeSchedule(await loadScheduleRow(node, vmid)) });
+  try {
+    const row = await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx) => {
+      const existing = await loadScheduleRow(node, vmid, tx);
+      if (!existing || !existing.enabled || !isValidTime(existing.start_time) || !isValidTimezone(existing.timezone)) {
+        throw httpError(400, 'No active schedule to skip');
+      }
+      const skipUntil = nextTimeOccurrence(Date.now(), existing.timezone, timeToMinutes(existing.start_time));
+      const [updated] = await tx.update(vmSchedules).set({ skip_until: skipUntil }).where(eq(vmSchedules.id, existing.id)).returning();
+      return updated;
+    });
+    await logAudit(req, 'vm_schedule_skip', `${node}/${vmid}`, new Date(row.skip_until || 0).toISOString());
+    res.json({ schedule: serializeSchedule(row) });
+  } catch (err) { sendError(res, err); }
 });
 
 // Cancel a pending "skip tonight".
@@ -1863,11 +1858,16 @@ router.delete('/:node/:vmid/schedule/skip', async (req, res) => {
   if (!(await canEditSchedule(req, node, vmid))) {
     return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
   }
-  const row = await loadScheduleRow(node, vmid);
-  if (!row) return res.status(404).json({ error: 'No schedule found' });
-  await db.update(vmSchedules).set({ skip_until: 0 }).where(eq(vmSchedules.id, row.id));
-  await logAudit(req, 'vm_schedule_skip_cancel', `${node}/${vmid}`, '');
-  res.json({ schedule: serializeSchedule(await loadScheduleRow(node, vmid)) });
+  try {
+    const row = await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx) => {
+      const existing = await loadScheduleRow(node, vmid, tx);
+      if (!existing) throw httpError(404, 'No schedule found');
+      const [updated] = await tx.update(vmSchedules).set({ skip_until: 0 }).where(eq(vmSchedules.id, existing.id)).returning();
+      return updated;
+    });
+    await logAudit(req, 'vm_schedule_skip_cancel', `${node}/${vmid}`, '');
+    res.json({ schedule: serializeSchedule(row) });
+  } catch (err) { sendError(res, err); }
 });
 
 // ─── User's allowed VLANs ────────────────────────────────────────────────────
