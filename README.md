@@ -301,7 +301,9 @@ and the backend logs a one-time warning on startup traffic when the numbers disa
 
 Everything Homelabrrr knows lives in the PostgreSQL database inside the `pg_data` volume. `docker compose down` keeps that volume; `docker compose down -v` **deletes it**.
 
-The backend can take an online `pg_dump --format=custom` snapshot, encrypt it with AES-256-GCM into a `homelabrrr-<stamp>.dump.enc` archive, copy it to a separate destination, and verify it by decrypting the copied artifact and reading its archive table of contents with `pg_restore --list`. No application downtime is required for the scheduled snapshot. (`pg_dump`/`pg_restore` come from the `postgresql17-client` package baked into the backend image.)
+The backend takes an online `pg_dump --format=custom` snapshot, encrypts it with AES-256-GCM into a `homelabrrr-<stamp>.dump.enc` archive, and copies it to a separate destination. Every backup authenticates the staging artifact and fully restores the decrypted off-host copy with `pg_restore --exit-on-error --single-transaction` into a uniquely named disposable database. Applied migration and critical table row counts must match the same exported snapshot used by `pg_dump`; concurrent application writes do not cause false mismatches. Only successful restore, sanity checks, and database cleanup allow a backup to be marked verified. No application downtime is required. (`pg_dump`/`pg_restore` come from the `postgresql17-client` package baked into the backend image.)
+
+The `DATABASE_URL` role needs `CREATEDB` and enough temporary disk space on the PostgreSQL server for a full database copy. Restore verification has a 30-minute timeout. Permission, restore, sanity-check, or cleanup failures mark the run as an error, remove its encrypted artifacts, and do not advance the last full-restore timestamp. If cleanup cannot complete, the run detail identifies the `homelabrrr_verify_<random>` database requiring administrator cleanup; never drop the live database. A hard process/server crash can also leave a disposable database behind.
 
 Set these before enabling backups:
 
@@ -318,11 +320,11 @@ BACKUP_HOST_PATH=./backups
 BACKUP_OFFSITE_HOST_PATH=/mnt/nas/homelabrrr
 ```
 
-Keep `BACKUP_ENCRYPTION_KEY` in a password manager or secrets system separate from the database, staging directory, and off-host destination. Scheduled failure/success events use the existing configurable backup notification channels. **Admin → Operations** shows whether backups are configured, the last outcome/failure reason, size, and verified-restore time; it can also run one immediately.
+Keep `BACKUP_ENCRYPTION_KEY` in a password manager or secrets system separate from the database, staging directory, and off-host destination. Scheduled failure/success events use the existing configurable backup notification channels. **Admin → Operations** shows whether backups are configured, the last outcome/failure reason, size, and the last successful full-restore time (even if a later run failed); it can also run one immediately. Historical TOC-only verification runs are labelled `toc_checked`, not full-restore verified.
 
 #### Disaster-recovery restore
 
-Restore is a two-step operation: `restore-backup` turns the encrypted archive back into a verified plain `pg_dump` custom-format file, and then `pg_restore` loads that file into a **new, empty database** — never over a live one.
+Restore is a two-step operation: `restore-backup` turns the encrypted archive back into a decrypted, TOC-checked plain `pg_dump` custom-format file (this alone does not verify its data), and then `pg_restore` loads that file into a **new, empty database** — never over a live one.
 
 1. Secure a copy of the encrypted `.dump.enc` artifact and the separate backup key.
 2. Decrypt and verify it to a plain `.dump` file. The restore command refuses to overwrite an existing target and reads the archive's table of contents before reporting success.
@@ -335,11 +337,11 @@ Restore is a two-step operation: `restore-backup` turns the encrypted archive ba
      /app/data/db-restored.dump
    ```
 
-3. Create a fresh target database and load the verified archive into it with `pg_restore` (drop ownership so it re-owns to the connecting role). Do this against a **new** database, not the live one:
+3. Create a fresh target database and load the decrypted archive into it with `pg_restore` (drop ownership so it re-owns to the connecting role). Do this against a **new** database, not the live one:
 
    ```bash
    # e.g. create homelabrrr_restored on the same server, then:
-   pg_restore --no-owner --dbname="postgres://homelabrrr:$POSTGRES_PASSWORD@127.0.0.1:5432/homelabrrr_restored" \
+   pg_restore --exit-on-error --single-transaction --no-owner --no-privileges --dbname="postgres://homelabrrr:$POSTGRES_PASSWORD@127.0.0.1:5432/homelabrrr_restored" \
      ./data/db-restored.dump
    ```
 
@@ -432,7 +434,7 @@ Example values live in [`.env.example`](.env.example).
 | `VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS` | How long a scheduled graceful shutdown waits before the hard-stop fallback fires (default `120000`) |
 | `WEBSITE_RECONCILE_INTERVAL_MS` | How often published websites are re-checked: admin-API routes dropped by a `caddy reload` are re-pushed, and every published site is re-probed over HTTPS (default `300000` = 5 min; minimum `60000`) — see [Route durability](#️-route-durability-admin-api-routes-are-not-persistent) |
 | `AUDIT_RETENTION_DAYS` / `JOB_RETENTION_DAYS` | Retention for audit records (default 365 days) and terminal job history (default 90 days) |
-| `BACKUP_DIR` / `BACKUP_OFFSITE_DIR` / `BACKUP_ENCRYPTION_KEY` | Enables scheduled `pg_dump` custom-format, encrypted backups whose separately copied artifact is restore-verified (`pg_restore --list`); keep the backup key separate from the database and both destinations |
+| `BACKUP_DIR` / `BACKUP_OFFSITE_DIR` / `BACKUP_ENCRYPTION_KEY` | Enables scheduled `pg_dump` custom-format, encrypted backups whose separately copied artifact is full-restore verified in a disposable database (requires `CREATEDB`); keep the backup key separate from the database and both destinations |
 | `BACKUP_RETENTION_DAYS` / `BACKUP_INTERVAL_MS` | Backup retention (default 14 days) and schedule (default daily) |
 | `BACKUP_HOST_PATH` / `BACKUP_OFFSITE_HOST_PATH` | Compose host mounts for local staging and the separately mounted/replicated disaster-recovery destination |
 | `DB_PATH` | **Legacy** — path to the old SQLite file, used only by the one-time `import-sqlite` tool (see [Migrating from SQLite](#migrating-from-sqlite)). The running server no longer reads or writes it |

@@ -1,10 +1,11 @@
-import { useCallback, useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import Layout from '../components/Layout.jsx';
 import PrereqCallout from '../components/PrereqCallout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import { normalizeUpstreamPort, isUpstreamDraftValid, hasSiteChanged, isInspectionOn } from '../utils/siteEdit.js';
+import { startPolling } from '../utils/polling.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const selectCls = inputCls;
@@ -47,8 +48,12 @@ export default function WebsitesPage() {
   // transitions land even if a card unmounts.
   useEffect(() => {
     if (!hasInFlight) return;
-    const t = setInterval(() => { api.get('/websites/sites').then((r) => setSites(r.data || [])).catch(() => {}); }, 4000);
-    return () => clearInterval(t);
+    return startPolling({
+      request: async (signal) => (await api.get('/websites/sites', { signal })).data || [],
+      onUpdate: setSites,
+      shouldContinue: (updated) => updated.some((s) => IN_FLIGHT.includes(s.status)),
+      interval: 4000,
+    });
   }, [hasInFlight]);
 
   return (
@@ -277,23 +282,18 @@ function SiteCard({ site: initial, servers, upstream, isAdmin, onChanged }) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const timerRef = useRef(null);
 
   useEffect(() => { setSite(initial); }, [initial]);
 
   const inFlight = IN_FLIGHT.includes(site.status);
   useEffect(() => {
     if (!inFlight) return undefined;
-    const tick = async () => {
-      try {
-        const r = await api.get(`/websites/sites/${site.id}/status`);
-        setSite(r.data);
-        if (IN_FLIGHT.includes(r.data.status)) timerRef.current = setTimeout(tick, 2500);
-        else onChanged?.();
-      } catch { timerRef.current = setTimeout(tick, 4000); }
-    };
-    timerRef.current = setTimeout(tick, 2500);
-    return () => clearTimeout(timerRef.current);
+    return startPolling({
+      request: async (signal) => (await api.get(`/websites/sites/${site.id}/status`, { signal })).data,
+      onUpdate: setSite,
+      shouldContinue: (updated) => IN_FLIGHT.includes(updated.status),
+      onComplete: onChanged,
+    });
   }, [inFlight, site.id, onChanged]);
 
   const retry = async () => {
