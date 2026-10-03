@@ -1,5 +1,6 @@
 export function createSftpNavigation() {
   let sequence = 0;
+  let directoryVersion = 0;
   let loading = false;
   let confirmedPath = null;
 
@@ -7,6 +8,7 @@ export function createSftpNavigation() {
     async load(path, request, { onStart, onSuccess, onError, onFinish }) {
       const requestSequence = ++sequence;
       const isCurrent = () => requestSequence === sequence;
+      if (path !== confirmedPath) directoryVersion += 1;
       loading = true;
       onStart();
       try {
@@ -25,14 +27,16 @@ export function createSftpNavigation() {
     },
     getMutationTarget(path) {
       if (loading || confirmedPath === null || path !== confirmedPath) return null;
-      const requestSequence = sequence;
+      const targetVersion = directoryVersion;
+      const targetPath = confirmedPath;
       return {
-        path: confirmedPath,
-        isCurrent: () => requestSequence === sequence,
+        path: targetPath,
+        isCurrent: () => targetVersion === directoryVersion && targetPath === confirmedPath,
       };
     },
     invalidate() {
       sequence += 1;
+      directoryVersion += 1;
       loading = false;
       confirmedPath = null;
     },

@@ -135,6 +135,104 @@ test('a mutation retains its target but cannot refresh it after a newer navigati
   assert.equal(navigation.getMutationTarget('/a').isCurrent(), true);
 });
 
+for (const order of [['delete', 'mkdir'], ['mkdir', 'delete']]) {
+  test(`overlapping delete and mkdir refresh /a after each completion, ${order[0]} first`, async () => {
+    const { navigation, state, load } = createBrowser();
+    let remoteEntries = [{ name: 'old-file', type: 'file' }];
+    await load('/a', Promise.resolve({ path: '/a', entries: [...remoteEntries] }));
+    const responses = { delete: Promise.withResolvers(), mkdir: Promise.withResolvers() };
+    const completed = [];
+    const refreshPaths = [];
+    const mutate = async (action) => {
+      const target = navigation.getMutationTarget(state.path);
+      assert.ok(target);
+      await responses[action].promise;
+      if (action === 'delete') remoteEntries = remoteEntries.filter((entry) => entry.name !== 'old-file');
+      else remoteEntries.push({ name: 'new-folder', type: 'directory' });
+      if (!target.isCurrent()) return;
+      completed.push(action);
+      refreshPaths.push(target.path);
+      await load(target.path, Promise.resolve({ path: target.path, entries: [...remoteEntries] }));
+    };
+    const mutations = { delete: mutate('delete'), mkdir: mutate('mkdir') };
+
+    responses[order[0]].resolve();
+    await mutations[order[0]];
+    assert.deepEqual(completed, [order[0]]);
+    assert.deepEqual(state.entries, remoteEntries);
+    assert.equal(state.loading, false);
+
+    responses[order[1]].resolve();
+    await mutations[order[1]];
+    assert.deepEqual(completed, order);
+    assert.deepEqual(refreshPaths, ['/a', '/a']);
+    assert.equal(state.path, '/a');
+    assert.deepEqual(state.entries, [{ name: 'new-folder', type: 'directory' }]);
+    assert.equal(state.loading, false);
+  });
+}
+
+test('overlapping mutation refreshes keep the newest listing when refresh responses arrive in reverse order', async () => {
+  const { navigation, state, load } = createBrowser();
+  await load('/a', Promise.resolve(listing('/a')));
+  const deletionTarget = navigation.getMutationTarget('/a');
+  const creationTarget = navigation.getMutationTarget('/a');
+  const afterDelete = Promise.withResolvers();
+  const afterMkdir = Promise.withResolvers();
+  const firstRefresh = load(deletionTarget.path, afterDelete.promise);
+  assert.equal(creationTarget.isCurrent(), true);
+  assert.equal(navigation.getMutationTarget('/a'), null);
+  const secondRefresh = load(creationTarget.path, afterMkdir.promise);
+
+  afterMkdir.resolve({ path: '/a', entries: [{ name: 'new-folder', type: 'directory' }] });
+  await secondRefresh;
+  afterDelete.resolve({ path: '/a', entries: [] });
+  await firstRefresh;
+  assert.equal(state.path, '/a');
+  assert.deepEqual(state.entries, [{ name: 'new-folder', type: 'directory' }]);
+  assert.equal(state.loading, false);
+});
+
+for (const destinationLoaded of [false, true]) {
+  test(`a pending mutation in /a cannot refresh over ${destinationLoaded ? 'confirmed' : 'pending'} navigation to /b`, async () => {
+    const { navigation, state, load } = createBrowser();
+    await load('/a', Promise.resolve(listing('/a')));
+    const responses = { delete: Promise.withResolvers(), mkdir: Promise.withResolvers() };
+    const completed = [];
+    const mutate = async (action) => {
+      const target = navigation.getMutationTarget(state.path);
+      assert.ok(target);
+      await responses[action].promise;
+      if (!target.isCurrent()) return;
+      completed.push(action);
+      await load(target.path, Promise.resolve({ path: target.path, entries: [] }));
+    };
+    const deletion = mutate('delete');
+    const creation = mutate('mkdir');
+    responses.delete.resolve();
+    await deletion;
+    const destination = Promise.withResolvers();
+    const switching = load('/b', destination.promise);
+    if (destinationLoaded) {
+      destination.resolve(listing('/b'));
+      await switching;
+    }
+
+    responses.mkdir.resolve();
+    await creation;
+    assert.deepEqual(completed, ['delete']);
+    assert.equal(state.path, destinationLoaded ? '/b' : '/a');
+    assert.equal(state.loading, !destinationLoaded);
+    if (!destinationLoaded) {
+      destination.resolve(listing('/b'));
+      await switching;
+    }
+    assert.equal(state.path, '/b');
+    assert.deepEqual(state.entries, listing('/b').entries);
+    assert.equal(state.loading, false);
+  });
+}
+
 test('cleanup invalidates pending listings and mutation targets', async () => {
   const { navigation, state, load } = createBrowser();
   await load('/home', Promise.resolve(listing('/home')));
