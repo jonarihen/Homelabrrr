@@ -2,12 +2,12 @@ import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { vmLeases, vmSchedules, vmMigrations, users, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms, pveHosts } from '../db/schema/index.ts';
+import { vmLeases, vmSchedules, vmMigrations, users, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms, pveHosts, publicIpAssignments, publicIpPools, publicIps, firewalls, backupTasks } from '../db/schema/index.ts';
 import https from 'node:https';
+import tls from 'node:tls';
 import { EventEmitter } from 'node:events';
 import express from 'express';
 import request from 'supertest';
-import { setTimeout as delay } from 'node:timers/promises';
 
 let testDb: TestDatabase;
 let client: typeof import('../db/client.ts');
@@ -17,6 +17,7 @@ let finalizeMigration: typeof import('./migrate.ts').finalizeMigration;
 let createLeaseForVm: typeof import('../utils/leases.ts').createLeaseForVm;
 let app: express.Express;
 let recordMigrationProgress: typeof import('./migrate.ts').recordMigrationProgress;
+let recordMigrationStartFailure: typeof import('./migrate.ts').recordMigrationStartFailure;
 
 const lease = {
   lease_days: 14,
@@ -51,7 +52,7 @@ before(async () => {
   process.env.DATABASE_URL = testDb.url;
   process.env.SECRET_ENCRYPTION_KEY ||= '44'.repeat(32);
   client = await import('../db/client.ts');
-  ({ repointVmRows, finalizeMigrationSuccess, finalizeMigration, recordMigrationProgress } = await import('./migrate.ts'));
+  ({ repointVmRows, finalizeMigrationSuccess, finalizeMigration, recordMigrationProgress, recordMigrationStartFailure } = await import('./migrate.ts'));
   process.env.SECRET_ENCRYPTION_KEY ||= '44'.repeat(32);
   await testDb.db.insert(users).values([
     { id: 1, username: 'migration-admin', password: 'x', is_admin: true },
@@ -66,6 +67,7 @@ before(async () => {
   });
   app.use('/admin', (await import('./admin.ts')).default);
   app.use('/operations', (await import('./operations.ts')).default);
+  app.use('/migrate', (await import('./migrate.ts')).default);
   app.use((await import('./vms.ts')).default);
 });
 
@@ -83,6 +85,12 @@ beforeEach(async () => {
   await testDb.db.delete(vmAssignments);
   await testDb.db.delete(vmSshConfigs);
   await testDb.db.delete(vmSshUserConfigs);
+  await testDb.db.delete(pveHosts);
+  await testDb.db.delete(publicIpAssignments);
+  await testDb.db.delete(publicIps);
+  await testDb.db.delete(publicIpPools);
+  await testDb.db.delete(firewalls);
+  await testDb.db.delete(backupTasks);
 });
 
 async function seedPolicies(node: string, vmid = 101, source = false) {
@@ -162,10 +170,13 @@ test('does not delete existing target policies when no source policy exists', as
 test('concurrent repoints preserve one migrated lease and schedule', async () => {
   const source = await seedPolicies('1~pve1', 101, true);
   await seedPolicies('2~pve2');
-  await Promise.all([
+  const outcomes = await Promise.allSettled([
     repointVmRows('1~pve1', 101, '2~pve2'),
     repointVmRows('1~pve1', 101, '2~pve2'),
   ]);
+  assert.ok(outcomes.some((outcome) => outcome.status === 'fulfilled'));
+  for (const outcome of outcomes) if (outcome.status === 'rejected') assert.equal(outcome.reason.statusCode, 409);
+  await repointVmRows('1~pve1', 101, '2~pve2');
   await assertRepointed(source, '2~pve2');
 });
 
@@ -222,17 +233,8 @@ for (const mode of ['remote_migrate', 'adopt']) {
   });
 }
 
-async function waitForBlockedPolicyWrites() {
-  for (let i = 0; i < 200; i++) {
-    const { rows } = await testDb.pool.query("SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory'");
-    if (rows[0].count >= 2) return;
-    await delay(10);
-  }
-  assert.fail('policy writers did not wait for the logical VM lock');
-}
-
 for (const existing of [false, true]) {
-  test(`policy creation queued behind finalization cannot recreate the source key (existing=${existing})`, async (t) => {
+  test(`contended policy creation rejects without recreating the source key (existing=${existing})`, async (t) => {
     if (existing) await seedPolicies('1~pve1', 101, true);
     const migration = await seedMigration();
     const locked = Promise.withResolvers<void>();
@@ -254,13 +256,10 @@ for (const existing of [false, true]) {
     const scheduleWrite = request(app).put('/1~pve1/101/schedule')
       .send({ stopTime: '23:00', startTime: '07:00' }).then((response) => response);
     try {
-      await waitForBlockedPolicyWrites();
-    } finally {
-      release.resolve();
-    }
+      assert.equal((await leaseWrite)?.statusCode, 409);
+      assert.equal((await scheduleWrite).status, 409);
+    } finally { release.resolve(); }
     assert.equal(await finalization, true);
-    assert.equal((await leaseWrite)?.statusCode, 409);
-    assert.equal((await scheduleWrite).status, 409);
     const policies = await readPolicies();
     assert.equal(policies.leases.length, existing ? 1 : 0);
     assert.equal(policies.schedules.length, existing ? 1 : 0);
@@ -268,7 +267,9 @@ for (const existing of [false, true]) {
   });
 }
 
-test('policy creation during a running migration is rejected and creation at the completed target succeeds', async () => {
+test('policy creation during a running migration is rejected and creation at the completed target succeeds', async (t) => {
+  await seedHost(2);
+  mockUpstream(t, () => ({ data: { status: 'stopped' } }));
   const migration = await seedMigration();
   await assert.rejects(createLeaseForVm('1~pve1', 101), { statusCode: 409 });
   assert.equal((await request(app).put('/1~pve1/101/schedule').send({ stopTime: '23:00', startTime: '07:00' })).status, 409);
@@ -314,7 +315,9 @@ for (const status of ['running', 'needs_review']) {
   });
 }
 
-test('equivalent unambiguous bare target references support lease and schedule writes', async () => {
+test('equivalent unambiguous bare target references support lease and schedule writes', async (t) => {
+  await seedHost(2);
+  mockUpstream(t, () => ({ data: { status: 'stopped' } }));
   const migration = await seedMigration();
   await finalizeMigrationSuccess(client.db, migration.id);
   assert.ok(await createLeaseForVm('pve2', 101));
@@ -439,3 +442,318 @@ test('deleting a migrated guest removes obsolete location history so its VMID ca
   const replacement = await createLeaseForVm('3~replacement', 101);
   assert.equal(replacement?.node, '3~replacement');
 });
+
+function mockUpstream(t, respond) {
+  return t.mock.method(https, 'request', (url, options, callback) => {
+    const req = new EventEmitter() as any;
+    req.setTimeout = () => {};
+    req.write = () => {};
+    req.destroy = (err) => req.emit('error', err);
+    req.end = () => {
+      void Promise.resolve(respond(url, options)).then(({ statusCode = 200, data }) => {
+        const res = new EventEmitter() as any;
+        res.statusCode = statusCode;
+        callback(res);
+        res.emit('data', JSON.stringify({ data }));
+        res.emit('end');
+      }).catch((err) => req.emit('error', err));
+    };
+    return req;
+  });
+}
+
+async function seedHost(id = 1) {
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  await testDb.db.insert(pveHosts).values({ id, name: `host-${id}`, host: 'pve.invalid', token_id: 'test', token_secret: encryptSecret('test'), verify_tls: true });
+}
+
+for (const status of ['running', 'needs_review']) {
+  test(`deletion rejects ${status} migrations before any Proxmox operation`, async (t) => {
+    const migration = await seedMigration('adopt');
+    await testDb.db.update(vmMigrations).set({ status }).where(eq(vmMigrations.id, migration.id));
+    const original = (await testDb.db.select().from(vmMigrations))[0];
+    const upstream = mockUpstream(t, () => { throw new Error('must not contact upstream'); });
+    assert.equal((await request(app).delete('/1~pve1/101')).status, 409);
+    assert.equal(upstream.mock.callCount(), 0);
+    assert.deepEqual((await testDb.db.select().from(vmMigrations))[0], original);
+  });
+}
+
+for (const source of ['pve', '1~pve']) {
+  test(`qualified deletion protects kept source stored as ${source}`, async (t) => {
+    await testDb.db.insert(vmMigrations).values({ vmid: 101, source_node: source, target_node: '2~pve', status: 'ok', kept_source: true });
+    const upstream = mockUpstream(t, () => { throw new Error('must not contact upstream'); });
+    assert.equal((await request(app).delete('/1~pve/101')).status, 400);
+    assert.equal(upstream.mock.callCount(), 0);
+  });
+}
+
+test('qualified target deletion is allowed when a legacy kept source has the same bare node name', async (t) => {
+  await seedHost(2);
+  await testDb.db.insert(vmMigrations).values({ vmid: 101, source_node: 'pve', target_node: '2~pve', status: 'ok', kept_source: true });
+  mockUpstream(t, (url, options) => ({ data: options.method === 'DELETE' ? 'UPID:pve:delete'
+    : url.pathname.endsWith('/status/current') ? { status: 'stopped' }
+      : url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] }));
+  assert.equal((await request(app).delete('/2~pve/101')).status, 200);
+});
+
+test('migration registration rejects contention throughout deletion and succeeds after cleanup', async (t) => {
+  await seedHost();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  mockUpstream(t, async (url, options) => {
+    if (options.method === 'DELETE') { entered.resolve(); await release.promise; return { data: 'UPID:pve1:delete' }; }
+    return { data: url.pathname.endsWith('/status/current') ? { status: 'stopped' }
+      : url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] };
+  });
+  const deleting = request(app).delete('/1~pve1/101').then((response) => response);
+  await entered.promise;
+  const { withVmMigrationLock } = await import('../utils/vmMigrationLock.ts');
+  let registered = false;
+  try {
+    await assert.rejects(withVmMigrationLock(101, async () => { registered = true; }), { statusCode: 409 });
+    assert.equal(registered, false);
+  } finally { release.resolve(); }
+  assert.equal((await deleting).status, 200);
+  await withVmMigrationLock(101, async () => { registered = true; });
+  assert.equal(registered, true);
+});
+
+test('cleanup retries after irreversible deletion and does not treat unreachable hosts as absent', async (t) => {
+  await seedHost(2);
+  const migration = await seedMigration();
+  await finalizeMigrationSuccess(client.db, migration.id);
+  await seedPolicies('2~pve2');
+  let absent = false;
+  let deletes = 0;
+  mockUpstream(t, (url, options) => {
+    if (url.pathname.endsWith('/status/current')) return { statusCode: absent ? 404 : 200, data: absent ? null : { status: 'stopped' } };
+    if (options.method === 'DELETE') { absent = true; deletes++; return { data: 'UPID:pve1:delete' }; }
+    return { data: url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] };
+  });
+  const originalConnect = client.pool.connect.bind(client.pool);
+  const connect = t.mock.method(client.pool, 'connect', async (...args) => {
+    const connection = await originalConnect(...args);
+    const query = connection.query.bind(connection);
+    connection.query = (...queryArgs) => {
+      if (queryArgs[0]?.text?.startsWith('delete from "vm_migrations"')) throw new Error('cleanup unavailable');
+      return query(...queryArgs);
+    };
+    const release = connection.release.bind(connection);
+    connection.release = (...releaseArgs) => { connection.query = query; return release(...releaseArgs); };
+    return connection;
+  });
+  assert.equal((await request(app).delete('/2~pve2/101')).status, 500);
+  assert.equal(deletes, 1);
+  assert.equal((await testDb.db.select().from(vmMigrations)).length, 1);
+  connect.mock.restore();
+  const retry = await request(app).delete('/2~pve2/101');
+  assert.equal(retry.status, 200, JSON.stringify(retry.body));
+  assert.equal(retry.body.alreadyAbsent, true);
+  assert.equal(deletes, 1);
+  assert.deepEqual(await testDb.db.select().from(vmMigrations), []);
+  assert.ok(await createLeaseForVm('3~replacement', 101));
+  t.mock.restoreAll();
+  mockUpstream(t, () => { throw new Error('connection unavailable'); });
+  const failed = await seedMigration();
+  await testDb.db.update(vmMigrations).set({ status: 'ok' }).where(eq(vmMigrations.id, failed.id));
+  assert.equal((await request(app).delete('/2~pve2/101')).status, 500);
+  assert.equal((await testDb.db.select().from(vmMigrations)).length, 1);
+});
+
+test('ambiguous migration submissions retain review protection; known pre-submit failures are terminal', async () => {
+  const migration = await seedMigration();
+  await recordMigrationStartFailure(migration.id, true);
+  const [row] = await testDb.db.select().from(vmMigrations);
+  assert.equal(row.status, 'needs_review');
+  assert.equal(row.upstream_status, 'submission:unknown');
+  await assert.rejects(createLeaseForVm('1~pve1', 101), { statusCode: 409 });
+  assert.equal((await request(app).delete('/1~pve1/101')).status, 409);
+  const [second] = await testDb.db.insert(vmMigrations).values({ vmid: 102, source_node: '1~pve1', target_node: '2~pve2' }).returning();
+  await recordMigrationStartFailure(second.id, false);
+  assert.equal((await testDb.db.select().from(vmMigrations).where(eq(vmMigrations.id, second.id)))[0].status, 'error');
+});
+
+test('a losing migration cannot mutate or restore media while the winner prepares the source', async (t) => {
+  await seedHost();
+  await seedHost(2);
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let configWrites = 0;
+  let detached = false;
+  mockUpstream(t, async (url, options) => {
+    if (url.pathname.endsWith('/cluster/resources')) return { data: [{ vmid: 101, node: 'pve1', type: 'qemu', status: 'stopped' }] };
+    if (options.method === 'PUT') {
+      configWrites++;
+      entered.resolve();
+      await release.promise;
+      detached = true;
+      return { data: null };
+    }
+    if (url.pathname.endsWith('/config')) return { data: { ide2: detached ? 'none,media=cdrom' : 'local:iso/test.iso,media=cdrom' } };
+    if (url.pathname.endsWith('/status')) return { data: { memory: { total: 1e12, free: 1e12 } } };
+    return { data: [] };
+  });
+  t.mock.method(tls, 'connect', () => { throw new Error('pre-submit certificate lookup failed'); });
+  const body = { targetNode: '2~pve2', targetStorage: 'local', targetBridge: 'vmbr0' };
+  const winning = request(app).post('/migrate/1~pve1/101').send(body).then((response) => response);
+  await entered.promise;
+  try {
+    assert.equal((await request(app).post('/migrate/1~pve1/101').send(body)).status, 409);
+    assert.equal(configWrites, 1);
+  } finally { release.resolve(); }
+  assert.equal((await winning).status, 500);
+  assert.equal(configWrites, 2, 'only winner detaches and restores its own media');
+});
+
+test('a lost remote-migrate response leaves the claimed operation reviewable and blocks retry', async (t) => {
+  await seedHost();
+  await seedHost(2);
+  t.mock.method(tls, 'connect', (_options, callback) => {
+    const socket = new EventEmitter() as any;
+    socket.getPeerCertificate = () => ({ fingerprint256: 'AA:BB' });
+    socket.end = () => {};
+    socket.setTimeout = () => {};
+    queueMicrotask(callback);
+    return socket;
+  });
+  let submissions = 0;
+  mockUpstream(t, (url) => {
+    if (url.pathname.endsWith('/remote_migrate')) { submissions++; throw new Error('response connection lost'); }
+    if (url.pathname.endsWith('/cluster/resources')) return { data: [{ vmid: 101, node: 'pve1', type: 'qemu', status: 'stopped' }] };
+    if (url.pathname.endsWith('/config')) return { data: {} };
+    if (url.pathname.endsWith('/status')) return { data: { memory: { total: 1e12, free: 1e12 } } };
+    return { data: [] };
+  });
+  const response = await request(app).post('/migrate/1~pve1/101').send({ targetNode: '2~pve2', targetStorage: 'local', targetBridge: 'vmbr0' });
+  assert.equal(response.status, 500, JSON.stringify(response.body));
+  assert.equal(submissions, 1);
+  const [row] = await testDb.db.select().from(vmMigrations);
+  assert.equal(row.status, 'needs_review');
+  assert.equal(row.upstream_status, 'submission:unknown');
+  assert.equal((await request(app).post('/migrate/1~pve1/101').send({ targetNode: '2~pve2', targetStorage: 'local', targetBridge: 'vmbr0' })).status, 409);
+  assert.equal(submissions, 1);
+});
+
+test('bare target deletion cleans canonical policies and does not let late admin writes recreate them', async (t) => {
+  await seedHost(2);
+  const migration = await seedMigration();
+  const source = await seedPolicies('1~pve1', 101, true);
+  await finalizeMigrationSuccess(client.db, migration.id);
+  let absent = false;
+  mockUpstream(t, (url, options) => {
+    if (options.method === 'DELETE') { absent = true; return { data: 'UPID:pve2:delete' }; }
+    if (url.pathname.endsWith('/status/current')) return { statusCode: absent ? 404 : 200, data: absent ? null : { status: 'stopped' } };
+    return { data: url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] };
+  });
+  assert.equal((await request(app).delete('/pve2/101')).status, 200);
+  assert.deepEqual(await readPolicies(), { leases: [], schedules: [] });
+  assert.deepEqual(await testDb.db.select().from(vmMigrations), []);
+  assert.equal((await request(app).post('/admin/leases/2~pve2/101/renew')).status, 404);
+  assert.equal((await request(app).put('/2~pve2/101/schedule').send({ stopTime: '23:00', startTime: '07:00' })).status, 404);
+  assert.deepEqual(await readPolicies(), { leases: [], schedules: [] });
+  assert.ok(source.lease.id);
+});
+
+test('a delayed authorized policy request cannot recreate rows after deletion releases its lock', async (t) => {
+  await seedHost();
+  await seedPolicies('1~pve1');
+  let absent = false;
+  const entered = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  mockUpstream(t, (url, options) => {
+    if (options.method === 'DELETE') { absent = true; return { data: 'UPID:pve1:delete' }; }
+    if (url.pathname.endsWith('/status/current')) return { statusCode: absent ? 404 : 200, data: absent ? null : { status: 'stopped' } };
+    return { data: url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] };
+  });
+  const { withVmPolicyWrite } = await import('../utils/vmMigrationLock.ts');
+  const authorizedRequest = (async () => {
+    entered.resolve();
+    await resume.promise;
+    return withVmPolicyWrite('1~pve1', 101, async (tx) => tx.insert(vmSchedules).values({ node: '1~pve1', vmid: 101 }), { userId: 1 });
+  })();
+  await entered.promise;
+  assert.equal((await request(app).delete('/1~pve1/101')).status, 200);
+  resume.resolve();
+  await assert.rejects(authorizedRequest, { statusCode: 404 });
+  assert.deepEqual(await readPolicies(), { leases: [], schedules: [] });
+});
+
+test('policy authorization is revalidated under the lock rather than trusting an earlier assignment', async (t) => {
+  await seedHost();
+  mockUpstream(t, () => ({ data: { status: 'stopped' } }));
+  const { renewLease } = await import('../utils/leases.ts');
+  await testDb.db.insert(vmAssignments).values({ user_id: 2, node: '1~pve1', vmid: 101 });
+  await testDb.db.delete(vmAssignments);
+  await assert.rejects(renewLease('1~pve1', 101, { actor: { userId: 2 } }), { statusCode: 403 });
+  assert.deepEqual(await readPolicies(), { leases: [], schedules: [] });
+});
+
+test('public-IP assignment node/host move atomically while backup task history retains its task host', async (t) => {
+  const [firewall] = await testDb.db.insert(firewalls).values({ name: 'test', host: 'firewall.invalid', api_key: 'unused' }).returning();
+  const [pool] = await testDb.db.insert(publicIpPools).values({ firewall_id: firewall.id, name: 'test', external_interface: 'wan1' }).returning();
+  const [ip] = await testDb.db.insert(publicIps).values({ pool_id: pool.id, firewall_id: firewall.id, address: '192.0.2.20' }).returning();
+  const [assignment] = await testDb.db.insert(publicIpAssignments).values({
+    public_ip_id: ip.id, firewall_id: firewall.id, user_id: 1, private_ip: '10.0.0.20', node: 'pve1', vmid: 101, proxmox_host_id: 1,
+  }).returning();
+  const [backup] = await testDb.db.insert(backupTasks).values({ node: '1~pve1', vmid: 101, upid: 'UPID:pve1:backup', status: 'ok' }).returning();
+  const migration = await seedMigration();
+  const transaction = client.db.transaction.bind(client.db);
+  t.mock.method(client.db, 'transaction', (callback) => transaction(async (tx) => {
+    const update = tx.update.bind(tx);
+    t.mock.method(tx, 'update', (table) => { if (table === publicIpAssignments) throw new Error('IP write failed'); return update(table); });
+    return callback(tx);
+  }));
+  await assert.rejects(finalizeMigrationSuccess(client.db, migration.id), /IP write failed/);
+  assert.deepEqual((await testDb.db.select().from(publicIpAssignments))[0], assignment);
+  assert.deepEqual((await testDb.db.select().from(backupTasks))[0], backup);
+  t.mock.restoreAll();
+  assert.equal(await finalizeMigrationSuccess(client.db, migration.id), true);
+  assert.deepEqual((await testDb.db.select().from(publicIpAssignments))[0], { ...assignment, node: '2~pve2', proxmox_host_id: 2 });
+  assert.deepEqual((await testDb.db.select().from(backupTasks))[0], backup);
+});
+
+for (const task of [{ status: 'running' }, { status: 'stopped', exitstatus: 'OK' }]) {
+  test(`manual failure rejects upstream ${JSON.stringify(task)} and allows only a later failed result`, async (t) => {
+    await seedHost();
+    const migration = await seedMigration();
+    await testDb.db.update(vmMigrations).set({ status: 'needs_review', upid: 'UPID:pve1:test' }).where(eq(vmMigrations.id, migration.id));
+    const original = (await testDb.db.select().from(vmMigrations))[0];
+    mockUpstream(t, () => ({ data: task }));
+    assert.equal((await request(app).post(`/operations/migration/${migration.id}/resolve`).send({ status: 'error' })).status, 409);
+    assert.deepEqual((await testDb.db.select().from(vmMigrations))[0], original);
+    t.mock.restoreAll();
+    mockUpstream(t, () => ({ data: { status: 'stopped', exitstatus: 'ERROR' } }));
+    assert.equal((await request(app).post(`/operations/migration/${migration.id}/resolve`).send({ status: 'error' })).status, 200);
+    assert.equal((await testDb.db.select().from(vmMigrations))[0].status, 'error');
+  });
+}
+
+test('legacy bare source task verification identifies the unique saved task among same-named hosts', async (t) => {
+  await seedHost();
+  await seedHost(2);
+  await testDb.db.update(pveHosts).set({ host: 'host-1.invalid' }).where(eq(pveHosts.id, 1));
+  await testDb.db.update(pveHosts).set({ host: 'host-2.invalid' }).where(eq(pveHosts.id, 2));
+  const [migration] = await testDb.db.insert(vmMigrations).values({ vmid: 101, source_node: 'pve', target_node: '2~pve', status: 'needs_review', upid: 'UPID:pve:saved' }).returning();
+  mockUpstream(t, (url) => url.pathname.endsWith('/nodes') ? { data: [{ node: 'pve' }] }
+    : url.hostname === 'host-1.invalid' ? { data: { status: 'stopped', exitstatus: 'OK' } } : { statusCode: 404, data: null });
+  assert.equal((await request(app).post(`/operations/migration/${migration.id}/resolve`).send({ status: 'ok' })).status, 200);
+});
+
+for (const task of [{ status: 'running' }, { status: 'stopped', exitstatus: 'ERROR' }]) {
+  test(`manual success rejects upstream ${JSON.stringify(task)} without moving records`, async (t) => {
+    await seedHost();
+    const migration = await seedMigration();
+    await testDb.db.update(vmMigrations).set({ status: 'needs_review', upid: 'UPID:pve1:test' }).where(eq(vmMigrations.id, migration.id));
+    const original = (await testDb.db.select().from(vmMigrations))[0];
+    const source = await seedPolicies('1~pve1', 101, true);
+    mockUpstream(t, () => ({ data: task }));
+    assert.equal((await request(app).post(`/operations/migration/${migration.id}/resolve`).send({ status: 'ok' })).status, 409);
+    assert.deepEqual((await testDb.db.select().from(vmMigrations))[0], original);
+    assert.deepEqual(await readPolicies(), { leases: [source.lease], schedules: [source.schedule] });
+    t.mock.restoreAll();
+    mockUpstream(t, () => ({ data: { status: 'stopped', exitstatus: 'OK' } }));
+    assert.equal((await request(app).post(`/operations/migration/${migration.id}/resolve`).send({ status: 'ok' })).status, 200);
+    await assertRepointed(source, '2~pve2');
+  });
+}

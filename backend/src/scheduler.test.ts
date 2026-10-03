@@ -212,6 +212,30 @@ for (const action of ['stop', 'start'] as const) {
   }
 }
 
+for (const action of ['stop', 'start'] as const) {
+  test(`failed migration revalidation leaves the ${action} edge untouched for retry`, async (t) => {
+    status = action === 'stop' ? 'running' : 'stopped';
+    const original = await insertSchedule(action === 'start' ? { stop_time: '03:00', last_off: 1 } : {});
+    let failValidation = true;
+    interceptGuardQuery(t, async (query, args) => {
+      if (failValidation && args[0]?.text?.includes('from "vm_migrations"')) {
+        failValidation = false;
+        throw new Error('migration validation unavailable');
+      }
+      return query();
+    });
+    const warnings = t.mock.method(console, 'warn', () => {});
+    await sweep();
+    assert.equal(warnings.mock.callCount(), 1);
+    assert.deepEqual(actions, []);
+    assert.deepEqual(await readSchedule(), original);
+    now += 10_000;
+    await sweep();
+    assert.deepEqual(actions, [action === 'start' ? 'start' : 'shutdown']);
+    assert.equal((await readSchedule()).last_action, action === 'start' ? 'start:start' : 'stop:shutdown');
+  });
+}
+
 test('a failed database claim never dispatches a power action', async (t) => {
   const original = await insertSchedule();
   interceptGuardQuery(t, async (query, args) => {

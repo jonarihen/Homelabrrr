@@ -15,7 +15,7 @@ import { db, pool, type DbOrTx } from './db/client.ts';
 import { vmSchedules } from './db/schema/index.ts';
 import { getAllVMs, scheduledStopVM, scheduledStartVM } from './proxmox.ts';
 import { logAuditEntry } from './utils/audit.ts';
-import { nodeLookupCandidates } from './utils/nodeRef.ts';
+import { decodeNodeRef, nodeLookupCandidates } from './utils/nodeRef.ts';
 import { withMigrationSafeSchedule } from './utils/vmMigrationLock.ts';
 import {
   isValidTime, isValidTimezone, timeToMinutes, zonedParts, offWindowContains,
@@ -41,12 +41,12 @@ function systemAudit(action: string, target: string, detail: string) {
     .catch(() => { /* never let audit failure break the loop */ });
 }
 
-function findVmStatus(vms: any[], node: any, vmid: any) {
+export function findVmStatus(vms: any[], node: any, vmid: any) {
   const candidates = new Set(nodeLookupCandidates(node));
   const target = Number.parseInt(vmid, 10);
   const vm = vms.find((v) => (
     Number.parseInt(v.vmid, 10) === target
-    && (candidates.has(v.nodeRef) || candidates.has(v.node))
+    && (decodeNodeRef(node).hostId !== null ? v.nodeRef === decodeNodeRef(node).nodeRef : candidates.has(v.nodeRef) || candidates.has(v.node))
   ));
   return vm ? vm.status : null;
 }
@@ -89,7 +89,7 @@ async function markAction(schedule: Schedule, action: string, detail: string, da
 function claimAndRunAction(schedule: Schedule, action: 'stop' | 'start', flags: ScheduleFlags) {
   if (stopping) return;
   const key = `${schedule.node}/${schedule.vmid}`;
-  if (inFlight.has(key) || inFlight.size >= Math.max(1, pool.options.max - 1)) return;
+  if (inFlight.has(key) || inFlight.size >= pool.options.max - 1) return;
   inFlight.add(key);
   claiming.add(key);
 
@@ -101,8 +101,8 @@ function claimAndRunAction(schedule: Schedule, action: 'stop' | 'start', flags: 
     claiming.delete(key);
     try {
       const result = action === 'stop'
-        ? await scheduledStopVM(schedule.node, schedule.vmid, { timeoutMs: SHUTDOWN_TIMEOUT_MS })
-        : await scheduledStartVM(schedule.node, schedule.vmid);
+        ? await scheduledStopVM(schedule.node, schedule.vmid, { timeoutMs: SHUTDOWN_TIMEOUT_MS }, database)
+        : await scheduledStartVM(schedule.node, schedule.vmid, database);
       if (action === 'stop') {
         await database.update(vmSchedules)
           .set({

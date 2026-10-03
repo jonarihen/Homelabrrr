@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmMigrations, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms,
-  vmLeases, vmSchedules,
+  vmLeases, vmSchedules, publicIpAssignments,
 } from '../db/schema/index.ts';
 import {
   getAllVMs, getHost, getHosts, remoteMigrateVm, getTaskStatus, getTaskLog,
@@ -85,6 +85,13 @@ async function repointVmRowsInTransaction(sourceNode, vmid, targetNode, tx: DbOr
   }
   await tx.update(provisionedVms).set({ node: targetNode })
     .where(and(eq(provisionedVms.vmid, Number(vmid)), inArray(provisionedVms.node, candidates)));
+  const sourceRef = decodeNodeRef(sourceNode);
+  const targetHostId = decodeNodeRef(targetNode).hostId;
+  const sourceIpRows = sourceRef.hostId === null ? inArray(publicIpAssignments.node, candidates)
+    : or(eq(publicIpAssignments.node, sourceRef.nodeRef), and(eq(publicIpAssignments.node, sourceRef.nodeName),
+      or(eq(publicIpAssignments.proxmox_host_id, sourceRef.hostId), isNull(publicIpAssignments.proxmox_host_id))));
+  await tx.update(publicIpAssignments).set({ node: targetNode, ...(targetHostId === null ? {} : { proxmox_host_id: targetHostId }) })
+    .where(and(eq(publicIpAssignments.vmid, Number(vmid)), sourceIpRows));
 }
 
 export async function finalizeMigrationSuccess(
@@ -102,6 +109,12 @@ export async function finalizeMigrationSuccess(
       .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, expectedStatus)))
       .returning();
     if (!claimed) return;
+    if (expectedStatus === 'needs_review' && claimed.upid) {
+      const task = await getTaskStatus(claimed.source_node, claimed.upid, tx);
+      if (task?.status !== 'stopped' || task.exitstatus !== 'OK') {
+        throw httpError(409, 'Upstream migration task must be stopped with an OK result before successful verification');
+      }
+    }
     if (claimed.mode !== 'adopt') await closeSteps(id, true, detail, tx);
     await repointVmRowsInTransaction(claimed.source_node, claimed.vmid, claimed.target_node, tx);
     return claimed;
@@ -111,11 +124,38 @@ export async function finalizeMigrationSuccess(
   return true;
 }
 
+export async function finalizeMigrationFailure(database: DbOrTx, id: number, detail: string): Promise<boolean> {
+  return database.transaction(async (tx) => {
+    const [snapshot] = await tx.select({ vmid: vmMigrations.vmid }).from(vmMigrations).where(eq(vmMigrations.id, id));
+    if (!snapshot) return false;
+    await lockVmMigration(tx, snapshot.vmid);
+    const [claimed] = await tx.update(vmMigrations).set({ status: 'error', status_detail: detail, finished_at: new Date() })
+      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'needs_review'))).returning();
+    if (!claimed) return false;
+    if (claimed.upid) {
+      const task = await getTaskStatus(claimed.source_node, claimed.upid, tx);
+      if (task?.status !== 'stopped' || !task.exitstatus || task.exitstatus === 'OK') {
+        throw httpError(409, 'Upstream migration task must be stopped with a failed result before failure verification');
+      }
+    }
+    return true;
+  });
+}
+
+export async function recordMigrationStartFailure(id: number, uncertain: boolean) {
+  if (!uncertain) return finalizeMigration(id, false, 'Upstream migration could not be started');
+  await db.update(vmMigrations).set({
+    status: 'needs_review', status_detail: 'Migration submission outcome is unknown; verify source, target and upstream tasks before resolving',
+    upstream_status: 'submission:unknown',
+  }).where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
+}
+
 export async function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
   if (ok) {
     try {
       return await finalizeMigrationSuccess(db, id, detail, { keptSource });
     } catch (err) {
+      if (err.statusCode === 409) return false;
       console.error(`[migrate] portal finalization ${id} failed:`, err.message);
       try {
         await db.update(vmMigrations).set({
@@ -1021,6 +1061,9 @@ router.post('/:node/:vmid', async (req, res) => {
     let ejected = [];
     let inserted;
     if (mode === 'remote_migrate') {
+      inserted = await claimMigration();
+      let submitted = false;
+      try {
       // Proxmox ships the ACTIVE (on-disk) source config for a cross-host
       // migration, so a stale boot-order entry (device removed/rebused but
       // still listed) makes the target reject the config. Validate against the
@@ -1036,6 +1079,7 @@ router.post('/:node/:vmid', async (req, res) => {
           // so the migration would still fail. Refuse early with guidance
           // instead of letting Proxmox abort three seconds in.
           if (running) {
+            await recordMigrationStartFailure(inserted.id, false);
             return res.status(409).json({
               code: 'stale_boot_order',
               boot: activeCfg.boot,
@@ -1066,6 +1110,7 @@ router.post('/:node/:vmid', async (req, res) => {
           const afterCfg = await getVMConfigCurrent(sourceRef, vmid);
           const stillAttached = planCdromDetach(afterCfg, { sharedStorages });
           if (stillAttached.keys.length > 0) {
+            await recordMigrationStartFailure(inserted.id, false);
             return res.status(409).json({
               code: 'cdrom_eject_pending',
               error: `Could not eject the CD-ROM ISO from ${stillAttached.keys.join(', ')} — Proxmox deferred the change instead of applying it. Eject the ISO in Proxmox (or stop the VM) and start the migration again; a guest with a local ISO attached cannot be migrated.`,
@@ -1075,8 +1120,6 @@ router.post('/:node/:vmid', async (req, res) => {
           console.log(`[migrate] VM ${vmid}: ejected local CD-ROM ${ejected.map((e) => `${e.key}=${e.volid}`).join(', ')}`);
         }
       }
-      try {
-        inserted = await claimMigration();
         upid = await remoteMigrateVm(sourceRef, vmid, vmtype, targetHost, {
           // A bare storage id when everything lands in one pool, otherwise the
           // `src:tgt,…` pair list that spreads the disks.
@@ -1085,11 +1128,11 @@ router.post('/:node/:vmid', async (req, res) => {
           online: vmtype === 'qemu' && running && !!online,
           restart: vmtype === 'lxc' && running,
           deleteSource: !!deleteSource,
+          onSubmit: () => { submitted = true; },
         });
       } catch (err) {
-        // The migration never started — put the ISOs back so the VM is left
-        // exactly as it was found.
-        if (ejected.length > 0) {
+        const uncertain = submitted && ![400, 401, 403, 404, 405, 409, 422].includes(err.upstreamStatus);
+        if (!uncertain && ejected.length > 0) {
           try {
             await updateVMConfig(sourceRef, vmid, Object.fromEntries(ejected.map((e) => [e.key, e.value])));
             ejected = [];
@@ -1097,7 +1140,7 @@ router.post('/:node/:vmid', async (req, res) => {
             console.warn(`[migrate] VM ${vmid}: could not re-attach ejected CD-ROM ISOs: ${restoreErr.message}`);
           }
         }
-        if (inserted) await finalizeMigration(inserted.id, false, 'Upstream migration could not be started');
+        if (inserted) await recordMigrationStartFailure(inserted.id, uncertain);
         throw err;
       }
     } else {
