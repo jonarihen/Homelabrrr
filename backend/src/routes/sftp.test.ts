@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import express from 'express';
 import request from 'supertest';
 import ssh2 from 'ssh2';
+import { sshClientError } from '../utils/sshError.ts';
 import { requestContext } from '../utils/logger.ts';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
 import { sessions, users, vmAssignments } from '../db/schema/index.ts';
@@ -29,9 +30,38 @@ await testDb.db.insert(vmAssignments).values({ user_id: USER_ID, node: 'host1~pv
  */
 let plan: Record<string, { code: number; message?: string }> = {};
 let liveConnections = 0;
+let transportFailure: { category: string; name: string; code: string } | undefined;
+const originalConnect = ssh2.Client.prototype.connect;
+ssh2.Client.prototype.connect = function (...args) {
+  this.once('error', (err) => {
+    transportFailure = {
+      category: sshClientError(err).code,
+      name: String(err?.name || '').replace(/[^a-zA-Z]/g, '').slice(0, 40),
+      code: String(err?.code || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40),
+    };
+  });
+  try {
+    return originalConnect.apply(this, args);
+  } catch (err) {
+    transportFailure = {
+      category: /parse privateKey|private key/i.test(String(err?.message)) ? 'SSH_KEY_PARSE_FAILED' : sshClientError(err).code,
+      name: String(err?.name || '').replace(/[^a-zA-Z]/g, '').slice(0, 40),
+      code: String(err?.code || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40),
+    };
+    throw err;
+  }
+};
 
-const hostKey = utils.generateKeyPairSync('ed25519');
-const clientKey = utils.generateKeyPairSync('ed25519');
+function fixtureKeyPair() {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const key = utils.generateKeyPairSync('ed25519');
+    if (!(utils.parseKey(key.private) instanceof Error)) return key;
+  }
+  throw new Error('Could not generate a parseable SSH fixture key');
+}
+
+const hostKey = fixtureKeyPair();
+const clientKey = fixtureKeyPair();
 const hostFingerprint = `SHA256:${createHash('sha256')
   .update(Buffer.from(String(hostKey.public).split(' ')[1], 'base64'))
   .digest('base64')}`;
@@ -82,6 +112,7 @@ sftpSessions.set(TOKEN, {
 
 test.after(async () => {
   sftpSessions.delete(TOKEN);
+  ssh2.Client.prototype.connect = originalConnect;
   server.close();
   await testDb.drop();
 });
@@ -158,9 +189,11 @@ const cases = [
 ];
 
 for (const scenario of cases) {
-  test(`SFTP error callbacks answer instead of crashing when ${scenario.name}`, async () => {
+  test(`SFTP error callbacks answer instead of crashing when ${scenario.name}`, async (t) => {
     plan = scenario.plan;
+    transportFailure = undefined;
     const response = await scenario.send();
+    if (response.status !== scenario.status) t.diagnostic(JSON.stringify({ transportFailure, responseCode: response.body.code, liveConnections }));
 
     assert.equal(response.status, scenario.status);
     assert.equal(response.body.code, scenario.code);
