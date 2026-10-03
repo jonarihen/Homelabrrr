@@ -6,20 +6,20 @@ import request from 'supertest';
 import ssh2 from 'ssh2';
 import { requestContext } from '../utils/logger.ts';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
+import { sessions, users, vmAssignments } from '../db/schema/index.ts';
 
 const { Server, utils } = ssh2;
 const { STATUS_CODE } = utils.sftp;
 
-// The router imports the Drizzle client and the secret helpers at load time, so
-// both need to be satisfied before the dynamic import below. Nothing these
-// tests touch queries PostgreSQL — every error path answers before the audit
-// write — but the module must load.
 process.env.SECRET_ENCRYPTION_KEY = '44'.repeat(32);
 const testDb = await createTestDatabase();
 process.env.DATABASE_URL = testDb.url;
 const { default: sftpRouter, sftpSessions } = await import('./sftp.ts');
 
 const USER_ID = 7;
+await testDb.db.insert(users).values({ id: USER_ID, username: 'operator', password: 'unused' });
+await testDb.db.insert(sessions).values({ sid: 'test-session', sess: { userId: USER_ID }, expire: new Date(Date.now() + 60 * 60 * 1000) });
+await testDb.db.insert(vmAssignments).values({ user_id: USER_ID, node: 'host1~pve1', vmid: 101 });
 
 /**
  * An SFTP subsystem that answers every request with a chosen status. Real
@@ -77,6 +77,7 @@ sftpSessions.set(TOKEN, {
   privateKey: clientKey.private,
   passphrase: '',
   expires: Date.now() + 60 * 60 * 1000,
+  absoluteExpires: Date.now() + 8 * 60 * 60 * 1000,
 });
 
 test.after(async () => {
@@ -90,6 +91,7 @@ function app() {
   instance.use(requestContext, express.json());
   instance.use((req, _res, next) => {
     (req as express.Request & { session: unknown }).session = { userId: USER_ID, username: 'operator', isAdmin: false };
+    req.sessionID = 'test-session';
     next();
   });
   instance.use('/api/sftp', sftpRouter);
