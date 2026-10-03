@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activateModal, getFocusableElements, getTabDestination, isTopModal, lockBackgroundScroll } from './modalFocus.js';
+import { activateModal, getFocusableElements, getTabDestination, isTopModal, lockBackgroundScroll, refreshModalFocus } from './modalFocus.js';
 
 function style(initial = {}) {
   const properties = new Map(Object.entries(initial).map(([name, value]) => [name, [value, '']]));
@@ -138,6 +138,77 @@ test('initial focus prefers autofocus and preserves an already focused content c
   release = open(entry, trigger);
   assert.equal(doc.activeElement, entry.controls[0]);
   release();
+});
+
+test('replacing active content refocuses the reused modal without changing its return trigger or scroll lock', () => {
+  const { doc, trigger } = documentFixture();
+  const entry = modal(doc);
+  const release = open(entry, trigger);
+  const original = entry.controls[0];
+  const replacement = element(doc, { dialog: entry.dialog });
+  entry.content.children = [replacement];
+  original.isConnected = false;
+  doc.activeElement = doc.body;
+  refreshModalFocus(entry.dialog);
+  assert.equal(doc.activeElement, replacement);
+  assert.equal(doc.body.style.getPropertyValue('overflow-y'), 'hidden');
+  const back = element(doc, { dialog: entry.dialog });
+  entry.content.children = [back];
+  replacement.isConnected = false;
+  doc.activeElement = doc.body;
+  refreshModalFocus(entry.dialog);
+  assert.equal(doc.activeElement, back);
+  release();
+  assert.equal(doc.activeElement, trigger);
+  assert.equal(doc.body.style.getPropertyValue('overflow-y'), '');
+});
+
+test('focus refresh preserves valid control and dialog focus and repairs disabled or missing controls', () => {
+  const { doc, trigger } = documentFixture();
+  const entry = modal(doc, { controls: [{ autofocus: true }, {}] });
+  const release = open(entry, trigger);
+  entry.controls[1].focus();
+  const focusOptions = entry.controls[1].focusOptions;
+  refreshModalFocus(entry.dialog);
+  assert.equal(doc.activeElement, entry.controls[1]);
+  assert.equal(entry.controls[1].focusOptions, focusOptions);
+  entry.controls[1].disabled = true;
+  refreshModalFocus(entry.dialog);
+  assert.equal(doc.activeElement, entry.controls[0]);
+  entry.content.children = [];
+  doc.activeElement = doc.body;
+  refreshModalFocus(entry.dialog);
+  assert.equal(doc.activeElement, entry.dialog);
+  const dialogFocusOptions = entry.dialog.focusOptions;
+  refreshModalFocus(entry.dialog);
+  assert.equal(entry.dialog.focusOptions, dialogFocusOptions);
+  release();
+  doc.activeElement = doc.body;
+  refreshModalFocus(entry.dialog);
+  refreshModalFocus(null);
+  refreshModalFocus(undefined);
+  assert.equal(doc.activeElement, doc.body);
+});
+
+test('refreshing a covered parent cannot steal focus from a nested modal', () => {
+  const { doc, trigger } = documentFixture();
+  const parent = modal(doc);
+  const child = modal(doc, { controls: [{}, {}] });
+  parent.content.children.push(child.dialog);
+  const releaseParent = open(parent, trigger);
+  const releaseChild = open(child, parent.controls[0]);
+  child.controls[1].focus();
+  refreshModalFocus(parent.dialog);
+  refreshModalFocus(child.dialog);
+  assert.equal(doc.activeElement, child.controls[1]);
+  doc.activeElement = doc.body;
+  refreshModalFocus(parent.dialog);
+  assert.equal(doc.activeElement, doc.body);
+  refreshModalFocus(child.dialog);
+  assert.equal(doc.activeElement, child.controls[0]);
+  releaseChild();
+  releaseParent();
+  assert.equal(doc.activeElement, trigger);
 });
 
 test('a dialog with no meaningful control focuses itself and includes Close in the Tab loop', () => {

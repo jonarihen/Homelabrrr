@@ -1,5 +1,5 @@
 import { useId, useLayoutEffect, useRef } from 'react';
-import { activateModal, isTopModal } from '../utils/modalFocus.js';
+import { activateModal, isTopModal, refreshModalFocus } from '../utils/modalFocus.js';
 
 export default function Modal({ title, onClose, children, size = 'md' }) {
   const titleId = useId();
@@ -16,6 +16,8 @@ export default function Modal({ title, onClose, children, size = 'md' }) {
     trigger: triggerRef.current,
     onClose: () => onCloseRef.current(),
   }), []);
+
+  useLayoutEffect(() => { refreshModalFocus(dialogRef.current); });
 
   const sizes = {
     sm: 'max-w-md',

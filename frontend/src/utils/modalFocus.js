@@ -88,6 +88,11 @@ export function isTopModal(dialog) {
   return modalStates.get(dialog?.ownerDocument)?.entries.at(-1)?.dialog === dialog;
 }
 
+export function refreshModalFocus(dialog) {
+  const entry = modalStates.get(dialog?.ownerDocument)?.entries.at(-1);
+  if (entry && entry.dialog === dialog) focusInitial(entry);
+}
+
 export function activateModal({ dialog, content, trigger, onClose }) {
   const doc = dialog.ownerDocument;
   let state = modalStates.get(doc);

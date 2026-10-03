@@ -36,6 +36,39 @@ test('editing a role shows a review diff and impact before applying', async ({ p
   expect(putBody.expectedHolders).toBe(2);
 });
 
+test('keyboard Review and Back refocus a reused role dialog without losing its original trigger', async ({ page }) => {
+  await mockRoles(page);
+  await page.route('**/api/admin/roles/2/users', (route) => route.fulfill({ json: [{ id: 3, username: 'alice' }, { id: 4, username: 'bob' }] }));
+  await page.goto('/admin/roles');
+  const trigger = page.getByRole('row', { name: /Operator/ }).getByRole('button', { name: 'Manage', exact: true });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  const editor = page.getByRole('dialog', { name: 'Role — Operator', exact: true });
+  const titleId = await editor.getAttribute('aria-labelledby');
+  const description = editor.getByRole('textbox').nth(1);
+  await description.focus();
+  await description.fill('Updated description');
+  await expect(description).toBeFocused();
+  await editor.getByRole('button', { name: 'Review 1 change', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  const review = page.getByRole('dialog', { name: 'Review changes — Operator', exact: true });
+  await expect(review).toBeVisible();
+  expect(await review.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  expect(await review.evaluate(() => document.activeElement.textContent)).toBe('Back');
+  await expect(review.getByRole('button', { name: 'Back', exact: true })).toBeFocused();
+  expect(await review.getAttribute('aria-labelledby')).toBe(titleId);
+  await page.keyboard.press('Enter');
+  await expect(editor).toBeVisible();
+  expect(await editor.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  expect(await editor.evaluate(() => document.activeElement.value)).toBe('Operator');
+  await expect(editor.getByRole('textbox').first()).toBeFocused();
+  expect(await editor.getAttribute('aria-labelledby')).toBe(titleId);
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.keyboard.press('Escape');
+  await expect(editor).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
 test('clone posts to the clone endpoint with the chosen name', async ({ page }) => {
   await mockRoles(page);
   let cloneBody = null;
