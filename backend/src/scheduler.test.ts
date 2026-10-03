@@ -11,6 +11,8 @@ let pool: typeof import('./db/client.ts').pool;
 let closeDb: typeof import('./db/client.ts').closeDb;
 let runScheduleTick: typeof import('./scheduler.ts').runScheduleTick;
 let waitForSchedulerIdle: typeof import('./scheduler.ts').waitForSchedulerIdle;
+let startScheduler: typeof import('./scheduler.ts').startScheduler;
+let stopScheduler: typeof import('./scheduler.ts').stopScheduler;
 let now = Date.parse('2026-10-03T02:00:00Z');
 let status = 'running';
 let visible = true;
@@ -23,7 +25,7 @@ before(async () => {
   process.env.DATABASE_URL = testDb.url;
   process.env.SECRET_ENCRYPTION_KEY ||= '0123456789abcdef0123456789abcdef';
   ({ pool, closeDb } = await import('./db/client.ts'));
-  ({ runScheduleTick, waitForSchedulerIdle } = await import('./scheduler.ts'));
+  ({ runScheduleTick, waitForSchedulerIdle, startScheduler, stopScheduler } = await import('./scheduler.ts'));
   const { encryptSecret } = await import('./utils/secrets.ts');
   await testDb.db.insert(pveHosts).values({
     id: 1,
@@ -372,4 +374,71 @@ test('an invisible VM freezes the window edge', async () => {
   await sweep();
   assert.deepEqual(await readSchedule(), original);
   assert.deepEqual(actions, []);
+});
+
+for (const action of ['stop', 'start'] as const) {
+  test(`shutdown after the ${action} claim still dispatches and drains the claimed action`, { timeout: 5_000 }, async (t) => {
+    status = action === 'stop' ? 'running' : 'stopped';
+    await insertSchedule(action === 'start' ? { stop_time: '03:00', last_off: 1 } : {});
+    const query = pool.query.bind(pool);
+    let stoppedAtClaim = false;
+    t.mock.method(pool, 'query', async (...args: any[]) => {
+      const result = await (query as any)(...args);
+      if (!stoppedAtClaim && args[0]?.text?.startsWith('update "vm_schedules"')) {
+        assert.equal(result.rowCount, 1);
+        stoppedAtClaim = true;
+        stopScheduler();
+      }
+      return result;
+    });
+    let release!: () => void;
+    let started!: () => void;
+    const actionStarted = new Promise<void>((resolve) => { started = resolve; });
+    const actionReleased = new Promise<void>((resolve) => { release = resolve; });
+    onAction = async () => {
+      started();
+      await actionReleased;
+    };
+    t.mock.method(console, 'log', () => {});
+    startScheduler();
+    try {
+      await runScheduleTick();
+      assert.equal(stoppedAtClaim, true);
+      assert.equal(await waitForSchedulerIdle(0), false);
+      await actionStarted;
+      assert.deepEqual(actions, [action === 'start' ? 'start' : 'shutdown']);
+      const claimed = await readSchedule();
+      assert.equal(claimed.last_off, action === 'start' ? 0 : 1);
+      assert.equal(claimed.last_action, '');
+      now += 10_000;
+      await runScheduleTick();
+      assert.deepEqual(await readSchedule(), claimed);
+      assert.deepEqual(actions, [action === 'start' ? 'start' : 'shutdown']);
+    } finally {
+      stopScheduler();
+      release();
+      assert.equal(await waitForSchedulerIdle(), true);
+    }
+    const current = await readSchedule();
+    assert.equal(current.last_action, action === 'start' ? 'start:start' : 'stop:shutdown');
+    assert.equal(current.last_action_at, now);
+    assert.equal(current.stopped_this_window, action === 'stop');
+  });
+}
+
+test('shutdown before the claim leaves the start edge unconsumed', async (t) => {
+  status = 'stopped';
+  const original = await insertSchedule({ stop_time: '03:00', last_off: 1 });
+  const assertStopped = afterSnapshot(t, async () => { stopScheduler(); });
+  t.mock.method(console, 'log', () => {});
+  startScheduler();
+  try {
+    await sweep();
+    assertStopped();
+    assert.deepEqual(actions, []);
+    assert.deepEqual(await readSchedule(), original);
+  } finally {
+    stopScheduler();
+    assert.equal(await waitForSchedulerIdle(), true);
+  }
 });

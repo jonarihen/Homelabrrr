@@ -83,8 +83,7 @@ async function markAction(schedule: Schedule, action: string, detail: string) {
 
 // Execute a stop/start out of band so a slow graceful shutdown doesn't stall the
 // tick or other VMs. Updates bookkeeping + audit on completion.
-function runAction(schedule: Schedule, action: 'stop' | 'start') {
-  if (stopping) return;
+function runClaimedAction(schedule: Schedule, action: 'stop' | 'start') {
   const key = `${schedule.node}/${schedule.vmid}`;
   if (inFlight.has(key)) return;
   inFlight.add(key);
@@ -215,7 +214,7 @@ export async function runScheduleTick() {
         if (manual && !s.running_due_to_manual) {
           systemAudit('vm_schedule_manual_override', `${s.node}/${s.vmid}`, 'running inside off-window');
         }
-        if (action) runAction({ ...s, ...flags }, action);
+        if (action) runClaimedAction({ ...s, ...flags }, action);
       } catch (err: any) {
         // One bad schedule must never abort the sweep.
         console.warn(`[scheduler] error evaluating schedule ${s.node}/${s.vmid}: ${err.message}`);
