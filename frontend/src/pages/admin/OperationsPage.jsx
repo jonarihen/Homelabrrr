@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
+import { backupVerificationLabel } from '../../utils/backupVerification.js';
 
 const card = 'bg-gray-900 border border-gray-800 rounded-2xl p-5';
 
@@ -65,7 +66,7 @@ export default function OperationsPage() {
       <RecentReauthDialog open={!!reauth} busy={reauthBusy} error={reauthError} onCancel={() => setReauth(null)} onConfirm={confirmReauth} />
       <div>
         <h1 className="aaris-display text-xl text-gray-100">Operations & Recovery</h1>
-        <p className="text-sm text-gray-500 mt-1">Reconcile interrupted Proxmox jobs, verify backups, and monitor SQLite health.</p>
+        <p className="text-sm text-gray-500 mt-1">Reconcile interrupted Proxmox jobs, restore-test backups, and monitor PostgreSQL health.</p>
       </div>
       {error && <div className="border border-red-800 bg-red-950/30 text-red-300 rounded-xl px-4 py-3 text-sm">{error}</div>}
 
@@ -79,8 +80,11 @@ export default function OperationsPage() {
         <section className={card}>
           <p className="text-xs uppercase tracking-wide text-gray-500">Encrypted backups</p>
           <p className={`text-lg mt-2 ${data.backups.enabled ? 'text-green-400' : 'text-yellow-400'}`}>{data.backups.enabled ? 'Enabled' : 'Not configured'}</p>
-          <p className="text-xs text-gray-500 mt-1">{data.backups.latest ? `Last ${data.backups.latest.status} · ${formatBytes(data.backups.latest.size_bytes)}` : 'No backup run recorded'}</p>
-          <button onClick={() => act('backup', () => api.post('/admin/operations/backups'))} disabled={!!busy || !data.backups.enabled} className="mt-4 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs text-white">{busy === 'backup' ? 'Backing up…' : 'Back up & verify'}</button>
+          <p className="text-xs text-gray-500 mt-1">{data.backups.latest ? `Last ${backupVerificationLabel(data.backups.latest)} · ${formatBytes(data.backups.latest.size_bytes)}` : 'No backup run recorded'}</p>
+          <p className="text-xs text-gray-500 mt-1">Last full restore: {data.backups.lastFullRestoreVerifiedAt ? new Date(data.backups.lastFullRestoreVerifiedAt).toLocaleString() : 'Never'}</p>
+          {data.backups.latest?.detail && <p className="text-xs text-red-400 mt-1">{data.backups.latest.detail}</p>}
+          <p className="text-xs text-gray-500 mt-1">Each backup restores the off-host copy into a disposable database. Requires CREATEDB and temporary disk space.</p>
+          <button onClick={() => act('backup', () => api.post('/admin/operations/backups'))} disabled={!!busy || !data.backups.enabled} className="mt-4 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs text-white">{busy === 'backup' ? 'Backing up…' : 'Back up & restore-test'}</button>
         </section>
         <section className={card}>
           <p className="text-xs uppercase tracking-wide text-gray-500">Encryption keyring</p>
