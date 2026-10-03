@@ -1974,7 +1974,7 @@ router.put('/leases/:node/:vmid', requireAdmin, async (req, res) => {
     await logAudit(req, 'lease_adjust', `${node}/${vmid}`, detail);
     res.json({ ok: true, lease: await computeLeaseView(lease) });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1986,7 +1986,7 @@ router.post('/leases/:node/:vmid/renew', requireAdmin, async (req, res) => {
     await logAudit(req, 'lease_renew', `${node}/${vmid}`, `admin renewal #${lease.renewal_count}`);
     res.json({ ok: true, lease: await computeLeaseView(lease) });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 

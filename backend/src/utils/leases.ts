@@ -1,11 +1,11 @@
 import { and, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { db, type DbOrTx } from '../db/client.ts';
 import { vmLeases, provisionedVms, vmAssignments } from '../db/schema/index.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
-import { isUniqueViolation } from '../db/errors.ts';
+import { lockVmMigration, vmMigrationPending, withVmPolicyWrite } from './vmMigrationLock.ts';
 import { logAuditEntry } from './audit.ts';
 import { getAllVMs, vmAction, lxcAction } from '../proxmox.ts';
-import { nodeLookupCandidates } from './nodeRef.ts';
+import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
 
 // ─── VM leases (per-VM TTL / expiry) ─────────────────────────────────────────
 // A lease is a row in `vm_leases` keyed on (node, vmid). It starts at
@@ -23,17 +23,17 @@ export const LEASE_EXPIRING_SOON_DAYS = 3;
 
 const MS_PER_DAY = 86_400_000;
 
-async function readIntSetting(key: string, fallback: number): Promise<number> {
-  const value = await getSetting(key);
+async function readIntSetting(key: string, fallback: number, database: DbOrTx = db): Promise<number> {
+  const value = await getSetting(key, database);
   if (value === null) return fallback;
   const n = Number.parseInt(value, 10);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-export async function getLeaseSettings() {
+export async function getLeaseSettings(database: DbOrTx = db) {
   return {
-    defaultDays: await readIntSetting(LEASE_DEFAULT_DAYS_KEY, DEFAULT_LEASE_DAYS),
-    graceDays: await readIntSetting(LEASE_GRACE_DAYS_KEY, DEFAULT_GRACE_DAYS),
+    defaultDays: await readIntSetting(LEASE_DEFAULT_DAYS_KEY, DEFAULT_LEASE_DAYS, database),
+    graceDays: await readIntSetting(LEASE_GRACE_DAYS_KEY, DEFAULT_GRACE_DAYS, database),
   };
 }
 
@@ -52,7 +52,7 @@ export async function setLeaseSettings({ defaultDays, graceDays }: { defaultDays
 // Node values in vm_leases may be stored as a nodeRef ("1~pve") or a legacy
 // bare node name, so match through all nodeLookupCandidates in a single query,
 // ordering the matches by candidate preference (nodeRef before bare name).
-export async function getLeaseRow(node: unknown, vmid: unknown) {
+export async function getLeaseRow(node: unknown, vmid: unknown, database: DbOrTx = db) {
   const parsed = Number.parseInt(vmid as string, 10);
   if (!Number.isInteger(parsed)) return null;
   const candidates = nodeLookupCandidates(node);
@@ -63,7 +63,7 @@ export async function getLeaseRow(node: unknown, vmid: unknown) {
     sql` `,
   )} ELSE ${candidates.length} END`;
 
-  const [row] = await db
+  const [row] = await database
     .select()
     .from(vmLeases)
     .where(and(eq(vmLeases.vmid, parsed), inArray(vmLeases.node, candidates)))
@@ -78,28 +78,26 @@ export async function createLeaseForVm(node: unknown, vmid: unknown, { createdBy
   const parsed = Number.parseInt(vmid as string, 10);
   if (!node || !Number.isInteger(parsed)) return null;
 
-  const existing = await getLeaseRow(node, vmid);
+  return withVmPolicyWrite(node, parsed, (tx, currentNode) => createLeaseRow(tx, currentNode, parsed, { createdBy, leaseDays }));
+}
+
+async function createLeaseRow(database: DbOrTx, node: unknown, parsed: number, { createdBy = '', leaseDays }: { createdBy?: string; leaseDays?: unknown } = {}) {
+  const existing = await getLeaseRow(node, parsed, database);
   if (existing) return existing;
 
-  const { defaultDays } = await getLeaseSettings();
+  const { defaultDays } = await getLeaseSettings(database);
   const requested = leaseDays !== undefined && leaseDays !== null ? Number.parseInt(leaseDays as string, 10) : defaultDays;
   const days = Number.isFinite(requested) && requested > 0 ? requested : 0; // 0 = unlimited
 
-  try {
-    await db.insert(vmLeases).values({
-      node: String(node),
-      vmid: parsed,
-      lease_days: days,
-      // started_at defaults to now(); expires_at is now + N days, or NULL when unlimited.
-      expires_at: days > 0 ? (sql`now() + make_interval(days => ${days})` as unknown as Date) : null,
-      created_by: createdBy || '',
-    });
-  } catch (err) {
-    // UNIQUE race — a lease already exists; fall through and read it back.
-    if (!isUniqueViolation(err)) throw err;
-  }
+  await database.insert(vmLeases).values({
+    node: String(node),
+    vmid: parsed,
+    lease_days: days,
+    expires_at: days > 0 ? (sql`now() + make_interval(days => ${days})` as unknown as Date) : null,
+    created_by: createdBy || '',
+  }).onConflictDoNothing({ target: [vmLeases.node, vmLeases.vmid] });
 
-  return getLeaseRow(node, vmid);
+  return getLeaseRow(node, parsed, database);
 }
 
 // Owner-initiated renewal: reset the clock from now using the lease's own
@@ -107,76 +105,80 @@ export async function createLeaseForVm(node: unknown, vmid: unknown, { createdBy
 // clear any expired/auto-stopped flags. Creates a lease first if none exists so
 // a claimed pre-portal VM can still be given a lease.
 export async function renewLease(node: unknown, vmid: unknown, { createdBy = '' }: { createdBy?: string } = {}) {
-  let row = await getLeaseRow(node, vmid);
-  if (!row) row = await createLeaseForVm(node, vmid, { createdBy });
-  if (!row) return null;
+  const parsed = Number.parseInt(vmid as string, 10);
+  if (!node || !Number.isInteger(parsed)) return null;
+  return withVmPolicyWrite(node, parsed, async (database, currentNode) => {
+    const row = await createLeaseRow(database, currentNode, parsed, { createdBy });
+    if (!row) return null;
 
-  const { defaultDays } = await getLeaseSettings();
-  const days = row.lease_days && row.lease_days > 0
-    ? row.lease_days
-    : (defaultDays > 0 ? defaultDays : 0);
+    const { defaultDays } = await getLeaseSettings(database);
+    const days = row.lease_days && row.lease_days > 0
+      ? row.lease_days
+      : (defaultDays > 0 ? defaultDays : 0);
 
-  await db.update(vmLeases).set({
-    started_at: new Date(),
-    expires_at: days > 0 ? (sql`now() + make_interval(days => ${days})` as unknown as Date) : null,
-    lease_days: days,
-    renewal_count: sql`${vmLeases.renewal_count} + 1`,
-    last_renewed_at: new Date(),
-    expired: false,
-    expired_at: null,
-    auto_stopped: false,
-  }).where(eq(vmLeases.id, row.id));
+    await database.update(vmLeases).set({
+      started_at: new Date(),
+      expires_at: days > 0 ? (sql`now() + make_interval(days => ${days})` as unknown as Date) : null,
+      lease_days: days,
+      renewal_count: sql`${vmLeases.renewal_count} + 1`,
+      last_renewed_at: new Date(),
+      expired: false,
+      expired_at: null,
+      auto_stopped: false,
+    }).where(eq(vmLeases.id, row.id));
 
-  return getLeaseRow(node, vmid);
+    return getLeaseRow(currentNode, parsed, database);
+  });
 }
 
 // Admin adjustment: toggle exempt, set a new duration (recomputes expiry from
 // now), and/or extend by N days from the current expiry. Any change clears the
 // expired flag. Creates a lease if none exists.
 export async function updateLease(node: unknown, vmid: unknown, { exempt, leaseDays, extendDays, createdBy = '' }: { exempt?: unknown; leaseDays?: unknown; extendDays?: unknown; createdBy?: string } = {}) {
-  let row = await getLeaseRow(node, vmid);
-  if (!row) row = await createLeaseForVm(node, vmid, { createdBy });
-  if (!row) return null;
+  const parsed = Number.parseInt(vmid as string, 10);
+  if (!node || !Number.isInteger(parsed)) return null;
+  return withVmPolicyWrite(node, parsed, async (database, currentNode) => {
+    const row = await createLeaseRow(database, currentNode, parsed, { createdBy });
+    if (!row) return null;
 
-  if (exempt !== undefined) {
-    await db.update(vmLeases)
-      .set({ exempt: Boolean(exempt), expired: false, expired_at: null, auto_stopped: false })
-      .where(eq(vmLeases.id, row.id));
-  }
-
-  if (leaseDays !== undefined && leaseDays !== null) {
-    const days = Math.max(0, Number.parseInt(leaseDays as string, 10) || 0);
-    if (days > 0) {
-      await db.update(vmLeases).set({
-        lease_days: days,
-        started_at: new Date(),
-        expires_at: sql`now() + make_interval(days => ${days})` as unknown as Date,
-        expired: false,
-        expired_at: null,
-        auto_stopped: false,
-      }).where(eq(vmLeases.id, row.id));
-    } else {
-      await db.update(vmLeases)
-        .set({ lease_days: 0, expires_at: null, expired: false, expired_at: null, auto_stopped: false })
+    if (exempt !== undefined) {
+      await database.update(vmLeases)
+        .set({ exempt: Boolean(exempt), expired: false, expired_at: null, auto_stopped: false })
         .where(eq(vmLeases.id, row.id));
     }
-  }
 
-  if (extendDays !== undefined && extendDays !== null) {
-    const days = Number.parseInt(extendDays as string, 10) || 0;
-    if (days !== 0) {
-      // Extend from the later of the current expiry or now, so extending an
-      // already-expired (or unlimited) lease still lands relative to now.
-      await db.update(vmLeases).set({
-        expires_at: sql`GREATEST(COALESCE(${vmLeases.expires_at}, now()), now()) + make_interval(days => ${days})` as unknown as Date,
-        expired: false,
-        expired_at: null,
-        auto_stopped: false,
-      }).where(eq(vmLeases.id, row.id));
+    if (leaseDays !== undefined && leaseDays !== null) {
+      const days = Math.max(0, Number.parseInt(leaseDays as string, 10) || 0);
+      if (days > 0) {
+        await database.update(vmLeases).set({
+          lease_days: days,
+          started_at: new Date(),
+          expires_at: sql`now() + make_interval(days => ${days})` as unknown as Date,
+          expired: false,
+          expired_at: null,
+          auto_stopped: false,
+        }).where(eq(vmLeases.id, row.id));
+      } else {
+        await database.update(vmLeases)
+          .set({ lease_days: 0, expires_at: null, expired: false, expired_at: null, auto_stopped: false })
+          .where(eq(vmLeases.id, row.id));
+      }
     }
-  }
 
-  return getLeaseRow(node, vmid);
+    if (extendDays !== undefined && extendDays !== null) {
+      const days = Number.parseInt(extendDays as string, 10) || 0;
+      if (days !== 0) {
+        await database.update(vmLeases).set({
+          expires_at: sql`GREATEST(COALESCE(${vmLeases.expires_at}, now()), now()) + make_interval(days => ${days})` as unknown as Date,
+          expired: false,
+          expired_at: null,
+          auto_stopped: false,
+        }).where(eq(vmLeases.id, row.id));
+      }
+    }
+
+    return getLeaseRow(currentNode, parsed, database);
+  });
 }
 
 // Derive a UI-friendly view from a raw lease row. `status` ∈
@@ -262,71 +264,48 @@ export async function runLeaseSweep() {
     // Guard every lease independently: a single failing row (a stuck upstream
     // call, a bad DB write) must never abort the sweep of the remaining ones.
     try {
-      const [current] = await db
-        .select()
-        .from(vmLeases)
-        .where(eq(vmLeases.id, lease.id))
-        .limit(1);
-
-      if (!current || current.exempt || current.expired || !current.expires_at) {
-        continue;
-      }
-      if (current.expires_at.getTime() > Date.now()) {
-        continue;
-      }
-      if (lease.expires_at && current.expires_at.getTime() !== lease.expires_at.getTime()) {
-        continue;
-      }
-
-      const candidates = nodeLookupCandidates(lease.node);
-      const live = vms.find(v => Number(v.vmid) === lease.vmid
-        && (candidates.includes(v.nodeRef) || candidates.includes(v.node)));
-
-      let autoStopped = false;
-      if (live && live.status === 'running') {
-        try {
-          // Graceful ACPI shutdown — never a hard stop, never a delete.
-          if (live.type === 'lxc') await lxcAction(lease.node, lease.vmid, 'shutdown');
-          else await vmAction(lease.node, lease.vmid, 'shutdown');
-          autoStopped = true;
-          stopped += 1;
-          await logSystemAudit('lease_expired_autostop', `${lease.node}/${lease.vmid}`, 'Lease expired — VM gracefully shut down');
-        } catch (err: any) {
-          await logSystemAudit('lease_autostop_failed', `${lease.node}/${lease.vmid}`, err.message);
-        }
-      } else {
-        await logSystemAudit('lease_expired', `${lease.node}/${lease.vmid}`, live ? 'VM already stopped' : 'VM not found in cluster');
-      }
-
-      // Owners are notified in-app via the Overview (Dashboard) expiry notice,
-      // which derives from each VM's lease status. Discord expiry warnings are a
-      // separate feature (#22) and are deliberately not wired here.
-
-      // Claim the flag write inside a tx so a concurrent sweep can't double-flag:
-      // read-decide-write, and only the caller that still sees expired = false
-      // commits the transition (WHERE id = ? AND expired = false).
+      const audits: [string, string, string][] = [];
       await db.transaction(async (tx) => {
-        const [latest] = await tx
-          .select({
-            expired: vmLeases.expired,
-            exempt: vmLeases.exempt,
-            expires_at: vmLeases.expires_at,
-          })
-          .from(vmLeases)
-          .where(eq(vmLeases.id, lease.id))
-          .for('update')
-          .limit(1);
-        if (!latest || latest.expired || latest.exempt || !latest.expires_at) return;
+        await lockVmMigration(tx, lease.vmid, true);
+        if (await vmMigrationPending(tx, lease.vmid)) return;
+        const [current] = await tx.select().from(vmLeases).where(eq(vmLeases.id, lease.id)).limit(1);
+        if (!current || current.node !== lease.node || current.exempt || current.expired || !current.expires_at) return;
+        if (current.expires_at.getTime() > Date.now()) return;
+        if (lease.expires_at && current.expires_at.getTime() !== lease.expires_at.getTime()) return;
+
+        const candidates = nodeLookupCandidates(current.node);
+        const live = vms.find(v => Number(v.vmid) === current.vmid
+          && (candidates.includes(v.nodeRef) || (decodeNodeRef(current.node).hostId === null && candidates.includes(v.node))));
+        if (!live) return;
+        const target = `${current.node}/${current.vmid}`;
+        let autoStopped = false;
+        if (live.status === 'running') {
+          try {
+            if (live.type === 'lxc') await lxcAction(current.node, current.vmid, 'shutdown');
+            else await vmAction(current.node, current.vmid, 'shutdown');
+            autoStopped = true;
+            stopped += 1;
+            audits.push(['lease_expired_autostop', target, 'Lease expired — VM gracefully shut down']);
+          } catch (err: any) {
+            audits.push(['lease_autostop_failed', target, err.message]);
+            return;
+          }
+        } else {
+          audits.push(['lease_expired', target, 'VM already stopped']);
+        }
+
+        const [latest] = await tx.select().from(vmLeases).where(eq(vmLeases.id, current.id)).for('update').limit(1);
+        if (!latest || latest.node !== current.node || latest.expired || latest.exempt || !latest.expires_at) return;
         if (latest.expires_at.getTime() !== current.expires_at.getTime() || latest.expires_at.getTime() > Date.now()) return;
         await tx.update(vmLeases)
           .set({ expired: true, expired_at: new Date(), auto_stopped: autoStopped })
           .where(and(
-            eq(vmLeases.id, lease.id),
-            eq(vmLeases.expired, false),
-            eq(vmLeases.exempt, false),
+            eq(vmLeases.id, current.id), eq(vmLeases.node, current.node),
+            eq(vmLeases.expired, false), eq(vmLeases.exempt, false),
             sql`date_trunc('milliseconds', ${vmLeases.expires_at}) = ${current.expires_at}`,
           ));
       });
+      for (const [action, target, detail] of audits) await logSystemAudit(action, target, detail);
     } catch (err: any) {
       await logSystemAudit('lease_sweep_error', `${lease.node}/${lease.vmid}`, err.message);
     }

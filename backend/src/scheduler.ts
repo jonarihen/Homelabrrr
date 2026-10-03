@@ -11,11 +11,12 @@
 // actions until skip_until.
 
 import { and, count, eq, sql } from 'drizzle-orm';
-import { db } from './db/client.ts';
+import { db, pool, type DbOrTx } from './db/client.ts';
 import { vmSchedules } from './db/schema/index.ts';
 import { getAllVMs, scheduledStopVM, scheduledStartVM } from './proxmox.ts';
 import { logAuditEntry } from './utils/audit.ts';
 import { nodeLookupCandidates } from './utils/nodeRef.ts';
+import { withMigrationSafeSchedule } from './utils/vmMigrationLock.ts';
 import {
   isValidTime, isValidTimezone, timeToMinutes, zonedParts, offWindowContains,
 } from './utils/schedule.ts';
@@ -29,6 +30,7 @@ const SHUTDOWN_TIMEOUT_MS = Number(process.env.VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS) 
 let ticking = false;
 let stopping = false;
 const inFlight = new Set<string>();
+const claiming = new Set<string>();
 let firstRunTimer: ReturnType<typeof setTimeout> | null = null;
 let intervalTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -50,6 +52,7 @@ function findVmStatus(vms: any[], node: any, vmid: any) {
 }
 
 type Schedule = typeof vmSchedules.$inferSelect;
+type ScheduleFlags = Pick<Schedule, 'last_off' | 'running_due_to_manual' | 'stopped_this_window'>;
 
 function scheduleConfigurationMatches(schedule: Schedule) {
   return and(
@@ -75,42 +78,53 @@ function scheduleSnapshotMatches(schedule: Schedule) {
   );
 }
 
-async function markAction(schedule: Schedule, action: string, detail: string) {
-  await db.update(vmSchedules)
+async function markAction(schedule: Schedule, action: string, detail: string, database: DbOrTx) {
+  await database.update(vmSchedules)
     .set({ last_action: `${action}${detail ? `:${detail}` : ''}`, last_action_at: Date.now() })
     .where(scheduleConfigurationMatches(schedule));
 }
 
 // Execute a stop/start out of band so a slow graceful shutdown doesn't stall the
 // tick or other VMs. Updates bookkeeping + audit on completion.
-function runClaimedAction(schedule: Schedule, action: 'stop' | 'start') {
+function claimAndRunAction(schedule: Schedule, action: 'stop' | 'start', flags: ScheduleFlags) {
+  if (stopping) return;
   const key = `${schedule.node}/${schedule.vmid}`;
-  if (inFlight.has(key)) return;
+  if (inFlight.has(key) || inFlight.size >= Math.max(1, pool.options.max - 1)) return;
   inFlight.add(key);
+  claiming.add(key);
 
   const target = `${schedule.node}/${schedule.vmid}`;
-  const run = action === 'stop'
-    ? scheduledStopVM(schedule.node, schedule.vmid, { timeoutMs: SHUTDOWN_TIMEOUT_MS })
-    : scheduledStartVM(schedule.node, schedule.vmid);
-
-  run.then(async (result: any) => {
-    if (action === 'stop') {
-      await db.update(vmSchedules)
-        .set({
-          stopped_this_window: sql`CASE WHEN ${vmSchedules.last_off} = 1 THEN true ELSE ${vmSchedules.stopped_this_window} END`,
-          last_action: `stop:${result.method}`,
-          last_action_at: Date.now(),
-        })
-        .where(scheduleConfigurationMatches(schedule));
-      systemAudit('vm_schedule_stop', target, `method=${result.method}`);
-    } else {
-      await markAction(schedule, 'start', result.method);
-      systemAudit('vm_schedule_start', target, `method=${result.method}`);
+  const run = withMigrationSafeSchedule(schedule, async (database) => {
+    if (stopping) return;
+    const claimed = await database.update(vmSchedules).set(flags).where(scheduleSnapshotMatches(schedule));
+    if (claimed.rowCount !== 1) return;
+    claiming.delete(key);
+    try {
+      const result = action === 'stop'
+        ? await scheduledStopVM(schedule.node, schedule.vmid, { timeoutMs: SHUTDOWN_TIMEOUT_MS })
+        : await scheduledStartVM(schedule.node, schedule.vmid);
+      if (action === 'stop') {
+        await database.update(vmSchedules)
+          .set({
+            stopped_this_window: sql`CASE WHEN ${vmSchedules.last_off} = 1 THEN true ELSE ${vmSchedules.stopped_this_window} END`,
+            last_action: `stop:${result.method}`,
+            last_action_at: Date.now(),
+          })
+          .where(scheduleConfigurationMatches(schedule));
+      } else {
+        await markAction(schedule, 'start', result.method, database);
+      }
+      systemAudit(`vm_schedule_${action}`, target, `method=${result.method}`);
+    } catch (err: any) {
+      await markAction(schedule, `${action}_failed`, '', database).catch(() => {});
+      systemAudit(`vm_schedule_${action}_failed`, target, String(err.message || err).slice(0, 300));
     }
-  }).catch(async (err: any) => {
-    await markAction(schedule, `${action}_failed`, '').catch(() => {});
-    systemAudit(`vm_schedule_${action}_failed`, target, String(err.message || err).slice(0, 300));
+  });
+
+  run.catch((err: any) => {
+    console.warn(`[scheduler] error claiming schedule ${target}: ${err.message}`);
   }).finally(() => {
+    claiming.delete(key);
     inFlight.delete(key);
   });
 }
@@ -140,6 +154,7 @@ export async function runScheduleTick() {
 
     for (const s of schedules) {
       try {
+        if (claiming.has(`${s.node}/${s.vmid}`)) continue;
         // Skip malformed schedules rather than throw (keeps the loop alive).
         if (!isValidTime(s.stop_time) || !isValidTime(s.start_time) || !isValidTimezone(s.timezone)) {
           continue;
@@ -201,20 +216,24 @@ export async function runScheduleTick() {
         }
 
         if (stopping) return;
-        const flags = {
+        const flags: ScheduleFlags = {
           last_off: off ? 1 : 0,
           running_due_to_manual: manual,
           stopped_this_window: stoppedThisWindow,
         };
-        const res = await db.update(vmSchedules)
-          .set(flags)
-          .where(scheduleSnapshotMatches(s));
-        if (res.rowCount !== 1) continue;
+        if (action) {
+          claimAndRunAction(s, action, flags);
+          continue;
+        }
+        const res = await withMigrationSafeSchedule(s, async (database) => {
+          if (stopping) return;
+          return database.update(vmSchedules).set(flags).where(scheduleSnapshotMatches(s));
+        });
+        if (res?.rowCount !== 1) continue;
 
         if (manual && !s.running_due_to_manual) {
           systemAudit('vm_schedule_manual_override', `${s.node}/${s.vmid}`, 'running inside off-window');
         }
-        if (action) runClaimedAction({ ...s, ...flags }, action);
       } catch (err: any) {
         // One bad schedule must never abort the sweep.
         console.warn(`[scheduler] error evaluating schedule ${s.node}/${s.vmid}: ${err.message}`);

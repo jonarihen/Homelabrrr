@@ -128,6 +128,22 @@ function afterSnapshot(t: any, change: () => Promise<void>) {
   return () => assert.equal(pending, false, 'the edit must occur after the enabled schedule snapshot');
 }
 
+function interceptGuardQuery(t: any, intercept: (query: () => Promise<any>, args: any[]) => Promise<any>) {
+  const connect = pool.connect.bind(pool);
+  const patched = new WeakSet();
+  t.mock.method(pool, 'connect', (...args: any[]) => {
+    if (args.length) return (connect as any)(...args);
+    return connect().then((connection) => {
+      if (!patched.has(connection)) {
+        patched.add(connection);
+        const query = connection.query.bind(connection);
+        t.mock.method(connection, 'query', (...queryArgs: any[]) => intercept(() => (query as any)(...queryArgs), queryArgs));
+      }
+      return connection;
+    });
+  });
+}
+
 const changes: [string, Partial<typeof vmSchedules.$inferInsert>][] = [
   ['disabled', { enabled: false }],
   ['stop time edited', { stop_time: '04:00' }],
@@ -170,14 +186,39 @@ for (const action of ['stop', 'start'] as const) {
   });
 }
 
+for (const action of ['stop', 'start'] as const) {
+  for (const [name, update] of changes) {
+    test(`CAS rejects ${action} when the schedule is ${name} after migration guard validation`, async (t) => {
+      status = action === 'stop' ? 'running' : 'stopped';
+      const original = await insertSchedule({ last_off: 1, ...(action === 'start' ? { stop_time: '03:00' } : {}) });
+      let edited = false;
+      let rowCount: number | undefined;
+      interceptGuardQuery(t, async (query, args) => {
+        if (!edited && args[0]?.text?.startsWith('update "vm_schedules"')) {
+          edited = true;
+          await testDb.db.update(vmSchedules).set(update).where(eq(vmSchedules.id, original.id));
+          const result = await query();
+          rowCount = result.rowCount;
+          return result;
+        }
+        return query();
+      });
+      await sweep();
+      assert.equal(edited, true);
+      assert.equal(rowCount, 0);
+      assert.deepEqual(actions, []);
+      assert.deepEqual(await readSchedule(), { ...original, ...update });
+    });
+  }
+}
+
 test('a failed database claim never dispatches a power action', async (t) => {
   const original = await insertSchedule();
-  const query = pool.query.bind(pool);
-  t.mock.method(pool, 'query', async (...args: any[]) => {
+  interceptGuardQuery(t, async (query, args) => {
     if (args[0]?.text?.startsWith('update "vm_schedules"')) {
       throw new Error('claim unavailable');
     }
-    return (query as any)(...args);
+    return query();
   });
   const warnings = t.mock.method(console, 'warn', () => {});
   await sweep();
@@ -288,6 +329,35 @@ for (const action of ['stop', 'start'] as const) {
   }
 }
 
+test('a later tick cannot consume a start edge while its claim is pending', { timeout: 5_000 }, async (t) => {
+  status = 'stopped';
+  const original = await insertSchedule({ stop_time: '03:00', last_off: 1 });
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let intercepted = false;
+  interceptGuardQuery(t, async (query, args) => {
+    if (!intercepted && args[0]?.text?.startsWith('update "vm_schedules"')) {
+      intercepted = true;
+      entered.resolve();
+      await release.promise;
+    }
+    return query();
+  });
+  try {
+    await runScheduleTick();
+    await entered.promise;
+    now += 10_000;
+    await runScheduleTick();
+    assert.deepEqual(await readSchedule(), original);
+    assert.deepEqual(actions, []);
+  } finally {
+    release.resolve();
+    assert.equal(await waitForSchedulerIdle(), true);
+  }
+  assert.deepEqual(actions, ['start']);
+  assert.equal((await readSchedule()).last_action, 'start:start');
+});
+
 test('a slow stop does not stall ticks or dispatch a duplicate stop', async () => {
   await insertSchedule();
   let release!: () => void;
@@ -380,10 +450,9 @@ for (const action of ['stop', 'start'] as const) {
   test(`shutdown after the ${action} claim still dispatches and drains the claimed action`, { timeout: 5_000 }, async (t) => {
     status = action === 'stop' ? 'running' : 'stopped';
     await insertSchedule(action === 'start' ? { stop_time: '03:00', last_off: 1 } : {});
-    const query = pool.query.bind(pool);
     let stoppedAtClaim = false;
-    t.mock.method(pool, 'query', async (...args: any[]) => {
-      const result = await (query as any)(...args);
+    interceptGuardQuery(t, async (query, args) => {
+      const result = await query();
       if (!stoppedAtClaim && args[0]?.text?.startsWith('update "vm_schedules"')) {
         assert.equal(result.rowCount, 1);
         stoppedAtClaim = true;
@@ -403,9 +472,9 @@ for (const action of ['stop', 'start'] as const) {
     startScheduler();
     try {
       await runScheduleTick();
+      await actionStarted;
       assert.equal(stoppedAtClaim, true);
       assert.equal(await waitForSchedulerIdle(0), false);
-      await actionStarted;
       assert.deepEqual(actions, [action === 'start' ? 'start' : 'shutdown']);
       const claimed = await readSchedule();
       assert.equal(claimed.last_off, action === 'start' ? 0 : 1);
@@ -425,6 +494,31 @@ for (const action of ['stop', 'start'] as const) {
     assert.equal(current.stopped_this_window, action === 'stop');
   });
 }
+
+test('shutdown during migration guard validation leaves the start edge unconsumed', { timeout: 5_000 }, async (t) => {
+  status = 'stopped';
+  const original = await insertSchedule({ stop_time: '03:00', last_off: 1 });
+  let stopped = false;
+  interceptGuardQuery(t, async (query, args) => {
+    const result = await query();
+    if (!stopped && args[0]?.text?.startsWith('select "id", "node", "vmid"') && args[0].text.includes('from "vm_schedules"')) {
+      stopped = true;
+      stopScheduler();
+    }
+    return result;
+  });
+  t.mock.method(console, 'log', () => {});
+  startScheduler();
+  try {
+    await sweep();
+    assert.equal(stopped, true);
+    assert.deepEqual(actions, []);
+    assert.deepEqual(await readSchedule(), original);
+  } finally {
+    stopScheduler();
+    assert.equal(await waitForSchedulerIdle(), true);
+  }
+});
 
 test('shutdown before the claim leaves the start edge unconsumed', async (t) => {
   status = 'stopped';
