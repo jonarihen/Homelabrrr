@@ -119,11 +119,15 @@ export async function finalizeMigration(id, ok, detail = '', { keptSource = fals
       return await finalizeMigrationSuccess(db, id, detail, { keptSource });
     } catch (err) {
       console.error(`[migrate] portal finalization ${id} failed:`, err.message);
-      await db.update(vmMigrations).set({
-        status: 'needs_review',
-        status_detail: `Upstream migration completed, but portal bookkeeping failed. Review and retry verification. ${detail}`.trim(),
-        upstream_status: 'stopped:OK', kept_source: keptSource, finished_at: new Date(),
-      }).where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
+      try {
+        await db.update(vmMigrations).set({
+          status: 'needs_review',
+          status_detail: `Upstream migration completed, but portal bookkeeping failed. Review and retry verification. ${detail}`.trim(),
+          upstream_status: 'stopped:OK', kept_source: keptSource, finished_at: new Date(),
+        }).where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
+      } catch (reviewError) {
+        console.error(`[migrate] could not persist portal review state for ${id}:`, reviewError.message);
+      }
       return false;
     }
   }

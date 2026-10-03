@@ -144,6 +144,7 @@ router.post('/provision/:id/reconcile', requireRecentReauthentication, async (re
 router.post('/migration/:id/reconcile', requireRecentReauthentication, async (req, res) => {
   const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, Number(req.params.id))).limit(1);
   if (!row) return res.status(404).json({ error: 'Migration operation not found' });
+  if (row.status !== 'needs_review') return res.status(409).json({ error: 'Only migrations awaiting review can be reconciled' });
   if (!row.upid) return res.status(400).json({ error: 'This operation has no upstream task identifier to reconcile' });
   try {
     const task = await getTaskStatus(row.source_node, row.upid);
@@ -153,7 +154,9 @@ router.post('/migration/:id/reconcile', requireRecentReauthentication, async (re
     // finished_at is only stamped on the error transition; otherwise left unchanged.
     const set: any = { status, status_detail: classified.detail, upstream_status: upstreamStatus, upstream_checked_at: new Date() };
     if (status === 'error') set.finished_at = new Date();
-    await db.update(vmMigrations).set(set).where(eq(vmMigrations.id, row.id));
+    const claimed = await db.update(vmMigrations).set(set)
+      .where(and(eq(vmMigrations.id, row.id), eq(vmMigrations.status, 'needs_review')));
+    if (claimed.rowCount !== 1) return res.status(409).json({ error: 'Migration was resolved while reconciliation was in flight; reload its current state' });
     await logAudit(req, 'migration_operation_reconciled', String(row.id), `status=${status}; upid=${row.upid}`);
     res.json({ ...row, status, status_detail: classified.detail, upstream_status: upstreamStatus, upstream: { status: task.status, exitstatus: task.exitstatus } });
   } catch (err) { sendError(res, err); }

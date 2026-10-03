@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import request from 'supertest';
 import { eq } from 'drizzle-orm';
+import https from 'node:https';
+import { EventEmitter } from 'node:events';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import {
   auditLog, users, vmMigrations, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms,
+  vmLeases, vmSchedules, pveHosts,
 } from '../db/schema/index.ts';
 import type { finalizeMigrationSuccess as FinalizeMigrationSuccess } from './migrate.ts';
 
@@ -14,6 +17,8 @@ let app: express.Express;
 let closeDb: (() => Promise<void>) | undefined;
 let finalizeMigrationSuccess: typeof FinalizeMigrationSuccess;
 let ownerId: number;
+let client: typeof import('../db/client.ts');
+let finalizeMigration: typeof import('./migrate.ts').finalizeMigration;
 
 const sourceNode = '1~source';
 const targetNode = '2~target';
@@ -29,8 +34,14 @@ before(async () => {
   testDb = await createTestDatabase();
   process.env.DATABASE_URL = testDb.url;
   process.env.SECRET_ENCRYPTION_KEY ||= '99'.repeat(32);
-  ({ closeDb } = await import('../db/client.ts'));
-  ({ finalizeMigrationSuccess } = await import('./migrate.ts'));
+  client = await import('../db/client.ts');
+  ({ closeDb } = client);
+  ({ finalizeMigrationSuccess, finalizeMigration } = await import('./migrate.ts'));
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  await testDb.db.insert(pveHosts).values({
+    id: 1, name: 'source', host: 'source.example.test', port: 8006,
+    token_id: 'root@pam!test', token_secret: encryptSecret('test-secret'), verify_tls: true,
+  });
   const [owner] = await testDb.db.insert(users)
     .values({ username: 'migration-admin', password: 'x', is_admin: true })
     .returning({ id: users.id });
@@ -71,12 +82,21 @@ async function seedLinkedRows(vmid: number) {
     .values({ node: 'source', vmid, name: 'migrated-template', default_cores: 4 }).returning();
   const [provisioning] = await testDb.db.insert(provisionedVms)
     .values({ user_id: ownerId, node: sourceNode, vmid, name: 'provisioned-guest', template_id: template.id, status: 'ready' }).returning();
+  const [lease] = await testDb.db.insert(vmLeases).values({
+    node: 'source', vmid, lease_days: 14, renewal_count: 2, exempt: true,
+  }).returning();
+  const [schedule] = await testDb.db.insert(vmSchedules).values({
+    node: sourceNode, vmid, stop_time: '23:00', start_time: '07:00',
+    skip_until: 1791000000000, running_due_to_manual: true,
+  }).returning();
   return [
     { table: vmAssignments, row: assignment },
     { table: vmSshConfigs, row: ssh },
     { table: vmSshUserConfigs, row: userSsh },
     { table: vmTemplates, row: template },
     { table: provisionedVms, row: provisioning },
+    { table: vmLeases, row: lease },
+    { table: vmSchedules, row: schedule },
   ];
 }
 
@@ -222,4 +242,97 @@ test('concurrent manual success and failure resolutions cannot overwrite the win
     const [persisted] = await testDb.db.select().from(table).where(eq(table.id, row.id));
     assert.deepEqual(persisted, { ...row, node: finished.status === 'ok' ? targetNode : row.node });
   }
+});
+
+for (const exitstatus of ['OK', 'ERROR']) {
+  test(`stale reconciliation (${exitstatus}) cannot overwrite manual success or repointed policies`, async (t) => {
+    const migration = await seedMigration(exitstatus === 'OK' ? 350 : 351);
+    const linked = await seedLinkedRows(migration.vmid);
+    await testDb.db.update(vmMigrations).set({ upid: 'UPID:source:reconcile' }).where(eq(vmMigrations.id, migration.id));
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    t.mock.method(https, 'request', (_url, _options, callback) => {
+      const req = new EventEmitter() as any;
+      req.setTimeout = () => {};
+      req.write = () => {};
+      req.destroy = () => {};
+      req.end = async () => {
+        entered.resolve();
+        await release.promise;
+        const res = new EventEmitter() as any;
+        res.statusCode = 200;
+        callback(res);
+        res.emit('data', JSON.stringify({ data: { status: 'stopped', exitstatus } }));
+        res.emit('end');
+      };
+      return req;
+    });
+    const reconciliation = request(app).post(`/operations/migration/${migration.id}/reconcile`).then((response) => response);
+    await entered.promise;
+    let finished;
+    try {
+      assert.equal((await resolve(migration.id, 'ok')).status, 200);
+      finished = await readMigration(migration.id);
+    } finally {
+      release.resolve();
+    }
+    assert.equal((await reconciliation).status, 409);
+    assert.deepEqual(await readMigration(migration.id), finished);
+    for (const { table, row } of linked) {
+      const [persisted] = await testDb.db.select().from(table).where(eq(table.id, row.id));
+      assert.deepEqual(persisted, { ...row, node: targetNode });
+    }
+    assert.equal((await resolve(migration.id, 'error')).status, 409);
+    const audits = await testDb.db.select().from(auditLog).where(eq(auditLog.target, String(migration.id)));
+    assert.deepEqual(audits.map((audit) => audit.action), ['migration_operation_resolved']);
+  });
+}
+
+for (const mode of ['remote_migrate', 'adopt']) {
+  test(`automatic ${mode} linked-row conflict becomes reviewable and manual verification can retry`, async () => {
+    const migration = await seedMigration(mode === 'adopt' ? 361 : 360, 'running', mode);
+    const linked = await seedLinkedRows(migration.vmid);
+    const [conflict] = await testDb.db.insert(vmTemplates).values({
+      node: targetNode, vmid: migration.vmid, name: 'conflicting-target',
+    }).returning();
+    assert.equal(await finalizeMigration(migration.id, true, 'Physical move completed', { keptSource: true }), false);
+    const review = await readMigration(migration.id);
+    assert.equal(review.status, 'needs_review');
+    assert.equal(review.upstream_status, 'stopped:OK');
+    assert.match(review.status_detail || '', /Upstream migration completed.*bookkeeping failed/);
+    assert.equal(review.kept_source, true);
+    assert.deepEqual(review.steps, migration.steps);
+    for (const { table, row } of linked) {
+      const [persisted] = await testDb.db.select().from(table).where(eq(table.id, row.id));
+      assert.deepEqual(persisted, row);
+    }
+    assert.equal((await resolve(migration.id, 'ok')).status, 500);
+    assert.deepEqual(await readMigration(migration.id), review);
+    await testDb.db.delete(vmTemplates).where(eq(vmTemplates.id, conflict.id));
+    assert.equal((await resolve(migration.id, 'ok')).status, 200);
+    assert.equal((await readMigration(migration.id)).status, 'ok');
+  });
+}
+
+test('automatic success cannot escape into physical-failure handlers when saving review state also fails', async (t) => {
+  const migration = await seedMigration(370, 'running', 'adopt');
+  const linked = await seedLinkedRows(370);
+  t.mock.method(client.db, 'transaction', async () => { throw new Error('database unavailable'); });
+  t.mock.method(client.db, 'update', () => { throw new Error('database unavailable'); });
+  assert.equal(await finalizeMigration(migration.id, true), false);
+  assert.deepEqual(await readMigration(migration.id), migration);
+  for (const { table, row } of linked) {
+    const [persisted] = await testDb.db.select().from(table).where(eq(table.id, row.id));
+    assert.deepEqual(persisted, row);
+  }
+});
+
+test('reconciliation rejects running and terminal migrations before any upstream request', async (t) => {
+  const upstream = t.mock.method(https, 'request', () => { throw new Error('must not request upstream'); });
+  for (const [index, status] of ['running', 'ok', 'error'].entries()) {
+    const migration = await seedMigration(380 + index, status);
+    await testDb.db.update(vmMigrations).set({ upid: 'UPID:source:reconcile' }).where(eq(vmMigrations.id, migration.id));
+    assert.equal((await request(app).post(`/operations/migration/${migration.id}/reconcile`)).status, 409);
+  }
+  assert.equal(upstream.mock.callCount(), 0);
 });
