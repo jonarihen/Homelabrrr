@@ -271,3 +271,14 @@ test('a bare source name shared by both hosts cannot recreate policy after migra
   assert.equal((await request(app).put('/pve/101/schedule').send({ stopTime: '23:00', startTime: '07:00' })).status, 409);
   assert.deepEqual(await readPolicies(), { leases: [], schedules: [] });
 });
+
+test('automatic finalization remains contained when the database cannot persist review state', async (t) => {
+  const migration = await seedMigration('adopt');
+  await seedPolicies('1~pve1', 101, true);
+  const original = await readPolicies();
+  t.mock.method(client.db, 'transaction', async () => { throw new Error('database unavailable'); });
+  t.mock.method(client.db, 'update', () => { throw new Error('database unavailable'); });
+  assert.equal(await finalizeMigration(migration.id, true), false);
+  assert.deepEqual((await testDb.db.select().from(vmMigrations))[0], migration);
+  assert.deepEqual(await readPolicies(), original);
+});
