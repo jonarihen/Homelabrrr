@@ -206,11 +206,24 @@ test('shared success finalizer claims running migrations once and cannot bypass 
   assert.deepEqual(await readMigration(review.id), review);
 });
 
-test('repoint conflicts roll back status, steps and all linked updates and allow retry', async () => {
+function failTemplateWrite(t) {
+  const transaction = client.db.transaction.bind(client.db);
+  t.mock.method(client.db, 'transaction', (callback) => transaction(async (tx) => {
+    const update = tx.update.bind(tx);
+    t.mock.method(tx, 'update', (table) => {
+      if (table === vmTemplates) throw new Error('template write unavailable');
+      return update(table);
+    });
+    return callback(tx);
+  }));
+}
+
+test('repoint write failures roll back status, steps and all linked updates and allow retry', async (t) => {
   const migration = await seedMigration(330);
   const linked = await seedLinkedRows(330);
   const [conflict] = await testDb.db.insert(vmTemplates)
     .values({ node: targetNode, vmid: 330, name: 'existing-target-template' }).returning();
+  failTemplateWrite(t);
   assert.equal((await resolve(migration.id, 'ok')).status, 500);
   assert.deepEqual(await readMigration(migration.id), migration);
   for (const { table, row } of linked) {
@@ -221,8 +234,9 @@ test('repoint conflicts roll back status, steps and all linked updates and allow
   assert.deepEqual(untouched, conflict);
   assert.deepEqual(await testDb.db.select().from(auditLog).where(eq(auditLog.target, String(migration.id))), []);
 
-  await testDb.db.delete(vmTemplates).where(eq(vmTemplates.id, conflict.id));
+  t.mock.restoreAll();
   assert.equal((await resolve(migration.id, 'ok')).status, 200);
+  assert.deepEqual(await testDb.db.select().from(vmTemplates).where(eq(vmTemplates.id, conflict.id)), []);
   assert.equal((await readMigration(migration.id)).status, 'ok');
   for (const { table, row } of linked) {
     const [moved] = await testDb.db.select().from(table).where(eq(table.id, row.id));
@@ -289,12 +303,13 @@ for (const exitstatus of ['OK', 'ERROR']) {
 }
 
 for (const mode of ['remote_migrate', 'adopt']) {
-  test(`automatic ${mode} linked-row conflict becomes reviewable and manual verification can retry`, async () => {
+  test(`automatic ${mode} linked-row write failure becomes reviewable and manual verification can retry`, async (t) => {
     const migration = await seedMigration(mode === 'adopt' ? 361 : 360, 'running', mode);
     const linked = await seedLinkedRows(migration.vmid);
     const [conflict] = await testDb.db.insert(vmTemplates).values({
       node: targetNode, vmid: migration.vmid, name: 'conflicting-target',
     }).returning();
+    failTemplateWrite(t);
     assert.equal(await finalizeMigration(migration.id, true, 'Physical move completed', { keptSource: true }), false);
     const review = await readMigration(migration.id);
     assert.equal(review.status, 'needs_review');
@@ -308,8 +323,9 @@ for (const mode of ['remote_migrate', 'adopt']) {
     }
     assert.equal((await resolve(migration.id, 'ok')).status, 500);
     assert.deepEqual(await readMigration(migration.id), review);
-    await testDb.db.delete(vmTemplates).where(eq(vmTemplates.id, conflict.id));
+    t.mock.restoreAll();
     assert.equal((await resolve(migration.id, 'ok')).status, 200);
+    assert.deepEqual(await testDb.db.select().from(vmTemplates).where(eq(vmTemplates.id, conflict.id)), []);
     assert.equal((await readMigration(migration.id)).status, 'ok');
   });
 }
