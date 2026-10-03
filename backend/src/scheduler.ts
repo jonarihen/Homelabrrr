@@ -62,7 +62,7 @@ async function markAction(schedule, action: string, detail: string) {
 function runAction(schedule: any, action: 'stop' | 'start', flags) {
   if (stopping) return;
   const key = `${schedule.node}/${schedule.vmid}`;
-  if (inFlight.has(key) || inFlight.size >= Math.max(1, pool.options.max - 1)) return;
+  if (inFlight.has(key) || inFlight.size >= pool.options.max - 1) return;
   inFlight.add(key);
 
   const target = `${schedule.node}/${schedule.vmid}`;
@@ -75,8 +75,8 @@ function runAction(schedule: any, action: 'stop' | 'start', flags) {
     ));
     if (claimed.rowCount !== 1) return;
     return action === 'stop'
-      ? scheduledStopVM(schedule.node, schedule.vmid, { timeoutMs: SHUTDOWN_TIMEOUT_MS })
-      : scheduledStartVM(schedule.node, schedule.vmid);
+      ? scheduledStopVM(schedule.node, schedule.vmid, { timeoutMs: SHUTDOWN_TIMEOUT_MS }, tx)
+      : scheduledStartVM(schedule.node, schedule.vmid, tx);
   });
 
   run.then(async (result: any) => {

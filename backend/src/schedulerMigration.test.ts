@@ -2,6 +2,8 @@ import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import { EventEmitter } from 'node:events';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { sql } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from './testUtils/pgTestDb.ts';
@@ -14,6 +16,7 @@ let repointVmRows: typeof import('./routes/migrate.ts').repointVmRows;
 let actions: string[];
 let status: string;
 let onAction: (() => Promise<void>) | null;
+let vmids = [100];
 let now = Date.parse('2026-10-03T02:00:00Z');
 
 before(async () => {
@@ -37,6 +40,7 @@ beforeEach(async (t) => {
   actions = [];
   status = 'running';
   onAction = null;
+  vmids = [100];
   await testDb.db.delete(vmSchedules);
   await testDb.db.delete(vmMigrations);
   t.mock.method(Date, 'now', () => now);
@@ -47,7 +51,7 @@ beforeEach(async (t) => {
     req.destroy = (err) => req.emit('error', err);
     req.end = async () => {
       let data;
-      if (url.pathname === '/api2/json/cluster/resources') data = [{ vmid: 100, node: 'pve1', type: 'qemu', status }];
+      if (url.pathname === '/api2/json/cluster/resources') data = vmids.map((vmid) => ({ vmid, node: 'pve1', type: 'qemu', status }));
       else if (options.method === 'POST') {
         actions.push(url.pathname);
         if (onAction) await onAction();
@@ -133,3 +137,43 @@ for (const action of ['stop', 'start'] as const) {
     assert.equal(actions.length, 1);
   });
 }
+
+test('invalid or single-client pools are rejected before any action can hold a migration lock', async () => {
+  const run = promisify(execFile);
+  for (const size of ['1', '0', '-1', '1.5', 'NaN']) {
+    await assert.rejects(run(process.execPath, ['--input-type=module', '-e', "await import('./src/db/client.ts')"], {
+      env: { ...process.env, PG_POOL_SIZE: size, DATABASE_URL: testDb.url }, timeout: 5000,
+    }), (err: any) => /PG_POOL_SIZE must be an integer of at least 2/.test(err.stderr));
+  }
+});
+
+test('two-client scheduler reserves capacity and does not perform a nested host checkout', async (t) => {
+  const originalMax = client.pool.options.max;
+  client.pool.options.max = 2;
+  vmids = [100, 101];
+  const original = await seed('stop');
+  await testDb.db.insert(vmSchedules).values({ ...original, id: undefined, vmid: 101 });
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  onAction = async () => { entered.resolve(); await release.promise; };
+  const query = client.pool.query.bind(client.pool);
+  let inventoryRead = false;
+  t.mock.method(client.pool, 'query', (...args: any[]) => {
+    const text = args[0]?.text || args[0];
+    if (String(text).includes('from "pve_hosts"')) {
+      assert.equal(inventoryRead, false, 'scheduler host lookup must use the held connection');
+      inventoryRead = true;
+    }
+    return (query as any)(...args);
+  });
+  try {
+    await scheduler.runScheduleTick();
+    await entered.promise;
+    assert.equal(actions.length, 1);
+    assert.equal((await client.db.select().from(vmSchedules)).length, 2);
+  } finally {
+    release.resolve();
+    assert.equal(await scheduler.waitForSchedulerIdle(), true);
+    client.pool.options.max = originalMax;
+  }
+});

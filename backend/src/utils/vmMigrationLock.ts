@@ -38,11 +38,23 @@ export async function withVmPolicyWrite<T>(node: unknown, vmid: number, write: (
   });
 }
 
-export async function withMigrationSafeSchedule<T>(schedule: typeof vmSchedules.$inferSelect, action: (tx: DbOrTx) => Promise<T>) {
+export async function withVmMigrationLock<T>(vmid: number, action: (database: DbOrTx) => Promise<T>, shared = false) {
   const connection = await pool.connect();
   try {
-    await connection.query('SELECT pg_advisory_lock_shared(206, $1)', [schedule.vmid]);
-    const database = drizzle(connection, { schema });
+    await connection.query(shared ? 'SELECT pg_advisory_lock_shared(206, $1)' : 'SELECT pg_advisory_lock(206, $1)', [vmid]);
+    return await action(drizzle(connection, { schema }));
+  } finally {
+    try {
+      await connection.query(shared ? 'SELECT pg_advisory_unlock_shared(206, $1)' : 'SELECT pg_advisory_unlock(206, $1)', [vmid]);
+      connection.release();
+    } catch (err) {
+      connection.release(err as Error);
+    }
+  }
+}
+
+export async function withMigrationSafeSchedule<T>(schedule: typeof vmSchedules.$inferSelect, action: (tx: DbOrTx) => Promise<T>) {
+  return withVmMigrationLock(schedule.vmid, async (database) => {
     if (await vmMigrationPending(database, schedule.vmid)) return;
     const [current] = await database.select().from(vmSchedules).where(eq(vmSchedules.id, schedule.id));
     if (!current || !current.enabled || current.node !== schedule.node || current.vmid !== schedule.vmid
@@ -53,14 +65,7 @@ export async function withMigrationSafeSchedule<T>(schedule: typeof vmSchedules.
       || current.stopped_this_window !== schedule.stopped_this_window
       || current.updated_at?.getTime() !== schedule.updated_at?.getTime()) return;
     return await action(database);
-  } finally {
-    try {
-      await connection.query('SELECT pg_advisory_unlock_shared(206, $1)', [schedule.vmid]);
-      connection.release();
-    } catch (err) {
-      connection.release(err as Error);
-    }
-  }
+  }, true);
 }
 
 export async function vmMigrationPending(database: DbOrTx, vmid: number) {
