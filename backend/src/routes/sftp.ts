@@ -481,7 +481,7 @@ router.post('/upload', (req, res) => {
           const statTemp = () => new Promise((resolve, reject) => {
             sftp.fstat(handle, (err, attrs) => (err ? reject(err) : resolve(attrs)));
           });
-          const mode = destination ? destination.mode & 0o7777 : 0o666;
+          const mode = destination ? destination.mode & 0o7777 : 0o600;
           if (destination) {
             const attrs = await statTemp();
             if (settled) return;

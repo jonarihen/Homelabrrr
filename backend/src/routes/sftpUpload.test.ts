@@ -302,6 +302,21 @@ test('an overwrite stays unchanged until the closed temporary file is atomically
   });
 });
 
+test('a new POSIX-renamed upload remains owner-only before and after commit', async (t) => {
+  const f = fixture(t, { holdRename: true }, false);
+  const pending = upload().then((response) => response);
+  await waitFor(() => f.renamed.length === 1);
+  assert.equal(f.files.has(REMOTE_PATH), false);
+  assert.deepEqual(f.metadata.get(f.opened[0]), { ...UPLOADER_METADATA, size: REPLACEMENT.length });
+  assert.deepEqual(f.attributes, [{ path: f.opened[0], attrs: { mode: 0o600 } }]);
+  f.releaseRename();
+  assert.equal((await pending).status, 200);
+  assert.deepEqual(f.files.get(REMOTE_PATH), REPLACEMENT);
+  assert.deepEqual(f.metadata.get(REMOTE_PATH), { ...UPLOADER_METADATA, size: REPLACEMENT.length });
+  assert.equal(f.metadata.get(REMOTE_PATH)!.mode! & 0o077, 0);
+  assert.deepEqual(f.removed, []);
+});
+
 for (const extension of ['unadvertised', 'unsupported', 'missing'] as const) {
   test(`plain rename creates a new file when the POSIX extension is ${extension}`, async (t) => {
     const f = fixture(t, { extension }, false);
@@ -312,7 +327,9 @@ for (const extension of ['unadvertised', 'unsupported', 'missing'] as const) {
     assert.equal(f.renamed[0].kind, 'plain');
     assert.deepEqual(f.removed, []);
     assert.equal(f.ends, 1);
-    assert.deepEqual(f.metadata.get(REMOTE_PATH), { ...UPLOADER_METADATA, mode: 0o100666, size: REPLACEMENT.length });
+    assert.deepEqual(f.metadata.get(REMOTE_PATH), { ...UPLOADER_METADATA, mode: 0o100600, size: REPLACEMENT.length });
+    assert.deepEqual(f.attributes, [{ path: f.opened[0], attrs: { mode: 0o600 } }]);
+    assert.equal(f.metadata.get(REMOTE_PATH)!.mode! & 0o077, 0);
   });
 
   test(`a rejected plain-rename overwrite preserves the original when the POSIX extension is ${extension}`, async (t) => {
@@ -446,7 +463,7 @@ test('an unreadable destination does not get treated as a new file', async (t) =
   assert.equal(f.ends, 1);
 });
 
-for (const mode of [0o600, 0o644, 0o755, 0o6750]) {
+for (const mode of [0o600, 0o644, 0o660, 0o666, 0o755, 0o6750]) {
   test(`replacement preserves service UID/GID and mode ${mode.toString(8)} after writing`, async (t) => {
     const attrs = { ...ORIGINAL_METADATA, uid: 0, gid: 42, mode: 0o100000 | mode };
     const f = fixture(t, { metadata: attrs });
