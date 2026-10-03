@@ -8,6 +8,7 @@ import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { users, pveHosts, provisionedVms, vmAssignments, vmLeases, vlans, userVlans, vmTemplates, cloudImages } from '../db/schema/index.ts';
 import { provisionAllocation } from '../utils/provisionIntent.ts';
+import { operationPhase } from '../services/operationReconciliation.ts';
 
 let testDb: TestDatabase;
 let app: express.Express;
@@ -23,6 +24,13 @@ let task: Record<string, unknown> = { status: 'stopped', exitstatus: 'OK' };
 let taskCalls = 0;
 let liveVms: any[] = [];
 let configName = 'new-vm';
+let sourceDisks: Record<string, string> = {};
+let submitFailure: Error | null = null;
+let submitStatus = 200;
+const submittedVmids: number[] = [];
+let getNextVmid: typeof import('../proxmox.ts').getNextVmid;
+let releaseVmid: typeof import('../proxmox.ts').releaseVmid;
+let reviewerId: number;
 let quota: typeof import('../utils/quota.ts');
 let submitProvision: typeof import('../services/provisionOwnership.ts').submitProvision;
 let reconcileInterruptedOperations: () => Promise<void>;
@@ -38,6 +46,8 @@ before(async () => {
   ({ waitForBackgroundWork } = await import('../services/backgroundWork.ts'));
   const router = (await import('./provision.ts')).default;
   const operations = (await import('./operations.ts')).default;
+  const adminRouter = (await import('./admin.ts')).default;
+  ({ getNextVmid, releaseVmid } = await import('../proxmox.ts'));
   quota = await import('../utils/quota.ts');
   ({ submitProvision } = await import('../services/provisionOwnership.ts'));
   ({ reconcileInterruptedOperations } = await import('../db/init.ts'));
@@ -49,6 +59,9 @@ before(async () => {
     { username: 'other-owner', password: 'x' },
   ]).returning({ id: users.id });
   [adminId, ownerId, otherId] = rows.map(row => row.id);
+  const [reviewer] = await testDb.db.insert(users).values({ username: 'review-admin', password: 'x', is_admin: true })
+    .returning({ id: users.id });
+  reviewerId = reviewer.id;
   const [host] = await testDb.db.insert(pveHosts).values({
     name: 'fake-create-pve', host: 'pve.example', token_id: 'test@pve!portal', token_secret: 'test-secret',
   }).returning({ id: pveHosts.id });
@@ -69,6 +82,10 @@ before(async () => {
   });
   app.use('/provision', router);
   app.use('/operations', operations);
+  app.use('/admin', (req, _res, next) => {
+    req.session = { userId: reviewerId, username: 'review-admin', isAdmin: true, reauthenticatedAt: Date.now() };
+    next();
+  }, adminRouter);
 });
 
 beforeEach(async t => {
@@ -79,6 +96,10 @@ beforeEach(async t => {
   tagWrites.length = 0;
   liveVms = [];
   configName = 'new-vm';
+  sourceDisks = { scsi0: 'local-lvm:vm-500-disk-0,size=20G' };
+  submitFailure = null;
+  submitStatus = 200;
+  submittedVmids.length = 0;
   await testDb.db.update(users).set({ max_cores: null, max_memory_gb: null, max_storage_gb: null }).where(eq(users.id, ownerId));
   t.mock.method(https, 'request', (url: URL, options: any, callback: any) => {
     const outgoing = new EventEmitter();
@@ -96,12 +117,17 @@ beforeEach(async t => {
           else if (path === '/api2/json/nodes/pve/status') {
             data = { cpuinfo: { sockets: 1, cores: 8 }, memory: { total: 64 * 1024 ** 3 } };
           } else if (path === '/api2/json/nodes/pve/storage/local-lvm/status') data = { avail: 1024 ** 4 };
-          else if ((path === '/api2/json/nodes/pve/qemu' || path.endsWith('/clone')) && options.method === 'POST') data = upid;
+          else if ((path === '/api2/json/nodes/pve/qemu' || path.endsWith('/clone')) && options.method === 'POST') {
+            const submitted = JSON.parse(body);
+            submittedVmids.push(Number(submitted.vmid ?? submitted.newid));
+            if (submitFailure) { outgoing.emit('error', submitFailure); return; }
+            data = upid;
+          }
           else if (path.includes('/tasks/')) { taskCalls += 1; data = task; }
-          else if (path.endsWith('/config') && options.method === 'GET') data = { name: configName, net0: 'virtio,bridge=vmbr0,tag=200' };
+          else if (path.endsWith('/config') && options.method === 'GET') data = { name: configName, net0: 'virtio,bridge=vmbr0,tag=200', ...sourceDisks };
           else if (path.endsWith('/config') && options.method === 'PUT') { tagWrites.push(JSON.parse(body)); data = null; }
           else assert.fail(`Unexpected PVE request: ${options.method} ${url}`);
-          const incoming = Object.assign(new EventEmitter(), { statusCode: 200 });
+          const incoming = Object.assign(new EventEmitter(), { statusCode: options.method === 'POST' ? submitStatus : 200 });
           callback(incoming);
           incoming.emit('data', JSON.stringify({ data }));
           incoming.emit('end');
@@ -229,7 +255,11 @@ test('a synchronous create response still records ownership and lease', async ()
   assert.equal(rows.assignments[0].user_id, ownerId);
   assert.equal(rows.leases.length, 1);
   assert.equal(taskCalls, 0);
-  assert.equal((await provision(created.id)).status, 'ready');
+  const row = await provision(created.id);
+  assert.equal(row.status, 'ready');
+  assert.equal((row.steps as any[]).find(step => step.key === 'create').status, 'done');
+  assert.equal((row.steps as any[]).find(step => step.key === 'tags').status, 'done');
+  assert.equal(operationPhase(row.steps), 'tags');
 });
 
 test('failed-create reconciliation reports legacy rows and reuse history without deleting legitimate ownership', async () => {
@@ -379,8 +409,87 @@ test('synchronous upstream rejection releases its reservation', async () => {
   await assert.rejects(submitProvision({
     user_id: adminId, node, vmid: 0, name: 'new-vm', status: 'creating', steps: [{ key: 'reserve' }],
   }, { userId: ownerId, createdBy: 'create-admin', cores: 2, memoryMb: 2048, diskGb: 20 },
-  async () => { throw new Error('submission rejected'); }), /submission rejected/);
+  async () => { throw Object.assign(new Error('submission rejected'), { definitiveRejection: true }); }), /submission rejected/);
   assert.deepEqual(await quota.getUserResourceUsage(ownerId), { cores: 0, memoryGb: 0, diskGb: 0, vmCount: 0 });
+});
+
+test('user deletion blocks submitting actors and intended owners until provisioning is resolved', async () => {
+  const saved = await savedSubmission(920);
+  await testDb.db.update(provisionedVms).set({ status: 'submitting' }).where(eq(provisionedVms.id, saved.provisionId));
+  for (const id of [adminId, ownerId]) {
+    const response = await request(app).delete(`/admin/users/${id}`);
+    assert.equal(response.status, 409, JSON.stringify(response.body));
+    assert.ok(await provision(saved.provisionId));
+  }
+  await reconcileInterruptedOperations();
+  liveVms = [{ vmid: 920, node: 'pve', type: 'qemu' }];
+  const response = await request(app).post(`/operations/provision/${saved.provisionId}/resolve`).send({ status: 'ready' });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal((await ownership(920)).assignments[0].user_id, ownerId);
+  assert.equal((await ownership(920)).leases[0].created_by, 'create-admin');
+  const [terminalActor] = await testDb.db.insert(users).values({ username: 'terminal-actor', password: 'x' })
+    .returning({ id: users.id });
+  await testDb.db.insert(provisionedVms).values({ user_id: terminalActor.id, node, vmid: 921, name: 'finished', status: 'error' });
+  assert.equal((await request(app).delete(`/admin/users/${terminalActor.id}`)).status, 200);
+});
+
+test('transport timeout and connection reset retain quota and durable VMID reservations without granting access', async () => {
+  await testDb.db.update(users).set({ max_cores: 2 }).where(eq(users.id, ownerId));
+  for (const error of [new Error('Proxmox request timeout'), Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })]) {
+    submitFailure = error;
+    const response = await request(app).post('/provision/create').send({ node, name: 'new-vm', assignTo: ownerId });
+    assert.equal(response.status, 500);
+    const [row] = await testDb.db.select().from(provisionedVms);
+    assert.equal(row.status, 'needs_review');
+    assert.equal(row.vmid, submittedVmids.at(-1));
+    assert.ok(row.vmid > 0);
+    assert.equal(provisionAllocation(row.steps)?.state, 'pending');
+    assert.deepEqual(await ownership(row.vmid), { assignments: [], leases: [] });
+    await assert.rejects(quota.assertUserQuota(ownerId, { addCores: 1 }), /CPU quota exceeded/);
+    releaseVmid(row.vmid);
+    const next = await getNextVmid();
+    assert.notEqual(next, row.vmid);
+    releaseVmid(next);
+    await testDb.db.update(provisionedVms).set({ created_at: new Date('2020-01-01') }).where(eq(provisionedVms.id, row.id));
+    await runDatabaseMaintenance();
+    assert.ok(await provision(row.id));
+    assert.equal((await cleanupOperationTracking(testDb.db, 'provision', row.id)).blocked, true);
+    const ready = await request(app).post(`/operations/provision/${row.id}/resolve`).send({ status: 'ready' });
+    assert.equal(ready.status, 409);
+    await testDb.db.delete(provisionedVms);
+  }
+});
+
+test('definitive upstream rejection frees quota but server errors stay reviewable', async () => {
+  for (const [code, status] of [[400, 'error'], [500, 'needs_review']] as const) {
+    submitStatus = code;
+    const response = await request(app).post('/provision/create').send({ node, name: 'new-vm', assignTo: ownerId });
+    assert.equal(response.status, 500);
+    const [row] = await testDb.db.select().from(provisionedVms);
+    assert.equal(row.status, status);
+    assert.equal((await quota.getUserResourceUsage(ownerId)).vmCount, code === 400 ? 0 : 1);
+    assert.deepEqual(await ownership(row.vmid), { assignments: [], leases: [] });
+    await testDb.db.delete(provisionedVms);
+  }
+});
+
+test('clone quota reserves actual source disks and rejects underreported unknown sizes', async () => {
+  const [template] = await testDb.db.insert(vmTemplates).values({ name: 'large-quota-template', node, vmid: 501, default_disk_gb: 1 })
+    .returning({ id: vmTemplates.id });
+  sourceDisks = { scsi0: 'local-lvm:vm-501-disk-0,size=64G', scsi1: 'local-lvm:vm-501-disk-1,size=16G' };
+  await testDb.db.update(users).set({ max_storage_gb: 79 }).where(eq(users.id, ownerId));
+  const clone = () => request(app).post('/provision/clone').send({ templateId: template.id, name: 'new-vm', assignTo: ownerId, diskGb: 1 });
+  assert.equal((await clone()).status, 403);
+  assert.equal(submittedVmids.length, 0);
+  await testDb.db.update(users).set({ max_storage_gb: 80 }).where(eq(users.id, ownerId));
+  task = { status: 'stopped', exitstatus: 'clone failed' };
+  const response = await clone();
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(provisionAllocation((await provision(response.body.id)).steps)?.diskGb, 80);
+  assert.equal((await clone()).status, 403);
+  await waitForBackgroundWork();
+  sourceDisks = { scsi0: 'local-lvm:vm-501-disk-0' };
+  assert.equal((await clone()).status, 503);
 });
 
 test('successful upstream reconciliation does not classify existing ownership as failed-create leftovers', async () => {

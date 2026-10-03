@@ -8,7 +8,7 @@ import { isUniqueViolation } from '../db/errors.ts';
 import {
   withFreshVmid, cloneVM, createVM, updateVMConfig, resizeVMDisk, startVM,
   getStorages, getISOImages, getNetworks, getNodes, getTaskStatus,
-  getAllVMs, getVMConfig,
+  getAllVMs, getVMConfig, getVMConfigCurrent,
 } from '../proxmox.ts';
 import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth.ts';
 import { sendError, hasHttpStatus, tagStatus } from '../utils/httpError.ts';
@@ -22,7 +22,7 @@ import { assertStorageExposed, filterExposedStorages } from '../utils/storageVis
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
 import { assertNodeCapacity } from '../utils/capacity.ts';
 import { assertNodeAvailable } from '../utils/nodeMaintenance.ts';
-import { assertUserQuota, getUserQuota, getUserResourceUsage } from '../utils/quota.ts';
+import { assertUserQuota, cloneDiskAllocation, getUserQuota, getUserResourceUsage } from '../utils/quota.ts';
 import { syncVmTagsSafe } from '../utils/vmTags.ts';
 import { getRolePermissions } from '../utils/permissions.ts';
 import { toPveVmName } from '../utils/vmName.ts';
@@ -373,10 +373,15 @@ router.post('/clone', async (req: any, res: any) => {
   const finalMem = memoryGb ? Math.round(parseFloat(memoryGb) * 1024) : template.default_memory;
   const finalDisk = diskGb || template.default_disk_gb;
   let capacityNote = '';
+  let cloneDiskGb: number;
+  let resizeDisk: string | null;
   try {
+    const allocation = cloneDiskAllocation(await getVMConfigCurrent(template.node, template.vmid), Number(finalDisk));
+    cloneDiskGb = allocation.diskGb;
+    resizeDisk = allocation.resizeDisk;
     const capacity = await assertNodeCapacity(template.node, {
       memoryMb: finalMem,
-      diskGb: finalDisk,
+      diskGb: cloneDiskGb,
       storage: storage || template.default_storage,
     });
     capacityNote = capacity?.memoryWarning || '';
@@ -384,7 +389,7 @@ router.post('/clone', async (req: any, res: any) => {
     await assertUserQuota(req.session.userId, {
       addCores: parseInt(finalCores, 10) || 0,
       addMemoryMb: finalMem,
-      addDiskGb: parseFloat(finalDisk) || 0,
+      addDiskGb: cloneDiskGb,
     });
   } catch (err) {
     if (hasHttpStatus(err)) return sendError(res, err);
@@ -396,13 +401,13 @@ router.post('/clone', async (req: any, res: any) => {
     // the duration of the clone submit, so a second deploy running right now
     // can't be handed the same id. withFreshVmid retries once if Proxmox says
     // the id is taken anyway, and releases the reservation if the clone fails.
-    const submit = () => withFreshVmid((vmid: number) => cloneVM(
+    const submit = (onReserved: (vmid: number) => Promise<void>) => withFreshVmid((vmid: number) => cloneVM(
       template.node,
       template.vmid,
       vmid,
       vmName,
       { storage: storage || template.default_storage, description: description || '' }
-    ));
+    ), { onReserved });
 
     // Track the provisioned VM — the clone/capacity work above is already done,
     // so those steps are seeded complete and the clone task is left active.
@@ -420,7 +425,7 @@ router.post('/clone', async (req: any, res: any) => {
       template_id: template.id, source_type: 'template', steps, status: 'cloning', request_id: req.requestId || '',
     }, {
       userId: targetUser, createdBy: req.session.username,
-      cores: Number(finalCores), memoryMb: finalMem, diskGb: Number(finalDisk),
+      cores: Number(finalCores), memoryMb: finalMem, diskGb: cloneDiskGb,
     }, submit);
 
     // Do config changes after clone finishes — poll in background
@@ -428,6 +433,7 @@ router.post('/clone', async (req: any, res: any) => {
       cores: finalCores,
       memory: finalMem,
       diskGb: finalDisk,
+      resizeDisk,
       cloudInit: template.cloud_init,
       ...cloudInitOpts,
       description,
@@ -692,7 +698,7 @@ router.post('/from-image', async (req: any, res: any) => {
 
     // Late allocation + reservation (see /clone above): concurrent deploys can
     // no longer be handed the same id, and a failed create hands its id back.
-    const submit = () => withFreshVmid((id: number) => createVM(targetImage.node, id, {
+    const submit = (onReserved: (vmid: number) => Promise<void>) => withFreshVmid((id: number) => createVM(targetImage.node, id, {
       name: vmName,
       cpu: 'host',
       sockets: cpuLayout.sockets,
@@ -707,7 +713,7 @@ router.post('/from-image', async (req: any, res: any) => {
       vga: 'serial0',
       net0: tag ? `virtio,bridge=${safeBridge},tag=${tag}` : `virtio,bridge=${safeBridge}`,
       ...(description && { description }),
-    }));
+    }), { onReserved });
 
     const startNow = !!start;
     const steps = stepList([
@@ -875,7 +881,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
       userId: targetUser, createdBy: req.session.username,
       cores: cpuLayout.sockets * cpuLayout.cores,
       memoryMb: config.memory, diskGb: Number(String(diskSize).replace(/[^0-9]/g, '')) || 0,
-    }, () => withFreshVmid((id: number) => createVM(node, id, config)));
+    }, onReserved => withFreshVmid((id: number) => createVM(node, id, config), { onReserved }));
 
     // Poll for completion, then stamp PVE owner/VLAN tags on the new VM
     if (upid) {
@@ -892,6 +898,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
         }), { kind: 'provision', id: provisionId, requestId: req.requestId })
         .catch((err: any) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
     } else {
+      await setStep(provisionId, 'create', 'done');
       await recordProvisionOwnership(provisionId);
       await setStep(provisionId, 'tags', 'active');
       await db.update(provisionedVms).set({ status: 'ready', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
@@ -1157,19 +1164,13 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
 
     // Resize disk if needed
     await setStep(provisionId, 'resize', 'active');
-    if (opts.diskGb) {
+    if (opts.resizeDisk) {
       try {
-        await resizeVMDisk(node, vmid, 'scsi0', `${opts.diskGb}G`);
+        await resizeVMDisk(node, vmid, opts.resizeDisk, `${opts.diskGb}G`);
         await setStep(provisionId, 'resize', 'done');
       } catch {
-        // Try virtio0 if scsi0 doesn't exist
-        try {
-          await resizeVMDisk(node, vmid, 'virtio0', `${opts.diskGb}G`);
-          await setStep(provisionId, 'resize', 'done');
-        } catch {
-          warnings.push(`Disk resize to ${opts.diskGb}G failed`);
-          await setStep(provisionId, 'resize', 'skipped', `resize to ${opts.diskGb}G failed`);
-        }
+        warnings.push(`Disk resize to ${opts.diskGb}G failed`);
+        await setStep(provisionId, 'resize', 'skipped', `resize to ${opts.diskGb}G failed`);
       }
     } else {
       await setStep(provisionId, 'resize', 'skipped');

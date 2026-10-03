@@ -134,6 +134,25 @@ export async function assertUserQuota(
   }
 }
 
+export function cloneDiskAllocation(config: Record<string, unknown>, requestedGb: number) {
+  if (!Number.isFinite(requestedGb) || requestedGb <= 0) throw httpError(400, 'Invalid clone disk size');
+  const disks = new Map<string, number>();
+  for (const [key, value] of Object.entries(config)) {
+    if (!/^(?:(?:scsi|virtio|sata|ide|efidisk|tpmstate)\d+)$/.test(key) || typeof value !== 'string') continue;
+    const volume = value.split(',')[0];
+    if (volume === 'none' || volume.includes('cloudinit') || value.split(',').includes('media=cdrom')) continue;
+    const size = value.split(',').find(option => option.startsWith('size='))?.slice(5);
+    const gb = sizeToGb(size);
+    if (gb === null || gb <= 0) throw httpError(503, 'Cannot determine the template disk size safely');
+    disks.set(key, gb);
+  }
+  if (disks.size === 0) throw httpError(503, 'The template has no measurable clone disks');
+  const primary = disks.has('scsi0') ? 'scsi0' : disks.has('virtio0') ? 'virtio0' : null;
+  const total = [...disks.values()].reduce((sum, size) => sum + size, 0);
+  const growthGb = primary ? Math.max(0, requestedGb - disks.get(primary)!) : 0;
+  return { diskGb: total + growthGb, resizeDisk: growthGb > 0 ? primary : null };
+}
+
 /** Parse a PVE disk size string ("32G", "512M", "1T") to GB. */
 export function sizeToGb(value: unknown): number | null {
   const m = String(value ?? '').match(/^(\d+(?:\.\d+)?)([MGT])$/i);
