@@ -1,7 +1,7 @@
 import https from 'https';
 import tls from 'tls';
 import { eq } from 'drizzle-orm';
-import { db } from './db/client.ts';
+import { db, type DbOrTx } from './db/client.ts';
 import { pveHosts } from './db/schema/index.ts';
 import { decryptSecret } from './utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.ts';
@@ -24,8 +24,8 @@ function agentForHost(host) {
   return new https.Agent({ rejectUnauthorized: host.verify_tls !== false });
 }
 
-async function getHostById(hostId) {
-  const [host] = await db.select().from(pveHosts).where(eq(pveHosts.id, hostId)).limit(1);
+async function getHostById(hostId, database: DbOrTx = db) {
+  const [host] = await database.select().from(pveHosts).where(eq(pveHosts.id, hostId)).limit(1);
   if (!host) {
     throw new Error(`Configured Proxmox host ${hostId} was not found`);
   }
@@ -65,7 +65,7 @@ function makeRequest(host, method, path, body) {
       res.on('data', (chunk) => { text += chunk; });
       res.on('end', () => {
         if (res.statusCode >= 400) {
-          fail(new Error(`Proxmox ${method} ${path} → ${res.statusCode}: ${text}`));
+          fail(Object.assign(new Error(`Proxmox ${method} ${path} → ${res.statusCode}: ${text}`), { upstreamStatus: res.statusCode }));
           return;
         }
         try { resolve(JSON.parse(text).data); }
@@ -84,8 +84,8 @@ export const hostDelete = (host, path) => makeRequest(host, 'DELETE', path);
 
 // ── Host helpers ─────────────────────────────────────────────────────────────
 
-export async function getHosts() {
-  return db.select().from(pveHosts).orderBy(pveHosts.name);
+export async function getHosts(database: DbOrTx = db) {
+  return database.select().from(pveHosts).orderBy(pveHosts.name);
 }
 
 export async function getHost(id) {
@@ -100,8 +100,8 @@ async function defaultHost() {
   return host;
 }
 
-async function findHostsForNodeName(nodeName) {
-  const hosts = await getHosts();
+async function findHostsForNodeName(nodeName, database: DbOrTx = db) {
+  const hosts = await getHosts(database);
   const matches = [];
   for (const h of hosts) {
     try {
@@ -113,14 +113,14 @@ async function findHostsForNodeName(nodeName) {
 }
 
 async function hostForNode(nodeRef, opts = {}) {
-  const { vmid = null } = opts;
+  const { vmid = null, database = db } = opts;
   const { hostId, nodeName } = decodeNodeRef(nodeRef);
   if (!nodeName) throw new Error('Node is required');
   if (!isValidNodeName(nodeName)) throw new Error('Invalid node name');
 
-  if (hostId) return await getHostById(hostId);
+  if (hostId) return await getHostById(hostId, database);
 
-  const matches = await findHostsForNodeName(nodeName);
+  const matches = await findHostsForNodeName(nodeName, database);
   if (matches.length === 1) return matches[0];
 
   if (matches.length > 1 && vmid !== null && vmid !== undefined) {
@@ -140,7 +140,7 @@ async function hostForNode(nodeRef, opts = {}) {
   }
 
   if (matches.length === 0) {
-    const hosts = await getHosts();
+    const hosts = await getHosts(database);
     if (hosts.length === 1) return hosts[0];
     throw new Error(`Node ${nodeName} was not found on any configured Proxmox host`);
   }
@@ -225,8 +225,8 @@ export async function getVMStatus(node, vmid) {
   return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/current`);
 }
 
-export async function vmAction(node, vmid, action) {
-  const { host, nodeName } = await resolveNode(node, { vmid });
+export async function vmAction(node, vmid, action, database: DbOrTx = db) {
+  const { host, nodeName } = await resolveNode(node, { vmid, database });
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/${action}`, {});
 }
 
@@ -274,8 +274,8 @@ export async function getLXCStatus(node, vmid) {
   return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/current`);
 }
 
-export async function lxcAction(node, vmid, action) {
-  const { host, nodeName } = await resolveNode(node, { vmid });
+export async function lxcAction(node, vmid, action, database: DbOrTx = db) {
+  const { host, nodeName } = await resolveNode(node, { vmid, database });
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/${action}`, {});
 }
 
@@ -541,9 +541,25 @@ export async function getNodes() {
   return allNodes;
 }
 
-export async function getTaskStatus(node, upid) {
-  const { host, nodeName } = await resolveNode(node);
-  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/tasks/${encodeURIComponent(upid)}/status`);
+export async function getTaskStatus(node, upid, database: DbOrTx = db) {
+  const ref = decodeNodeRef(node);
+  if (!isValidNodeName(ref.nodeName)) throw new Error('Invalid node name');
+  const path = `/nodes/${encodeURIComponent(ref.nodeName)}/tasks/${encodeURIComponent(upid)}/status`;
+  if (ref.hostId !== null) return makeRequest(await getHostById(ref.hostId, database), 'GET', path);
+  const hosts = await getHosts(database);
+  const matches = [];
+  let uncertain = false;
+  for (const host of hosts) {
+    try {
+      const task = await makeRequest(host, 'GET', path);
+      if (task && ['running', 'stopped'].includes(task.status)) matches.push(task);
+      else uncertain = true;
+    } catch (err) {
+      if (err.upstreamStatus !== 404 && !(err.upstreamStatus === 500 && /(?:task|UPID).*not found|no such|does not exist/i.test(err.message))) uncertain = true;
+    }
+  }
+  if (matches.length === 1 && !uncertain) return matches[0];
+  throw new Error('Saved upstream task host could not be identified unambiguously');
 }
 
 // Task log lines as `[{ n, t }]`, `n` being the 1-based line number. Reading is
@@ -615,8 +631,8 @@ export async function getGuestType(node, vmid) {
 // Scheduler-driven graceful stop: ask the guest OS to shut down and wait up to
 // `timeoutMs`; if it doesn't stop in time, fall back to a hard stop. Returns
 // `{ method }` describing what actually stopped it ('none' | 'shutdown' | 'stop').
-export async function scheduledStopVM(node, vmid, { timeoutMs = 120_000 } = {}) {
-  const { host, nodeName } = await resolveNode(node, { vmid });
+export async function scheduledStopVM(node, vmid, { timeoutMs = 120_000 } = {}, database: DbOrTx = db) {
+  const { host, nodeName } = await resolveNode(node, { vmid, database });
   const { vmtype, status } = await detectGuest(host, nodeName, vmid);
   if (status.status === 'stopped') return { vmtype, method: 'none' };
 
@@ -634,24 +650,52 @@ export async function scheduledStopVM(node, vmid, { timeoutMs = 120_000 } = {}) 
 }
 
 // Scheduler-driven start (qemu or lxc). No-op if already running.
-export async function scheduledStartVM(node, vmid) {
-  const { host, nodeName } = await resolveNode(node, { vmid });
+export async function scheduledStartVM(node, vmid, database: DbOrTx = db) {
+  const { host, nodeName } = await resolveNode(node, { vmid, database });
   const { vmtype, status } = await detectGuest(host, nodeName, vmid);
   if (status.status === 'running') return { vmtype, method: 'none' };
   await makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/status/start`, {});
   return { vmtype, method: 'start' };
 }
 
-export async function deleteVM(node, vmid) {
-  const { host, nodeName } = await resolveNode(node, { vmid });
+function isMissingGuestError(err) {
+  return err?.upstreamStatus === 404
+    || (err?.upstreamStatus === 500 && /(?:configuration file|config).*does not exist|(?:VM|CT) \d+ does not exist/i.test(err.message));
+}
+
+export async function guestPresence(node, vmid, database: DbOrTx = db) {
+  const { host, nodeName } = await resolveNode(node, { vmid, database });
+  try {
+    await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/current`);
+    return true;
+  } catch (qemuError) {
+    try {
+      await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/current`);
+      return true;
+    } catch (lxcError) {
+      if (isMissingGuestError(qemuError) && isMissingGuestError(lxcError)) return false;
+      throw lxcError;
+    }
+  }
+}
+
+export async function deleteVM(node, vmid, { allowMissing = false } = {}, database: DbOrTx = db) {
+  const { host, nodeName } = await resolveNode(node, { vmid, database });
 
   let vmtype = 'qemu';
   let status;
   try {
     status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/current`);
-  } catch {
-    status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/current`);
-    vmtype = 'lxc';
+  } catch (qemuError) {
+    try {
+      status = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/lxc/${vmid}/status/current`);
+      vmtype = 'lxc';
+    } catch (lxcError) {
+      if (allowMissing && isMissingGuestError(qemuError) && isMissingGuestError(lxcError)) {
+        return { vmtype: null, alreadyAbsent: true };
+      }
+      throw lxcError;
+    }
   }
 
   // Proxmox refuses to destroy a running guest — force-stop it first
@@ -769,7 +813,9 @@ export async function remoteMigrateVm(sourceNode, vmid, vmtype, targetHost, opts
   if (vmtype === 'qemu') body.online = opts.online ? 1 : 0;
   else body.restart = opts.restart ? 1 : 0;
 
+  opts.onSubmit?.();
   const upid = await makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/remote_migrate`, body);
+  if (typeof upid !== 'string' || !upid.startsWith('UPID:')) throw new Error('Proxmox migration response did not contain a task identifier');
   clearCachedVmConfig(sourceNode, vmid, vmtype);
   _vmCache = { data: null, expires: 0 };
   return upid;
@@ -800,8 +846,8 @@ export async function rollbackSnapshot(node, vmid, vmtype = 'qemu', snapname) {
 
 // ── Backup helpers ──────────────────────────────────────────────────────────
 
-export async function getVMBackups(node, vmid) {
-  const { host, nodeName } = await resolveNode(node, { vmid });
+export async function getVMBackups(node, vmid, database: DbOrTx = db) {
+  const { host, nodeName } = await resolveNode(node, { vmid, database });
   // List all storages, then check each backup-capable one for this VM's backups
   const storages = await makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/storage`);
   const backupStorages = storages.filter(s => s.active && s.enabled && s.content?.includes('backup'));
@@ -849,8 +895,8 @@ export async function restoreVMBackup(node, vmid, archive, storage, vmtype = 'qe
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}`, body);
 }
 
-export async function deleteVMBackup(node, storage, volid) {
-  const { host, nodeName } = await resolveNode(node);
+export async function deleteVMBackup(node, storage, volid, database: DbOrTx = db) {
+  const { host, nodeName } = await resolveNode(node, { database });
   return makeRequest(host, 'DELETE', `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storage)}/content/${encodeURIComponent(volid)}`);
 }
 
