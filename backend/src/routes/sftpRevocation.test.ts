@@ -33,6 +33,8 @@ const hostFingerprint = `SHA256:${createHash('sha256')
   .update(Buffer.from(String(hostKey.public).split(' ')[1], 'base64')).digest('base64')}`;
 let connections = 0;
 let uploadedBytes = 0;
+let uploadedPaths: string[] = [];
+let renamedPaths: Array<[string, string]> = [];
 const clients = new Set();
 const server = new ssh2.Server({ hostKeys: [hostKey.private] }, (client) => {
   connections += 1;
@@ -46,11 +48,29 @@ const server = new ssh2.Server({ hostKeys: [hostKey.private] }, (client) => {
       for (const event of ['REALPATH', 'OPENDIR']) {
         sftp.on(event, (id) => sftp.status(id, ssh2.utils.sftp.STATUS_CODE.NO_SUCH_FILE));
       }
-      sftp.on('OPEN', (id) => sftp.handle(id, Buffer.from('handle')));
+      const attrs = { uid: 1000, gid: 1000, mode: 0o100600 };
+      sftp.on('LSTAT', (id) => sftp.status(id, ssh2.utils.sftp.STATUS_CODE.NO_SUCH_FILE));
+      sftp.on('OPEN', (id, path, flags, initialAttrs) => {
+        uploadedPaths.push(path);
+        assert.equal(flags, ssh2.utils.sftp.OPEN_MODE.WRITE | ssh2.utils.sftp.OPEN_MODE.CREAT | ssh2.utils.sftp.OPEN_MODE.TRUNC | ssh2.utils.sftp.OPEN_MODE.EXCL);
+        assert.equal(initialAttrs.mode, 0o600);
+        sftp.handle(id, Buffer.from('handle'));
+      });
       sftp.on('WRITE', (id, _handle, _offset, data) => {
         uploadedBytes += data.length;
         sftp.status(id, ssh2.utils.sftp.STATUS_CODE.OK);
       });
+      sftp.on('FSTAT', (id) => sftp.attrs(id, attrs));
+      sftp.on('FSETSTAT', (id, _handle, changes) => {
+        Object.assign(attrs, changes);
+        attrs.mode |= 0o100000;
+        sftp.status(id, ssh2.utils.sftp.STATUS_CODE.OK);
+      });
+      sftp.on('RENAME', (id, from, to) => {
+        renamedPaths.push([from, to]);
+        sftp.status(id, ssh2.utils.sftp.STATUS_CODE.OK);
+      });
+      sftp.on('REMOVE', (id) => sftp.status(id, ssh2.utils.sftp.STATUS_CODE.OK));
       sftp.on('CLOSE', (id) => sftp.status(id, ssh2.utils.sftp.STATUS_CODE.OK));
     });
   }));
@@ -98,6 +118,8 @@ const operations = [
 
 test.beforeEach(async () => {
   sftpSessions.clear();
+  uploadedPaths = [];
+  renamedPaths = [];
   await testDb.db.delete(sessions);
   await testDb.db.delete(users);
   await testDb.db.delete(roles);
@@ -189,8 +211,9 @@ test('authorized operations honor legacy node assignments and cap idle renewal a
   assert.equal(connections, before + 2);
 });
 
-test('authorized multipart uploads pass the session and VM authorization gate', async () => {
-  seedToken();
+test('authorized multipart uploads pass authorization and atomically commit through the plain-rename fallback', async () => {
+  const sess = seedToken();
+  sess.absoluteExpires = Date.now() + 60_000;
   const before = connections;
   uploadedBytes = 0;
   const res = await request(app()).post('/api/sftp/upload')
@@ -199,6 +222,10 @@ test('authorized multipart uploads pass the session and VM authorization gate', 
   assert.equal(res.body.size, 7);
   assert.equal(uploadedBytes, 7);
   assert.equal(connections, before + 1);
+  assert.equal(uploadedPaths.length, 1);
+  assert.match(uploadedPaths[0], /^\/\.homelabrrr-upload-[\da-f-]+\.tmp$/);
+  assert.deepEqual(renamedPaths, [[uploadedPaths[0], '/x.txt']]);
+  assert.equal(sess.expires, sess.absoluteExpires);
 });
 
 test('connect requires a portal session ID', async () => {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import Busboy from 'busboy';
+import ssh2 from 'ssh2';
 import { basename, posix } from 'path';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client.ts';
@@ -351,6 +352,7 @@ router.post('/upload', (req, res) => {
     settled = true;
     req.unpipe(bb);
     bb.removeAllListeners();
+    bb.on('error', () => {});
     respond();
   };
 
@@ -388,10 +390,12 @@ router.post('/upload', (req, res) => {
     const filename = basename(info.filename || '');
     if (!filename) return fail(400, 'No file uploaded');
     const remotePath = posix.join(fields.path || '/', filename);
+    const tempPath = posix.join(posix.dirname(remotePath), `.homelabrrr-upload-${uuidv4()}.tmp`);
 
     // Hold the part until the SSH channel is up; backpressure keeps the client
     // from running ahead of us.
     fileStream.pause();
+    fileStream.on('error', (err) => fail(500, uploadFailure(req, err)));
 
     resolveSession(req, fields.token, fail).then(async (sess) => {
       if (!sess || settled) return;
@@ -399,11 +403,65 @@ router.post('/upload', (req, res) => {
       if (settled) return sshConn.end();
       conn = sshConn;
 
-      const writeStream = sftp.createWriteStream(remotePath);
+      const readDestination = () => new Promise((resolve, reject) => {
+        sftp.lstat(remotePath, (err, attrs) => {
+          if (err?.code === ssh2.utils.sftp.STATUS_CODE.NO_SUCH_FILE) return resolve(null);
+          if (err) return reject(err);
+          resolve(attrs);
+        });
+      });
+      const canReplace = (attrs) => {
+        if (!attrs) return true;
+        let error, code;
+        if (attrs.isSymbolicLink()) {
+          error = 'Uploads cannot replace symbolic links; choose the target file directly';
+          code = 'SFTP_SYMLINK_DESTINATION';
+        } else if (!attrs.isFile()) {
+          error = 'Uploads can only replace regular files';
+          code = 'SFTP_UNSAFE_OVERWRITE';
+        } else if (![attrs.uid, attrs.gid, attrs.mode].every((value) => Number.isInteger(value) && value >= 0 && value <= 0xffffffff)
+          || Object.keys(attrs.extended || {}).length > 0) {
+          error = 'The destination metadata cannot be safely preserved';
+          code = 'SFTP_UNSAFE_OVERWRITE';
+        }
+        if (!error) return true;
+        fail(409, { error, code, requestId: req.requestId });
+        return false;
+      };
+      const destination = await readDestination();
+      if (settled || !canReplace(destination)) return;
+      const destinationUnchanged = async () => {
+        if (settled) return false;
+        const current = await readDestination();
+        if (settled || !canReplace(current)) return false;
+        if (Boolean(current) !== Boolean(destination)
+          || (current && ['uid', 'gid', 'mode', 'size', 'mtime'].some((key) => current[key] !== destination[key]))) {
+          fail(409, { error: 'The destination changed during the upload; retry the upload', code: 'SFTP_DESTINATION_CHANGED', requestId: req.requestId });
+          return false;
+        }
+        return true;
+      };
+
+      const opened = new Promise((resolve, reject) => {
+        sftp.open(tempPath, 'wx', 0o600, (err, handle) => (err ? reject(err) : resolve(handle)));
+      });
+      discardPartial = (done) => {
+        opened.then((handle) => {
+          sftp.close(handle, () => sftp.unlink(tempPath, () => done()));
+        }, () => done());
+      };
+      const handle = await opened;
+      if (settled) return;
+
+      const writeStream = sftp.createWriteStream(tempPath, { handle, autoClose: false });
+      let prepared = false;
       let bytes = 0;
       let touched = Date.now();
 
-      discardPartial = (done) => sftp.unlink(remotePath, () => done());
+      discardPartial = (done) => {
+        fileStream.unpipe(writeStream);
+        writeStream.destroy(null, () => sftp.unlink(tempPath, () => done()));
+      };
 
       fileStream.on('data', (chunk) => {
         bytes += chunk.length;
@@ -416,14 +474,66 @@ router.post('/upload', (req, res) => {
         }
       });
 
-      // `fail` settles synchronously, so the 'close' that destroy() triggers
-      // can no longer be mistaken for a completed upload.
-      fileStream.on('error', (err) => {
-        fail(500, uploadFailure(req, err));
-        writeStream.destroy();
-      });
       writeStream.on('error', (err) => fail(500, uploadFailure(req, err)));
-      writeStream.on('close', () => succeed({ ok: true, path: remotePath, size: bytes }));
+      writeStream.on('finish', () => {
+        const prepare = async () => {
+          if (settled || !await destinationUnchanged()) return;
+          const statTemp = () => new Promise((resolve, reject) => {
+            sftp.fstat(handle, (err, attrs) => (err ? reject(err) : resolve(attrs)));
+          });
+          const mode = destination ? destination.mode & 0o7777 : 0o600;
+          if (destination) {
+            const attrs = await statTemp();
+            if (settled) return;
+            if (attrs.uid !== destination.uid || attrs.gid !== destination.gid) {
+              await new Promise((resolve, reject) => {
+                sftp.fchown(handle, destination.uid, destination.gid, (err) => (err ? reject(err) : resolve()));
+              });
+            }
+          }
+          if (settled) return;
+          await new Promise((resolve, reject) => {
+            sftp.fchmod(handle, mode, (err) => (err ? reject(err) : resolve()));
+          });
+          if (settled) return;
+          const preserved = await statTemp();
+          if (settled) return;
+          if (!preserved.isFile() || !Number.isInteger(preserved.mode) || (preserved.mode & 0o7777) !== mode
+            || (destination && (preserved.uid !== destination.uid || preserved.gid !== destination.gid))) {
+            return fail(409, { error: 'The destination metadata could not be preserved', code: 'SFTP_UNSAFE_OVERWRITE', requestId: req.requestId });
+          }
+          prepared = true;
+          writeStream.destroy();
+        };
+        prepare().catch((err) => fail(500, uploadFailure(req, err)));
+      });
+      writeStream.on('close', () => {
+        if (settled) return;
+        if (!prepared || !writeStream.writableFinished) return fail(500, 'Upload did not complete');
+        const renamed = (err) => {
+          if (err) return fail(500, uploadFailure(req, err));
+          succeed({ ok: true, path: remotePath, size: bytes });
+        };
+        const commit = async () => {
+          const rename = () => {
+            destinationUnchanged().then((unchanged) => {
+              if (unchanged) sftp.rename(tempPath, remotePath, renamed);
+            }).catch((err) => fail(500, uploadFailure(req, err)));
+          };
+          if (!await destinationUnchanged()) return;
+          if (typeof sftp.ext_openssh_rename !== 'function') return rename();
+          try {
+            sftp.ext_openssh_rename(tempPath, remotePath, (err) => {
+              if (err?.code === ssh2.utils.sftp.STATUS_CODE.OP_UNSUPPORTED) return rename();
+              renamed(err);
+            });
+          } catch (err) {
+            if (err.message !== 'Server does not support this extended request') throw err;
+            rename();
+          }
+        };
+        commit().catch((err) => fail(500, uploadFailure(req, err)));
+      });
 
       fileStream.pipe(writeStream);
     }).catch((err) => fail(500, uploadFailure(req, err)));
