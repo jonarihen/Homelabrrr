@@ -47,6 +47,7 @@ export const backupRuns = pgTable('backup_runs', {
   detail: text('detail').notNull().default(''),
   created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   verified_at: timestamp('verified_at', { withTimezone: true, mode: 'date' }),
+  full_restore_verified_at: timestamp('full_restore_verified_at', { withTimezone: true, mode: 'date' }),
   request_id: text('request_id').notNull().default(''),
 });
 
