@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import Busboy from 'busboy';
+import ssh2 from 'ssh2';
 import { basename, posix } from 'path';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client.ts';
@@ -320,6 +321,7 @@ router.post('/upload', (req, res) => {
     settled = true;
     req.unpipe(bb);
     bb.removeAllListeners();
+    bb.on('error', () => {});
     respond();
   };
 
@@ -362,20 +364,36 @@ router.post('/upload', (req, res) => {
     const filename = basename(info.filename || '');
     if (!filename) return fail(400, 'No file uploaded');
     const remotePath = posix.join(fields.path || '/', filename);
+    const tempPath = posix.join(posix.dirname(remotePath), `.homelabrrr-upload-${uuidv4()}.tmp`);
 
     // Hold the part until the SSH channel is up; backpressure keeps the client
     // from running ahead of us.
     fileStream.pause();
+    fileStream.on('error', (err) => fail(500, uploadFailure(req, err)));
 
-    openSftp(sess).then(({ conn: sshConn, sftp }) => {
+    openSftp(sess).then(async ({ conn: sshConn, sftp }) => {
       if (settled) return sshConn.end();
       conn = sshConn;
 
-      const writeStream = sftp.createWriteStream(remotePath);
+      const opened = new Promise((resolve, reject) => {
+        sftp.open(tempPath, 'wx', (err, handle) => (err ? reject(err) : resolve(handle)));
+      });
+      discardPartial = (done) => {
+        opened.then((handle) => {
+          sftp.close(handle, () => sftp.unlink(tempPath, () => done()));
+        }, () => done());
+      };
+      const handle = await opened;
+      if (settled) return;
+
+      const writeStream = sftp.createWriteStream(tempPath, { handle });
       let bytes = 0;
       let touched = Date.now();
 
-      discardPartial = (done) => sftp.unlink(remotePath, () => done());
+      discardPartial = (done) => {
+        fileStream.unpipe(writeStream);
+        writeStream.destroy(null, () => sftp.unlink(tempPath, () => done()));
+      };
 
       fileStream.on('data', (chunk) => {
         bytes += chunk.length;
@@ -388,14 +406,30 @@ router.post('/upload', (req, res) => {
         }
       });
 
-      // `fail` settles synchronously, so the 'close' that destroy() triggers
-      // can no longer be mistaken for a completed upload.
-      fileStream.on('error', (err) => {
-        fail(500, uploadFailure(req, err));
-        writeStream.destroy();
-      });
       writeStream.on('error', (err) => fail(500, uploadFailure(req, err)));
-      writeStream.on('close', () => succeed({ ok: true, path: remotePath, size: bytes }));
+      writeStream.on('close', () => {
+        if (settled) return;
+        if (!writeStream.writableFinished) return fail(500, 'Upload did not complete');
+        const renamed = (err) => {
+          if (err) return fail(500, uploadFailure(req, err));
+          succeed({ ok: true, path: remotePath, size: bytes });
+        };
+        const rename = () => { if (!settled) sftp.rename(tempPath, remotePath, renamed); };
+        try {
+          if (typeof sftp.ext_openssh_rename !== 'function') return rename();
+          try {
+            sftp.ext_openssh_rename(tempPath, remotePath, (err) => {
+              if (err?.code === ssh2.utils.sftp.STATUS_CODE.OP_UNSUPPORTED) return rename();
+              renamed(err);
+            });
+          } catch (err) {
+            if (err.message !== 'Server does not support this extended request') throw err;
+            rename();
+          }
+        } catch (err) {
+          fail(500, uploadFailure(req, err));
+        }
+      });
 
       fileStream.pipe(writeStream);
     }).catch((err) => fail(500, uploadFailure(req, err)));
