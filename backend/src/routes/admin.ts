@@ -52,6 +52,7 @@ import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
+import { assertUserCanBeDeleted } from '../services/provisionOwnership.ts';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -1337,10 +1338,18 @@ router.delete('/users/:id', pUsers, async (req, res) => {
   }
   // Assignments cascade away with the user — capture them (and the username,
   // which won't exist anymore) so the owner tags get cleared from PVE.
-  const [target] = await db.select({ username: users.username }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
-  const orphanedVms = await db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
-    .from(vmAssignments).where(eq(vmAssignments.user_id, Number(req.params.id)));
-  await db.delete(users).where(eq(users.id, Number(req.params.id)));
+  let deleted;
+  try {
+    deleted = await db.transaction(async tx => {
+      await assertUserCanBeDeleted(tx, Number(req.params.id));
+      const [target] = await tx.select({ username: users.username }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
+      const orphanedVms = await tx.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
+        .from(vmAssignments).where(eq(vmAssignments.user_id, Number(req.params.id)));
+      await tx.delete(users).where(eq(users.id, Number(req.params.id)));
+      return { target, orphanedVms };
+    });
+  } catch (err) { return sendError(res, err); }
+  const { target, orphanedVms } = deleted;
   revokeUserSftpSessions(Number(req.params.id));
   await logAudit(req, 'admin_delete_user', req.params.id, '');
   for (const vm of orphanedVms) {
