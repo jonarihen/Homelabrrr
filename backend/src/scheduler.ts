@@ -16,7 +16,7 @@ import { db, pool } from './db/client.ts';
 import { vmSchedules } from './db/schema/index.ts';
 import { getAllVMs, scheduledStopVM, scheduledStartVM } from './proxmox.ts';
 import { logAuditEntry } from './utils/audit.ts';
-import { nodeLookupCandidates } from './utils/nodeRef.ts';
+import { decodeNodeRef, nodeLookupCandidates } from './utils/nodeRef.ts';
 import { withMigrationSafeSchedule } from './utils/vmMigrationLock.ts';
 import {
   isValidTime, isValidTimezone, timeToMinutes, zonedParts, offWindowContains,
@@ -41,12 +41,12 @@ function systemAudit(action: string, target: string, detail: string) {
     .catch(() => { /* never let audit failure break the loop */ });
 }
 
-function findVmStatus(vms: any[], node: any, vmid: any) {
+export function findVmStatus(vms: any[], node: any, vmid: any) {
   const candidates = new Set(nodeLookupCandidates(node));
   const target = Number.parseInt(vmid, 10);
   const vm = vms.find((v) => (
     Number.parseInt(v.vmid, 10) === target
-    && (candidates.has(v.nodeRef) || candidates.has(v.node))
+    && (decodeNodeRef(node).hostId !== null ? v.nodeRef === decodeNodeRef(node).nodeRef : candidates.has(v.nodeRef) || candidates.has(v.node))
   ));
   return vm ? vm.status : null;
 }

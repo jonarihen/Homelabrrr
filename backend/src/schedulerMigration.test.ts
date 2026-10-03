@@ -138,6 +138,50 @@ for (const action of ['stop', 'start'] as const) {
   });
 }
 
+test('qualified schedules use target inventory even when a retained same-named source appears first', () => {
+  const inventory = [
+    { vmid: 100, node: 'pve', nodeRef: '1~pve', status: 'stopped' },
+    { vmid: 100, node: 'pve', nodeRef: '2~pve', status: 'running' },
+  ];
+  assert.equal(scheduler.findVmStatus(inventory, '2~pve', 100), 'running');
+  assert.equal(scheduler.findVmStatus(inventory.slice(0, 1), '2~pve', 100), null);
+  assert.equal(scheduler.findVmStatus(inventory, 'pve', 100), 'stopped');
+});
+
+test('contending lock requests fail before checkout and leave unrelated pool work usable', async (t) => {
+  const { withVmMigrationLock, withVmPolicyWrite } = await import('./utils/vmMigrationLock.ts');
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const holder = withVmMigrationLock(100, async () => { entered.resolve(); await release.promise; });
+  await entered.promise;
+  const connect = t.mock.method(client.pool, 'connect', client.pool.connect.bind(client.pool));
+  try {
+    const requests = Array.from({ length: 30 }, (_, index) => index % 2
+      ? withVmMigrationLock(100, async () => {}) : withVmPolicyWrite('1~pve1', 100, async () => {}));
+    const results = await Promise.allSettled(requests);
+    assert.ok(results.every((result) => result.status === 'rejected' && result.reason.statusCode === 409));
+    assert.equal(connect.mock.callCount(), 0);
+    await client.db.select().from(vmSchedules);
+  } finally { release.resolve(); }
+  await holder;
+});
+
+test('cross-process advisory contention is rejected without leaving a checked-out waiter', async () => {
+  const { withVmMigrationLock } = await import('./utils/vmMigrationLock.ts');
+  const blocker = await testDb.pool.connect();
+  await blocker.query('SELECT pg_advisory_lock(206, 100)');
+  try {
+    for (let i = 0; i < 20; i++) await assert.rejects(withVmMigrationLock(100, async () => {}), { statusCode: 409 });
+    assert.equal(client.pool.waitingCount, 0);
+    const { rows } = await testDb.pool.query("SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory'");
+    assert.equal(rows[0].count, 0);
+    await client.db.select().from(vmSchedules);
+  } finally {
+    await blocker.query('SELECT pg_advisory_unlock(206, 100)');
+    blocker.release();
+  }
+});
+
 test('invalid or single-client pools are rejected before any action can hold a migration lock', async () => {
   const run = promisify(execFile);
   for (const size of ['1', '0', '-1', '1.5', 'NaN']) {

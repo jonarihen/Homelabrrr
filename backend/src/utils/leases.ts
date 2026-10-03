@@ -2,7 +2,7 @@ import { and, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import { vmLeases, provisionedVms, vmAssignments, pveHosts } from '../db/schema/index.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
-import { lockVmMigration, vmMigrationPending, withVmPolicyWrite } from './vmMigrationLock.ts';
+import { withVmMigrationLock, vmMigrationPending, withVmPolicyWrite, type PolicyActor } from './vmMigrationLock.ts';
 import { logAuditEntry } from './audit.ts';
 import { getAllVMs, vmAction, lxcAction, guestPresence } from '../proxmox.ts';
 import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
@@ -74,11 +74,11 @@ export async function getLeaseRow(node: unknown, vmid: unknown, database: DbOrTx
 
 // Create a lease for a VM at provisioning time (no-op if one already exists).
 // `leaseDays` overrides the configured default; 0 / unlimited → expires_at NULL.
-export async function createLeaseForVm(node: unknown, vmid: unknown, { createdBy = '', leaseDays }: { createdBy?: string; leaseDays?: unknown } = {}) {
+export async function createLeaseForVm(node: unknown, vmid: unknown, { createdBy = '', leaseDays, actor }: { createdBy?: string; leaseDays?: unknown; actor?: PolicyActor } = {}) {
   const parsed = Number.parseInt(vmid as string, 10);
   if (!node || !Number.isInteger(parsed)) return null;
 
-  return withVmPolicyWrite(node, parsed, (tx, currentNode) => createLeaseRow(tx, currentNode, parsed, { createdBy, leaseDays }));
+  return withVmPolicyWrite(node, parsed, (tx, currentNode) => createLeaseRow(tx, currentNode, parsed, { createdBy, leaseDays }), actor);
 }
 
 async function createLeaseRow(database: DbOrTx, node: unknown, parsed: number, { createdBy = '', leaseDays }: { createdBy?: string; leaseDays?: unknown } = {}) {
@@ -104,7 +104,7 @@ async function createLeaseRow(database: DbOrTx, node: unknown, parsed: number, {
 // duration (falling back to the current default), bump the renewal count, and
 // clear any expired/auto-stopped flags. Creates a lease first if none exists so
 // a claimed pre-portal VM can still be given a lease.
-export async function renewLease(node: unknown, vmid: unknown, { createdBy = '' }: { createdBy?: string } = {}) {
+export async function renewLease(node: unknown, vmid: unknown, { createdBy = '', actor }: { createdBy?: string; actor?: PolicyActor } = {}) {
   const parsed = Number.parseInt(vmid as string, 10);
   if (!node || !Number.isInteger(parsed)) return null;
   return withVmPolicyWrite(node, parsed, async (database, currentNode) => {
@@ -128,13 +128,13 @@ export async function renewLease(node: unknown, vmid: unknown, { createdBy = '' 
     }).where(eq(vmLeases.id, row.id));
 
     return getLeaseRow(currentNode, parsed, database);
-  });
+  }, actor);
 }
 
 // Admin adjustment: toggle exempt, set a new duration (recomputes expiry from
 // now), and/or extend by N days from the current expiry. Any change clears the
 // expired flag. Creates a lease if none exists.
-export async function updateLease(node: unknown, vmid: unknown, { exempt, leaseDays, extendDays, createdBy = '' }: { exempt?: unknown; leaseDays?: unknown; extendDays?: unknown; createdBy?: string } = {}) {
+export async function updateLease(node: unknown, vmid: unknown, { exempt, leaseDays, extendDays, createdBy = '', actor }: { exempt?: unknown; leaseDays?: unknown; extendDays?: unknown; createdBy?: string; actor?: PolicyActor } = {}) {
   const parsed = Number.parseInt(vmid as string, 10);
   if (!node || !Number.isInteger(parsed)) return null;
   return withVmPolicyWrite(node, parsed, async (database, currentNode) => {
@@ -178,7 +178,7 @@ export async function updateLease(node: unknown, vmid: unknown, { exempt, leaseD
     }
 
     return getLeaseRow(currentNode, parsed, database);
-  });
+  }, actor);
 }
 
 // Derive a UI-friendly view from a raw lease row. `status` ∈
@@ -265,8 +265,7 @@ export async function runLeaseSweep() {
     // call, a bad DB write) must never abort the sweep of the remaining ones.
     try {
       const audits: [string, string, string][] = [];
-      await db.transaction(async (tx) => {
-        await lockVmMigration(tx, lease.vmid, true);
+      await withVmMigrationLock(lease.vmid, (database) => database.transaction(async (tx) => {
         if (await vmMigrationPending(tx, lease.vmid)) return;
         const [current] = await tx.select().from(vmLeases).where(eq(vmLeases.id, lease.id)).limit(1);
         if (!current || current.node !== lease.node || current.exempt || current.expired || !current.expires_at) return;
@@ -308,7 +307,7 @@ export async function runLeaseSweep() {
             eq(vmLeases.expired, false), eq(vmLeases.exempt, false),
             sql`date_trunc('milliseconds', ${vmLeases.expires_at}) = ${current.expires_at}`,
           ));
-      });
+      }), true);
       for (const [action, target, detail] of audits) await logSystemAudit(action, target, detail);
     } catch (err: any) {
       await logSystemAudit('lease_sweep_error', `${lease.node}/${lease.vmid}`, err.message);
@@ -321,7 +320,7 @@ export async function runLeaseSweep() {
 // One-off backfill: give every provisioned / assigned VM that lacks a lease the
 // configured default. Lets leases start applying to VMs that predate the
 // feature. Returns the number of leases created.
-export async function backfillLeases({ createdBy = '' }: { createdBy?: string } = {}) {
+export async function backfillLeases({ createdBy = '', actor }: { createdBy?: string; actor?: PolicyActor } = {}) {
   const [provisioned, assigned] = await Promise.all([
     db.select({ node: provisionedVms.node, vmid: provisionedVms.vmid }).from(provisionedVms),
     db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid }).from(vmAssignments),
@@ -340,7 +339,7 @@ export async function backfillLeases({ createdBy = '' }: { createdBy?: string } 
   let created = 0;
   for (const t of targets) {
     if (await getLeaseRow(t.node, t.vmid)) continue;
-    if (await createLeaseForVm(t.node, t.vmid, { createdBy })) created += 1;
+    if (await createLeaseForVm(t.node, t.vmid, { createdBy, actor })) created += 1;
   }
   return created;
 }
