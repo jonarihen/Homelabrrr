@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmMigrations, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms,
 } from '../db/schema/index.ts';
@@ -60,34 +60,44 @@ const NODE_KEYED_TABLES: [string, any][] = [
 const DISK_KEY_RE = /^(?:scsi|virtio|sata|ide)\d+$|^(?:efidisk|tpmstate)\d+$/;
 const IDENT_RE = /^[a-zA-Z0-9._-]+$/;
 
-async function repointVmRows(sourceNode, vmid, targetNode) {
+async function repointVmRows(sourceNode, vmid, targetNode, database: DbOrTx) {
   const candidates = nodeLookupCandidates(sourceNode);
   if (candidates.length === 0) return;
-  for (const [label, table] of NODE_KEYED_TABLES) {
-    try {
-      await db.update(table).set({ node: targetNode })
-        .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)));
-    } catch (err) {
-      console.warn(`[migrate] failed to re-point ${label} for VM ${vmid}: ${err.message}`);
-    }
+  for (const [, table] of NODE_KEYED_TABLES) {
+    await database.update(table).set({ node: targetNode })
+      .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)));
   }
 }
 
-// Idempotent: the status transition guard means only the first caller (the
-// background job/poller or a lazy status check after a restart) finalizes.
+export async function finalizeMigrationSuccess(
+  database: DbOrTx,
+  id: number,
+  detail = '',
+  { expectedStatus = 'running', keptSource }: { expectedStatus?: 'running' | 'needs_review'; keptSource?: boolean } = {},
+): Promise<boolean> {
+  const row = await database.transaction(async (tx) => {
+    const [claimed] = await tx.update(vmMigrations)
+      .set({ status: 'ok', status_detail: detail, finished_at: new Date(), ...(keptSource === undefined ? {} : { kept_source: keptSource }) })
+      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, expectedStatus)))
+      .returning();
+    if (!claimed) return;
+    if (claimed.mode !== 'adopt') await closeSteps(id, true, detail, tx);
+    await repointVmRows(claimed.source_node, claimed.vmid, claimed.target_node, tx);
+    return claimed;
+  });
+  if (!row) return false;
+  console.log(`[migrate] VM ${row.vmid} migrated ${row.source_node} → ${row.target_node} (${row.mode})`);
+  return true;
+}
+
 async function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
-  // Atomic claim: only the first caller to flip a still-'running' row finalizes.
+  if (ok) return finalizeMigrationSuccess(db, id, detail, { keptSource });
   const claimed = await db.update(vmMigrations)
-    .set({ status: ok ? 'ok' : 'error', status_detail: detail, kept_source: keptSource, finished_at: new Date() })
+    .set({ status: 'error', status_detail: detail, kept_source: keptSource, finished_at: new Date() })
     .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
   if (claimed.rowCount === 0) return;
   const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
-  // Adopt drives its own steps as it goes; remote_migrate only learns the
-  // outcome here, so its seeded steps are resolved from the final status.
-  if (row.mode !== 'adopt') await closeSteps(id, ok, detail);
-  if (!ok) return;
-  await repointVmRows(row.source_node, row.vmid, row.target_node);
-  console.log(`[migrate] VM ${row.vmid} migrated ${row.source_node} → ${row.target_node} (${row.mode})`);
+  if (row.mode !== 'adopt') await closeSteps(id, false, detail);
 }
 
 // ─── Step tracking (same shape as provisioned_vms.steps) ─────────────────────
@@ -99,8 +109,8 @@ async function seedSteps(id, steps) {
     .where(eq(vmMigrations.id, id));
 }
 
-async function readSteps(id) {
-  const [row] = await db.select({ steps: vmMigrations.steps }).from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
+async function readSteps(id, database: DbOrTx = db) {
+  const [row] = await database.select({ steps: vmMigrations.steps }).from(vmMigrations).where(eq(vmMigrations.id, id)).limit(1);
   return Array.isArray(row?.steps) ? row.steps : [];
 }
 
@@ -115,8 +125,8 @@ async function setStep(id, key, status, note) {
 
 // Resolve every unfinished step when a migration ends: all done on success, the
 // step that was running marked failed otherwise.
-async function closeSteps(id, ok, detail) {
-  const steps = await readSteps(id);
+async function closeSteps(id, ok, detail, database: DbOrTx = db) {
+  const steps = await readSteps(id, database);
   if (steps.length === 0) return;
   for (const step of steps) {
     if (step.status === 'done' || step.status === 'skipped' || step.status === 'error') continue;
@@ -126,7 +136,7 @@ async function closeSteps(id, ok, detail) {
       if (detail) step.note = detail;
     }
   }
-  await db.update(vmMigrations).set({ steps }).where(eq(vmMigrations.id, id));
+  await database.update(vmMigrations).set({ steps }).where(eq(vmMigrations.id, id));
 }
 
 // ─── Transfer progress ───────────────────────────────────────────────────────
