@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import {
   vmMigrations, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms,
+  vmLeases, vmSchedules,
 } from '../db/schema/index.ts';
 import {
   getAllVMs, getHost, getHosts, remoteMigrateVm, getTaskStatus, getTaskLog,
@@ -60,9 +61,23 @@ const NODE_KEYED_TABLES: [string, any][] = [
 const DISK_KEY_RE = /^(?:scsi|virtio|sata|ide)\d+$|^(?:efidisk|tpmstate)\d+$/;
 const IDENT_RE = /^[a-zA-Z0-9._-]+$/;
 
-async function repointVmRows(sourceNode, vmid, targetNode) {
+export async function repointVmRows(sourceNode, vmid, targetNode) {
   const candidates = nodeLookupCandidates(sourceNode);
   if (candidates.length === 0) return;
+  const policyCandidates = [...new Set([...candidates, ...nodeLookupCandidates(targetNode)])];
+  await db.transaction(async (tx) => {
+    for (const table of [vmLeases, vmSchedules]) {
+      const rows = await tx.select({ id: table.id, node: table.node }).from(table)
+        .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)))
+        .orderBy(table.id).for('update');
+      const source = candidates.map((node) => rows.find((row) => row.node === node)).find(Boolean);
+      if (!source) continue;
+      await tx.delete(table).where(and(
+        eq(table.vmid, Number(vmid)), inArray(table.node, policyCandidates), ne(table.id, source.id),
+      ));
+      await tx.update(table).set({ node: targetNode }).where(eq(table.id, source.id));
+    }
+  });
   for (const [label, table] of NODE_KEYED_TABLES) {
     try {
       await db.update(table).set({ node: targetNode })
