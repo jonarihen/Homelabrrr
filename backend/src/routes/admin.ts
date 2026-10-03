@@ -1964,7 +1964,7 @@ router.put('/leases/:node/:vmid', requireAdmin, async (req, res) => {
   const { node, vmid } = req.params;
   const { exempt, leaseDays, extendDays } = req.body || {};
   try {
-    const lease = await updateLease(node, vmid, { exempt, leaseDays, extendDays, createdBy: req.session.username });
+    const lease = await updateLease(node, vmid, { exempt, leaseDays, extendDays, createdBy: req.session.username, actor: { userId: req.session.userId } });
     if (!lease) return res.status(400).json({ error: 'Could not update lease' });
     const detail = [
       exempt !== undefined ? `exempt=${exempt ? 1 : 0}` : null,
@@ -1981,7 +1981,7 @@ router.put('/leases/:node/:vmid', requireAdmin, async (req, res) => {
 router.post('/leases/:node/:vmid/renew', requireAdmin, async (req, res) => {
   const { node, vmid } = req.params;
   try {
-    const lease = await renewLease(node, vmid, { createdBy: req.session.username });
+    const lease = await renewLease(node, vmid, { createdBy: req.session.username, actor: { userId: req.session.userId } });
     if (!lease) return res.status(404).json({ error: 'This VM has no lease to renew' });
     await logAudit(req, 'lease_renew', `${node}/${vmid}`, `admin renewal #${lease.renewal_count}`);
     res.json({ ok: true, lease: await computeLeaseView(lease) });
@@ -2002,7 +2002,7 @@ router.post('/leases/sweep', requireAdmin, async (req, res) => {
 
 router.post('/leases/backfill', requireAdmin, async (req, res) => {
   try {
-    const created = await backfillLeases({ createdBy: req.session.username });
+    const created = await backfillLeases({ createdBy: req.session.username, actor: { userId: req.session.userId } });
     await logAudit(req, 'lease_backfill', 'all', `created=${created}`);
     res.json({ ok: true, created });
   } catch (err) {

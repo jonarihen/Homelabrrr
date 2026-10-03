@@ -481,7 +481,7 @@ router.post('/:node/:vmid/lease/renew', async (req, res) => {
   }
 
   try {
-    const lease = await renewLease(node, vmid, { createdBy: req.session.username });
+    const lease = await renewLease(node, vmid, { createdBy: req.session.username, actor: { userId: req.session.userId } });
     if (!lease) return res.status(404).json({ error: 'This VM has no lease to renew' });
     await logAudit(req, 'lease_renew', `${node}/${vmid}`, `renewal #${lease.renewal_count}`);
     res.json({ ok: true, lease: await summarizeLease(node, vmid) });
@@ -554,26 +554,26 @@ router.delete('/:node/:vmid', async (req, res) => {
           && (source.hostId === null ? requested.nodeRef !== target.nodeRef : requested.hostId === null || requested.hostId === source.hostId);
         if (isSource) throw httpError(400, 'This is the migrated-away source copy; remove only its config, not its shared disks');
       }
-      await assertVmPolicyLocation(database, node, parsedVmid);
+      const currentNode = await assertVmPolicyLocation(database, node, parsedVmid);
       let backups = [];
       try {
-        backups = await getVMBackups(node, vmid, database);
+        backups = await getVMBackups(currentNode, vmid, database);
       } catch (err) {
         console.warn(`[vm-delete] Could not list backups for ${node}/${vmid}: ${err.message}`);
       }
-      const deleted = await deleteVM(node, vmid, { allowMissing: true }, database);
+      const deleted = await deleteVM(currentNode, vmid, { allowMissing: true }, database);
       let deletedBackups = 0;
       const failedBackups = [];
       for (const backup of backups) {
         try {
-          await deleteVMBackup(node, backup.storage, backup.volid, database);
+          await deleteVMBackup(currentNode, backup.storage, backup.volid, database);
           deletedBackups += 1;
         } catch (err) {
           console.warn(`[vm-delete] Failed to delete backup ${backup.volid}: ${err.message}`);
           failedBackups.push(backup.volid);
         }
       }
-      const candidates = nodeLookupCandidates(node);
+      const candidates = nodeLookupCandidates(currentNode);
       if (candidates.length > 0) {
         await database.transaction(async (tx) => {
           for (const table of [vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules, backupTasks] as any[]) {
@@ -1796,7 +1796,7 @@ router.put('/:node/:vmid/schedule', async (req, res) => {
       const [inserted] = await tx.insert(vmSchedules).values({ node: currentNode, vmid: parsedVmid, ...set })
         .onConflictDoUpdate({ target: [vmSchedules.node, vmSchedules.vmid], set }).returning();
       return inserted;
-    });
+    }, { userId: req.session.userId });
     await logAudit(req, 'vm_schedule_set', `${node}/${vmid}`, `${enabledBool ? 'on' : 'off'} stop=${stopTime} start=${startTime} days=${daysMask} tz=${timezone}`);
     res.json({ schedule: serializeSchedule(row) });
   } catch (err) { sendError(res, err); }
@@ -1813,7 +1813,7 @@ router.delete('/:node/:vmid/schedule', async (req, res) => {
   try {
     if (candidates.length > 0) {
       await withVmPolicyWrite(node, parsedVmid, (tx, currentNode) =>
-        tx.delete(vmSchedules).where(and(eq(vmSchedules.vmid, parsedVmid), inArray(vmSchedules.node, nodeLookupCandidates(currentNode)))));
+        tx.delete(vmSchedules).where(and(eq(vmSchedules.vmid, parsedVmid), inArray(vmSchedules.node, nodeLookupCandidates(currentNode)))), { userId: req.session.userId });
     }
     await logAudit(req, 'vm_schedule_delete', `${node}/${vmid}`, '');
     res.json({ ok: true });
@@ -1836,7 +1836,7 @@ router.post('/:node/:vmid/schedule/skip', async (req, res) => {
       const skipUntil = nextTimeOccurrence(Date.now(), existing.timezone, timeToMinutes(existing.start_time));
       const [updated] = await tx.update(vmSchedules).set({ skip_until: skipUntil }).where(eq(vmSchedules.id, existing.id)).returning();
       return updated;
-    });
+    }, { userId: req.session.userId });
     await logAudit(req, 'vm_schedule_skip', `${node}/${vmid}`, new Date(row.skip_until || 0).toISOString());
     res.json({ schedule: serializeSchedule(row) });
   } catch (err) { sendError(res, err); }
@@ -1854,7 +1854,7 @@ router.delete('/:node/:vmid/schedule/skip', async (req, res) => {
       if (!existing) throw httpError(404, 'No schedule found');
       const [updated] = await tx.update(vmSchedules).set({ skip_until: 0 }).where(eq(vmSchedules.id, existing.id)).returning();
       return updated;
-    });
+    }, { userId: req.session.userId });
     await logAudit(req, 'vm_schedule_skip_cancel', `${node}/${vmid}`, '');
     res.json({ schedule: serializeSchedule(row) });
   } catch (err) { sendError(res, err); }

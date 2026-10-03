@@ -4,7 +4,6 @@ import https from 'node:https';
 import { EventEmitter } from 'node:events';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { pveHosts, vmLeases, vmMigrations } from '../db/schema/index.ts';
-import { setTimeout as delay } from 'node:timers/promises';
 import { sql, eq } from 'drizzle-orm';
 
 let testDb: TestDatabase;
@@ -223,23 +222,13 @@ test('a lease moved while VM enumeration is in flight remains due for the target
   assert.ok(shutdownCalls[0].includes('/nodes/pve2/qemu/100/status/shutdown'));
 });
 
-test('migration repoint waits for an active expiry action and cannot move a stale sweep row', async () => {
+test('migration repoint rejects an active expiry action and can retry after it completes', async () => {
   await seedDueLease();
-  let move: Promise<void> | undefined;
-  let moved = false;
   onShutdown = async () => {
-    move = repointVmRows('1~pve1', 100, '1~pve2').then(() => { moved = true; });
-    let blocked = false;
-    for (let i = 0; i < 200; i++) {
-      const { rows } = await testDb.pool.query("SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory'");
-      if (rows[0].count > 0) { blocked = true; break; }
-      await delay(10);
-    }
-    assert.equal(blocked, true);
-    assert.equal(moved, false);
+    await assert.rejects(repointVmRows('1~pve1', 100, '1~pve2'), { statusCode: 409 });
   };
   assert.equal((await runLeaseSweep()).stopped, 1);
-  await move;
+  await repointVmRows('1~pve1', 100, '1~pve2');
   const [lease] = await testDb.db.select().from(vmLeases);
   assert.equal(lease.node, '1~pve2');
   assert.equal(lease.expired, true);

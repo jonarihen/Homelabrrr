@@ -542,8 +542,24 @@ export async function getNodes() {
 }
 
 export async function getTaskStatus(node, upid, database: DbOrTx = db) {
-  const { host, nodeName } = await resolveNode(node, { database });
-  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/tasks/${encodeURIComponent(upid)}/status`);
+  const ref = decodeNodeRef(node);
+  if (!isValidNodeName(ref.nodeName)) throw new Error('Invalid node name');
+  const path = `/nodes/${encodeURIComponent(ref.nodeName)}/tasks/${encodeURIComponent(upid)}/status`;
+  if (ref.hostId !== null) return makeRequest(await getHostById(ref.hostId, database), 'GET', path);
+  const hosts = await getHosts(database);
+  const matches = [];
+  let uncertain = false;
+  for (const host of hosts) {
+    try {
+      const task = await makeRequest(host, 'GET', path);
+      if (task && ['running', 'stopped'].includes(task.status)) matches.push(task);
+      else uncertain = true;
+    } catch (err) {
+      if (err.upstreamStatus !== 404 && !(err.upstreamStatus === 500 && /(?:task|UPID).*not found|no such|does not exist/i.test(err.message))) uncertain = true;
+    }
+  }
+  if (matches.length === 1 && !uncertain) return matches[0];
+  throw new Error('Saved upstream task host could not be identified unambiguously');
 }
 
 // Task log lines as `[{ n, t }]`, `n` being the 1-based line number. Reading is
