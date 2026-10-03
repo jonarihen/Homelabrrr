@@ -265,18 +265,19 @@ for (const exitstatus of ['OK', 'ERROR']) {
     await testDb.db.update(vmMigrations).set({ upid: 'UPID:source:reconcile' }).where(eq(vmMigrations.id, migration.id));
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
+    let requests = 0;
     t.mock.method(https, 'request', (_url, _options, callback) => {
       const req = new EventEmitter() as any;
       req.setTimeout = () => {};
       req.write = () => {};
       req.destroy = () => {};
       req.end = async () => {
-        entered.resolve();
-        await release.promise;
+        const stale = requests++ === 0;
+        if (stale) { entered.resolve(); await release.promise; }
         const res = new EventEmitter() as any;
         res.statusCode = 200;
         callback(res);
-        res.emit('data', JSON.stringify({ data: { status: 'stopped', exitstatus } }));
+        res.emit('data', JSON.stringify({ data: { status: 'stopped', exitstatus: stale ? exitstatus : 'OK' } }));
         res.emit('end');
       };
       return req;
