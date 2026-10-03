@@ -46,6 +46,18 @@ function app(capture?: (req: express.Request, res: express.Response) => void) {
   return instance;
 }
 
+type Metadata = {
+  uid?: number;
+  gid?: number;
+  mode?: number;
+  size?: number;
+  mtime?: number;
+  extended?: Record<string, Buffer>;
+};
+
+const ORIGINAL_METADATA = { uid: 123, gid: 456, mode: 0o100640, size: ORIGINAL.length, mtime: 100 };
+const UPLOADER_METADATA = { uid: 1000, gid: 1000, mode: 0o100600, size: 0, mtime: 200 };
+
 type Plan = {
   extension?: 'supported' | 'unadvertised' | 'unsupported' | 'missing';
   openError?: boolean;
@@ -54,10 +66,25 @@ type Plan = {
   renameError?: boolean;
   holdRename?: boolean;
   holdOpen?: boolean;
+  metadata?: Metadata;
+  statError?: boolean;
+  chownError?: boolean;
+  chmodError?: boolean;
+  ignoreChown?: boolean;
+  ignoreChmod?: boolean;
+  changeDestination?: Metadata;
+  holdChown?: boolean;
+  changeAtRead?: number;
+  tempStatError?: boolean;
 };
 
 function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
   const files = new Map<string, Buffer>(existing ? [[REMOTE_PATH, ORIGINAL]] : []);
+  const metadata = new Map<string, Metadata>(existing ? [[REMOTE_PATH, { ...(plan.metadata ?? ORIGINAL_METADATA) }]] : []);
+  const inspected: string[] = [];
+  const attributes: Array<{ path: string; attrs: Metadata }> = [];
+  let destinationReads = 0;
+  let releaseChown: () => void;
   const opened: string[] = [];
   const removed: string[] = [];
   const renamed: Array<{ kind: string; from: string; to: string }> = [];
@@ -79,7 +106,9 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
       if (kind === 'plain' && files.has(to)) return cb(error('File already exists'));
       assert.ok(files.has(from));
       files.set(to, files.get(from)!);
+      metadata.set(to, metadata.get(from)!);
       files.delete(from);
+      metadata.delete(from);
       events.push('renamed');
       cb();
     };
@@ -87,8 +116,51 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
   };
 
   const sftp = {
-    open(path: string, flags: string, cb: (err: Error | null, handle?: Buffer) => void) {
+    lstat(path: string, cb: (err: Error | null, attrs?: Metadata & { isFile(): boolean; isSymbolicLink(): boolean }) => void) {
+      inspected.push(path);
+      if (path === REMOTE_PATH) {
+        destinationReads += 1;
+        if (plan.statError) return queueMicrotask(() => cb(error('Permission denied', ssh2.utils.sftp.STATUS_CODE.PERMISSION_DENIED)));
+        if (destinationReads >= (plan.changeAtRead ?? 2) && plan.changeDestination) metadata.set(path, plan.changeDestination);
+      } else if (plan.tempStatError) {
+        return queueMicrotask(() => cb(error('Permission denied', ssh2.utils.sftp.STATUS_CODE.PERMISSION_DENIED)));
+      }
+      const attrs = metadata.get(path);
+      if (!attrs) return queueMicrotask(() => cb(error('No such file', ssh2.utils.sftp.STATUS_CODE.NO_SUCH_FILE)));
+      queueMicrotask(() => cb(null, {
+        ...attrs,
+        isFile: () => (attrs.mode! & 0o170000) === 0o100000,
+        isSymbolicLink: () => (attrs.mode! & 0o170000) === 0o120000,
+      }));
+    },
+    fstat(handle: Buffer, cb: (err: Error | null, attrs?: Metadata & { isFile(): boolean; isSymbolicLink(): boolean }) => void) {
+      sftp.lstat(handle.toString(), cb);
+    },
+    fchown(handle: Buffer, uid: number, gid: number, cb: (err?: Error) => void) {
+      const path = handle.toString();
+      assert.notEqual(path, REMOTE_PATH);
+      attributes.push({ path, attrs: { uid, gid } });
+      releaseChown = () => {
+        if (!metadata.has(path)) return cb(error('Handle closed'));
+        if (plan.chownError) return cb(error('Permission denied', ssh2.utils.sftp.STATUS_CODE.PERMISSION_DENIED));
+        if (!plan.ignoreChown) metadata.set(path, { ...metadata.get(path), uid, gid, mode: metadata.get(path)!.mode! & ~0o6000 });
+        events.push('chown');
+        cb();
+      };
+      if (!plan.holdChown) queueMicrotask(releaseChown);
+    },
+    fchmod(handle: Buffer, mode: number, cb: (err?: Error) => void) {
+      const path = handle.toString();
+      assert.notEqual(path, REMOTE_PATH);
+      attributes.push({ path, attrs: { mode } });
+      if (plan.chmodError) return queueMicrotask(() => cb(error('Permission denied', ssh2.utils.sftp.STATUS_CODE.PERMISSION_DENIED)));
+      if (!plan.ignoreChmod) metadata.set(path, { ...metadata.get(path), mode: 0o100000 | mode });
+      events.push('chmod');
+      queueMicrotask(cb);
+    },
+    open(path: string, flags: string, mode: number, cb: (err: Error | null, handle?: Buffer) => void) {
       assert.equal(flags, 'wx');
+      assert.equal(mode, 0o600);
       assert.equal(posix.dirname(path), posix.dirname(REMOTE_PATH));
       assert.notEqual(path, REMOTE_PATH);
       assert.match(posix.basename(path), /^\.homelabrrr-upload-[\da-f-]+\.tmp$/);
@@ -100,6 +172,7 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
         }
         assert.equal(files.has(path), false);
         files.set(path, Buffer.alloc(0));
+        metadata.set(path, { ...UPLOADER_METADATA });
         cb(null, Buffer.from(path));
       };
       openRequested();
@@ -110,13 +183,15 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
       events.push('closed');
       queueMicrotask(cb);
     },
-    createWriteStream(path: string, options: { handle: Buffer }) {
+    createWriteStream(path: string, options: { handle: Buffer; autoClose: boolean }) {
       assert.equal(options.handle.toString(), path);
+      assert.equal(options.autoClose, false);
       stream = new Writable({
-        autoDestroy: true,
+        autoDestroy: false,
         write(chunk, _encoding, cb) {
           if (plan.writeError) return cb(error('Write failed'));
           files.set(path, Buffer.concat([files.get(path)!, chunk]));
+          metadata.set(path, { ...metadata.get(path), size: files.get(path)!.length });
           wrote();
           cb();
         },
@@ -131,6 +206,7 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
       removed.push(path);
       assert.notEqual(path, REMOTE_PATH);
       files.delete(path);
+      metadata.delete(path);
       queueMicrotask(cb);
     },
     rename(from: string, to: string, cb: (err?: Error) => void) {
@@ -157,7 +233,8 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
   });
 
   return {
-    files, opened, removed, renamed, events, written, opening,
+    files, metadata, inspected, attributes, opened, removed, renamed, events, written, opening,
+    releaseChown: () => releaseChown(),
     get stream() { return stream; },
     get ends() { return ends; },
     releaseRename: () => releaseRename(),
@@ -193,7 +270,12 @@ test('an overwrite stays unchanged until the closed temporary file is atomically
   assert.deepEqual(f.files.get(f.opened[0]), REPLACEMENT);
   assert.equal(f.ends, 0);
   assert.deepEqual(f.renamed, [{ kind: 'posix', from: f.opened[0], to: REMOTE_PATH }]);
-  assert.deepEqual(f.events, ['closed']);
+  assert.deepEqual(f.events, ['chown', 'chmod', 'closed']);
+  assert.deepEqual(f.metadata.get(REMOTE_PATH), ORIGINAL_METADATA);
+  assert.deepEqual(f.attributes, [
+    { path: f.opened[0], attrs: { uid: ORIGINAL_METADATA.uid, gid: ORIGINAL_METADATA.gid } },
+    { path: f.opened[0], attrs: { mode: ORIGINAL_METADATA.mode & 0o7777 } },
+  ]);
   f.releaseRename();
   const response = await pending;
   assert.equal(response.status, 200);
@@ -201,7 +283,11 @@ test('an overwrite stays unchanged until the closed temporary file is atomically
   assert.deepEqual(f.files.get(REMOTE_PATH), REPLACEMENT);
   assert.equal(f.files.size, 1);
   assert.deepEqual(f.removed, []);
-  assert.deepEqual(f.events, ['closed', 'renamed', 'ended']);
+  assert.deepEqual(f.events, ['chown', 'chmod', 'closed', 'renamed', 'ended']);
+  assert.deepEqual(f.metadata.get(REMOTE_PATH), {
+    uid: ORIGINAL_METADATA.uid, gid: ORIGINAL_METADATA.gid, mode: ORIGINAL_METADATA.mode,
+    size: REPLACEMENT.length, mtime: UPLOADER_METADATA.mtime,
+  });
 });
 
 for (const extension of ['unadvertised', 'unsupported', 'missing'] as const) {
@@ -214,6 +300,7 @@ for (const extension of ['unadvertised', 'unsupported', 'missing'] as const) {
     assert.equal(f.renamed[0].kind, 'plain');
     assert.deepEqual(f.removed, []);
     assert.equal(f.ends, 1);
+    assert.deepEqual(f.metadata.get(REMOTE_PATH), { ...UPLOADER_METADATA, mode: 0o100666, size: REPLACEMENT.length });
   });
 
   test(`a rejected plain-rename overwrite preserves the original when the POSIX extension is ${extension}`, async (t) => {
@@ -254,6 +341,144 @@ test('temporary filenames are unique for repeated uploads to the same destinatio
   assert.equal((await upload()).status, 200);
   assert.equal((await upload()).status, 200);
   assert.equal(new Set(f.opened).size, 2);
+});
+
+for (const extension of ['supported', 'unadvertised'] as const) {
+  for (const dangling of [false, true]) {
+    test(`a ${dangling ? 'dangling' : 'live'} symbolic-link destination is rejected with ${extension} rename support`, async (t) => {
+      const attrs = { ...ORIGINAL_METADATA, mode: 0o120777 };
+      const f = fixture(t, { extension, metadata: attrs });
+      const target = '/srv/files/target.txt';
+      if (!dangling) f.files.set(target, ORIGINAL);
+      const before = new Map(f.files);
+      const response = await upload();
+      assert.equal(response.status, 409);
+      assert.equal(response.body.code, 'SFTP_SYMLINK_DESTINATION');
+      assert.match(response.body.error, /choose the target file directly/);
+      assert.deepEqual(f.files, before);
+      assert.deepEqual(f.metadata.get(REMOTE_PATH), attrs);
+      assert.deepEqual(f.opened, []);
+      assert.deepEqual(f.removed, []);
+      assert.deepEqual(f.renamed, []);
+      assert.equal(f.ends, 1);
+    });
+  }
+}
+
+for (const attrs of [
+  { ...ORIGINAL_METADATA, mode: 0o040750 },
+  { ...ORIGINAL_METADATA, mode: 0o010600 },
+  { ...ORIGINAL_METADATA, uid: undefined },
+  { ...ORIGINAL_METADATA, gid: undefined },
+  { ...ORIGINAL_METADATA, mode: undefined },
+  { ...ORIGINAL_METADATA, extended: { 'acl@example': Buffer.from('private') } },
+]) {
+  test(`unsupported overwrite metadata ${JSON.stringify(attrs)} fails before opening a temporary file`, async (t) => {
+    const f = fixture(t, { metadata: attrs });
+    const response = await upload();
+    assert.equal(response.status, 409);
+    assert.equal(response.body.code, 'SFTP_UNSAFE_OVERWRITE');
+    assert.deepEqual(f.files.get(REMOTE_PATH), ORIGINAL);
+    assert.deepEqual(f.metadata.get(REMOTE_PATH), attrs);
+    assert.deepEqual(f.opened, []);
+    assert.deepEqual(f.renamed, []);
+    assert.deepEqual(f.removed, []);
+  });
+}
+
+test('an unreadable destination does not get treated as a new file', async (t) => {
+  const f = fixture(t, { statError: true });
+  assert.equal((await upload()).status, 500);
+  assert.deepEqual(f.files.get(REMOTE_PATH), ORIGINAL);
+  assert.deepEqual(f.opened, []);
+  assert.deepEqual(f.renamed, []);
+  assert.equal(f.ends, 1);
+});
+
+for (const mode of [0o600, 0o644, 0o755, 0o6750]) {
+  test(`replacement preserves service UID/GID and mode ${mode.toString(8)} after writing`, async (t) => {
+    const attrs = { ...ORIGINAL_METADATA, uid: 0, gid: 42, mode: 0o100000 | mode };
+    const f = fixture(t, { metadata: attrs });
+    assert.equal((await upload()).status, 200);
+    assert.deepEqual(f.files.get(REMOTE_PATH), REPLACEMENT);
+    assert.deepEqual(f.metadata.get(REMOTE_PATH), { ...attrs, size: REPLACEMENT.length, mtime: UPLOADER_METADATA.mtime });
+    assert.deepEqual(f.events, ['chown', 'chmod', 'closed', 'renamed', 'ended']);
+  });
+}
+
+test('same-owner overwrite avoids unnecessary chown but still preserves mode', async (t) => {
+  const attrs = { ...ORIGINAL_METADATA, uid: UPLOADER_METADATA.uid, gid: UPLOADER_METADATA.gid, mode: 0o100750 };
+  const f = fixture(t, { metadata: attrs });
+  assert.equal((await upload()).status, 200);
+  assert.deepEqual(f.attributes, [{ path: f.opened[0], attrs: { mode: 0o750 } }]);
+  assert.deepEqual(f.metadata.get(REMOTE_PATH), { ...attrs, size: REPLACEMENT.length, mtime: UPLOADER_METADATA.mtime });
+});
+
+for (const failure of ['chownError', 'chmodError', 'ignoreChown', 'ignoreChmod', 'tempStatError'] as const) {
+  test(`${failure} fails without replacing the destination or changing its metadata`, async (t) => {
+    const f = fixture(t, { [failure]: true });
+    const response = await upload();
+    assert.equal(response.status, failure.startsWith('ignore') ? 409 : 500);
+    await waitFor(() => f.ends === 1);
+    assertCleaned(f);
+    assert.deepEqual(f.metadata.get(REMOTE_PATH), ORIGINAL_METADATA);
+    assert.deepEqual(f.renamed, []);
+  });
+}
+
+for (const changeAtRead of [2, 3]) {
+  test(`a symlink substituted before destination check ${changeAtRead} is never renamed over`, async (t) => {
+    const attrs = { ...ORIGINAL_METADATA, mode: 0o120777 };
+    const f = fixture(t, { changeDestination: attrs, changeAtRead });
+    const response = await upload();
+    assert.equal(response.status, 409);
+    assert.equal(response.body.code, 'SFTP_SYMLINK_DESTINATION');
+    await waitFor(() => f.ends === 1);
+    assertCleaned(f);
+    assert.deepEqual(f.metadata.get(REMOTE_PATH), attrs);
+    assert.deepEqual(f.renamed, []);
+  });
+}
+
+test('a symlink substituted before the plain-rename fallback is rejected', async (t) => {
+  const attrs = { ...ORIGINAL_METADATA, mode: 0o120777 };
+  const f = fixture(t, { extension: 'unadvertised', changeDestination: attrs, changeAtRead: 4 });
+  const response = await upload();
+  assert.equal(response.status, 409);
+  assert.equal(response.body.code, 'SFTP_SYMLINK_DESTINATION');
+  await waitFor(() => f.ends === 1);
+  assertCleaned(f);
+  assert.deepEqual(f.metadata.get(REMOTE_PATH), attrs);
+  assert.deepEqual(f.renamed, []);
+});
+
+test('concurrent ownership changes reject the overwrite instead of applying stale ownership', async (t) => {
+  const attrs = { ...ORIGINAL_METADATA, uid: 999 };
+  const f = fixture(t, { changeDestination: attrs });
+  const response = await upload();
+  assert.equal(response.status, 409);
+  assert.equal(response.body.code, 'SFTP_DESTINATION_CHANGED');
+  await waitFor(() => f.ends === 1);
+  assertCleaned(f);
+  assert.deepEqual(f.metadata.get(REMOTE_PATH), attrs);
+  assert.deepEqual(f.attributes, []);
+  assert.deepEqual(f.renamed, []);
+});
+
+test('an abort while ownership preservation is pending never commits the replacement', async (t) => {
+  const f = fixture(t, { holdChown: true });
+  let response: express.Response;
+  const pending = upload(app((_req, res) => { response = res; })).then((res) => res, () => null);
+  await waitFor(() => f.attributes.length === 1);
+  response.destroy();
+  await waitFor(() => f.ends === 1);
+  f.releaseChown();
+  await pending;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assertCleaned(f);
+  assert.deepEqual(f.metadata.get(REMOTE_PATH), ORIGINAL_METADATA);
+  assert.deepEqual(f.renamed, []);
+  assert.equal(f.attributes.length, 1);
 });
 
 async function partialUpload(t: test.TestContext, instance = app()) {
