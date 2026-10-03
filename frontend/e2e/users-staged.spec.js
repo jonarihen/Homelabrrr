@@ -103,6 +103,46 @@ test('a 409 conflict reloads the latest state and reports it', async ({ page }) 
   await expect(page.getByText(/pending change/)).toHaveCount(0);
 });
 
+test('nested review keeps focus and scroll locked until the final modal closes', async ({ page }) => {
+  await mockUsersPage(page);
+  await page.goto('/admin/users');
+  const trigger = page.getByRole('button', { name: 'Manage', exact: true });
+  await trigger.click();
+  const parent = page.getByRole('dialog', { name: 'Manage — alice', exact: true });
+  await expect(parent).toBeVisible();
+  await parent.getByRole('checkbox', { name: /^Operate all VMs/ }).check();
+  const reviewTrigger = parent.getByRole('button', { name: 'Review & Apply', exact: true });
+  await reviewTrigger.click();
+  const review = page.getByRole('dialog', { name: 'Review changes — alice', exact: true });
+  const confirmation = review.getByLabel('Confirm username');
+  await expect(confirmation).toBeFocused();
+  await expect(page.getByRole('main')).toHaveCSS('overflow-y', 'hidden');
+  expect(await parent.getAttribute('aria-labelledby')).not.toBe(await review.getAttribute('aria-labelledby'));
+  await confirmation.fill('alice');
+  await expect(confirmation).toBeFocused();
+  const last = review.getByRole('button', { name: 'Apply 1 change', exact: true });
+  const close = review.getByRole('button', { name: 'Close', exact: true });
+  await last.focus();
+  await page.keyboard.press('Tab');
+  await expect(close).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(last).toBeFocused();
+  await parent.getByRole('button', { name: 'Permissions', exact: true }).evaluate((element) => element.focus());
+  await expect(last).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(review).toHaveCount(0);
+  await expect(parent).toBeVisible();
+  await expect(reviewTrigger).toBeFocused();
+  expect(await page.evaluate(() => document.body.style.overflowY)).toBe('hidden');
+  await expect(page.getByRole('main')).toHaveCSS('overflow-y', 'hidden');
+  await parent.getByRole('button', { name: 'Discard', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(parent).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  expect(await page.evaluate(() => [document.body.style.overflowY, document.documentElement.style.overflowY])).toEqual(['', '']);
+  await expect(page.getByRole('main')).toHaveCSS('overflow-y', 'auto');
+});
+
 test('browser Back asks before discarding staged user changes', async ({ page }) => {
   await mockUsersPage(page);
   await page.route('**/api/admin/audit-log**', (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
