@@ -36,6 +36,39 @@ test('editing a role shows a review diff and impact before applying', async ({ p
   expect(putBody.expectedHolders).toBe(2);
 });
 
+test('keyboard Review and Back refocus a reused role dialog without losing its original trigger', async ({ page }) => {
+  await mockRoles(page);
+  await page.route('**/api/admin/roles/2/users', (route) => route.fulfill({ json: [{ id: 3, username: 'alice' }, { id: 4, username: 'bob' }] }));
+  await page.goto('/admin/roles');
+  const trigger = page.getByRole('row', { name: /Operator/ }).getByRole('button', { name: 'Manage', exact: true });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  const editor = page.getByRole('dialog', { name: 'Role — Operator', exact: true });
+  const titleId = await editor.getAttribute('aria-labelledby');
+  const description = editor.getByRole('textbox').nth(1);
+  await description.focus();
+  await description.fill('Updated description');
+  await expect(description).toBeFocused();
+  await editor.getByRole('button', { name: 'Review 1 change', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  const review = page.getByRole('dialog', { name: 'Review changes — Operator', exact: true });
+  await expect(review).toBeVisible();
+  expect(await review.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  expect(await review.evaluate(() => document.activeElement.textContent)).toBe('Back');
+  await expect(review.getByRole('button', { name: 'Back', exact: true })).toBeFocused();
+  expect(await review.getAttribute('aria-labelledby')).toBe(titleId);
+  await page.keyboard.press('Enter');
+  await expect(editor).toBeVisible();
+  expect(await editor.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  expect(await editor.evaluate(() => document.activeElement.value)).toBe('Operator');
+  await expect(editor.getByRole('textbox').first()).toBeFocused();
+  expect(await editor.getAttribute('aria-labelledby')).toBe(titleId);
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.keyboard.press('Escape');
+  await expect(editor).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
 test('clone posts to the clone endpoint with the chosen name', async ({ page }) => {
   await mockRoles(page);
   let cloneBody = null;
@@ -65,6 +98,49 @@ test('deleting a held role can reassign holders', async ({ page }) => {
   await page.getByRole('button', { name: 'Delete role' }).click();
   await expect.poll(() => deleteUrl).toContain('reassignTo=1');
   expect(deleteUrl).toContain('expectedHolders=2');
+});
+
+test('shared modal semantics, keyboard focus, dismissal and scroll restoration', async ({ page }) => {
+  await mockRoles(page);
+  await page.goto('/admin/roles');
+  await page.evaluate(() => {
+    document.body.style.setProperty('overflow-y', 'scroll', 'important');
+    document.documentElement.style.setProperty('overflow-x', 'clip');
+  });
+  const trigger = page.getByRole('row', { name: /Operator/ }).getByRole('button', { name: 'Clone' });
+  await trigger.click();
+  const dialog = page.getByRole('dialog', { name: 'Clone — Operator', exact: true });
+  const input = dialog.getByPlaceholder('Operator (copy)');
+  const close = dialog.getByRole('button', { name: 'Close', exact: true });
+  const last = dialog.getByRole('button', { name: 'Clone role', exact: true });
+  await expect(dialog).toHaveAttribute('aria-modal', 'true');
+  expect(await dialog.evaluate((element) => document.getElementById(element.getAttribute('aria-labelledby'))?.textContent)).toBe('Clone — Operator');
+  await expect(input).toBeFocused();
+  expect(await page.evaluate(() => [document.body.style.overflowY, document.documentElement.style.overflowY])).toEqual(['hidden', 'hidden']);
+  await expect(page.getByRole('main')).toHaveCSS('overflow-y', 'hidden');
+  await last.focus();
+  await page.keyboard.press('Tab');
+  await expect(close).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(last).toBeFocused();
+  await trigger.evaluate((element) => element.focus());
+  await expect(last).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  expect(await page.evaluate(() => [
+    document.body.style.overflowY, document.body.style.getPropertyPriority('overflow-y'),
+    document.documentElement.style.overflowX, document.documentElement.style.overflowY,
+  ])).toEqual(['scroll', 'important', 'clip', '']);
+  await expect(page.getByRole('main')).toHaveCSS('overflow-y', 'auto');
+
+  await trigger.click();
+  await close.click();
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await dialog.locator('..').click({ position: { x: 5, y: 5 } });
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
 });
 
 test('the filter narrows roles by permission label', async ({ page }) => {
