@@ -3,6 +3,7 @@ import api from '../api.js';
 import ErrorCallout from './ErrorCallout.jsx';
 import { normalizeApiError } from '../utils/apiError.js';
 import { isSftpSessionExpired } from '../utils/sftpSession.js';
+import { createSftpNavigation } from '../utils/sftpNavigation.js';
 
 function formatSize(bytes) {
   if (bytes == null) return '—';
@@ -48,25 +49,37 @@ export default function SFTPBrowser({ token, onReconnect }) {
   const fileInputRef = useRef(null);
   const dropRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
+  const navigationRef = useRef(createSftpNavigation());
+  const mutationsDisabled = loading || !initialLoaded;
 
   const loadDir = useCallback(async (path, activeToken = token) => {
-    setLoading(true);
-    setError('');
-    try {
+    await navigationRef.current.load(path, async () => {
       const { data } = await api.post('/sftp/ls', { token: activeToken, path });
-      setEntries(data.entries);
-      setCurrentPath(data.path || path);
-      setSessionExpired(false);
-      setInitialLoaded(true);
-    } catch (e) {
-      if (isSftpSessionExpired(e)) {
-        setSessionExpired(true);
-      } else {
-        setError(normalizeApiError(e, 'Failed to list directory'));
-      }
-    } finally {
-      setLoading(false);
-    }
+      return data;
+    }, {
+      onStart: () => {
+        setLoading(true);
+        setError('');
+        setDeleteConfirm(null);
+        setShowMkdir(false);
+        setMkdirName('');
+        setDragOver(false);
+      },
+      onSuccess: (data, confirmedPath) => {
+        setEntries(data.entries);
+        setCurrentPath(confirmedPath);
+        setSessionExpired(false);
+        setInitialLoaded(true);
+      },
+      onError: (e) => {
+        if (isSftpSessionExpired(e)) {
+          setSessionExpired(true);
+        } else {
+          setError(normalizeApiError(e, 'Failed to list directory'));
+        }
+      },
+      onFinish: () => setLoading(false),
+    });
   }, [token]);
 
   const reconnect = async () => {
@@ -86,7 +99,9 @@ export default function SFTPBrowser({ token, onReconnect }) {
 
   // Load initial directory on mount
   useEffect(() => {
+    const navigation = navigationRef.current;
     loadDir(currentPath);
+    return () => navigation.invalidate();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const navigate = (name) => {
@@ -133,6 +148,8 @@ export default function SFTPBrowser({ token, onReconnect }) {
   };
 
   const uploadFiles = async (files) => {
+    const target = navigationRef.current.getMutationTarget(currentPath);
+    if (!target || uploading) return;
     const queue = Array.from(files || []);
     if (queue.length === 0) return;
     setUploading(true);
@@ -144,7 +161,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
         // any of the file itself.
         const form = new FormData();
         form.append('token', token);
-        form.append('path', currentPath);
+        form.append('path', target.path);
         form.append('file', file);
         setUploadProgress({ name: file.name, index: i + 1, total: queue.length, percent: 0 });
         await api.post('/sftp/upload', form, {
@@ -156,7 +173,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
           },
         });
       }
-      await loadDir(currentPath);
+      if (target.isCurrent()) await loadDir(target.path);
     } catch (e) {
       noteExpiredSession(e, 'Upload failed');
     } finally {
@@ -166,50 +183,60 @@ export default function SFTPBrowser({ token, onReconnect }) {
   };
 
   const createDir = async () => {
-    if (!mkdirName.trim()) return;
+    const target = navigationRef.current.getMutationTarget(currentPath);
+    if (!target || !mkdirName.trim()) return;
     setError('');
     try {
-      await api.post('/sftp/mkdir', { token, path: joinPath(currentPath, mkdirName.trim()) });
+      await api.post('/sftp/mkdir', { token, path: joinPath(target.path, mkdirName.trim()) });
+      if (!target.isCurrent()) return;
       setMkdirName('');
       setShowMkdir(false);
-      await loadDir(currentPath);
+      await loadDir(target.path);
     } catch (e) {
       noteExpiredSession(e, 'Failed to create directory');
     }
   };
 
   const deleteEntry = async (name, isDirectory) => {
+    const target = navigationRef.current.getMutationTarget(currentPath);
+    if (!target) return;
     setError('');
     try {
       await api.post('/sftp/delete', {
         token,
-        path: joinPath(currentPath, name),
+        path: joinPath(target.path, name),
         isDirectory,
       });
+      if (!target.isCurrent()) return;
       setDeleteConfirm(null);
-      await loadDir(currentPath);
+      await loadDir(target.path);
     } catch (e) {
       noteExpiredSession(e, 'Failed to delete');
     }
   };
 
   const renameEntry = async (name) => {
+    const target = navigationRef.current.getMutationTarget(currentPath);
+    if (!target) return;
     const nextName = window.prompt(`Rename ${name} to:`, name)?.trim();
-    if (!nextName || nextName === name) return;
+    if (!target.isCurrent() || !nextName || nextName === name) return;
     if (nextName.includes('/') || nextName === '.' || nextName === '..') {
       setError('The new name cannot contain a path.');
       return;
     }
     setError('');
     try {
-      await api.post('/sftp/rename', { token, path: joinPath(currentPath, name), name: nextName });
-      await loadDir(currentPath);
+      await api.post('/sftp/rename', { token, path: joinPath(target.path, name), name: nextName });
+      if (target.isCurrent()) await loadDir(target.path);
     } catch (e) {
       noteExpiredSession(e, 'Failed to rename');
     }
   };
 
-  const onDragOver = (e) => { e.preventDefault(); setDragOver(true); };
+  const onDragOver = (e) => {
+    e.preventDefault();
+    if (navigationRef.current.getMutationTarget(currentPath) && !uploading) setDragOver(true);
+  };
   const onDragLeave = () => setDragOver(false);
   const onDrop = (e) => {
     e.preventDefault();
@@ -278,7 +305,8 @@ export default function SFTPBrowser({ token, onReconnect }) {
         <button
           type="button"
           onClick={() => setShowMkdir(!showMkdir)}
-          className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white transition-colors"
+          disabled={mutationsDisabled}
+          className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-300 hover:text-white transition-colors"
           title="New folder"
         >
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -289,7 +317,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
+          disabled={mutationsDisabled || uploading}
           className="text-xs px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-colors"
         >
           {uploading ? 'Uploading...' : 'Upload'}
@@ -299,6 +327,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
           ref={fileInputRef}
           type="file"
           multiple
+          disabled={mutationsDisabled || uploading}
           className="hidden"
           onChange={(e) => uploadFiles(e.target.files)}
         />
@@ -319,7 +348,8 @@ export default function SFTPBrowser({ token, onReconnect }) {
           <button
             type="button"
             onClick={createDir}
-            className="text-xs px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+            disabled={mutationsDisabled}
+            className="text-xs px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-colors"
           >Create</button>
           <button
             type="button"
@@ -458,7 +488,8 @@ export default function SFTPBrowser({ token, onReconnect }) {
                       <button
                         type="button"
                         onClick={() => renameEntry(entry.name)}
-                        className="rounded p-1 text-gray-500 hover:bg-gray-700 hover:text-white transition-colors"
+                        disabled={mutationsDisabled}
+                        className="rounded p-1 text-gray-500 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors"
                         title="Rename"
                       >
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zM19.5 7.125L16.875 4.5M18 14.25v4.125A2.625 2.625 0 0115.375 21H5.625A2.625 2.625 0 013 18.375V8.625A2.625 2.625 0 015.625 6H9.75" /></svg>
@@ -468,7 +499,8 @@ export default function SFTPBrowser({ token, onReconnect }) {
                           <button
                             type="button"
                             onClick={() => deleteEntry(entry.name, entry.type === 'directory')}
-                            className="rounded px-1.5 py-0.5 text-[10px] bg-red-600 hover:bg-red-500 text-white transition-colors"
+                            disabled={mutationsDisabled}
+                            className="rounded px-1.5 py-0.5 text-[10px] bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white transition-colors"
                           >Yes</button>
                           <button
                             type="button"
@@ -480,7 +512,8 @@ export default function SFTPBrowser({ token, onReconnect }) {
                         <button
                           type="button"
                           onClick={() => setDeleteConfirm(entry.name)}
-                          className="rounded p-1 text-gray-500 hover:bg-red-500/10 hover:text-red-300 transition-colors"
+                          disabled={mutationsDisabled}
+                          className="rounded p-1 text-gray-500 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50 transition-colors"
                           title="Delete"
                         >
                           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
