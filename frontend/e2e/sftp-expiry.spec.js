@@ -93,6 +93,136 @@ for (const operation of ['ls', 'download', 'upload', 'mkdir', 'delete', 'rename'
   });
 }
 
+test('superseded listings are cancelled and cannot replace the confirmed directory', async ({ page }) => {
+  const { listings } = await openFiles(page);
+  const pending = Promise.withResolvers();
+  const started = Promise.withResolvers();
+  const released = Promise.withResolvers();
+  await page.route('**/api/sftp/ls', async route => {
+    const body = route.request().postDataJSON();
+    listings.push(body);
+    if (body.path === '/home/operator/folder') {
+      started.resolve();
+      await pending.promise;
+      try {
+        await route.fulfill({ json: { path: body.path, entries: [{ name: 'stale.txt', type: 'file' }] } });
+      } catch {}
+      released.resolve();
+      return;
+    }
+    await route.fulfill({ json: { path: body.path, entries } });
+  });
+  await page.getByRole('button', { name: 'folder', exact: true }).click();
+  await started.promise;
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeDisabled();
+  const cancelled = page.waitForEvent('requestfailed', request => request.url().endsWith('/api/sftp/ls'));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await cancelled;
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeEnabled();
+  pending.resolve();
+  await released.promise;
+  await expect(page.getByText('stale.txt', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('x.txt', { exact: true })).toBeVisible();
+  expect(listings.at(-1)).toEqual({ token: 'sftp-token-1', path: '/home/operator' });
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+for (const oldMutationStatus of [200, 410]) {
+  test(`expiry cancels navigation and ignores a late old-token mutation (${oldMutationStatus}) after reconnect`, async ({ page }) => {
+    const { listings } = await openFiles(page);
+    const deletion = Promise.withResolvers();
+    const deletionStarted = Promise.withResolvers();
+    const deletionReleased = Promise.withResolvers();
+    await page.route('**/api/sftp/delete', async route => {
+      deletionStarted.resolve();
+      await deletion.promise;
+      await route.fulfill({ status: oldMutationStatus, json: oldMutationStatus === 410 ? expired : { ok: true } });
+      deletionReleased.resolve();
+    });
+    const download = Promise.withResolvers();
+    const downloadStarted = Promise.withResolvers();
+    await page.route('**/api/sftp/download?*', async route => {
+      downloadStarted.resolve();
+      await download.promise;
+      await route.fulfill({ status: 410, json: expired });
+    });
+    const pendingListing = Promise.withResolvers();
+    const listingStarted = Promise.withResolvers();
+    const listingReleased = Promise.withResolvers();
+    await page.route('**/api/sftp/ls', async route => {
+      const body = route.request().postDataJSON();
+      listings.push(body);
+      if (body.token === 'sftp-token-1') {
+        listingStarted.resolve();
+        await pendingListing.promise;
+        try {
+          await route.fulfill({ json: { path: '/stale', entries: [{ name: 'stale.txt', type: 'file' }] } });
+        } catch {}
+        listingReleased.resolve();
+        return;
+      }
+      await route.fulfill({ json: { path: body.path, entries } });
+    });
+    await page.getByRole('button', { name: 'Download', exact: true }).click();
+    await downloadStarted.promise;
+    await page.getByRole('row').filter({ hasText: 'x.txt' }).getByRole('button', { name: 'Delete', exact: true }).click();
+    await page.getByRole('button', { name: 'Yes', exact: true }).click();
+    await deletionStarted.promise;
+    await page.getByRole('button', { name: 'folder', exact: true }).click();
+    await listingStarted.promise;
+    const cancelled = page.waitForEvent('requestfailed', request => request.url().endsWith('/api/sftp/ls'));
+    download.resolve();
+    await expect(page.getByText('The file browser session expired. Reconnect to keep browsing.')).toBeVisible();
+    await cancelled;
+    await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+    await page.getByRole('button', { name: 'Reconnect', exact: true }).click();
+    await expect(page.getByText('The file browser session expired. Reconnect to keep browsing.')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeEnabled();
+    const reconnectedListings = listings.length;
+    const mutationFinished = page.waitForResponse(response => response.url().endsWith('/api/sftp/delete'));
+    deletion.resolve();
+    pendingListing.resolve();
+    await Promise.all([deletionReleased.promise, listingReleased.promise, mutationFinished]);
+    await page.getByRole('button', { name: 'New folder', exact: true }).click();
+    await expect(page.getByPlaceholder('New folder name')).toBeVisible();
+    expect(listings).toHaveLength(reconnectedListings);
+    expect(listings.at(-1)).toEqual({ token: 'sftp-token-2', path: '/home/operator' });
+    await expect(page.getByText('The file browser session expired. Reconnect to keep browsing.')).toHaveCount(0);
+    await expect(page.getByText('stale.txt', { exact: true })).toHaveCount(0);
+    await expect(page).toHaveURL(/\/ssh\/1~pve\/101$/);
+  });
+}
+
+test('an old-token upload batch cannot send more files or refresh after reconnect', async ({ page }) => {
+  const { listings } = await openFiles(page);
+  const upload = Promise.withResolvers();
+  const uploadStarted = Promise.withResolvers();
+  const uploads = [];
+  await page.route('**/api/sftp/upload', async route => {
+    uploads.push(route.request().postData());
+    uploadStarted.resolve();
+    await upload.promise;
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.locator('input[type="file"]').setInputFiles([
+    { name: 'first.txt', mimeType: 'text/plain', buffer: Buffer.from('first') },
+    { name: 'second.txt', mimeType: 'text/plain', buffer: Buffer.from('second') },
+  ]);
+  await uploadStarted.promise;
+  await page.route('**/api/sftp/download?*', route => route.fulfill({ status: 410, json: expired }));
+  await page.getByRole('button', { name: 'Download', exact: true }).click();
+  await expect(page.getByText('The file browser session expired. Reconnect to keep browsing.')).toBeVisible();
+  await page.getByRole('button', { name: 'Reconnect', exact: true }).click();
+  await expect(page.getByText('The file browser session expired. Reconnect to keep browsing.')).toHaveCount(0);
+  expect(listings.at(-1)).toEqual({ token: 'sftp-token-2', path: '/home/operator' });
+  const count = listings.length;
+  upload.resolve();
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeEnabled();
+  expect(uploads).toHaveLength(1);
+  expect(listings).toHaveLength(count);
+});
+
 test('a revoked-access download stays on the portal without offering token reconnect', async ({ page }) => {
   const { connectBodies } = await openFiles(page);
   await page.route('**/api/sftp/download?*', route => route.fulfill({ status: 403, json: { error: 'Access denied' } }));
