@@ -67,6 +67,49 @@ test('deleting a held role can reassign holders', async ({ page }) => {
   expect(deleteUrl).toContain('expectedHolders=2');
 });
 
+test('shared modal semantics, keyboard focus, dismissal and scroll restoration', async ({ page }) => {
+  await mockRoles(page);
+  await page.goto('/admin/roles');
+  await page.evaluate(() => {
+    document.body.style.setProperty('overflow-y', 'scroll', 'important');
+    document.documentElement.style.setProperty('overflow-x', 'clip');
+  });
+  const trigger = page.getByRole('row', { name: /Operator/ }).getByRole('button', { name: 'Clone' });
+  await trigger.click();
+  const dialog = page.getByRole('dialog', { name: 'Clone — Operator', exact: true });
+  const input = dialog.getByPlaceholder('Operator (copy)');
+  const close = dialog.getByRole('button', { name: 'Close', exact: true });
+  const last = dialog.getByRole('button', { name: 'Clone role', exact: true });
+  await expect(dialog).toHaveAttribute('aria-modal', 'true');
+  expect(await dialog.evaluate((element) => document.getElementById(element.getAttribute('aria-labelledby'))?.textContent)).toBe('Clone — Operator');
+  await expect(input).toBeFocused();
+  expect(await page.evaluate(() => [document.body.style.overflowY, document.documentElement.style.overflowY])).toEqual(['hidden', 'hidden']);
+  await expect(page.getByRole('main')).toHaveCSS('overflow-y', 'hidden');
+  await last.focus();
+  await page.keyboard.press('Tab');
+  await expect(close).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(last).toBeFocused();
+  await trigger.evaluate((element) => element.focus());
+  await expect(last).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  expect(await page.evaluate(() => [
+    document.body.style.overflowY, document.body.style.getPropertyPriority('overflow-y'),
+    document.documentElement.style.overflowX, document.documentElement.style.overflowY,
+  ])).toEqual(['scroll', 'important', 'clip', '']);
+  await expect(page.getByRole('main')).toHaveCSS('overflow-y', 'auto');
+
+  await trigger.click();
+  await close.click();
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await dialog.locator('..').click({ position: { x: 5, y: 5 } });
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
 test('the filter narrows roles by permission label', async ({ page }) => {
   await mockRoles(page);
   await page.goto('/admin/roles');
