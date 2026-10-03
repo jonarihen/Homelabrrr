@@ -884,13 +884,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
     // Assign VM — admins only get an assignment if they explicitly pick a
     // target user; non-admins always self-assign (assignTo is ignored).
     const targetUser = isAdmin ? (assignTo || null) : req.session.userId;
-    if (targetUser) {
-      // ON CONFLICT DO NOTHING — a VM already assigned stays put.
-      await db.insert(vmAssignments).values({ user_id: targetUser, node, vmid }).onConflictDoNothing();
-    }
-
-    // Start the VM's lease clock at provisioning (default duration from settings)
-    await createLeaseForVm(node, vmid, { createdBy: req.session.username });
+    const owner = { userId: targetUser, createdBy: req.session.username };
 
     // Poll for completion, then stamp PVE owner/VLAN tags on the new VM
     if (upid) {
@@ -898,6 +892,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
         .then(async (ok) => {
           await setStep(provisionId, 'create', ok ? 'done' : 'error');
           if (!ok) return;
+          await recordVmOwnership(node, vmid, owner);
           await setStep(provisionId, 'tags', 'active');
           await syncVmTagsSafe(node, vmid);
           await setStep(provisionId, 'tags', 'done');
@@ -906,6 +901,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
         }), { kind: 'provision', id: provisionId, requestId: req.requestId })
         .catch((err: any) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
     } else {
+      await recordVmOwnership(node, vmid, owner);
       await setStep(provisionId, 'tags', 'active');
       await db.update(provisionedVms).set({ status: 'ready', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
       startBackgroundWork(

@@ -11,7 +11,7 @@ import { databaseMaintenanceStatus, runDatabaseMaintenance } from '../services/d
 import { backupStatus, createVerifiedBackup } from '../services/backupService.ts';
 import { encryptionKeyStatus } from '../utils/secrets.ts';
 import { classifyUpstreamTask } from '../utils/reconciliation.ts';
-import { cleanupOperationTracking, operationPhase } from '../services/operationReconciliation.ts';
+import { cleanupOperationTracking, failedCreateOwnershipReview, operationPhase } from '../services/operationReconciliation.ts';
 import { boundedInteger, validateObject } from '../utils/validation.ts';
 
 const router = Router();
@@ -136,7 +136,8 @@ router.post('/provision/:id/reconcile', requireRecentReauthentication, async (re
       .set({ status, status_detail: detail, upstream_status: upstreamStatus, upstream_checked_at: new Date() })
       .where(eq(provisionedVms.id, row.id));
     await logAudit(req, 'provision_operation_reconciled', String(row.id), `status=${status}; upid=${row.upid}`);
-    res.json({ ...row, status, status_detail: detail, upstream_status: upstreamStatus, upstream: { status: task.status, exitstatus: task.exitstatus } });
+    const ownershipReview = await failedCreateOwnershipReview(db, row.id);
+    res.json({ ...row, status, status_detail: detail, upstream_status: upstreamStatus, upstream: { status: task.status, exitstatus: task.exitstatus }, ownershipReview });
   } catch (err) { sendError(res, err); }
 });
 
