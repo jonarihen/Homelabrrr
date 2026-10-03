@@ -3,6 +3,7 @@ import { eq, lt, sql } from 'drizzle-orm';
 import { db } from './client.ts';
 import { sessions } from './schema/index.ts';
 import { log } from '../utils/logger.ts';
+import { revokeSftpSession } from '../utils/sftpSessions.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 15 * 60 * 1000;
@@ -47,6 +48,7 @@ export class DrizzleSessionStore extends session.Store {
   }
 
   destroy(sid: string, cb?: (err?: unknown) => void): void {
+    revokeSftpSession(sid);
     db.delete(sessions).where(eq(sessions.sid, sid)).then(() => cb?.(), (err) => cb?.(err));
   }
 

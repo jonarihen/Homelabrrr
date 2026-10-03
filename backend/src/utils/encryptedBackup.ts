@@ -6,6 +6,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import pg from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { readBackupSanity, type BackupSanity } from './backupSanity.ts';
 
 const execFileAsync = promisify(execFile);
 const MAGIC = Buffer.from('HOMELABRRR-BACKUP-V1\n');
@@ -47,11 +50,7 @@ export async function decryptBackupFile(source, target, passphrase) {
   );
 }
 
-// Verify a pg_dump custom-format archive is intact and structurally sane by
-// reading its table of contents (pg_restore --list rejects a corrupt archive
-// and never touches a live database). Confirm the schema_migrations table is
-// present so a truncated dump can't pass.
-export async function verifyPostgresDump(path: string): Promise<void> {
+export async function checkPostgresDumpToc(path: string): Promise<void> {
   let toc: string;
   try {
     const { stdout } = await execFileAsync('pg_restore', ['--list', path], { maxBuffer: 64 * 1024 * 1024 });
@@ -64,10 +63,71 @@ export async function verifyPostgresDump(path: string): Promise<void> {
   }
 }
 
-export async function verifyEncryptedBackup(path: string, passphrase: string): Promise<void> {
+export type RestoreVerificationOptions = {
+  databaseUrl: string;
+  expected?: BackupSanity;
+};
+
+export async function verifyPostgresDump(path: string, options: RestoreVerificationOptions): Promise<BackupSanity> {
+  await checkPostgresDumpToc(path);
+  const name = `homelabrrr_verify_${crypto.randomBytes(16).toString('hex')}`;
+  const targetUrl = new URL(options.databaseUrl);
+  targetUrl.pathname = `/${name}`;
+  targetUrl.searchParams.delete('dbname');
+  targetUrl.searchParams.delete('database');
+  const admin = new pg.Client({ connectionString: options.databaseUrl, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
+  let created = false;
+  let phase = 'connect to PostgreSQL';
+  try {
+    await admin.connect();
+    phase = 'create disposable database (the backup role needs CREATEDB)';
+    await admin.query(`CREATE DATABASE "${name}" TEMPLATE template0`);
+    created = true;
+    await admin.query(`REVOKE CONNECT ON DATABASE "${name}" FROM PUBLIC`);
+    phase = 'restore archive data';
+    await execFileAsync('pg_restore', [
+      '--exit-on-error', '--single-transaction', '--no-owner', '--no-privileges',
+      '--dbname', targetUrl.toString(), path,
+    ], { timeout: 30 * 60 * 1000, maxBuffer: 1024 * 1024 });
+    phase = 'check restored migrations and critical table row counts';
+    const restored = new pg.Client({ connectionString: targetUrl.toString(), connectionTimeoutMillis: 10_000, query_timeout: 60_000 });
+    let sanity: BackupSanity;
+    try {
+      await restored.connect();
+      sanity = await readBackupSanity(drizzle(restored));
+    } finally {
+      await restored.end();
+    }
+    if (options.expected) {
+      for (const table of Object.keys(options.expected) as (keyof BackupSanity)[]) {
+        if (sanity[table] !== options.expected[table]) {
+          throw new Error('Restored row count differs from the dump snapshot');
+        }
+      }
+    }
+    return sanity;
+  } catch {
+    throw new Error(`Full backup restore verification failed: could not ${phase}`);
+  } finally {
+    await admin.end().catch(() => {});
+    if (created) {
+      const cleaner = new pg.Client({ connectionString: options.databaseUrl, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
+      try {
+        await cleaner.connect();
+        await cleaner.query(`DROP DATABASE "${name}" WITH (FORCE)`);
+      } catch {
+        throw new Error(`Full backup restore verification failed: could not drop disposable database ${name}; administrator cleanup required`);
+      } finally {
+        await cleaner.end();
+      }
+    }
+  }
+}
+
+export async function verifyEncryptedBackup(path: string, passphrase: string, options: RestoreVerificationOptions): Promise<BackupSanity> {
   const temp = join(tmpdir(), `homelabrrr-verify-${crypto.randomUUID()}.dump`);
   try {
     await decryptBackupFile(path, temp, passphrase);
-    await verifyPostgresDump(temp);
+    return await verifyPostgresDump(temp, options);
   } finally { await unlink(temp).catch(() => {}); }
 }
