@@ -254,6 +254,15 @@ export async function getVMConfigCurrent(node, vmid) {
   return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config?current=1`);
 }
 
+export async function getProvisionVMConfig(node, vmid) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  const resources = await makeRequest(host, 'GET', '/cluster/resources?type=vm');
+  if (!resources.some(vm => Number(vm.vmid) === Number(vmid) && vm.node === nodeName && vm.type === 'qemu')) {
+    throw new Error('Provisioned VM is not present on the recorded Proxmox node');
+  }
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config?current=1`);
+}
+
 // Addresses as the guest itself sees them. Requires qemu-guest-agent running
 // inside the VM — Proxmox answers 500 when the agent is absent, stopped, or
 // the VM is powered off, so every caller must treat a rejection as "unknown",

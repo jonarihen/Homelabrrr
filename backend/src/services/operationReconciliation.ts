@@ -3,6 +3,7 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import type { DbOrTx } from '../db/client.ts';
 import { provisionedVms, vmMigrations, vmAssignments, vmLeases } from '../db/schema/index.ts';
 import { nodeLookupCandidates } from '../utils/nodeRef.ts';
+import { provisionAllocation } from '../utils/provisionIntent.ts';
 
 interface OperationPolicy {
   table: PgTable & { id: typeof provisionedVms.id; status: typeof provisionedVms.status };
@@ -62,6 +63,13 @@ export async function cleanupOperationTracking(database: DbOrTx, type: string, i
   if (!row) return { ok: true, alreadyAbsent: true };
   if (!policy.terminalStatuses.has(row.status)) {
     return { ok: false, blocked: true, status: row.status };
+  }
+  if (type === 'provision') {
+    const [provision] = await database.select().from(provisionedVms).where(eq(provisionedVms.id, id)).limit(1);
+    const intent = provisionAllocation(provision?.steps);
+    if (intent && intent.state === 'pending' && provision?.status !== 'error') {
+      return { ok: false, blocked: true, status: row.status };
+    }
   }
   await database.delete(policy.table).where(eq(policy.table.id, row.id));
   return {

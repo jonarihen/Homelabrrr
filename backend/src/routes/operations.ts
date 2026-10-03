@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { eq, desc, sql } from 'drizzle-orm';
+import { and, eq, desc, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { provisionedVms, vmMigrations, users } from '../db/schema/index.ts';
 import { planEncryptedSecretRotation, rotateEncryptedSecrets } from '../db/init.ts';
@@ -13,6 +13,9 @@ import { encryptionKeyStatus } from '../utils/secrets.ts';
 import { classifyUpstreamTask } from '../utils/reconciliation.ts';
 import { cleanupOperationTracking, failedCreateOwnershipReview, operationPhase } from '../services/operationReconciliation.ts';
 import { boundedInteger, validateObject } from '../utils/validation.ts';
+import { recordProvisionOwnership } from '../services/provisionOwnership.ts';
+import { provisionAllocation } from '../utils/provisionIntent.ts';
+import { syncVmTagsSafe } from '../utils/vmTags.ts';
 
 const router = Router();
 const canOperate = requirePermission('can_manage_hosts');
@@ -135,6 +138,10 @@ router.post('/provision/:id/reconcile', requireRecentReauthentication, async (re
     await db.update(provisionedVms)
       .set({ status, status_detail: detail, upstream_status: upstreamStatus, upstream_checked_at: new Date() })
       .where(eq(provisionedVms.id, row.id));
+    if (task.status === 'stopped' && task.exitstatus === 'OK' && provisionAllocation(row.steps)) {
+      await recordProvisionOwnership(row.id, true);
+      await syncVmTagsSafe(row.node, row.vmid);
+    }
     await logAudit(req, 'provision_operation_reconciled', String(row.id), `status=${status}; upid=${row.upid}`);
     const ownershipReview = await failedCreateOwnershipReview(db, row.id);
     res.json({ ...row, status, status_detail: detail, upstream_status: upstreamStatus, upstream: { status: task.status, exitstatus: task.exitstatus }, ownershipReview });
@@ -176,13 +183,22 @@ router.post('/migration/:id/resolve', requireRecentReauthentication, async (req,
 router.post('/provision/:id/resolve', requireRecentReauthentication, async (req, res) => {
   const status = req.body?.status;
   if (!['ready', 'error'].includes(status)) return res.status(400).json({ error: 'status must be ready or error' });
-  const [row] = await db.select({ id: provisionedVms.id, status: provisionedVms.status }).from(provisionedVms).where(eq(provisionedVms.id, Number(req.params.id))).limit(1);
+  const [row] = await db.select().from(provisionedVms).where(eq(provisionedVms.id, Number(req.params.id))).limit(1);
   if (!row) return res.status(404).json({ error: 'Provisioning operation not found' });
   if (row.status !== 'needs_review') return res.status(409).json({ error: 'Only interrupted provisioning awaiting review can be resolved manually' });
   const detail = status === 'ready' ? 'Manually verified by an administrator after reconciliation.' : 'Marked failed by an administrator after reconciliation.';
-  await db.update(provisionedVms).set({ status, status_detail: detail }).where(eq(provisionedVms.id, row.id));
-  await logAudit(req, 'provision_operation_resolved', String(row.id), `from=${row.status}; to=${status}`);
-  res.json({ ok: true, status, detail });
+  try {
+    if (status === 'ready') {
+      await recordProvisionOwnership(row.id, true, detail);
+    } else {
+      const updated = await db.update(provisionedVms).set({ status, status_detail: detail })
+        .where(and(eq(provisionedVms.id, row.id), eq(provisionedVms.status, 'needs_review')));
+      if (updated.rowCount !== 1) return res.status(409).json({ error: 'Provisioning changed during resolution' });
+    }
+    if (status === 'ready') await syncVmTagsSafe(row.node, row.vmid);
+    await logAudit(req, 'provision_operation_resolved', String(row.id), `from=${row.status}; to=${status}`);
+    res.json({ ok: true, status, detail });
+  } catch (err) { sendError(res, err); }
 });
 
 async function cleanupOperation(req: any, res: any, type: string) {

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { and, eq, ne, desc, inArray, notLike, getTableColumns } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import {
-  provisionedVms, users, sshKeys, vmTemplates, cloudImages, pveHosts, vmAssignments,
+  provisionedVms, users, sshKeys, vmTemplates, cloudImages, pveHosts,
 } from '../db/schema/index.ts';
 import { isUniqueViolation } from '../db/errors.ts';
 import {
@@ -25,11 +25,11 @@ import { assertNodeAvailable } from '../utils/nodeMaintenance.ts';
 import { assertUserQuota, getUserQuota, getUserResourceUsage } from '../utils/quota.ts';
 import { syncVmTagsSafe } from '../utils/vmTags.ts';
 import { getRolePermissions } from '../utils/permissions.ts';
-import { createLeaseForVm } from '../utils/leases.ts';
 import { toPveVmName } from '../utils/vmName.ts';
 import { resolveSshKeys, unusableKeysError, assertLoginPossible } from '../utils/cloudInitCredentials.ts';
 import { validatePassword } from '../utils/validation.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
+import { submitProvision, recordProvisionOwnership } from '../services/provisionOwnership.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -65,14 +65,16 @@ function stepList(steps: any[]) {
 }
 
 async function setStep(provisionId: number, key: string, status: string, note?: string) {
-  const [row] = await db.select({ steps: provisionedVms.steps })
-    .from(provisionedVms).where(eq(provisionedVms.id, provisionId)).limit(1);
-  const steps: any[] = Array.isArray(row?.steps) ? (row!.steps as any[]) : [];
-  const step = steps.find((s) => s.key === key);
-  if (!step) return;
-  step.status = status;
-  if (note !== undefined) step.note = note;
-  await db.update(provisionedVms).set({ steps }).where(eq(provisionedVms.id, provisionId));
+  await db.transaction(async tx => {
+    const [row] = await tx.select({ steps: provisionedVms.steps })
+      .from(provisionedVms).where(eq(provisionedVms.id, provisionId)).for('update').limit(1);
+    const steps: any[] = Array.isArray(row?.steps) ? (row!.steps as any[]) : [];
+    const step = steps.find((s) => s.key === key);
+    if (!step) return;
+    step.status = status;
+    if (note !== undefined) step.note = note;
+    await tx.update(provisionedVms).set({ steps }).where(eq(provisionedVms.id, provisionId));
+  });
 }
 
 // Fire a Discord notification for a deployment that has reached a terminal
@@ -394,7 +396,7 @@ router.post('/clone', async (req: any, res: any) => {
     // the duration of the clone submit, so a second deploy running right now
     // can't be handed the same id. withFreshVmid retries once if Proxmox says
     // the id is taken anyway, and releases the reservation if the clone fails.
-    const { vmid: newVmid, result: upid } = await withFreshVmid((vmid: number) => cloneVM(
+    const submit = () => withFreshVmid((vmid: number) => cloneVM(
       template.node,
       template.vmid,
       vmid,
@@ -412,18 +414,14 @@ router.post('/clone', async (req: any, res: any) => {
       { key: 'resize', label: 'Resizing disk', status: 'pending' },
       { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
     ]);
-    const [inserted] = await db.insert(provisionedVms).values({
-      user_id: req.session.userId, node: template.node, vmid: newVmid, name: vmName,
-      template_id: template.id, source_type: 'template', steps, status: 'cloning',
-      upid: upid || '', request_id: req.requestId || '',
-    }).returning({ id: provisionedVms.id });
-    const provisionId = inserted.id;
-
-    // Assignment + lease are written by the background poller once the clone
-    // actually succeeds (recordVmOwnership) — writing them here would leave
-    // rows pointing at a VM that was never created if the task fails.
-    // Admins only get an assignment if they explicitly pick a target user.
-    const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
+    const targetUser = user.is_admin ? (assignTo ? Number(assignTo) : null) : req.session.userId;
+    const { provisionId, vmid: newVmid, upid } = await submitProvision({
+      user_id: req.session.userId, node: template.node, vmid: 0, name: vmName,
+      template_id: template.id, source_type: 'template', steps, status: 'cloning', request_id: req.requestId || '',
+    }, {
+      userId: targetUser, createdBy: req.session.username,
+      cores: Number(finalCores), memoryMb: finalMem, diskGb: Number(finalDisk),
+    }, submit);
 
     // Do config changes after clone finishes — poll in background
     startBackgroundWork(() => pollAndConfigure(provisionId, template.node, newVmid, upid, {
@@ -434,7 +432,6 @@ router.post('/clone', async (req: any, res: any) => {
       ...cloudInitOpts,
       description,
       vlanTag: vlanTag ? parseInt(vlanTag) : null,
-      owner: { userId: targetUser, createdBy: req.session.username },
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
       .catch((err: any) => console.error(`Post-clone config failed for VM ${newVmid}:`, err.message));
 
@@ -695,7 +692,7 @@ router.post('/from-image', async (req: any, res: any) => {
 
     // Late allocation + reservation (see /clone above): concurrent deploys can
     // no longer be handed the same id, and a failed create hands its id back.
-    const { vmid, result: upid } = await withFreshVmid((id: number) => createVM(targetImage.node, id, {
+    const submit = () => withFreshVmid((id: number) => createVM(targetImage.node, id, {
       name: vmName,
       cpu: 'host',
       sockets: cpuLayout.sockets,
@@ -722,22 +719,19 @@ router.post('/from-image', async (req: any, res: any) => {
       { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
       { key: 'start', label: startNow ? 'Starting VM' : 'Finalizing', status: 'pending' },
     ]);
-    const [inserted] = await db.insert(provisionedVms).values({
-      user_id: req.session.userId, node: targetImage.node, vmid, name: vmName,
-      source_type: 'cloudimage', cloud_image_id: targetImage.id, steps, status: 'creating',
-      upid: upid || '', request_id: req.requestId || '',
-    }).returning({ id: provisionedVms.id });
-    const provisionId = inserted.id;
-
-    // Assignment + lease are written by the background poller once the create
-    // actually succeeds (recordVmOwnership) — see /clone above.
-    const targetUser = user.is_admin ? (assignTo || null) : req.session.userId;
+    const targetUser = user.is_admin ? (assignTo ? Number(assignTo) : null) : req.session.userId;
+    const { provisionId, vmid, upid } = await submitProvision({
+      user_id: req.session.userId, node: targetImage.node, vmid: 0, name: vmName,
+      source_type: 'cloudimage', cloud_image_id: targetImage.id, steps, status: 'creating', request_id: req.requestId || '',
+    }, {
+      userId: targetUser, createdBy: req.session.username,
+      cores: cpuLayout.sockets * cpuLayout.cores, memoryMb, diskGb: baseDiskGb,
+    }, submit);
 
     startBackgroundWork(() => finishImageProvision(provisionId, targetImage.node, vmid, upid, {
       diskGb: baseDiskGb,
       ...cloudInitOpts,
       start: startNow,
-      owner: { userId: targetUser, createdBy: req.session.username },
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
       .catch((err: any) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message));
 
@@ -865,26 +859,23 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
 
     // Allocate the VMID last, after the capacity/quota rails have passed, and
     // hold it only for the create call itself (see /clone above).
-    const { vmid, result: upid } = await withFreshVmid((id: number) => createVM(node, id, config));
+    const targetUser = isAdmin ? (assignTo ? Number(assignTo) : null) : req.session.userId;
 
     // Track
     const steps = stepList([
       { key: 'reserve', label: 'Reserving VMID', status: 'done' },
       { key: 'capacity', label: 'Checking node capacity', status: 'done', note: capacityNote },
-      { key: 'create', label: 'Creating VM', status: upid ? 'active' : 'done' },
+      { key: 'create', label: 'Creating VM', status: 'active' },
       { key: 'tags', label: 'Applying owner / VLAN tags', status: 'pending' },
     ]);
-    const [inserted] = await db.insert(provisionedVms).values({
-      user_id: req.session.userId, node, vmid, name: vmName,
-      source_type: 'create', steps, status: 'creating',
-      upid: upid || '', request_id: req.requestId || '',
-    }).returning({ id: provisionedVms.id });
-    const provisionId = inserted.id;
-
-    // Assign VM — admins only get an assignment if they explicitly pick a
-    // target user; non-admins always self-assign (assignTo is ignored).
-    const targetUser = isAdmin ? (assignTo || null) : req.session.userId;
-    const owner = { userId: targetUser, createdBy: req.session.username };
+    const { provisionId, vmid, upid } = await submitProvision({
+      user_id: req.session.userId, node, vmid: 0, name: vmName,
+      source_type: 'create', steps, status: 'creating', request_id: req.requestId || '',
+    }, {
+      userId: targetUser, createdBy: req.session.username,
+      cores: cpuLayout.sockets * cpuLayout.cores,
+      memoryMb: config.memory, diskGb: Number(String(diskSize).replace(/[^0-9]/g, '')) || 0,
+    }, () => withFreshVmid((id: number) => createVM(node, id, config)));
 
     // Poll for completion, then stamp PVE owner/VLAN tags on the new VM
     if (upid) {
@@ -892,7 +883,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
         .then(async (ok) => {
           await setStep(provisionId, 'create', ok ? 'done' : 'error');
           if (!ok) return;
-          await recordVmOwnership(node, vmid, owner);
+          await recordProvisionOwnership(provisionId);
           await setStep(provisionId, 'tags', 'active');
           await syncVmTagsSafe(node, vmid);
           await setStep(provisionId, 'tags', 'done');
@@ -901,7 +892,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
         }), { kind: 'provision', id: provisionId, requestId: req.requestId })
         .catch((err: any) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
     } else {
-      await recordVmOwnership(node, vmid, owner);
+      await recordProvisionOwnership(provisionId);
       await setStep(provisionId, 'tags', 'active');
       await db.update(provisionedVms).set({ status: 'ready', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
       startBackgroundWork(
@@ -1096,26 +1087,6 @@ router.delete('/admin/templates/:id', requirePermission('can_manage_templates'),
 
 // ─── Background task polling ─────────────────────────────────────────────────
 
-// Write the portal-side ownership rows (VM assignment + lease clock) for a VM
-// that now really exists. /clone and /from-image used to write these the moment
-// the create was *submitted*; when the Proxmox task then failed, the rows were
-// left pointing at a VM that never existed and nothing cleaned them up (vms.js
-// only deletes them on an explicit VM delete). Called from the pollers once the
-// clone/create task reports OK, and always before the tags step — syncVmTagsSafe
-// reads the assignment to stamp the owner tag.
-async function recordVmOwnership(node: string, vmid: number, owner: any) {
-  if (!owner) return;
-  if (owner.userId) {
-    // ON CONFLICT DO NOTHING — the VM may already be assigned.
-    await db.insert(vmAssignments).values({ user_id: owner.userId, node, vmid }).onConflictDoNothing();
-  }
-  try {
-    await createLeaseForVm(node, vmid, { createdBy: owner.createdBy });
-  } catch (err: any) {
-    console.error(`Failed to start the lease clock for VM ${vmid}:`, err.message);
-  }
-}
-
 // Polls a PVE task to completion. Returns true on success. On failure/timeout
 // it writes a terminal status + detail so the error is visible; on success it
 // leaves the status untouched so the caller can finalize after its own
@@ -1153,7 +1124,7 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
   }
 
   // The VM exists now — claim it for its owner and start the lease clock
-  await recordVmOwnership(node, vmid, opts.owner);
+  await recordProvisionOwnership(provisionId);
 
   // Apply post-clone configuration
   await db.update(provisionedVms).set({ status: 'configuring', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
@@ -1250,7 +1221,7 @@ async function finishImageProvision(provisionId: number, node: string, vmid: num
   if (!ok) return; // status already error/timeout
 
   // The VM exists now — claim it for its owner and start the lease clock
-  await recordVmOwnership(node, vmid, opts.owner);
+  await recordProvisionOwnership(provisionId);
 
   await db.update(provisionedVms).set({ status: 'configuring', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
   const warnings = [];

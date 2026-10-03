@@ -136,13 +136,13 @@ async function seedBuiltInRoles(): Promise<void> {
 // continues. Move every such row into the reconciliation queue on startup.
 // Rows without a saved UPID cannot be polled, but are still ambiguous, so they
 // require explicit operator verification instead of being called failed.
-async function reconcileInterruptedOperations(): Promise<void> {
+export async function reconcileInterruptedOperations(): Promise<void> {
   await db.update(provisionedVms)
     .set({
       status: 'needs_review',
       status_detail: sql`CASE WHEN TRIM(COALESCE(${provisionedVms.upid}, '')) != '' THEN 'Portal monitoring was interrupted by a restart — reconcile the saved Proxmox task from Admin → Operations' ELSE 'Provisioning was interrupted without a saved upstream task identifier — verify the VM manually in Admin → Operations' END`,
     })
-    .where(inArray(provisionedVms.status, ['cloning', 'creating', 'configuring']));
+    .where(inArray(provisionedVms.status, ['submitting', 'cloning', 'creating', 'configuring']));
   await db.update(vmMigrations)
     .set({
       status: 'needs_review',
