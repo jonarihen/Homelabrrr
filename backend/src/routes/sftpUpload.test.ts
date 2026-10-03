@@ -8,7 +8,7 @@ import request from 'supertest';
 import ssh2 from 'ssh2';
 import { requestContext } from '../utils/logger.ts';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
-import { users } from '../db/schema/index.ts';
+import { sessions, users, vmAssignments } from '../db/schema/index.ts';
 
 process.env.SECRET_ENCRYPTION_KEY = '88'.repeat(32);
 const testDb = await createTestDatabase();
@@ -22,9 +22,18 @@ const REMOTE_PATH = '/srv/files/example.txt';
 const ORIGINAL = Buffer.from('original contents');
 const REPLACEMENT = Buffer.from('replacement contents');
 
-sftpSessions.set(TOKEN, {
-  userId, sessionId: 'upload-session', node: 'host1~pve1', vmid: '101',
-  expires: Date.now() + 60 * 60 * 1000,
+test.beforeEach(async () => {
+  await testDb.db.delete(sessions);
+  await testDb.db.delete(vmAssignments);
+  await testDb.db.insert(sessions).values({
+    sid: 'upload-session', sess: { userId }, expire: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+  await testDb.db.insert(vmAssignments).values({ user_id: userId, node: 'host1~pve1', vmid: 101 });
+  sftpSessions.set(TOKEN, {
+    userId, sessionId: 'upload-session', node: 'host1~pve1', vmid: 101,
+    expires: Date.now() + 30 * 60 * 1000,
+    absoluteExpires: Date.now() + 8 * 60 * 60 * 1000,
+  });
 });
 
 test.after(async () => {
@@ -90,6 +99,7 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
   const renamed: Array<{ kind: string; from: string; to: string }> = [];
   const events: string[] = [];
   let stream: Writable;
+  let connects = 0;
   let ends = 0;
   let releaseRename: () => void;
   let releaseOpen: () => void;
@@ -222,6 +232,7 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
   };
 
   t.mock.method(ssh2.Client.prototype, 'connect', function () {
+    connects += 1;
     queueMicrotask(() => this.emit('ready'));
     return this;
   });
@@ -236,6 +247,7 @@ function fixture(t: test.TestContext, plan: Plan = {}, existing = true) {
     files, metadata, inspected, attributes, opened, removed, renamed, events, written, opening,
     releaseChown: () => releaseChown(),
     get stream() { return stream; },
+    get connects() { return connects; },
     get ends() { return ends; },
     releaseRename: () => releaseRename(),
     releaseOpen: () => releaseOpen(),
@@ -342,6 +354,45 @@ test('temporary filenames are unique for repeated uploads to the same destinatio
   assert.equal((await upload()).status, 200);
   assert.equal(new Set(f.opened).size, 2);
 });
+
+for (const expiry of ['expires', 'absoluteExpires']) {
+  test(`an upload with ${expiry} elapsed returns 410 without touching either remote path`, async (t) => {
+    const f = fixture(t);
+    sftpSessions.get(TOKEN)[expiry] = Date.now();
+    const response = await upload();
+    assert.equal(response.status, 410);
+    assert.equal(response.body.code, 'SFTP_SESSION_EXPIRED');
+    assert.equal(sftpSessions.has(TOKEN), false);
+    assert.equal(f.connects, 0);
+    assert.deepEqual(f.inspected, []);
+    assert.deepEqual(f.opened, []);
+    assert.deepEqual(f.renamed, []);
+    assert.deepEqual(f.removed, []);
+    assert.deepEqual(f.files.get(REMOTE_PATH), ORIGINAL);
+  });
+}
+
+for (const denied of ['other-session', 'api-token', 'revoked-permission', 'revoked-session', 'unauthenticated']) {
+  test(`${denied} uploads cannot reach temporary-file creation or replacement`, async (t) => {
+    const f = fixture(t);
+    if (denied === 'revoked-permission') await testDb.db.delete(vmAssignments);
+    if (denied === 'revoked-session') await testDb.db.delete(sessions);
+    const instance = app((req) => {
+      if (denied === 'other-session') req.sessionID = 'other-session';
+      if (denied === 'api-token') req.apiToken = { id: 1 };
+      if (denied === 'unauthenticated') req.session = {};
+    });
+    const response = await upload(instance);
+    assert.equal(response.status, denied === 'unauthenticated' ? 401 : denied === 'revoked-session' ? 410 : 403);
+    assert.equal(response.body.code, denied === 'revoked-session' ? 'SFTP_SESSION_EXPIRED' : undefined);
+    assert.equal(f.connects, 0);
+    assert.deepEqual(f.inspected, []);
+    assert.deepEqual(f.opened, []);
+    assert.deepEqual(f.renamed, []);
+    assert.deepEqual(f.removed, []);
+    assert.deepEqual(f.files.get(REMOTE_PATH), ORIGINAL);
+  });
+}
 
 for (const extension of ['supported', 'unadvertised'] as const) {
   for (const dangling of [false, true]) {
