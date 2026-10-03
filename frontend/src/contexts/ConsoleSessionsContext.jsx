@@ -1,10 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import ErrorCallout from '../components/ErrorCallout.jsx';
 import SSHSessionPanel from '../components/SSHSessionPanel.jsx';
 import VNCSessionPanel from '../components/VNCSessionPanel.jsx';
 import { useAuth } from './AuthContext.jsx';
 import { displayNode, routeNode, vmIdentityKey } from '../utils/nodeRef.js';
 import { computeTileLayout } from '../utils/tileSessions.js';
+import { consoleSessionUrl } from '../utils/consolePopOut.js';
 
 const ConsoleSessionsContext = createContext(null);
 
@@ -151,20 +153,22 @@ export function ConsoleSessionsProvider({ children }) {
   }, []);
 
   const popOutSession = useCallback((id) => {
-    setSessions((current) => {
-      const session = current.find((s) => s.id === id);
-      if (!session) return current;
+    const session = sessions.find((s) => s.id === id);
+    if (!session) return;
 
-      const nodeRef = routeNode(session.vm);
-      const path = session.type === 'vnc'
-        ? `/vnc/${nodeRef}/${session.vm.vmid}`
-        : `/ssh/${nodeRef}/${session.vm.vmid}`;
-      const name = session.vm.name;
-      window.open(name ? `${path}?name=${encodeURIComponent(name)}` : path, '_blank', 'noopener');
+    const url = consoleSessionUrl(session);
+    const popup = window.open('about:blank', '_blank');
+    if (!popup) {
+      setSessions((current) => current.map((s) => (
+        s.id === id ? { ...s, popOutError: 'Pop-up blocked. Allow pop-ups for this site, then try again. Your console is still open here.' } : s
+      )));
+      return;
+    }
 
-      return current.filter((s) => s.id !== id);
-    });
-  }, []);
+    popup.opener = null;
+    popup.location.href = url;
+    closeSession(id);
+  }, [sessions, closeSession]);
 
   const value = useMemo(() => ({
     sessions,
@@ -323,6 +327,8 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
           />
         </div>
       </div>
+
+      <ErrorCallout error={session.popOutError} className="mx-4 my-2 shrink-0" />
 
       <div className="min-h-0 flex-1">
         {session.type === 'ssh' ? (

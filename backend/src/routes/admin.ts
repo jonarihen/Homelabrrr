@@ -51,6 +51,7 @@ import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows
 import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
+import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -1340,6 +1341,7 @@ router.delete('/users/:id', pUsers, async (req, res) => {
   const orphanedVms = await db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
     .from(vmAssignments).where(eq(vmAssignments.user_id, Number(req.params.id)));
   await db.delete(users).where(eq(users.id, Number(req.params.id)));
+  revokeUserSftpSessions(Number(req.params.id));
   await logAudit(req, 'admin_delete_user', req.params.id, '');
   for (const vm of orphanedVms) {
     await syncVmTagsSafe(vm.node, vm.vmid, { retired: [target?.username].filter(Boolean) });
@@ -1972,7 +1974,7 @@ router.put('/leases/:node/:vmid', requireAdmin, async (req, res) => {
     await logAudit(req, 'lease_adjust', `${node}/${vmid}`, detail);
     res.json({ ok: true, lease: await computeLeaseView(lease) });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -1984,7 +1986,7 @@ router.post('/leases/:node/:vmid/renew', requireAdmin, async (req, res) => {
     await logAudit(req, 'lease_renew', `${node}/${vmid}`, `admin renewal #${lease.renewal_count}`);
     res.json({ ok: true, lease: await computeLeaseView(lease) });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { and, desc, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmMigrations, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms,
@@ -47,17 +47,6 @@ router.use(requireAdmin);
 
 const GB = 1024 ** 3;
 
-// Every table that keys rows on (node, vmid) — after a successful migration
-// these must point at the target host's node ref or the portal loses track of
-// assignments, SSH configs and templates for the moved guest.
-const NODE_KEYED_TABLES: [string, any][] = [
-  ['vm_assignments', vmAssignments],
-  ['vm_ssh_configs', vmSshConfigs],
-  ['vm_ssh_user_configs', vmSshUserConfigs],
-  ['vm_templates', vmTemplates],
-  ['provisioned_vms', provisionedVms],
-];
-
 const DISK_KEY_RE = /^(?:scsi|virtio|sata|ide)\d+$|^(?:efidisk|tpmstate)\d+$/;
 const IDENT_RE = /^[a-zA-Z0-9._-]+$/;
 
@@ -72,21 +61,30 @@ async function repointVmRowsInTransaction(sourceNode, vmid, targetNode, tx: DbOr
   const candidates = nodeLookupCandidates(sourceNode);
   if (candidates.length === 0) return;
   const policyCandidates = [...new Set([...candidates, ...nodeLookupCandidates(targetNode)])];
-  for (const table of [vmLeases, vmSchedules]) {
-    const rows = await tx.select({ id: table.id, node: table.node }).from(table)
-      .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)))
+  for (const table of [vmLeases, vmSchedules, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates]) {
+    const rows = await tx.select().from(table)
+      .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, policyCandidates)))
       .orderBy(table.id).for('update');
-    const source = candidates.map((node) => rows.find((row) => row.node === node)).find(Boolean);
-    if (!source) continue;
-    await tx.delete(table).where(and(
-      eq(table.vmid, Number(vmid)), inArray(table.node, policyCandidates), ne(table.id, source.id),
-    ));
-    await tx.update(table).set({ node: targetNode }).where(eq(table.id, source.id));
+    const groups = table === vmSshUserConfigs
+      ? [...new Set(rows.filter((row) => candidates.includes(row.node)).map((row) => row.user_id))]
+      : [null];
+    for (const userId of groups) {
+      const matches = rows.filter((row) => userId === null || row.user_id === userId);
+      const source = candidates.map((node) => matches.find((row) => row.node === node)).find(Boolean);
+      if (!source) continue;
+      const duplicates = matches.filter((row) => row.id !== source.id).map((row) => row.id);
+      if (duplicates.length > 0) {
+        if (table === vmTemplates) {
+          await tx.update(provisionedVms).set({ template_id: source.id })
+            .where(inArray(provisionedVms.template_id, duplicates));
+        }
+        await tx.delete(table).where(inArray(table.id, duplicates));
+      }
+      await tx.update(table).set({ node: targetNode }).where(eq(table.id, source.id));
+    }
   }
-  for (const [, table] of NODE_KEYED_TABLES) {
-    await tx.update(table).set({ node: targetNode })
-      .where(and(eq(table.vmid, Number(vmid)), inArray(table.node, candidates)));
-  }
+  await tx.update(provisionedVms).set({ node: targetNode })
+    .where(and(eq(provisionedVms.vmid, Number(vmid)), inArray(provisionedVms.node, candidates)));
 }
 
 export async function finalizeMigrationSuccess(
@@ -154,12 +152,18 @@ async function readSteps(id, database: DbOrTx = db) {
 }
 
 async function setStep(id, key, status, note) {
-  const steps = await readSteps(id);
-  const step = steps.find((s) => s.key === key);
-  if (!step) return;
-  step.status = status;
-  if (note !== undefined) step.note = note;
-  await db.update(vmMigrations).set({ steps }).where(eq(vmMigrations.id, id));
+  await db.transaction(async (tx) => {
+    const [row] = await tx.select({ steps: vmMigrations.steps }).from(vmMigrations)
+      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running'))).for('update');
+    if (!row) return;
+    const steps = Array.isArray(row.steps) ? row.steps : [];
+    const step = steps.find((s) => s.key === key);
+    if (!step) return;
+    step.status = status;
+    if (note !== undefined) step.note = note;
+    await tx.update(vmMigrations).set({ steps })
+      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
+  });
 }
 
 // Resolve every unfinished step when a migration ends: all done on success, the
@@ -189,13 +193,28 @@ const LOG_BATCH = 512;
 const LOG_MAX_BATCHES = 20; // bounds the catch-up read of a long-running task
 
 async function clearProgress(id) {
-  await db.update(vmMigrations).set({ progress: null, progress_detail: '' }).where(eq(vmMigrations.id, id));
+  await db.update(vmMigrations).set({ progress: null, progress_detail: '' })
+    .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
 }
 
 // Returns a function that pulls the task log once and updates the row. Set
 // `persistOffset` for the single task of a remote_migrate; adopt's per-disk
 // moves are separate tasks whose line numbers each start over, so they keep
 // their offset in the closure instead.
+export async function recordMigrationProgress(id, values, step = null) {
+  await db.transaction(async (tx) => {
+    const [row] = await tx.select({ steps: vmMigrations.steps }).from(vmMigrations)
+      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running'))).for('update');
+    if (!row) return;
+    const steps = Array.isArray(row.steps) ? row.steps : [];
+    const active = step && steps.find((entry) => entry.key === step.key);
+    if (active) { active.status = 'active'; active.note = step.note; }
+    if (Object.keys(values).length === 0 && !active) return;
+    await tx.update(vmMigrations).set({ ...values, ...(active ? { steps } : {}) })
+      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
+  });
+}
+
 function progressReader(id, node, upid, { persistOffset = false, step = null, note = '' } = {}) {
   // Lazily resolved on first read so the factory itself stays synchronous — it
   // is handed to waitForTask as an onPoll callback, which expects a function.
@@ -218,18 +237,10 @@ function progressReader(id, node, upid, { persistOffset = false, step = null, no
     );
     offset = read.offset;
     const latest = read.progress;
-    // The migration can finish while this read is in flight — writing then
-    // would resurrect a finished step as "active".
-    const [running] = await db.select({ id: vmMigrations.id }).from(vmMigrations)
-      .where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running'))).limit(1);
-    if (!running) return;
-    if (persistOffset) {
-      await db.update(vmMigrations).set({ log_offset: offset }).where(eq(vmMigrations.id, id));
-    }
-    if (!latest) return;
-    await db.update(vmMigrations).set({ progress: latest.percent, progress_detail: latest.detail })
-      .where(eq(vmMigrations.id, id));
-    if (step) await setStep(id, step, 'active', note ? `${note} · ${latest.detail}` : latest.detail);
+    await recordMigrationProgress(id, {
+      ...(persistOffset ? { log_offset: offset } : {}),
+      ...(latest ? { progress: latest.percent, progress_detail: latest.detail } : {}),
+    }, latest && step ? { key: step, note: note ? `${note} · ${latest.detail}` : latest.detail } : null);
   };
 }
 
@@ -1091,6 +1102,14 @@ router.post('/:node/:vmid', async (req, res) => {
       }
     } else {
       inserted = await claimMigration();
+      try {
+        if ((await getVMStatus(sourceRef, vmid))?.status !== 'stopped') {
+          throw httpError(409, 'VM is no longer stopped; stop it before retrying shared-storage migration');
+        }
+      } catch (err) {
+        await finalizeMigration(inserted.id, false, 'Source stopped-state revalidation failed before migration');
+        throw err;
+      }
     }
     const migrationId = inserted.id;
     try {

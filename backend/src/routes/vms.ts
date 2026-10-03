@@ -38,7 +38,7 @@ import { parseUpid, inProgressVolids } from '../utils/backupTask.ts';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.ts';
 import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.ts';
 import { validatePassword } from '../utils/validation.ts';
-import { withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
+import { lockVmMigration, withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -545,9 +545,10 @@ router.delete('/:node/:vmid', async (req, res) => {
     .orderBy(desc(vmMigrations.id))
     .limit(1);
   if (latestMigration?.kept_source) {
-    const requestCandidates = nodeLookupCandidates(node);
+    const requested = decodeNodeRef(node);
     const sourceCandidates = nodeLookupCandidates(latestMigration.source_node);
-    if (sourceCandidates.some((c) => requestCandidates.includes(c))) {
+    if (requested.nodeRef === latestMigration.source_node
+      || (requested.hostId === null && sourceCandidates.includes(requested.nodeRef))) {
       return res.status(400).json({
         error: `This is the migrated-away source copy — its disks belong to the live VM on the other host. Remove only its config from the source host shell: rm /etc/pve/qemu-server/${parseInt(vmid, 10)}.conf`,
       });
@@ -587,9 +588,13 @@ router.delete('/:node/:vmid', async (req, res) => {
       const cleanupTables: any[] = [
         vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules, backupTasks,
       ];
-      for (const table of cleanupTables) {
-        await db.delete(table).where(and(eq(table.vmid, parsedVmid), inArray(table.node, candidates)));
-      }
+      await db.transaction(async (tx) => {
+        await lockVmMigration(tx, parsedVmid);
+        for (const table of cleanupTables) {
+          await tx.delete(table).where(and(eq(table.vmid, parsedVmid), inArray(table.node, candidates)));
+        }
+        await tx.delete(vmMigrations).where(eq(vmMigrations.vmid, parsedVmid));
+      });
     }
 
     await logAudit(req, 'vm_delete', `${node}/${vmid}`, `backups_deleted=${deletedBackups}${failedBackups.length > 0 ? ` backups_failed=${failedBackups.length}` : ''}`);
@@ -1792,8 +1797,8 @@ router.put('/:node/:vmid/schedule', async (req, res) => {
   const enabledBool = !!enabled;
 
   try {
-    const row = await withVmPolicyWrite(node, parsedVmid, async (tx) => {
-      const existing = await loadScheduleRow(node, vmid, tx);
+    const row = await withVmPolicyWrite(node, parsedVmid, async (tx, currentNode) => {
+      const existing = await loadScheduleRow(currentNode, vmid, tx);
       const set = {
         enabled: enabledBool, stop_time: stopTime, start_time: startTime, days: daysMask, timezone,
         skip_until: 0, running_due_to_manual: false, stopped_this_window: false,
@@ -1803,7 +1808,7 @@ router.put('/:node/:vmid/schedule', async (req, res) => {
         const [updated] = await tx.update(vmSchedules).set(set).where(eq(vmSchedules.id, existing.id)).returning();
         return updated;
       }
-      const [inserted] = await tx.insert(vmSchedules).values({ node, vmid: parsedVmid, ...set })
+      const [inserted] = await tx.insert(vmSchedules).values({ node: currentNode, vmid: parsedVmid, ...set })
         .onConflictDoUpdate({ target: [vmSchedules.node, vmSchedules.vmid], set }).returning();
       return inserted;
     });
@@ -1822,8 +1827,8 @@ router.delete('/:node/:vmid/schedule', async (req, res) => {
   const parsedVmid = parseInt(vmid, 10);
   try {
     if (candidates.length > 0) {
-      await withVmPolicyWrite(node, parsedVmid, (tx) =>
-        tx.delete(vmSchedules).where(and(eq(vmSchedules.vmid, parsedVmid), inArray(vmSchedules.node, candidates))));
+      await withVmPolicyWrite(node, parsedVmid, (tx, currentNode) =>
+        tx.delete(vmSchedules).where(and(eq(vmSchedules.vmid, parsedVmid), inArray(vmSchedules.node, nodeLookupCandidates(currentNode)))));
     }
     await logAudit(req, 'vm_schedule_delete', `${node}/${vmid}`, '');
     res.json({ ok: true });
@@ -1838,8 +1843,8 @@ router.post('/:node/:vmid/schedule/skip', async (req, res) => {
     return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
   }
   try {
-    const row = await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx) => {
-      const existing = await loadScheduleRow(node, vmid, tx);
+    const row = await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx, currentNode) => {
+      const existing = await loadScheduleRow(currentNode, vmid, tx);
       if (!existing || !existing.enabled || !isValidTime(existing.start_time) || !isValidTimezone(existing.timezone)) {
         throw httpError(400, 'No active schedule to skip');
       }
@@ -1859,8 +1864,8 @@ router.delete('/:node/:vmid/schedule/skip', async (req, res) => {
     return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
   }
   try {
-    const row = await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx) => {
-      const existing = await loadScheduleRow(node, vmid, tx);
+    const row = await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx, currentNode) => {
+      const existing = await loadScheduleRow(currentNode, vmid, tx);
       if (!existing) throw httpError(404, 'No schedule found');
       const [updated] = await tx.update(vmSchedules).set({ skip_until: 0 }).where(eq(vmSchedules.id, existing.id)).returning();
       return updated;

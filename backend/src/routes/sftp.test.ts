@@ -4,22 +4,23 @@ import { createHash } from 'node:crypto';
 import express from 'express';
 import request from 'supertest';
 import ssh2 from 'ssh2';
+import { sshClientError } from '../utils/sshError.ts';
 import { requestContext } from '../utils/logger.ts';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
+import { sessions, users, vmAssignments } from '../db/schema/index.ts';
 
 const { Server, utils } = ssh2;
 const { STATUS_CODE } = utils.sftp;
 
-// The router imports the Drizzle client and the secret helpers at load time, so
-// both need to be satisfied before the dynamic import below. Nothing these
-// tests touch queries PostgreSQL — every error path answers before the audit
-// write — but the module must load.
 process.env.SECRET_ENCRYPTION_KEY = '44'.repeat(32);
 const testDb = await createTestDatabase();
 process.env.DATABASE_URL = testDb.url;
 const { default: sftpRouter, sftpSessions } = await import('./sftp.ts');
 
 const USER_ID = 7;
+await testDb.db.insert(users).values({ id: USER_ID, username: 'operator', password: 'unused' });
+await testDb.db.insert(sessions).values({ sid: 'test-session', sess: { userId: USER_ID }, expire: new Date(Date.now() + 60 * 60 * 1000) });
+await testDb.db.insert(vmAssignments).values({ user_id: USER_ID, node: 'host1~pve1', vmid: 101 });
 
 /**
  * An SFTP subsystem that answers every request with a chosen status. Real
@@ -29,9 +30,38 @@ const USER_ID = 7;
  */
 let plan: Record<string, { code: number; message?: string }> = {};
 let liveConnections = 0;
+let transportFailure: { category: string; name: string; code: string } | undefined;
+const originalConnect = ssh2.Client.prototype.connect;
+ssh2.Client.prototype.connect = function (...args) {
+  this.once('error', (err) => {
+    transportFailure = {
+      category: sshClientError(err).code,
+      name: String(err?.name || '').replace(/[^a-zA-Z]/g, '').slice(0, 40),
+      code: String(err?.code || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40),
+    };
+  });
+  try {
+    return originalConnect.apply(this, args);
+  } catch (err) {
+    transportFailure = {
+      category: /parse privateKey|private key/i.test(String(err?.message)) ? 'SSH_KEY_PARSE_FAILED' : sshClientError(err).code,
+      name: String(err?.name || '').replace(/[^a-zA-Z]/g, '').slice(0, 40),
+      code: String(err?.code || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40),
+    };
+    throw err;
+  }
+};
 
-const hostKey = utils.generateKeyPairSync('ed25519');
-const clientKey = utils.generateKeyPairSync('ed25519');
+function fixtureKeyPair() {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const key = utils.generateKeyPairSync('ed25519');
+    if (!(utils.parseKey(key.private) instanceof Error)) return key;
+  }
+  throw new Error('Could not generate a parseable SSH fixture key');
+}
+
+const hostKey = fixtureKeyPair();
+const clientKey = fixtureKeyPair();
 const hostFingerprint = `SHA256:${createHash('sha256')
   .update(Buffer.from(String(hostKey.public).split(' ')[1], 'base64'))
   .digest('base64')}`;
@@ -77,10 +107,12 @@ sftpSessions.set(TOKEN, {
   privateKey: clientKey.private,
   passphrase: '',
   expires: Date.now() + 60 * 60 * 1000,
+  absoluteExpires: Date.now() + 8 * 60 * 60 * 1000,
 });
 
 test.after(async () => {
   sftpSessions.delete(TOKEN);
+  ssh2.Client.prototype.connect = originalConnect;
   server.close();
   await testDb.drop();
 });
@@ -90,6 +122,7 @@ function app() {
   instance.use(requestContext, express.json());
   instance.use((req, _res, next) => {
     (req as express.Request & { session: unknown }).session = { userId: USER_ID, username: 'operator', isAdmin: false };
+    req.sessionID = 'test-session';
     next();
   });
   instance.use('/api/sftp', sftpRouter);
@@ -156,9 +189,11 @@ const cases = [
 ];
 
 for (const scenario of cases) {
-  test(`SFTP error callbacks answer instead of crashing when ${scenario.name}`, async () => {
+  test(`SFTP error callbacks answer instead of crashing when ${scenario.name}`, async (t) => {
     plan = scenario.plan;
+    transportFailure = undefined;
     const response = await scenario.send();
+    if (response.status !== scenario.status) t.diagnostic(JSON.stringify({ transportFailure, responseCode: response.body.code, liveConnections }));
 
     assert.equal(response.status, scenario.status);
     assert.equal(response.body.code, scenario.code);
