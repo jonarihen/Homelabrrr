@@ -6,41 +6,109 @@ import { requestContext } from '../utils/logger.ts';
 
 process.env.SECRET_ENCRYPTION_KEY = '66'.repeat(32);
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
+import { sessions, users, vmAssignments } from '../db/schema/index.ts';
 
 const testDb = await createTestDatabase();
 process.env.DATABASE_URL = testDb.url;
 const { default: sftpRouter, sftpSessions } = await import('./sftp.ts');
 
 const USER_ID = 11;
+const SID = 'test-session';
+const NODE = '1~pve';
+const VMID = 101;
+
+await testDb.db.insert(users).values({ id: USER_ID, username: 'operator', password: 'unused' });
+await testDb.db.insert(sessions).values({ sid: SID, sess: { userId: USER_ID }, expire: new Date(Date.now() + 60 * 60 * 1000) });
+await testDb.db.insert(vmAssignments).values({ user_id: USER_ID, node: NODE, vmid: VMID });
+
+function seedToken(token) {
+  sftpSessions.set(token, {
+    userId: USER_ID, sessionId: SID, node: NODE, vmid: VMID,
+    expires: Date.now() + 30 * 60 * 1000,
+    absoluteExpires: Date.now() + 8 * 60 * 60 * 1000,
+  });
+  return sftpSessions.get(token);
+}
 
 test.after(async () => {
+  sftpSessions.clear();
   await testDb.drop();
 });
 
-function app() {
+function app(authenticated = true) {
   const instance = express();
   instance.use(requestContext, express.json());
   instance.use((req, _res, next) => {
-    req.session = { userId: USER_ID, username: 'operator', isAdmin: false };
+    req.sessionID = SID;
+    req.session = authenticated ? { userId: USER_ID, username: 'operator', isAdmin: false } : {};
     next();
   });
   instance.use('/api/sftp', sftpRouter);
   return instance;
 }
 
-test('a stale SFTP token is a 403 with a code, not a session expiry', async () => {
-  const cases = [
-    () => request(app()).post('/api/sftp/ls').send({ token: 'missing-token', path: '/' }),
-    () => request(app()).get('/api/sftp/download').query({ token: 'missing-token', path: '/x' }),
-    () => request(app()).post('/api/sftp/mkdir').send({ token: 'missing-token', path: '/x' }),
-    () => request(app()).post('/api/sftp/delete').send({ token: 'missing-token', path: '/x' }),
-    () => request(app()).post('/api/sftp/rename').send({ token: 'missing-token', path: '/x', name: 'y' }),
-  ];
-  for (const send of cases) {
-    const res = await send();
-    assert.equal(res.status, 403, 'a 401 here makes the SPA redirect a perfectly valid session to /login');
-    assert.equal(res.body.code, 'SFTP_SESSION_EXPIRED');
-    assert.equal(res.body.error, 'SFTP session expired or invalid');
+const operations = [
+  { name: 'ls', send: (instance, token) => request(instance).post('/api/sftp/ls').send({ token, path: '/' }) },
+  { name: 'download', send: (instance, token) => request(instance).get('/api/sftp/download').query({ ...(token === undefined ? {} : { token }), path: '/x' }) },
+  { name: 'mkdir', send: (instance, token) => request(instance).post('/api/sftp/mkdir').send({ token, path: '/x' }) },
+  { name: 'delete', send: (instance, token) => request(instance).post('/api/sftp/delete').send({ token, path: '/x' }) },
+  { name: 'rename', send: (instance, token) => request(instance).post('/api/sftp/rename').send({ token, path: '/x', name: 'y' }) },
+  {
+    name: 'upload',
+    send: (instance, token) => {
+      const upload = request(instance).post('/api/sftp/upload');
+      if (token !== undefined) upload.field('token', token);
+      return upload.field('path', '/').attach('file', Buffer.from('contents'), 'x.txt');
+    },
+  },
+];
+
+for (const operation of operations) {
+  for (const state of ['missing', 'empty', 'unknown', 'expired']) {
+    test(`${operation.name} returns SFTP_SESSION_EXPIRED with 410 for a ${state} token`, async () => {
+      const token = state === 'missing' ? undefined : state === 'empty' ? '' : `${operation.name}-${state}`;
+      if (state === 'expired') {
+        seedToken(token).expires = Date.now() - 1;
+      }
+      const res = await operation.send(app(), token);
+      assert.equal(res.status, 410);
+      assert.deepEqual(res.body, { code: 'SFTP_SESSION_EXPIRED', error: 'SFTP session expired or invalid' });
+      assert.equal(sftpSessions.has(token), false);
+      if (operation.name === 'upload') assert.equal(res.headers.connection, 'close');
+    });
   }
-  assert.equal(sftpSessions.has('missing-token'), false);
+
+  test(`${operation.name} still returns portal-auth 401 without a signed-in session`, async () => {
+    const res = await operation.send(app(false), 'missing-token');
+    assert.equal(res.status, 401);
+    assert.deepEqual(res.body, { error: 'Unauthorized' });
+  });
+}
+
+test('connect still returns portal-auth 401 without a signed-in session', async () => {
+  const res = await request(app(false)).post('/api/sftp/connect').send({ node: '1~pve', vmid: 101, keyId: 1 });
+  assert.equal(res.status, 401);
+  assert.deepEqual(res.body, { error: 'Unauthorized' });
+});
+
+test('an upload with its token after the file part returns the expiry response', async () => {
+  const token = 'late-upload-token';
+  seedToken(token);
+  try {
+    const res = await request(app()).post('/api/sftp/upload')
+      .field('path', '/')
+      .attach('file', Buffer.from('contents'), 'x.txt')
+      .field('token', token);
+    assert.equal(res.status, 410);
+    assert.equal(res.body.code, 'SFTP_SESSION_EXPIRED');
+    assert.equal(res.headers.connection, 'close');
+  } finally {
+    sftpSessions.delete(token);
+  }
+});
+
+test('malformed uploads remain validation errors rather than session expiry', async () => {
+  const res = await request(app()).post('/api/sftp/upload').send({ token: 'missing-token' });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, undefined);
 });
