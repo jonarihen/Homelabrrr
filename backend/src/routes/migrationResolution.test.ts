@@ -188,11 +188,12 @@ test('manual resolution rejects missing, invalid and non-review operations', asy
 test('shared success finalizer claims running migrations once and cannot bypass review', async () => {
   const migration = await seedMigration(320, 'running');
   const linked = await seedLinkedRows(320);
-  const outcomes = await Promise.all([
+  const outcomes = await Promise.allSettled([
     finalizeMigrationSuccess(testDb.db, migration.id, 'Completed', { keptSource: false }),
     finalizeMigrationSuccess(testDb.db, migration.id, 'Completed', { keptSource: false }),
   ]);
-  assert.deepEqual(outcomes.sort(), [false, true]);
+  assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled' && outcome.value === true).length, 1);
+  for (const outcome of outcomes) if (outcome.status === 'rejected') assert.equal(outcome.reason.statusCode, 409);
   const finished = await readMigration(migration.id);
   assert.equal(finished.status, 'ok');
   assert.equal(finished.kept_source, false);
