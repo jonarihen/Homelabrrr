@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-03 — Reliability fixes for file transfers, backups, and dialogs
+
+- **SFTP uploads no longer truncate the destination before the transfer succeeds.** Uploads stream into a unique temporary file in the destination directory, then commit by rename after transfer and metadata checks. Symlink destinations are rejected; overwrites preserve the existing owner, group, and mode, and new files stay owner-only (`0600`)
+- **SFTP tokens stay bound to the portal session that created them.** Each operation requires that same live interactive session and current VM permissions; logout, session revocation, or lost access blocks subsequent operations. The 30-minute idle timeout is capped by an eight-hour absolute lifetime
+- **A portal database backup is verified only after a full restore.** The off-host archive is restored into a disposable PostgreSQL database and checked against migration and critical-table row counts from the dump's snapshot before cleanup. Operations shows the last successful full-restore verification time, even after a later failure; verification requires `CREATEDB` and disk space for a full database copy
+- **An expired Files tab reconnects instead of signing you out.** All SFTP operations, including uploads and Blob downloads, recognise `410` / `SFTP_SESSION_EXPIRED` and offer Reconnect with the same credentials and directory. A genuinely expired portal session still redirects to sign-in
+- **Console pop-out is safe under React StrictMode.** A click opens only one window, isolates its opener, and removes only the selected dock session after the popup opens. A blocked popup leaves the console mounted and shows an accessible error with retry guidance
+- **Late SFTP responses no longer overwrite the directory you just opened.** Superseded listings are cancelled, mutation refreshes stay tied to their confirmed directory, and expiry or reconnect invalidates old-token completions and stops remaining uploads in the old batch
+- **Website polling stops when its page or card is replaced or unmounted.** Cleanup cancels timers and requests; late successes or failures cannot update state, call completion handlers, or schedule another poll
+- **Shared dialogs now support keyboard and assistive-technology navigation.** Modals have an accessible title and Close control, focus the content on opening or content transitions, trap focus in the topmost dialog, restore the trigger on close, and keep background scrolling locked safely across nested dialogs
+
 ## 2026-10-02 — User edits are staged and applied together after a review
 
 - **Clicking a toggle in Manage User no longer changes the account instantly.** Role, permissions, Enforce 2FA, quotas, and VM/VLAN assignments are now staged locally; changed controls are marked as pending and a sticky "N pending changes — Discard / Review & Apply" bar appears. Closing the dialog with pending edits asks first
