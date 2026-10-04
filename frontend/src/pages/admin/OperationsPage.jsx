@@ -118,12 +118,13 @@ export default function OperationsPage() {
               <div key={`${operation.type}-${operation.id}`} className="border border-gray-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
                 <div className="min-w-0">
                   <p className="text-sm text-white truncate">{operation.type} #{operation.id} · {operation.label || `${operation.node}/${operation.vmid}`}</p>
+                  {operation.type === 'provision' && operation.source_type !== 'create' && <p className="text-xs text-yellow-400 mt-1">Incomplete clone/image recovery cannot grant access: verify CPU, memory, all disks, cloud-init credentials, VLAN and start state in Proxmox, then explicitly assign/lease through admin controls and mark tracking failed.</p>}
                   <p className="text-xs text-gray-500 mt-1">{operation.status} · {operation.detail || 'No detail'} · {operation.upid ? 'UPID saved' : 'manual verification required'}{operation.request_id ? ` · request ${operation.request_id}` : ''}</p>
                 </div>
                 <div className="flex gap-2">
                   {operation.upid && <button disabled={!!busy} onClick={() => act(`reconcile-${operation.type}-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/reconcile`))} className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs text-white">Check upstream</button>}
                   {operationNeedsReview(operation) && <>
-                    <button disabled={!!busy} onClick={() => resolveReady(operation)} className="px-3 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40 text-xs text-white">Verified ready</button>
+                    <button disabled={!!busy || (operation.type === 'provision' && operation.source_type !== 'create')} onClick={() => resolveReady(operation)} className="px-3 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40 text-xs text-white">Verified ready</button>
                     <button disabled={!!busy} onClick={() => act(`error-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, { status: 'error' }))} className="px-3 py-2 rounded-lg bg-red-900 hover:bg-red-800 disabled:opacity-40 text-xs text-white">Mark failed</button>
                   </>}
                 </div>
@@ -143,6 +144,7 @@ export default function OperationsPage() {
                 <div className="min-w-0">
                   <p className="text-sm text-white truncate">{operation.type} #{operation.id} · {operation.label || `${operation.node}/${operation.vmid}`}</p>
                   <p className="text-xs text-gray-500 mt-1">local {operation.status}{operation.phase ? ` / ${operation.phase}` : ''} · upstream {operation.upstream_status || 'not checked'}{operation.upstream_checked_at ? ` at ${operation.upstream_checked_at}` : ''}</p>
+                  {operation.ownershipReview && <details className="text-xs text-yellow-400 mt-2"><summary>Ownership review before cleanup</summary><p>{operation.ownershipReview.detail}</p><pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify({ assignments: operation.ownershipReview.assignments, leases: operation.ownershipReview.leases, history: operation.ownershipReview.history }, null, 2)}</pre></details>}
                   <p className="text-[11px] text-gray-600 mt-1">actor {operation.actor_username || (operation.actor_user_id ? `#${operation.actor_user_id}` : 'system')}{operation.request_id ? ` · request ${operation.request_id}` : ''}</p>
                 </div>
                 {terminal && <button disabled={!!busy} onClick={() => cleanup(operation)} className="px-3 py-2 rounded-lg bg-gray-800 hover:bg-red-950 disabled:opacity-40 text-xs text-gray-300">Remove tracking only</button>}

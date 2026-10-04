@@ -1,4 +1,5 @@
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
+import { nodeLookupCandidates } from './nodeRef.ts';
 import { db, type DbOrTx } from '../db/client.ts';
 import { users, roles, vmAssignments, provisionedVms } from '../db/schema/index.ts';
 import { provisionAllocation } from './provisionIntent.ts';
@@ -60,6 +61,7 @@ export async function getUserResourceUsage(userId: number, database: DbOrTx = db
     const intent = provisionAllocation(job.steps);
     if (!intent || intent.userId !== userId || intent.state === 'released') continue;
     if (intent.state === 'owned' && !vmids.has(job.vmid)) continue;
+    if (intent.state === 'owned' && assignments.some(a => a.vmid === job.vmid && a.resource_allocation)) continue;
     const current = allocated.get(job.vmid);
     allocated.set(job.vmid || -job.id, {
       cores: Math.max(intent.cores, current?.cores || 0),
@@ -82,6 +84,25 @@ export async function getUserResourceUsage(userId: number, database: DbOrTx = db
  * user doesn't exist. Per metric: an explicit per-user value overrides the
  * role's default; otherwise the role's value applies (if any role is set).
  */
+export async function refreshHardwareAllocation(node: string, vmid: number, updates: { cores?: number; memoryMb?: number }) {
+  const candidates = nodeLookupCandidates(node);
+  if (!candidates.length) return;
+  await db.transaction(async tx => {
+    const owners = await tx.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
+      .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
+    for (const owner of owners) await tx.execute(sql`SELECT pg_advisory_xact_lock(208, ${owner.user_id})`);
+    const rows = await tx.select().from(vmAssignments)
+      .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates))).for('update');
+    for (const row of rows) {
+      if (!row.resource_allocation) continue;
+      await tx.update(vmAssignments).set({ resource_allocation: { ...row.resource_allocation,
+        ...(updates.cores !== undefined ? { cores: updates.cores } : {}),
+        ...(updates.memoryMb !== undefined ? { memoryMb: updates.memoryMb } : {}),
+      } }).where(eq(vmAssignments.id, row.id));
+    }
+  });
+}
+
 export async function getUserQuota(userId: number, database: DbOrTx = db): Promise<UserQuota | null> {
   const [user] = await database
     .select({

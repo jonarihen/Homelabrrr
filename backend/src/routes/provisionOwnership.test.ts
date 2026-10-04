@@ -2,11 +2,12 @@ import test, { before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import { EventEmitter } from 'node:events';
+import { Client as SSHClient } from 'ssh2';
 import express from 'express';
 import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, pveHosts, provisionedVms, vmAssignments, vmLeases, vlans, userVlans, vmTemplates, cloudImages } from '../db/schema/index.ts';
+import { users, pveHosts, provisionedVms, vmAssignments, vmLeases, vlans, userVlans, vmTemplates, cloudImages, notificationWebhooks } from '../db/schema/index.ts';
 import { provisionAllocation } from '../utils/provisionIntent.ts';
 import { operationPhase } from '../services/operationReconciliation.ts';
 
@@ -29,6 +30,10 @@ let submitFailure: Error | null = null;
 let submitStatus = 200;
 let allocatorFailure = false;
 let constructionFailure = false;
+let preSendFailure: Error | null = null;
+let reusedSocket = false;
+let configUpdateFailure = false;
+let imageVirtualBytes = 20 * 1024 ** 3;
 let taskGate: Promise<void> | null = null;
 let onTaskRead: (() => void) | null = null;
 let configDescription = '';
@@ -55,6 +60,7 @@ before(async () => {
   const router = (await import('./provision.ts')).default;
   const operations = (await import('./operations.ts')).default;
   const adminRouter = (await import('./admin.ts')).default;
+  const vmsRouter = (await import('./vms.ts')).default;
   ({ getNextVmid, releaseVmid, withFreshVmid } = await import('../proxmox.ts'));
   quota = await import('../utils/quota.ts');
   ({ submitProvision } = await import('../services/provisionOwnership.ts'));
@@ -72,6 +78,7 @@ before(async () => {
   reviewerId = reviewer.id;
   const [host] = await testDb.db.insert(pveHosts).values({
     name: 'fake-create-pve', host: 'pve.example', token_id: 'test@pve!portal', token_secret: 'test-secret',
+    ssh_host: 'pve.example', ssh_user: 'root', ssh_secret: 'test-ssh-secret',
   }).returning({ id: pveHosts.id });
   node = `${host.id}~pve`;
   const [vlan] = await testDb.db.insert(vlans).values({ name: 'create-network', tag: 200 })
@@ -88,6 +95,7 @@ before(async () => {
     };
     next();
   });
+  app.use('/vms', vmsRouter);
   app.use('/provision', router);
   app.use('/operations', operations);
   app.use('/admin', (req, _res, next) => {
@@ -109,6 +117,10 @@ beforeEach(async t => {
   submitStatus = 200;
   allocatorFailure = false;
   constructionFailure = false;
+  preSendFailure = null;
+  reusedSocket = false;
+  configUpdateFailure = false;
+  imageVirtualBytes = 20 * 1024 ** 3;
   taskGate = null;
   onTaskRead = null;
   configDescription = '';
@@ -116,6 +128,14 @@ beforeEach(async t => {
   postDescription = '';
   submittedVmids.length = 0;
   await testDb.db.update(users).set({ max_cores: null, max_memory_gb: null, max_storage_gb: null }).where(eq(users.id, ownerId));
+  t.mock.method(SSHClient.prototype, 'connect', function () { queueMicrotask(() => this.emit('ready')); return this; });
+  t.mock.method(SSHClient.prototype, 'exec', function (_command: string, callback: any) {
+    const stream = Object.assign(new EventEmitter(), { stderr: new EventEmitter() });
+    callback(null, stream);
+    queueMicrotask(() => { stream.emit('data', JSON.stringify({ 'virtual-size': imageVirtualBytes })); stream.emit('close', 0); });
+    return this;
+  });
+  t.mock.method(SSHClient.prototype, 'end', function () { return this; });
   t.mock.method(https, 'request', (url: URL, options: any, callback: any) => {
     if (constructionFailure && options.method === 'POST') throw new Error('Local request construction failed');
     const outgoing = new EventEmitter();
@@ -126,6 +146,11 @@ beforeEach(async t => {
       destroy(err: Error) { outgoing.emit('error', err); },
       end() {
         queueMicrotask(async () => {
+          const socket = Object.assign(new EventEmitter(), { encrypted: true, connecting: !reusedSocket, authorized: reusedSocket });
+          Object.assign(outgoing, { reusedSocket });
+          outgoing.emit('socket', socket);
+          if (preSendFailure && options.method === 'POST') { outgoing.emit('error', preSendFailure); return; }
+          if (!reusedSocket) socket.emit('secureConnect');
           let data: unknown;
           const path = url.pathname;
           if (path === '/api2/json/cluster/resources') {
@@ -145,7 +170,11 @@ beforeEach(async t => {
           }
           else if (path.includes('/tasks/')) { taskCalls += 1; onTaskRead?.(); if (taskGate) await taskGate; data = task; }
           else if (path.endsWith('/config') && options.method === 'GET') data = { name: configName, description: configDescription, lock: configLock, net0: 'virtio,bridge=vmbr0,tag=200', ...sourceDisks };
-          else if (path.endsWith('/config') && options.method === 'PUT') { tagWrites.push(JSON.parse(body)); data = null; }
+          else if (path.endsWith('/resize') && options.method === 'PUT') { data = null; }
+          else if (path.endsWith('/config') && options.method === 'PUT') {
+            if (configUpdateFailure) { outgoing.emit('error', new Error('Config rejected')); return; }
+            tagWrites.push(JSON.parse(body)); data = null;
+          }
           else assert.fail(`Unexpected PVE request: ${options.method} ${url}`);
           const incoming = Object.assign(new EventEmitter(), { statusCode: options.method === 'POST' ? submitStatus : 200 });
           callback(incoming);
@@ -163,6 +192,7 @@ afterEach(async () => {
     await tx.delete(vmAssignments);
     await tx.delete(vmLeases);
     await tx.delete(provisionedVms);
+    await tx.delete(notificationWebhooks);
   });
 });
 
@@ -303,6 +333,12 @@ test('failed-create reconciliation reports legacy rows and reuse history without
   assert.equal(response.body.ownershipReview.history.length, 2);
   assert.match(response.body.ownershipReview.detail, /does not prove absence/);
   assert.deepEqual(await ownership(900), before);
+  const reloaded = await request(app).get('/operations');
+  assert.equal(reloaded.status, 200, JSON.stringify(reloaded.body));
+  const review = reloaded.body.operations.find((operation: any) => operation.id === failed.id && operation.type === 'provision').ownershipReview;
+  assert.equal(review.assignments[0].user_id, otherId);
+  assert.equal(review.leases[0].renewal_count, 2);
+  assert.match(review.detail, /does not prove absence/);
 });
 
 async function savedSubmission(vmid: number) {
@@ -330,7 +366,7 @@ test('restart retains admin assignTo intent without access and manual verified s
   assert.equal(provisionAllocation((await provision(saved.provisionId)).steps)?.state, 'owned');
 });
 
-test('successful reconciliation after restart restores persisted ownership idempotently but leaves final configuration reviewable', async () => {
+test('successful reconciliation records only upstream evidence and defers access until explicit adoption', async () => {
   const saved = await savedSubmission(911);
   await reconcileInterruptedOperations();
   liveVms = [{ vmid: 911, node: 'pve', type: 'qemu' }];
@@ -339,10 +375,11 @@ test('successful reconciliation after restart restores persisted ownership idemp
     assert.equal(response.status, 200, JSON.stringify(response.body));
     assert.equal(response.body.status, 'needs_review');
   }
-  const owned = await ownership(911);
-  assert.equal(owned.assignments.length, 1);
-  assert.equal(owned.leases.length, 1);
-  assert.equal(owned.assignments[0].user_id, ownerId);
+  assert.deepEqual(await ownership(911), { assignments: [], leases: [] });
+  assert.deepEqual(tagWrites, []);
+  const adopted = await request(app).post(`/operations/provision/${saved.provisionId}/resolve`).send({ status: 'ready' });
+  assert.equal(adopted.status, 200);
+  assert.equal((await ownership(911)).assignments[0].user_id, ownerId);
 });
 
 test('manual ready refuses running tasks, absent VMs, name mismatch, and conflicting ownership', async () => {
@@ -621,6 +658,131 @@ test('protected legacy timeout can recover through the same operation resolution
   const response = await request(app).post(`/operations/provision/${saved.provisionId}/resolve`).send({ status: 'ready' });
   assert.equal(response.status, 200, JSON.stringify(response.body));
   assert.equal((await ownership(932)).assignments[0].user_id, ownerId);
+});
+
+test('cloud-image imports reserve virtual disk minimum for quota, pending usage and durable floor', async t => {
+  const [image] = await testDb.db.insert(cloudImages).values({
+    name: 'large-import-image', url: 'https://example.com/large.qcow2', node, storage: 'local',
+    volid: 'local:import/large.qcow2', default_storage: 'local-lvm', status: 'ready', size: 1024,
+  }).returning({ id: cloudImages.id });
+  imageVirtualBytes = 64 * 1024 ** 3;
+  await testDb.db.update(users).set({ max_storage_gb: 63 }).where(eq(users.id, ownerId));
+  const deploy = () => request(app).post('/provision/from-image').send({ imageId: image.id, name: 'new-vm', assignTo: ownerId, diskGb: 5, ciPassword: 'strong-import-password' });
+  assert.equal((await deploy()).status, 403);
+  assert.equal(submittedVmids.length, 0);
+  await testDb.db.update(users).set({ max_storage_gb: 64 }).where(eq(users.id, ownerId));
+  task = { status: 'stopped', exitstatus: 'import failed' };
+  const created = await deploy();
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  assert.equal(provisionAllocation((await provision(created.body.id)).steps)?.diskGb, 64);
+  assert.equal((await quota.getUserResourceUsage(ownerId)).diskGb, 64);
+  assert.equal((await deploy()).status, 403);
+  await waitForBackgroundWork();
+  assert.equal((await quota.getUserResourceUsage(ownerId)).diskGb, 0);
+  task = { status: 'stopped', exitstatus: 'OK' };
+  const successful = await deploy();
+  assert.equal(successful.status, 200, JSON.stringify(successful.body));
+  await waitForBackgroundWork();
+  assert.equal((await ownership(successful.body.vmid)).assignments[0].resource_allocation!.diskGb, 64);
+  assert.equal((await provision(successful.body.id)).status, 'ready');
+  const { imageVirtualSizeGb } = await import('../utils/cloudImageSize.ts');
+  assert.equal(imageVirtualSizeGb(JSON.stringify({ 'virtual-size': imageVirtualBytes })), 64);
+  assert.throws(() => imageVirtualSizeGb(JSON.stringify({ 'actual-size': 1024 })), /Cannot read/);
+  t.mock.method(SSHClient.prototype, 'exec', function (_command: string, callback: any) {
+    const stream = Object.assign(new EventEmitter(), { stderr: new EventEmitter() });
+    callback(null, stream); queueMicrotask(() => stream.emit('close', 1)); return this;
+  });
+  assert.equal((await deploy()).status, 503);
+});
+
+test('hardware success refreshes durable CPU/memory while preserving all-disk usage and failures leave it untouched', async () => {
+  await testDb.db.insert(vmAssignments).values({ user_id: ownerId, node, vmid: 950, resource_allocation: { cores: 8, memoryMb: 8192, diskGb: 80 } });
+  const saved = await savedSubmission(950);
+  const row = await provision(saved.provisionId);
+  const steps = row.steps as any[];
+  Object.assign(steps[0].allocation, { state: 'owned', cores: 8, memoryMb: 8192, diskGb: 80 });
+  await testDb.db.update(provisionedVms).set({ status: 'ready', steps }).where(eq(provisionedVms.id, row.id));
+  const update = (cores: number, memory: number) => request(app).put(`/vms/${node}/950/hardware`).send({ cores, memory });
+  assert.equal((await update(2, 2048)).status, 200);
+  assert.deepEqual(await quota.getUserResourceUsage(ownerId, testDb.db, []), { cores: 2, memoryGb: 2, diskGb: 80, vmCount: 1 });
+  assert.equal((await update(6, 6144)).status, 200);
+  assert.deepEqual(await quota.getUserResourceUsage(ownerId, testDb.db, []), { cores: 6, memoryGb: 6, diskGb: 80, vmCount: 1 });
+  configUpdateFailure = true;
+  assert.equal((await update(1, 1024)).status, 500);
+  assert.deepEqual(await quota.getUserResourceUsage(ownerId, testDb.db, []), { cores: 6, memoryGb: 6, diskGb: 80, vmCount: 1 });
+});
+
+test('recovered clone/import first phases never grant access even with admin attestation and matching marker', async () => {
+  for (const source_type of ['template', 'cloudimage']) {
+    for (const upid of ['UPID:initial-phase', '']) {
+      const saved = await savedSubmission(951);
+      const row = await provision(saved.provisionId);
+      await testDb.db.update(provisionedVms).set({ source_type, status: 'needs_review', upid }).where(eq(provisionedVms.id, row.id));
+      liveVms = [{ vmid: 951, node: 'pve', type: 'qemu' }];
+      configDescription = provisionAllocation(row.steps)!.marker!;
+      if (upid) assert.equal((await request(app).post(`/operations/provision/${row.id}/reconcile`).send({})).status, 200);
+      const response = await request(app).post(`/operations/provision/${row.id}/resolve`).send({ status: 'ready', verified: true, evidence: 'Reviewed first phase in Proxmox' });
+      assert.equal(response.status, 409);
+      assert.match(response.body.error, /cloud-init credentials, VLAN/);
+      assert.deepEqual(await ownership(951), { assignments: [], leases: [] });
+      assert.deepEqual(tagWrites, []);
+      await testDb.db.delete(provisionedVms);
+    }
+  }
+});
+
+test('DNS, refused TCP and certificate failures release reservations but connected/reused-socket losses remain ambiguous', async () => {
+  for (const code of ['ENOTFOUND', 'ECONNREFUSED', 'CERT_HAS_EXPIRED']) {
+    preSendFailure = Object.assign(new Error(code), { code });
+    const response = await request(app).post('/provision/create').send({ node, name: 'new-vm', assignTo: ownerId });
+    assert.equal(response.status, 500);
+    const [row] = await testDb.db.select().from(provisionedVms);
+    assert.equal(row.status, 'error');
+    assert.equal((await quota.getUserResourceUsage(ownerId)).vmCount, 0);
+    assert.equal(submittedVmids.length, 0);
+    await testDb.db.delete(provisionedVms);
+  }
+  preSendFailure = null;
+  reusedSocket = true;
+  submitFailure = Object.assign(new Error('partial request reset'), { code: 'ECONNRESET' });
+  assert.equal((await request(app).post('/provision/create').send({ node, name: 'new-vm', assignTo: ownerId })).status, 500);
+  const [row] = await testDb.db.select().from(provisionedVms);
+  assert.equal(row.status, 'needs_review');
+  assert.equal((await quota.getUserResourceUsage(ownerId)).vmCount, 1);
+});
+
+test('normal clone configuration failure leaves inherited credentials/VLAN unassigned and reviewable', async () => {
+  const [template] = await testDb.db.insert(vmTemplates).values({ name: 'config-failure-template', node, vmid: 502, cloud_init: true })
+    .returning({ id: vmTemplates.id });
+  configUpdateFailure = true;
+  const response = await request(app).post('/provision/clone').send({ templateId: template.id, name: 'new-vm', assignTo: ownerId, vlanTag: 200, ciPassword: 'strong-clone-password' });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  await waitForBackgroundWork();
+  assert.equal((await provision(response.body.id)).status, 'needs_review');
+  assert.deepEqual(await ownership(response.body.vmid), { assignments: [], leases: [] });
+});
+
+test('manual successful recovery sends the finished event and ambiguous review emits no terminal notification', async t => {
+  const sent: any[] = [];
+  t.mock.method(globalThis, 'fetch', async (_url: any, options: any) => { sent.push(JSON.parse(options.body)); return { ok: true }; });
+  await testDb.db.insert(notificationWebhooks).values({ name: 'deployment-events', url: 'https://example.com/webhook', event_types: ['deployment.finished', 'deployment.failed'] });
+  const saved = await savedSubmission(952);
+  await reconcileInterruptedOperations();
+  const { notifyDeployment } = await import('../services/deploymentNotification.ts');
+  await notifyDeployment(saved.provisionId);
+  assert.deepEqual(sent, []);
+  liveVms = [{ vmid: 952, node: 'pve', type: 'qemu' }];
+  const response = await request(app).post(`/operations/provision/${saved.provisionId}/resolve`).send({ status: 'ready' });
+  assert.equal(response.status, 200);
+  assert.equal(sent[0].embeds[0].title, 'VM deployment finished');
+});
+
+test('deployment notifications defer ambiguous states and classify final recovery as finished', async () => {
+  const { deploymentTerminalEvent } = await import('../services/deploymentNotification.ts');
+  for (const status of ['needs_review', 'timeout', 'creating']) assert.equal(deploymentTerminalEvent(status), null);
+  assert.equal(deploymentTerminalEvent('ready'), 'deployment.finished');
+  assert.equal(deploymentTerminalEvent('warning'), 'deployment.finished');
+  assert.equal(deploymentTerminalEvent('error'), 'deployment.failed');
 });
 
 test('successful upstream reconciliation does not classify existing ownership as failed-create leftovers', async () => {

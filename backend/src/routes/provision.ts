@@ -14,7 +14,7 @@ import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth
 import { sendError, hasHttpStatus, tagStatus } from '../utils/httpError.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { logAudit } from '../utils/audit.ts';
-import { notify, portalLink } from '../utils/notify.ts';
+import { notifyDeployment } from '../services/deploymentNotification.ts';
 import { decodeNodeRef } from '../utils/nodeRef.ts';
 import { imageDeployTargets, defaultStorageForHost } from '../utils/cloudImageTargets.ts';
 import { checkVlanAssignment } from '../utils/vlanAccess.ts';
@@ -31,6 +31,7 @@ import { validatePassword } from '../utils/validation.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
 import { submitProvision, recordProvisionOwnership } from '../services/provisionOwnership.ts';
 import { provisionAllocation } from '../utils/provisionIntent.ts';
+import { getCloudImageVirtualSizeGb } from '../utils/cloudImageSize.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -76,32 +77,6 @@ async function setStep(provisionId: number, key: string, status: string, note?: 
     if (note !== undefined) step.note = note;
     await tx.update(provisionedVms).set({ steps }).where(eq(provisionedVms.id, provisionId));
   });
-}
-
-// Fire a Discord notification for a deployment that has reached a terminal
-// state. Reads the current row so it maps status → deployment.finished (ready /
-// warning) or deployment.failed (error / timeout). Fire-and-forget: notify()
-// never throws, so this can never break the provisioning flow.
-async function notifyDeployment(provisionId: number) {
-  try {
-    const [row] = await db
-      .select({ ...getTableColumns(provisionedVms), username: users.username })
-      .from(provisionedVms)
-      .leftJoin(users, eq(users.id, provisionedVms.user_id))
-      .where(eq(provisionedVms.id, provisionId))
-      .limit(1);
-    if (!row) return;
-    const failed = row.status === 'error' || row.status === 'timeout' || row.status === 'needs_review';
-    const { nodeName } = decodeNodeRef(row.node);
-    await notify(failed ? 'deployment.failed' : 'deployment.finished', {
-      vm: `${row.name} (#${row.vmid}${nodeName ? ` on ${nodeName}` : ''})`,
-      owner: row.username || undefined,
-      ownerUserId: row.user_id,
-      status: row.status,
-      detail: row.status_detail || undefined,
-      url: portalLink(`/vm/${row.node}/${row.vmid}`),
-    });
-  } catch { /* notifications are best-effort */ }
 }
 
 // ─── Cloud-init option parsing (shared by clone + from-image) ────────────────
@@ -630,15 +605,22 @@ router.post('/from-image', async (req: any, res: any) => {
     return res.status(400).json({ error: 'Disk size must be at least 5 GB' });
   }
   const memoryMb = Math.round(parseFloat(memoryGb) * 1024);
+  let imageDiskGb: number;
+  try { imageDiskGb = Math.max(baseDiskGb, await getCloudImageVirtualSizeGb(image)); }
+  catch (err) { return sendError(res, err); }
 
   // Placement: admins deploy onto the image's own host, or a shared-storage
   // peer they selected via targetNode (resolved above); non-admins land on the
   // least-loaded host that has room for the request.
   if (!user.is_admin) {
-    const placed = await autoPlaceImage(image, { memoryMb, diskGb: baseDiskGb });
+    const placed = await autoPlaceImage(image, { memoryMb, diskGb: imageDiskGb });
     if ('error' in placed) return res.status(placed.error.status).json({ error: placed.error.message });
     targetImage = placed.image;
     targetStorage = placed.storage;
+  }
+  if (targetImage.node !== image.node || targetImage.volid !== image.volid) {
+    try { imageDiskGb = Math.max(baseDiskGb, await getCloudImageVirtualSizeGb(targetImage)); }
+    catch (err) { return sendError(res, err); }
   }
 
   // Cloud images are always cloud-init capable, so guest settings are honored —
@@ -681,13 +663,13 @@ router.post('/from-image', async (req: any, res: any) => {
 
   let capacityNote = '';
   try {
-    const capacity = await assertNodeCapacity(targetImage.node, { memoryMb, diskGb: baseDiskGb, storage: targetStorage });
+    const capacity = await assertNodeCapacity(targetImage.node, { memoryMb, diskGb: imageDiskGb, storage: targetStorage });
     capacityNote = capacity?.memoryWarning || '';
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
       addCores: parseInt(cores, 10) || 0,
       addMemoryMb: memoryMb,
-      addDiskGb: baseDiskGb,
+      addDiskGb: imageDiskGb,
     });
   } catch (err) {
     if (hasHttpStatus(err)) return sendError(res, err);
@@ -732,11 +714,11 @@ router.post('/from-image', async (req: any, res: any) => {
       source_type: 'cloudimage', cloud_image_id: targetImage.id, steps, status: 'creating', request_id: req.requestId || '',
     }, {
       userId: targetUser, createdBy: req.session.username,
-      cores: cpuLayout.sockets * cpuLayout.cores, memoryMb, diskGb: baseDiskGb,
+      cores: cpuLayout.sockets * cpuLayout.cores, memoryMb, diskGb: imageDiskGb,
     }, submit);
 
     startBackgroundWork(() => finishImageProvision(provisionId, targetImage.node, vmid, upid, {
-      diskGb: baseDiskGb,
+      diskGb: imageDiskGb,
       ...cloudInitOpts,
       start: startNow,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
@@ -1133,9 +1115,6 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
     await setStep(provisionId, 'clone', 'done');
   }
 
-  // The VM exists now — claim it for its owner and start the lease clock
-  await recordProvisionOwnership(provisionId);
-
   // Apply post-clone configuration
   await db.update(provisionedVms).set({ status: 'configuring', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
   await setStep(provisionId, 'configure', 'active');
@@ -1175,9 +1154,9 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
       try {
         await resizeVMDisk(node, vmid, opts.resizeDisk, `${opts.diskGb}G`);
         await setStep(provisionId, 'resize', 'done');
-      } catch {
-        warnings.push(`Disk resize to ${opts.diskGb}G failed`);
-        await setStep(provisionId, 'resize', 'skipped', `resize to ${opts.diskGb}G failed`);
+      } catch (err) {
+        await setStep(provisionId, 'resize', 'error', `resize to ${opts.diskGb}G failed`);
+        throw err;
       }
     } else {
       await setStep(provisionId, 'resize', 'skipped');
@@ -1196,10 +1175,11 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
         }
       } catch (err: any) {
         console.error(`Failed to set VLAN tag ${opts.vlanTag} on VM ${vmid}:`, err.message);
-        warnings.push(`Failed to apply VLAN tag ${opts.vlanTag}`);
+        throw err;
       }
     }
 
+    await recordProvisionOwnership(provisionId);
     // Stamp PVE owner/VLAN tags now that assignment + net config are final
     await setStep(provisionId, 'tags', 'active');
     await syncVmTagsSafe(node, vmid);
@@ -1215,7 +1195,7 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
     console.error(`Post-clone config failed for VM ${vmid}:`, err.message);
     await setStep(provisionId, 'configure', 'error', err.message);
     await db.update(provisionedVms)
-      .set({ status: 'warning', status_detail: err.message || 'Post-clone configuration failed' })
+      .set({ status: 'needs_review', status_detail: 'Post-clone configuration or ownership failed — verify credentials, VLAN and resources before assigning this VM' })
       .where(eq(provisionedVms.id, provisionId));
     await notifyDeployment(provisionId);
   }
@@ -1228,9 +1208,6 @@ async function finishImageProvision(provisionId: number, node: string, vmid: num
   await setStep(provisionId, 'create', ok ? 'done' : 'error');
   if (!ok) return; // status already error/timeout
 
-  // The VM exists now — claim it for its owner and start the lease clock
-  await recordProvisionOwnership(provisionId);
-
   await db.update(provisionedVms).set({ status: 'configuring', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
   const warnings = [];
 
@@ -1240,9 +1217,11 @@ async function finishImageProvision(provisionId: number, node: string, vmid: num
     try {
       await resizeVMDisk(node, vmid, 'scsi0', `${opts.diskGb}G`);
       await setStep(provisionId, 'resize', 'done');
-    } catch (err) {
-      warnings.push(`Disk resize to ${opts.diskGb}G failed`);
-      await setStep(provisionId, 'resize', 'skipped', `resize to ${opts.diskGb}G failed`);
+    } catch {
+      await setStep(provisionId, 'resize', 'error', `resize to ${opts.diskGb}G failed`);
+      await db.update(provisionedVms).set({ status: 'needs_review', status_detail: 'Image disk resize failed — verify all disks before assignment' })
+        .where(eq(provisionedVms.id, provisionId));
+      return;
     }
   } else {
     await setStep(provisionId, 'resize', 'skipped');
@@ -1259,14 +1238,11 @@ async function finishImageProvision(provisionId: number, node: string, vmid: num
     await updateVMConfig(node, vmid, config);
     await setStep(provisionId, 'cloudinit', 'done');
   } catch (err: any) {
-    warnings.push('Cloud-init configuration failed');
     await setStep(provisionId, 'cloudinit', 'error', err.message);
+    await db.update(provisionedVms).set({ status: 'needs_review', status_detail: 'Cloud-init configuration failed — complete credentials/network configuration before assignment' })
+      .where(eq(provisionedVms.id, provisionId));
+    return;
   }
-
-  // Owner / VLAN tags (net0 was set with the VLAN tag at create time)
-  await setStep(provisionId, 'tags', 'active');
-  await syncVmTagsSafe(node, vmid);
-  await setStep(provisionId, 'tags', 'done');
 
   // Optionally start the VM
   if (opts.start) {
@@ -1275,13 +1251,19 @@ async function finishImageProvision(provisionId: number, node: string, vmid: num
       await startVM(node, vmid);
       await setStep(provisionId, 'start', 'done');
     } catch (err: any) {
-      warnings.push('VM created but failed to start');
       await setStep(provisionId, 'start', 'error', err.message);
+      await db.update(provisionedVms).set({ status: 'needs_review', status_detail: 'Image VM failed to start — verify start state before assignment' })
+        .where(eq(provisionedVms.id, provisionId));
+      return;
     }
   } else {
     await setStep(provisionId, 'start', 'done');
   }
 
+  await recordProvisionOwnership(provisionId);
+  await setStep(provisionId, 'tags', 'active');
+  await syncVmTagsSafe(node, vmid);
+  await setStep(provisionId, 'tags', 'done');
   await db.update(provisionedVms)
     .set({ status: warnings.length ? 'warning' : 'ready', status_detail: warnings.join('; ') })
     .where(eq(provisionedVms.id, provisionId));

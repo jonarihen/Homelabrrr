@@ -24,7 +24,7 @@ import { notify, portalLink } from '../utils/notify.ts';
 import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.ts';
 import { checkVlanAssignment, parseVlanTag, parseNetInterface } from '../utils/vlanAccess.ts';
 import { summarizeLease, renewLease } from '../utils/leases.ts';
-import { assertUserQuota, sizeToGb } from '../utils/quota.ts';
+import { assertUserQuota, refreshHardwareAllocation, sizeToGb } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
 import {
@@ -1294,6 +1294,10 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
     }
 
     await updateVMConfig(node, vmid, updates);
+    await refreshHardwareAllocation(node, Number(vmid), {
+      ...(updates.cores ? { cores: updates.sockets * updates.cores } : {}),
+      ...(updates.memory ? { memoryMb: updates.memory } : {}),
+    });
     await logAudit(req, 'vm_hardware_change', `${node}/${vmid}`, details.join(', '));
     res.json({ ok: true });
   } catch (err) {

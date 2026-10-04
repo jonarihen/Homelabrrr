@@ -89,9 +89,13 @@ function makeRequest(host, method, path, body) {
     });
     } catch (err) { fail(err); return; }
 
+    req.on('socket', socket => {
+      const ready = () => { submissionStarted = true; };
+      if (req.reusedSocket || (!socket.connecting && socket.encrypted && socket.authorized)) ready();
+      else socket.once('secureConnect', ready);
+    });
     req.on('error', fail);
     req.setTimeout(15000, () => req.destroy(new Error('Proxmox request timeout')));
-    submissionStarted = true;
     if (payload) req.write(payload);
     req.end();
   });

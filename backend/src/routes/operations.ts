@@ -11,11 +11,11 @@ import { databaseMaintenanceStatus, runDatabaseMaintenance } from '../services/d
 import { backupStatus, createVerifiedBackup } from '../services/backupService.ts';
 import { encryptionKeyStatus } from '../utils/secrets.ts';
 import { classifyUpstreamTask } from '../utils/reconciliation.ts';
-import { cleanupOperationTracking, failedCreateOwnershipReview, operationPhase } from '../services/operationReconciliation.ts';
+import { cleanupOperationTracking, failedCreateOwnershipReview, failedCreateOwnershipReviews, operationPhase } from '../services/operationReconciliation.ts';
 import { boundedInteger, validateObject } from '../utils/validation.ts';
 import { recordProvisionOwnership } from '../services/provisionOwnership.ts';
-import { provisionAllocation } from '../utils/provisionIntent.ts';
 import { syncVmTagsSafe } from '../utils/vmTags.ts';
+import { notifyDeployment } from '../services/deploymentNotification.ts';
 
 const router = Router();
 const canOperate = requirePermission('can_manage_hosts');
@@ -29,6 +29,7 @@ async function listOperations() {
       node: provisionedVms.node,
       vmid: provisionedVms.vmid,
       label: provisionedVms.name,
+      source_type: provisionedVms.source_type,
       status: provisionedVms.status,
       detail: provisionedVms.status_detail,
       upid: provisionedVms.upid,
@@ -68,7 +69,10 @@ async function listOperations() {
     .leftJoin(users, eq(users.id, vmMigrations.user_id))
     .orderBy(desc(vmMigrations.id))
     .limit(100);
-  return [...provisioning, ...migrations]
+  const reviewIds = provisioning.filter(row => row.source_type === 'create' && row.status === 'error');
+  const reviewEvidence = await failedCreateOwnershipReviews(db, reviewIds.map(row => ({ id: row.id, node: row.node, vmid: row.vmid })));
+  const reviews = provisioning.map(row => ({ ...row, ownershipReview: reviewEvidence.get(row.id) ?? null }));
+  return [...reviews, ...migrations]
     .map((operation) => {
       // steps is a jsonb column now — pass the parsed array straight to operationPhase.
       const { steps, ...publicOperation } = operation as any;
@@ -140,10 +144,7 @@ router.post('/provision/:id/reconcile', requireRecentReauthentication, async (re
       .set({ status, status_detail: detail, upstream_status: upstreamStatus, upstream_checked_at: new Date() })
       .where(and(eq(provisionedVms.id, row.id), eq(provisionedVms.status, row.status!)));
     if (updated.rowCount !== 1) return res.status(409).json({ error: 'Provisioning was resolved while checking upstream' });
-    if (task.status === 'stopped' && task.exitstatus === 'OK' && provisionAllocation(row.steps)) {
-      await recordProvisionOwnership(row.id, true);
-      await syncVmTagsSafe(row.node, row.vmid);
-    }
+    if (status === 'error') await notifyDeployment(row.id);
     await logAudit(req, 'provision_operation_reconciled', String(row.id), `status=${status}; upid=${row.upid}`);
     const ownershipReview = await failedCreateOwnershipReview(db, row.id);
     res.json({ ...row, status, status_detail: detail, upstream_status: upstreamStatus, upstream: { status: task.status, exitstatus: task.exitstatus }, ownershipReview });
@@ -207,6 +208,7 @@ router.post('/provision/:id/resolve', requireRecentReauthentication, async (req,
     }
     if (status === 'ready') await syncVmTagsSafe(row.node, row.vmid);
     await logAudit(req, 'provision_operation_resolved', String(row.id), `from=${row.status}; to=${status}; evidence=${typeof req.body?.evidence === 'string' ? req.body.evidence.slice(0, 1000) : ''}`);
+    await notifyDeployment(row.id);
     res.json({ ok: true, status, detail });
   } catch (err) { sendError(res, err); }
 });

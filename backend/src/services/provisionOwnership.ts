@@ -77,6 +77,9 @@ export async function recordProvisionOwnership(id: number, verifiedRecovery = fa
   const intent = provisionAllocation(saved?.steps);
   if (!saved || !intent) throw httpError(409, 'This operation has no persisted owner intent; verify and assign it manually');
   if (verifiedRecovery) {
+    if (saved.source_type !== 'create') {
+      throw httpError(409, 'Interrupted clone/image configuration inputs are unavailable. Keep the VM unassigned; an administrator must verify CPU, memory, all disks, cloud-init credentials, VLAN and start state in Proxmox, then explicitly assign/lease it and resolve the tracking as failed');
+    }
     if (!['needs_review', 'timeout'].includes(saved.status!)) throw httpError(409, 'Only interrupted provisioning can recover ownership');
     if (saved.upid) {
       const task = await getTaskStatus(saved.node, saved.upid);
