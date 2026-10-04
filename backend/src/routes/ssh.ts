@@ -18,6 +18,7 @@ import { sendError } from '../utils/httpError.ts';
 import { authorizeSshTarget, sshConnectionRateLimited } from '../services/sshTargetPolicy.ts';
 import { sshClientError } from '../utils/sshError.ts';
 import { log } from '../utils/logger.ts';
+import { withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
 
 // Convert a PPK key (any version) to OpenSSH PEM using puttygen.
 // passphrase is the PPK decryption passphrase (empty string if unencrypted).
@@ -249,34 +250,21 @@ router.put('/config/:node/:vmid', async (req, res) => {
     });
   } catch (err) { return sendError(res, err); }
 
-  // Save host/port globally (shared across users). Non-admin DNS names are
-  // pinned to the authorized address to prevent DNS rebinding at connect time.
-  await db
-    .insert(vmSshConfigs)
-    .values({
-      node,
-      vmid: parseInt(vmid),
-      host: target.host,
-      port: target.port,
-      host_fingerprint: normalizedFingerprint,
-      username: '',
-    })
-    .onConflictDoUpdate({
-      target: [vmSshConfigs.node, vmSshConfigs.vmid],
-      set: { host: target.host, port: target.port, host_fingerprint: normalizedFingerprint },
-    });
-
-  // Save username per-user
-  await db
-    .insert(vmSshUserConfigs)
-    .values({ user_id: req.session.userId, node, vmid: parseInt(vmid), username })
-    .onConflictDoUpdate({
-      target: [vmSshUserConfigs.user_id, vmSshUserConfigs.node, vmSshUserConfigs.vmid],
-      set: { username },
-    });
-
-  await logAudit(req, 'ssh_config_updated', `${node}/${vmid}`, `targetType=${target.resolvedAddresses.length ? 'resolved' : 'configured'}; port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
-  res.json({ ok: true });
+  try {
+    await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx, currentNode) => {
+      await tx.insert(vmSshConfigs).values({
+        node: currentNode, vmid: parseInt(vmid, 10), host: target.host, port: target.port,
+        host_fingerprint: normalizedFingerprint, username: '',
+      }).onConflictDoUpdate({
+        target: [vmSshConfigs.node, vmSshConfigs.vmid],
+        set: { host: target.host, port: target.port, host_fingerprint: normalizedFingerprint },
+      });
+      await tx.insert(vmSshUserConfigs).values({ user_id: req.session.userId, node: currentNode, vmid: parseInt(vmid, 10), username })
+        .onConflictDoUpdate({ target: [vmSshUserConfigs.user_id, vmSshUserConfigs.node, vmSshUserConfigs.vmid], set: { username } });
+    }, { userId: req.session.userId, op: 'vm.sshConfig.write' });
+    await logAudit(req, 'ssh_config_updated', `${node}/${vmid}`, `targetType=${target.resolvedAddresses.length ? 'resolved' : 'configured'}; port=${target.port}${target.adminOverride ? '; admin override' : ''}`);
+    res.json({ ok: true });
+  } catch (err) { sendError(res, err); }
 });
 
 // The scan opens a TCP/SSH handshake to a user-supplied host/port, which could
