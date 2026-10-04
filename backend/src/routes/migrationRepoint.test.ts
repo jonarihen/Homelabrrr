@@ -16,6 +16,7 @@ let finalizeMigrationSuccess: typeof import('./migrate.ts').finalizeMigrationSuc
 let finalizeMigration: typeof import('./migrate.ts').finalizeMigration;
 let createLeaseForVm: typeof import('../utils/leases.ts').createLeaseForVm;
 let app: express.Express;
+let ownerApp: express.Express;
 let recordMigrationProgress: typeof import('./migrate.ts').recordMigrationProgress;
 let recordMigrationStartFailure: typeof import('./migrate.ts').recordMigrationStartFailure;
 
@@ -68,7 +69,15 @@ before(async () => {
   app.use('/admin', (await import('./admin.ts')).default);
   app.use('/operations', (await import('./operations.ts')).default);
   app.use('/migrate', (await import('./migrate.ts')).default);
-  app.use((await import('./vms.ts')).default);
+  const vmRouter = (await import('./vms.ts')).default;
+  app.use(vmRouter);
+  ownerApp = express();
+  ownerApp.use(express.json());
+  ownerApp.use((req, _res, next) => {
+    req.session = { userId: 2, isAdmin: false, username: 'other-owner' } as never;
+    next();
+  });
+  ownerApp.use(vmRouter);
 });
 
 after(async () => {
@@ -687,6 +696,116 @@ test('policy authorization is revalidated under the lock rather than trusting an
   await testDb.db.delete(vmAssignments);
   await assert.rejects(renewLease('1~pve1', 101, { actor: { userId: 2 } }), { statusCode: 403 });
   assert.deepEqual(await readPolicies(), { leases: [], schedules: [] });
+});
+
+async function seedLegacyOwnerVm() {
+  const [assignment] = await testDb.db.insert(vmAssignments).values({ user_id: 2, node: 'pve', vmid: 101 }).returning();
+  const [provisioning] = await testDb.db.insert(provisionedVms).values({ user_id: 2, node: 'pve', vmid: 101, name: 'legacy', status: 'ready' }).returning();
+  const policies = await seedPolicies('pve');
+  return { assignment, provisioning, policies };
+}
+
+async function mockLegacyHosts(t, { second = true, liveHosts = [1], unreachable = null }: { second?: boolean; liveHosts?: number[]; unreachable?: number | null } = {}) {
+  await seedHost();
+  if (second) await seedHost(2);
+  await testDb.db.update(pveHosts).set({ host: 'host-1.invalid' }).where(eq(pveHosts.id, 1));
+  if (second) await testDb.db.update(pveHosts).set({ host: 'host-2.invalid' }).where(eq(pveHosts.id, 2));
+  const writes: number[] = [];
+  const alive = new Set(liveHosts);
+  mockUpstream(t, (url, options) => {
+    const host = url.hostname === 'host-1.invalid' ? 1 : 2;
+    if (host === unreachable) throw new Error('host unreachable');
+    if (url.pathname.endsWith('/nodes')) return { data: [{ node: 'pve' }] };
+    if (url.pathname.endsWith('/status/current')) return { statusCode: alive.has(host) ? 200 : 404, data: alive.has(host) ? { status: 'stopped' } : null };
+    if (options.method !== 'GET') writes.push(host);
+    if (options.method === 'DELETE') { alive.delete(host); return { data: 'UPID:pve:delete' }; }
+    return { data: url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] };
+  });
+  return writes;
+}
+
+test('wrong qualified host absence cannot remove a legacy owner assignment or its quota tracking', async (t) => {
+  const legacy = await seedLegacyOwnerVm();
+  const writes = await mockLegacyHosts(t);
+  const response = await request(ownerApp).delete('/2~pve/101');
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.deepEqual(writes, []);
+  assert.deepEqual((await testDb.db.select().from(vmAssignments))[0], legacy.assignment);
+  assert.deepEqual((await testDb.db.select().from(provisionedVms))[0], legacy.provisioning);
+  assert.deepEqual(await readPolicies(), { leases: [legacy.policies.lease], schedules: [legacy.policies.schedule] });
+});
+
+test('correct qualified host deletion verifies and binds legacy records while preserving another host location', async (t) => {
+  await seedLegacyOwnerVm();
+  const [other] = await testDb.db.insert(vmAssignments).values({ user_id: 1, node: '2~pve', vmid: 101 }).returning();
+  const writes = await mockLegacyHosts(t);
+  const response = await request(ownerApp).delete('/1~pve/101');
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.deepEqual(writes, [1]);
+  assert.deepEqual(await testDb.db.select().from(vmAssignments), [other]);
+  assert.deepEqual(await testDb.db.select().from(provisionedVms), []);
+  assert.deepEqual(await readPolicies(), { leases: [], schedules: [] });
+});
+
+test('conflicting legacy and qualified owner aliases fail closed without dropping either assignment', async (t) => {
+  const legacy = await seedLegacyOwnerVm();
+  const [qualified] = await testDb.db.insert(vmAssignments).values({ user_id: 1, node: '1~pve', vmid: 101 }).returning();
+  const writes = await mockLegacyHosts(t);
+  const response = await request(ownerApp).delete('/1~pve/101');
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.deepEqual(writes, []);
+  assert.deepEqual(await testDb.db.select().from(vmAssignments).orderBy(vmAssignments.id), [legacy.assignment, qualified]);
+  assert.deepEqual((await testDb.db.select().from(provisionedVms))[0], legacy.provisioning);
+});
+
+test('legacy bare deletion and confirmed-missing cleanup work with one verified node host', async (t) => {
+  await seedLegacyOwnerVm();
+  const writes = await mockLegacyHosts(t, { second: false, liveHosts: [] });
+  const response = await request(ownerApp).delete('/pve/101');
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.body.alreadyAbsent, true);
+  assert.deepEqual(writes, []);
+  assert.deepEqual(await testDb.db.select().from(vmAssignments), []);
+  assert.deepEqual(await testDb.db.select().from(provisionedVms), []);
+});
+
+for (const scenario of [{ liveHosts: [1, 2] }, { liveHosts: [] }, { liveHosts: [1], unreachable: 2 }]) {
+  test(`legacy deletion fails closed for unresolved hosts ${JSON.stringify(scenario)}`, async (t) => {
+    const legacy = await seedLegacyOwnerVm();
+    const writes = await mockLegacyHosts(t, scenario);
+    const response = await request(ownerApp).delete('/1~pve/101');
+    assert.equal(response.status, scenario.unreachable ? 500 : 409, JSON.stringify(response.body));
+    assert.deepEqual(writes, []);
+    assert.deepEqual((await testDb.db.select().from(vmAssignments))[0], legacy.assignment);
+    assert.deepEqual((await testDb.db.select().from(provisionedVms))[0], legacy.provisioning);
+  });
+}
+
+test('verified legacy binding survives a cleanup failure so retry uses an exact host', async (t) => {
+  await seedLegacyOwnerVm();
+  const writes = await mockLegacyHosts(t);
+  const connect = client.pool.connect.bind(client.pool);
+  const mocked = t.mock.method(client.pool, 'connect', async (...args) => {
+    if (typeof args[0] === 'function') return connect(...args);
+    const connection = await connect(...args);
+    const query = connection.query.bind(connection);
+    connection.query = (...queryArgs) => {
+      if (queryArgs[0]?.text?.startsWith('delete from "vm_assignments"')) throw new Error('cleanup unavailable');
+      return query(...queryArgs);
+    };
+    const release = connection.release.bind(connection);
+    connection.release = (...releaseArgs) => { connection.query = query; return release(...releaseArgs); };
+    return connection;
+  });
+  assert.equal((await request(ownerApp).delete('/1~pve/101')).status, 500);
+  assert.deepEqual(writes, [1]);
+  assert.equal((await testDb.db.select().from(vmAssignments))[0].node, '1~pve');
+  mocked.mock.restore();
+  const retry = await request(ownerApp).delete('/1~pve/101');
+  assert.equal(retry.status, 200, JSON.stringify(retry.body));
+  assert.equal(retry.body.alreadyAbsent, true);
+  assert.deepEqual(writes, [1]);
+  assert.deepEqual(await testDb.db.select().from(vmAssignments), []);
 });
 
 test('public-IP assignment node/host move atomically while backup task history retains its task host', async (t) => {

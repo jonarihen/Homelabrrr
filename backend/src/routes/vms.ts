@@ -10,7 +10,7 @@ import {
 import {
   getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
-  restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType,
+  restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType, resolveLegacyVmNode,
   getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
   getTaskStatus, getTaskLog, getVMAgentInterfaces,
@@ -38,6 +38,7 @@ import { parseUpid, inProgressVolids } from '../utils/backupTask.ts';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.ts';
 import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.ts';
 import { validatePassword } from '../utils/validation.ts';
+import { isUniqueViolation } from '../db/errors.ts';
 import { assertVmPolicyLocation, vmMigrationPending, withVmMigrationLock, withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
 
 const router = Router();
@@ -536,13 +537,6 @@ router.delete('/:node/:vmid', async (req, res) => {
       if (await vmMigrationPending(database, parsedVmid)) {
         throw httpError(409, 'VM migration is running or awaiting review; deletion is blocked');
       }
-      if (!req.session.isAdmin) {
-        const [actor] = await database.select({ is_admin: users.is_admin }).from(users).where(eq(users.id, req.session.userId));
-        const candidates = nodeLookupCandidates(node);
-        const [assignment] = candidates.length === 0 ? [] : await database.select({ id: vmAssignments.id }).from(vmAssignments)
-          .where(and(eq(vmAssignments.user_id, req.session.userId), eq(vmAssignments.vmid, parsedVmid), inArray(vmAssignments.node, candidates)));
-        if (!actor || (!actor.is_admin && !assignment)) throw httpError(403, 'You can only delete VMs assigned to you');
-      }
       const [latestMigration] = await database.select().from(vmMigrations)
         .where(and(eq(vmMigrations.vmid, parsedVmid), eq(vmMigrations.status, 'ok')))
         .orderBy(desc(vmMigrations.id)).limit(1);
@@ -554,7 +548,42 @@ router.delete('/:node/:vmid', async (req, res) => {
           && (source.hostId === null ? requested.nodeRef !== target.nodeRef : requested.hostId === null || requested.hostId === source.hostId);
         if (isSource) throw httpError(400, 'This is the migrated-away source copy; remove only its config, not its shared disks');
       }
-      const currentNode = await assertVmPolicyLocation(database, node, parsedVmid);
+      let currentNode = await assertVmPolicyLocation(database, node, parsedVmid);
+      const currentRef = decodeNodeRef(currentNode);
+      const cleanupTables: any[] = [vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules, backupTasks];
+      let hasLegacyRows = currentRef.hostId === null;
+      for (const table of cleanupTables) {
+        const [legacy] = await database.select({ id: table.id }).from(table)
+          .where(and(eq(table.vmid, parsedVmid), eq(table.node, currentRef.nodeName))).limit(1);
+        if (legacy) hasLegacyRows = true;
+      }
+      if (hasLegacyRows) {
+        const verifiedNode = await resolveLegacyVmNode(currentRef.nodeName, parsedVmid, database);
+        if (currentRef.hostId !== null && verifiedNode !== currentRef.nodeRef) {
+          throw httpError(409, 'Legacy VM records belong to another host; reload its canonical location before deletion');
+        }
+        currentNode = verifiedNode;
+      }
+      const candidates = nodeLookupCandidates(currentNode);
+      const [actor] = await database.select({ is_admin: users.is_admin }).from(users).where(eq(users.id, req.session.userId));
+      const assignments = await database.select().from(vmAssignments)
+        .where(and(eq(vmAssignments.vmid, parsedVmid), inArray(vmAssignments.node, candidates)));
+      if (!actor || (!actor.is_admin && !assignments.some((assignment) => assignment.user_id === req.session.userId))) {
+        throw httpError(403, 'You can only delete VMs assigned to you');
+      }
+      if (hasLegacyRows) {
+        try {
+          await database.transaction(async (tx) => {
+            for (const table of cleanupTables) {
+              await tx.update(table).set({ node: currentNode })
+                .where(and(eq(table.vmid, parsedVmid), eq(table.node, currentRef.nodeName)));
+            }
+          });
+        } catch (err) {
+          if (isUniqueViolation(err)) throw httpError(409, 'Conflicting legacy VM aliases must be reconciled before deletion');
+          throw err;
+        }
+      }
       let backups = [];
       try {
         backups = await getVMBackups(currentNode, vmid, database);
@@ -573,11 +602,10 @@ router.delete('/:node/:vmid', async (req, res) => {
           failedBackups.push(backup.volid);
         }
       }
-      const candidates = nodeLookupCandidates(currentNode);
-      if (candidates.length > 0) {
+      if (currentNode) {
         await database.transaction(async (tx) => {
-          for (const table of [vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules, backupTasks] as any[]) {
-            await tx.delete(table).where(and(eq(table.vmid, parsedVmid), inArray(table.node, candidates)));
+          for (const table of cleanupTables) {
+            await tx.delete(table).where(and(eq(table.vmid, parsedVmid), eq(table.node, currentNode)));
           }
           await tx.delete(vmMigrations).where(and(eq(vmMigrations.vmid, parsedVmid), inArray(vmMigrations.status, ['ok', 'error', 'failed', 'timeout'])));
         });
