@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmSchedules, pveHosts, vmSshConfigs, vmSshUserConfigs, vlans, firewallVlanSync, firewalls,
@@ -550,7 +550,7 @@ router.delete('/:node/:vmid', async (req, res) => {
       }
       let currentNode = await assertVmPolicyLocation(database, node, parsedVmid);
       const currentRef = decodeNodeRef(currentNode);
-      const cleanupTables: any[] = [vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules, backupTasks];
+      const cleanupTables: any[] = [vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules];
       let hasLegacyRows = currentRef.hostId === null;
       for (const table of cleanupTables) {
         const [legacy] = await database.select({ id: table.id }).from(table)
@@ -604,9 +604,17 @@ router.delete('/:node/:vmid', async (req, res) => {
       }
       if (currentNode) {
         await database.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL lock_timeout = '2s'`);
+          await tx.execute(sql`LOCK TABLE ${sql.join(cleanupTables.map((table) => sql`${table}`), sql`, `)} IN SHARE ROW EXCLUSIVE MODE`);
+          for (const table of cleanupTables) {
+            const [unexpected] = await tx.select({ id: table.id }).from(table)
+              .where(and(eq(table.vmid, parsedVmid), eq(table.node, decodeNodeRef(currentNode).nodeName))).limit(1);
+            if (unexpected) throw httpError(409, 'New legacy VM aliases appeared during deletion; reconcile them before cleanup');
+          }
           for (const table of cleanupTables) {
             await tx.delete(table).where(and(eq(table.vmid, parsedVmid), eq(table.node, currentNode)));
           }
+          await tx.delete(backupTasks).where(and(eq(backupTasks.vmid, parsedVmid), inArray(backupTasks.node, nodeLookupCandidates(currentNode))));
           await tx.delete(vmMigrations).where(and(eq(vmMigrations.vmid, parsedVmid), inArray(vmMigrations.status, ['ok', 'error', 'failed', 'timeout'])));
         });
       }

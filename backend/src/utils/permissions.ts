@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { db, type DbOrTx } from '../db/client.ts';
 import { users, rolePermissions } from '../db/schema/index.ts';
 import { resolvePermissionCheck, resolveEffectivePermissions } from './permissionRules.ts';
 import { PERMISSION_KEYS } from './permissionKeys.ts';
@@ -37,9 +37,9 @@ function toLegacyFlagRow(userRow: UserFlagRow): UserFlagRow {
 }
 
 /** Permission keys granted by a role (empty set for no role). */
-export async function getRolePermissions(roleId: number | null | undefined): Promise<Set<string>> {
+export async function getRolePermissions(roleId: number | null | undefined, database: DbOrTx = db): Promise<Set<string>> {
   if (!roleId) return new Set();
-  const rows = await db
+  const rows = await database
     .select({ permission: rolePermissions.permission })
     .from(rolePermissions)
     .where(eq(rolePermissions.role_id, roleId));
@@ -71,10 +71,10 @@ export async function userHasPermission(userId: number, ...keys: string[]): Prom
  * is_admin — admin bypass stays at the check sites, matching how the
  * frontend treats isAdmin separately.
  */
-export async function effectivePermissions(userRow: UserFlagRow): Promise<Record<string, boolean>> {
+export async function effectivePermissions(userRow: UserFlagRow, database: DbOrTx = db): Promise<Record<string, boolean>> {
   return resolveEffectivePermissions(
     toLegacyFlagRow(userRow),
-    userRow?.role_id ? await getRolePermissions(userRow.role_id) : null,
+    userRow?.role_id ? await getRolePermissions(userRow.role_id, database) : null,
     PERMISSION_KEYS,
   );
 }
