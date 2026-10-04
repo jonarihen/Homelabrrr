@@ -679,6 +679,26 @@ export async function guestPresence(node, vmid, database: DbOrTx = db) {
   }
 }
 
+export async function resolveLegacyVmNode(node, vmid, database: DbOrTx = db) {
+  const { nodeName } = decodeNodeRef(node);
+  if (!isValidNodeName(nodeName)) throw new Error('Invalid node name');
+  const matchingNodes: string[] = [];
+  const liveNodes: string[] = [];
+  for (const host of await getHosts(database)) {
+    const nodes = await makeRequest(host, 'GET', '/nodes');
+    if (!Array.isArray(nodes) || nodes.some((entry) => !entry || typeof entry.node !== 'string')) {
+      throw new Error('Proxmox node inventory could not be verified');
+    }
+    if (!nodes.some((entry) => entry.node === nodeName)) continue;
+    const canonical = encodeNodeRef(host.id, nodeName);
+    matchingNodes.push(canonical);
+    if (await guestPresence(canonical, vmid, database)) liveNodes.push(canonical);
+  }
+  if (liveNodes.length === 1) return liveNodes[0];
+  if (liveNodes.length === 0 && matchingNodes.length === 1) return matchingNodes[0];
+  throw Object.assign(new Error('Legacy VM host is unknown or ambiguous; reconcile its canonical location before deletion'), { statusCode: 409 });
+}
+
 export async function deleteVM(node, vmid, { allowMissing = false } = {}, database: DbOrTx = db) {
   const { host, nodeName } = await resolveNode(node, { vmid, database });
 
