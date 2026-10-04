@@ -13,6 +13,7 @@ import { encryptionKeyStatus } from '../utils/secrets.ts';
 import { classifyUpstreamTask } from '../utils/reconciliation.ts';
 import { cleanupOperationTracking, operationPhase } from '../services/operationReconciliation.ts';
 import { boundedInteger, validateObject } from '../utils/validation.ts';
+import { finalizeMigrationFailure, finalizeMigrationSuccess } from './migrate.ts';
 
 const router = Router();
 const canOperate = requirePermission('can_manage_hosts');
@@ -167,9 +168,14 @@ router.post('/migration/:id/resolve', requireRecentReauthentication, async (req,
   const detail = status === 'ok'
     ? 'Manually verified by an administrator after upstream reconciliation.'
     : 'Marked failed by an administrator after upstream reconciliation.';
-  await db.update(vmMigrations).set({ status, status_detail: detail, finished_at: new Date() }).where(eq(vmMigrations.id, row.id));
-  await logAudit(req, 'migration_operation_resolved', String(row.id), `from=${row.status}; to=${status}`);
-  res.json({ ok: true, status, detail });
+  try {
+    const resolved = status === 'ok'
+      ? await finalizeMigrationSuccess(db, row.id, detail, { expectedStatus: 'needs_review' })
+      : await finalizeMigrationFailure(db, row.id, detail);
+    if (!resolved) return res.status(409).json({ error: 'Only interrupted migrations awaiting review can be resolved manually' });
+    await logAudit(req, 'migration_operation_resolved', String(row.id), `from=${row.status}; to=${status}`);
+    res.json({ ok: true, status, detail });
+  } catch (err) { sendError(res, err); }
 });
 
 router.post('/provision/:id/resolve', requireRecentReauthentication, async (req, res) => {
