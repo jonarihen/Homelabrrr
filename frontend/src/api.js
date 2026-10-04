@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { isPublicPath } from './utils/publicRoutes.js';
+import { isSftpSessionExpired } from './utils/sftpSession.js';
 
 const api = axios.create({
   baseURL: '/api',
@@ -8,10 +9,14 @@ const api = axios.create({
 
 api.interceptors.response.use(
   res => res,
-  err => {
-    // A 401 on a public route (login, invite redemption) is expected — the
-    // visitor isn't signed in yet — so leave them on the page.
-    if (err.response?.status === 401 && !isPublicPath(window.location.pathname)) {
+  async err => {
+    const data = err.response?.data;
+    if (data instanceof Blob && data.type.startsWith('application/json')) {
+      try {
+        err.response.data = JSON.parse(await data.text());
+      } catch {}
+    }
+    if (err.response?.status === 401 && !isSftpSessionExpired(err) && !isPublicPath(window.location.pathname)) {
       window.location.href = '/login';
     }
     return Promise.reject(err);
