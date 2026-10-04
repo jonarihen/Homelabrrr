@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { setTimeout as delay } from 'node:timers/promises';
 import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import {
@@ -150,12 +151,18 @@ export async function recordMigrationStartFailure(id: number, uncertain: boolean
   }).where(and(eq(vmMigrations.id, id), eq(vmMigrations.status, 'running')));
 }
 
-export async function finalizeMigration(id, ok, detail = '', { keptSource = false } = {}) {
+export async function finalizeMigration(id, ok, detail = '', { keptSource = false, contentionAttempts = 5, contentionDelayMs = 100 } = {}) {
   if (ok) {
     try {
-      return await finalizeMigrationSuccess(db, id, detail, { keptSource });
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await finalizeMigrationSuccess(db, id, detail, { keptSource });
+        } catch (err) {
+          if (err.statusCode !== 409 || attempt + 1 >= contentionAttempts) throw err;
+          await delay(contentionDelayMs);
+        }
+      }
     } catch (err) {
-      if (err.statusCode === 409) return false;
       console.error(`[migrate] portal finalization ${id} failed:`, err.message);
       try {
         await db.update(vmMigrations).set({

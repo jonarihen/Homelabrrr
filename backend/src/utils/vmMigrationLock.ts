@@ -5,6 +5,8 @@ import { pool, type DbOrTx } from '../db/client.ts';
 import { vmMigrations, vmSchedules, users, vmAssignments } from '../db/schema/index.ts';
 import { guestPresence } from '../proxmox.ts';
 import { httpError } from './httpError.ts';
+import { effectivePermissions } from './permissions.ts';
+import { canPerformVmOp } from './vmOps.ts';
 import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
 
 export async function lockVmMigration(database: DbOrTx, vmid: number, shared = false) {
@@ -15,14 +17,17 @@ export async function lockVmMigration(database: DbOrTx, vmid: number, shared = f
 }
 
 export async function assertVmPolicyLocation(database: DbOrTx, node: unknown, vmid: number) {
-  const [migration] = await database.select().from(vmMigrations)
-    .where(and(eq(vmMigrations.vmid, vmid), inArray(vmMigrations.status, ['running', 'needs_review', 'ok'])))
-    .orderBy(desc(vmMigrations.id)).limit(1);
-  if (!migration) return String(node);
-  if (['running', 'needs_review'].includes(migration.status || '')) {
+  if (await vmMigrationPending(database, vmid)) {
     throw httpError(409, 'VM migration is awaiting completion or review; retry the policy change afterwards');
   }
   const requested = decodeNodeRef(node);
+  const migrations = await database.select().from(vmMigrations)
+    .where(and(eq(vmMigrations.vmid, vmid), eq(vmMigrations.status, 'ok'))).orderBy(desc(vmMigrations.id));
+  const matchesLocation = (value: string) => requested.hostId === null
+    ? nodeLookupCandidates(value).includes(requested.nodeRef)
+    : decodeNodeRef(value).hostId === null ? decodeNodeRef(value).nodeName === requested.nodeName : value === requested.nodeRef;
+  const migration = migrations.find((row) => matchesLocation(row.source_node) || matchesLocation(row.target_node));
+  if (!migration) return requested.nodeRef;
   const ambiguousBare = requested.hostId === null
     && migration.source_node !== migration.target_node
     && nodeLookupCandidates(migration.source_node).includes(requested.nodeRef);
@@ -32,17 +37,24 @@ export async function assertVmPolicyLocation(database: DbOrTx, node: unknown, vm
   return migration.target_node;
 }
 
-export type PolicyActor = { userId: number };
+export type PolicyActor = { userId: number; op?: string };
 
 export async function withVmPolicyWrite<T>(node: unknown, vmid: number, write: (tx: DbOrTx, currentNode: string) => Promise<T>, actor?: PolicyActor) {
   return withVmMigrationLock(vmid, (database) => database.transaction(async (tx) => {
     const currentNode = await assertVmPolicyLocation(tx, node, vmid);
     if (actor) {
-      const [user] = await tx.select({ is_admin: users.is_admin }).from(users).where(eq(users.id, actor.userId));
+      const [user] = await tx.select().from(users).where(eq(users.id, actor.userId));
       const candidates = nodeLookupCandidates(currentNode);
       const [assignment] = candidates.length === 0 ? [] : await tx.select({ id: vmAssignments.id }).from(vmAssignments)
         .where(and(eq(vmAssignments.user_id, actor.userId), eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
-      if (!user || (!user.is_admin && !assignment)) throw httpError(403, 'VM policy access has changed; reload before retrying');
+      if (!user) throw httpError(403, 'VM policy access has changed; reload before retrying');
+      const permissions = await effectivePermissions(user, tx);
+      const allowed = actor.op ? canPerformVmOp(actor.op, {
+        isAdmin: user.is_admin === true, isAssigned: Boolean(assignment),
+        operateAllVms: permissions.can_operate_all_vms, seeAllVms: permissions.see_all_vms,
+        canEditHardware: permissions.can_edit_vm_hardware,
+      }) : user.is_admin || assignment;
+      if (!allowed) throw httpError(403, 'VM policy access has changed; reload before retrying');
       if (!await guestPresence(currentNode, vmid, tx)) throw httpError(404, 'VM no longer exists');
     }
     return write(tx, currentNode);
