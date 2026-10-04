@@ -326,6 +326,7 @@ function SiteCard({ site: initial, servers, upstream, isAdmin, onChanged }) {
   // than fixing itself. Same "held, not failed" styling as blocked.
   const isConflict = site.status === 'conflict';
   const isHeld = isBlocked || isConflict;
+  const hasStatusDetail = [isWarning, isError, isHeld].some(Boolean);
   // Only a route Homelabrrr owns and actually reverse-proxies has an upstream to
   // edit: sites imported from the Caddyfile are managed there (the backend
   // rejects a PUT for them), and a file_server/static block has no upstream at
@@ -409,7 +410,7 @@ function SiteCard({ site: initial, servers, upstream, isAdmin, onChanged }) {
           </div>
         )}
 
-        {(isWarning || isError || isHeld) && site.statusDetail && (
+        {hasStatusDetail && site.statusDetail && (
           <p className={`text-xs mt-4 rounded-xl p-3 border ${isError ? 'text-red-400 bg-red-900/20 border-red-800/30' : isHeld ? 'text-orange-300 bg-orange-900/20 border-orange-800/30' : 'text-amber-400 bg-amber-900/20 border-amber-800/30'}`}>{site.statusDetail}</p>
         )}
         {error && <p className="text-xs text-red-400 mt-3">{error}</p>}

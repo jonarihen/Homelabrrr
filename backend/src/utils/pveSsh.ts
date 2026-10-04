@@ -1,9 +1,7 @@
-import { Client as SSHClient } from 'ssh2';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { pveHosts } from '../db/schema/index.ts';
-import { decryptSecret } from './secrets.ts';
-import { sshHostFingerprint } from './sshHostKey.ts';
+import { connectSshHostPinned } from './sshConnect.ts';
 
 // Root SSH to a Proxmox node. Used ONLY for the one hypervisor task the PVE
 // API cannot express: forgetting a VM config without destroying its disks
@@ -16,34 +14,10 @@ export function hostHasSsh(host) {
   return !!(host?.ssh_host && host?.ssh_user && host?.ssh_secret);
 }
 
+const SSH_KEY_MISMATCH_ADVICE = 'If the node was reinstalled, clear the pinned key by re-saving its SSH settings.';
+
 function connectSsh(host) {
-  return new Promise((resolve, reject) => {
-    const conn = new SSHClient();
-    const expected = host.ssh_host_key || '';
-    let fingerprint = '';
-    let hostKeyError = '';
-    conn.on('ready', () => resolve({ conn, fingerprint }));
-    conn.on('error', (err) => {
-      reject(new Error(hostKeyError || `SSH connection to ${host.ssh_host} failed: ${err.message}`));
-    });
-    const secret = decryptSecret(host.ssh_secret);
-    const auth = host.ssh_auth_type === 'password' ? { password: secret } : { privateKey: secret };
-    conn.connect({
-      host: host.ssh_host,
-      port: host.ssh_port || 22,
-      username: host.ssh_user,
-      readyTimeout: 10000,
-      ...auth,
-      hostVerifier: (key) => {
-        fingerprint = sshHostFingerprint(key);
-        if (expected && fingerprint !== expected) {
-          hostKeyError = `SSH host key mismatch for ${host.ssh_host}: expected ${expected}, got ${fingerprint}. If the node was reinstalled, clear the pinned key by re-saving its SSH settings.`;
-          return false;
-        }
-        return true; // first connect: trust-on-first-use, pinned below
-      },
-    });
-  });
+  return connectSshHostPinned(host, SSH_KEY_MISMATCH_ADVICE);
 }
 
 function execSsh(conn, command) {

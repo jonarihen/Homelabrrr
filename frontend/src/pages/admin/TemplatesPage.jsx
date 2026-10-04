@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, useEffect } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
+import StorageSelect from '../../components/StorageSelect.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
 
@@ -169,9 +170,15 @@ const imageStatusCls = {
 };
 
 function fmtSize(bytes) {
-  if (!bytes) return '';
+  if (!bytes) return 'unknown';
   const gb = bytes / 1024 ** 3;
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+function vmOptionLabel(v, { withStatus = false } = {}) {
+  const label = v.name || `VM ${v.vmid}`;
+  const status = withStatus && v.status !== 'running' ? ` [${v.status}]` : '';
+  return `${label} (VMID ${v.vmid})${status}`;
 }
 
 // The "where does this download land" field pair, shared by the cloud-image and
@@ -576,10 +583,10 @@ function CreateTemplateModal({ image, onClose, onStarted }) {
       .then(r => {
         const imgCapable = r.data.filter(s => s.content?.includes('images'));
         setStorages(imgCapable);
-        setForm(f => ({ ...f, storage: f.storage
-          || imgCapable.find(s => s.storage === image.default_storage)?.storage
-          || imgCapable.find(s => s.storage === 'local-lvm')?.storage
-          || imgCapable[0]?.storage || '' }));
+        const preferred = imgCapable.find(s => s.storage === image.default_storage)?.storage;
+        const fallbackLvm = imgCapable.find(s => s.storage === 'local-lvm')?.storage;
+        const firstCapable = imgCapable[0]?.storage || '';
+        setForm(f => ({ ...f, storage: f.storage || preferred || fallbackLvm || firstCapable }));
       })
       .catch(() => setStorages([]));
     api.get(`/provision/nodes/${image.nodeRef || image.node}/networks`)
@@ -1021,7 +1028,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
                         <optgroup label="Proxmox Templates">
                           {templateVms.map(v => (
                             <option key={v.vmid} value={v.vmid}>
-                              {v.name || `VM ${v.vmid}`} (VMID {v.vmid})
+                              {vmOptionLabel(v)}
                             </option>
                           ))}
                         </optgroup>
@@ -1030,7 +1037,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
                         <optgroup label="Regular VMs">
                           {regularVms.map(v => (
                             <option key={v.vmid} value={v.vmid}>
-                              {v.name || `VM ${v.vmid}`} (VMID {v.vmid}) {v.status !== 'running' ? `[${v.status}]` : ''}
+                              {vmOptionLabel(v, { withStatus: true })}
                             </option>
                           ))}
                         </optgroup>
@@ -1081,31 +1088,14 @@ function TemplateFormModal({ template, onClose, onSaved }) {
           </div>
         </div>
 
-        <div>
-          <label className="block text-xs text-gray-400 mb-1.5">Default Storage</label>
-          {storages.length > 0 ? (
-            <select
-              value={form.defaultStorage}
-              onChange={e => setForm(f => ({ ...f, defaultStorage: e.target.value }))}
-              className={inputCls}
-            >
-              {!storages.find(s => s.storage === form.defaultStorage) && form.defaultStorage && (
-                <option value={form.defaultStorage}>{form.defaultStorage}</option>
-              )}
-              {storages.filter(s => s.content?.includes('images')).map(s => (
-                <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
-              ))}
-            </select>
-          ) : (
-            <input
-              type="text"
-              value={form.defaultStorage}
-              onChange={e => setForm(f => ({ ...f, defaultStorage: e.target.value }))}
-              className={inputCls}
-              placeholder="local-lvm"
-            />
-          )}
-        </div>
+        <StorageSelect
+          label="Default Storage"
+          labelCls="block text-xs text-gray-400 mb-1.5"
+          value={form.defaultStorage}
+          onChange={v => setForm(f => ({ ...f, defaultStorage: v }))}
+          storages={storages}
+          inputCls={inputCls}
+        />
 
         <div className="flex items-center gap-6">
           <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">

@@ -3,7 +3,9 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 export function canonicalOrigin(value) {
   try {
     const url = new URL(String(value || ''));
-    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return '';
+    const hasUserInfo = Boolean(url.username || url.password);
+    const hasExtraPath = url.pathname !== '/' || Boolean(url.search || url.hash);
+    if (hasUserInfo || hasExtraPath) return '';
     return url.origin;
   } catch {
     return '';

@@ -2,12 +2,11 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import Busboy from 'busboy';
 import { basename, posix } from 'path';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { sshKeys, vmSshConfigs, vmSshUserConfigs } from '../db/schema/index.ts';
+import { sshKeys } from '../db/schema/index.ts';
 import { requireAuth } from '../middleware/auth.ts';
 import { userCanPerformVmOp } from '../utils/vmAccess.ts';
-import { nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { normalizeSshHostFingerprint } from '../utils/sshHostKey.ts';
 import { decryptSecret } from '../utils/secrets.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
@@ -18,6 +17,7 @@ import { logAudit } from '../utils/audit.ts';
 import { sftpClientError } from '../utils/sftpError.ts';
 import { log } from '../utils/logger.ts';
 import { boundedString } from '../utils/validation.ts';
+import { getGlobalSshConfig as getGlobalSshConfigRow, getUserSshConfig as getUserSshConfigRow } from '../utils/sshConfigLookup.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -60,44 +60,11 @@ function purgeExpired() {
 }
 
 async function getGlobalSshConfig(node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
-  const candidates = nodeLookupCandidates(node);
-  if (candidates.length === 0) return null;
-  // Legacy rows may store the bare node name — match any candidate in one query,
-  // then honour the candidate order (full ref preferred over bare name).
-  const rows = await db
-    .select({
-      node: vmSshConfigs.node,
-      host: vmSshConfigs.host,
-      port: vmSshConfigs.port,
-      host_fingerprint: vmSshConfigs.host_fingerprint,
-    })
-    .from(vmSshConfigs)
-    .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, parsedVmid)));
-  for (const candidate of candidates) {
-    const row = rows.find((r) => r.node === candidate);
-    if (row) return row;
-  }
-  return null;
+  return getGlobalSshConfigRow(node, vmid);
 }
 
 async function getUserSshConfig(userId, node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
-  const candidates = nodeLookupCandidates(node);
-  if (candidates.length === 0) return null;
-  const rows = await db
-    .select({ node: vmSshUserConfigs.node, username: vmSshUserConfigs.username })
-    .from(vmSshUserConfigs)
-    .where(and(
-      eq(vmSshUserConfigs.user_id, userId),
-      inArray(vmSshUserConfigs.node, candidates),
-      eq(vmSshUserConfigs.vmid, parsedVmid),
-    ));
-  for (const candidate of candidates) {
-    const row = rows.find((r) => r.node === candidate);
-    if (row) return row;
-  }
-  return null;
+  return getUserSshConfigRow(userId, node, vmid);
 }
 
 function resolveSession(token) {

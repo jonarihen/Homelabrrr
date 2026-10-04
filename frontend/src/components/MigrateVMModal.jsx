@@ -22,6 +22,8 @@ const STEP_ICON = {
   skipped: 'text-gray-600',
 };
 
+const STEP_GLYPH = { done: '✓', error: '✕', active: '▸', skipped: '–', pending: '·' };
+
 // Disk-transfer progress scraped from the Proxmox task log. Only rendered when
 // the backend actually parsed a percentage — LXC copies (rsync) and the early
 // phase of a migration report none, and those keep the pulsing dot instead.
@@ -169,6 +171,11 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
     ? null
     : (plan?.storageCompatibility || []).find((c) => chosenStorages.includes(c.storage) && c.severity === 'error');
   const missingDiskTarget = !adopt && placeableDisks.some((d) => !diskTarget(d.key));
+  const needsStorageForCopy = !adopt && !storage;
+  const busyOrIncomplete = starting || loadingTarget || !targetNode || !bridge;
+  const missingEssentials = busyOrIncomplete || blockedByRunning;
+  const blockingIssues = !!storageIssue || splitBlocked || missingDiskTarget;
+  const startDisabled = missingEssentials || blockingIssues || needsStorageForCopy;
 
   const submitMigration = async (onlineOverride) => {
     const { data } = await api.post(`/migrate/${encodeURIComponent(routeNode(vm))}/${vm.vmid}`, {
@@ -286,7 +293,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                   <div key={s.key}>
                     <div className="flex items-center gap-2 text-xs">
                       <span className={`font-mono ${STEP_ICON[s.status] || 'text-gray-600'}`}>
-                        {s.status === 'done' ? '✓' : s.status === 'error' ? '✕' : s.status === 'active' ? '▸' : s.status === 'skipped' ? '–' : '·'}
+                        {STEP_GLYPH[s.status] || '·'}
                       </span>
                       <span className={s.status === 'active' ? 'text-gray-200' : 'text-gray-500'}>{s.label}</span>
                       {s.note && <span className="text-gray-600 font-mono truncate">{s.note}</span>}
@@ -519,8 +526,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
             ) : (
               <button
                 onClick={start}
-                disabled={starting || loadingTarget || !targetNode || !bridge || blockedByRunning
-                  || !!storageIssue || splitBlocked || missingDiskTarget || (!adopt && !storage)}
+                disabled={startDisabled}
                 className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
               >
                 {starting ? 'Starting…' : adopt ? 'Start shared-storage migration' : 'Start migration'}

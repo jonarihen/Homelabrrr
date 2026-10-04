@@ -39,6 +39,59 @@ export function hostCoveredByWildcard(domain, wildcard) {
   return label.length > 0 && !label.includes('.');
 }
 
+/** Find the insertion slot inside a wildcard block's subroute: the index of the
+ *  first route without its own host matcher (the block's catch-all). */
+function wildcardSubrouteSlot(handle, serverName, routeIndex, wildcard) {
+  for (let j = 0; j < (handle || []).length; j++) {
+    if (handle[j].handler !== 'subroute') continue;
+    const sub = handle[j].routes || [];
+    const insertIndex = sub.findIndex((route) => hostsFromMatch(route.match).hosts.length === 0);
+    return {
+      path: `/apps/http/servers/${encodeURIComponent(serverName)}/routes/${routeIndex}/handle/${j}/routes`,
+      insertIndex: insertIndex === -1 ? sub.length : insertIndex,
+      wildcard,
+    };
+  }
+  return null;
+}
+
+/** Walk one route's handlers during site discovery, recording sites and
+ *  threading the sibling-guard flag. Returns the updated siblingGuard. */
+function walkRouteHandlers({ handlers, next, recordSite, walkSub, siblingGuard, routeGuarded }) {
+  let guard = siblingGuard;
+  for (const handler of handlers || []) {
+    switch (handler.handler) {
+      case 'subroute':
+        walkSub(handler.routes, next);
+        break;
+      case 'reverse_proxy': {
+        const tls = !!handler.transport?.tls;
+        const { host, port } = splitDial(handler.upstreams?.[0]?.dial);
+        recordSite(next, { kind: 'reverse_proxy', upstreamHost: host, upstreamPort: port || (tls ? 443 : 80), upstreamTls: tls });
+        break;
+      }
+      case 'file_server':
+        recordSite(next, { kind: 'file_server' });
+        break;
+      case 'static_response':
+        // `abort` compiles to static_response { abort: true } — a
+        // matcher-scoped one is an access guard, not a site.
+        if (handler.abort) {
+          if (routeGuarded) guard = true;
+        } else {
+          recordSite(next, { kind: 'static' });
+        }
+        break;
+      case 'authentication':
+        guard = true;
+        break;
+      default:
+        break;
+    }
+  }
+  return guard;
+}
+
 /** Does a listen address end on `port`? Handles ':443', '10.0.0.5:443', '[::]:443'. */
 function listensOn(server, port) {
   return (server?.listen || []).some((l) => new RegExp(`:${port}$`).test(String(l)));
@@ -371,21 +424,8 @@ export class CaddyClient {
         const { hosts } = hostsFromMatch(routes[i].match);
         const wildcard = hosts.find((h) => h.includes('*') && hostCoveredByWildcard(domain, h));
         if (!wildcard) continue;
-        const handle = routes[i].handle || [];
-        for (let j = 0; j < handle.length; j++) {
-          if (handle[j].handler !== 'subroute') continue;
-          const sub = handle[j].routes || [];
-          let insertIndex = sub.length;
-          for (let k = 0; k < sub.length; k++) {
-            const { hosts: subHosts } = hostsFromMatch(sub[k].match);
-            if (subHosts.length === 0) { insertIndex = k; break; }
-          }
-          return {
-            path: `/apps/http/servers/${encodeURIComponent(name)}/routes/${i}/handle/${j}/routes`,
-            insertIndex,
-            wildcard,
-          };
-        }
+        const slot = wildcardSubrouteSlot(routes[i].handle, name, i, wildcard);
+        if (slot) return slot;
       }
     }
     return null;
@@ -525,27 +565,14 @@ export class CaddyClient {
           wildcard: wild || ctx.wildcard,
           guarded: ctx.guarded || guarded || siblingGuard,
         };
-        for (const handler of route.handle || []) {
-          if (handler.handler === 'subroute') {
-            walk(handler.routes, next);
-          } else if (handler.handler === 'reverse_proxy') {
-            const tls = !!handler.transport?.tls;
-            const { host, port } = splitDial(handler.upstreams?.[0]?.dial);
-            record(next, { kind: 'reverse_proxy', upstreamHost: host, upstreamPort: port || (tls ? 443 : 80), upstreamTls: tls });
-          } else if (handler.handler === 'file_server') {
-            record(next, { kind: 'file_server' });
-          } else if (handler.handler === 'static_response') {
-            // `abort` compiles to static_response { abort: true } — a
-            // matcher-scoped one is an access guard, not a site.
-            if (handler.abort) {
-              if (guarded) siblingGuard = true;
-            } else {
-              record(next, { kind: 'static' });
-            }
-          } else if (handler.handler === 'authentication') {
-            siblingGuard = true;
-          }
-        }
+        siblingGuard = walkRouteHandlers({
+          handlers: route.handle,
+          next,
+          recordSite: record,
+          walkSub: walk,
+          siblingGuard,
+          routeGuarded: guarded,
+        });
       }
     };
 

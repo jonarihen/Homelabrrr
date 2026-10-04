@@ -34,6 +34,14 @@ export function vipNameHash(input, length = 4) {
   return (hash >>> 0).toString(36).padStart(length, '0').slice(-length);
 }
 
+function clipTrailingPunctuation(val) {
+  return val.replace(/[\s-]+$/, '');
+}
+
+function truncateWithTag(head, tag, tail = '') {
+  return `${clipTrailingPunctuation(head)}${tag}${tail}`;
+}
+
 // Deterministically shorten `name` to at most `limit` characters. Names already
 // within the limit are returned verbatim; longer names are truncated and tagged
 // with a "~<hash>" suffix derived from the full original so distinct inputs stay
@@ -44,21 +52,17 @@ export function shortenVipName(name, limit = VIP_NAME_MAX) {
   const trimmed = String(name ?? '').trim();
   if (trimmed.length <= limit) return trimmed;
 
-  const tag = `~${vipNameHash(trimmed)}`; // 5 chars, e.g. "~1a2b"
-
-  // Preserve the trailing " - <service>" label verbatim when the remaining
-  // budget still leaves room for at least one character of the head.
+  const tag = `~${vipNameHash(trimmed)}`;
   const sepIndex = trimmed.indexOf(' - ');
+
   if (sepIndex > 0) {
     const head = trimmed.slice(0, sepIndex);
-    const tail = trimmed.slice(sepIndex); // includes the leading " - "
+    const tail = trimmed.slice(sepIndex);
     const headBudget = limit - tag.length - tail.length;
     if (headBudget >= 1) {
-      const clippedHead = head.slice(0, headBudget).replace(/[\s-]+$/, '');
-      return `${clippedHead}${tag}${tail}`;
+      return truncateWithTag(head.slice(0, headBudget), tag, tail);
     }
   }
 
-  // No usable separator, or the tail alone is too long: hard-truncate and tag.
-  return `${trimmed.slice(0, limit - tag.length).replace(/[\s-]+$/, '')}${tag}`;
+  return truncateWithTag(trimmed.slice(0, limit - tag.length), tag);
 }

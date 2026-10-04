@@ -28,6 +28,11 @@ const READINESS_STATES = {
   ok: { led: 'aaris-led--ok', tag: 'border-green-500/40 text-green-400', label: 'OK', rank: 0 },
 };
 
+const VM_STATUS_LED = {
+  running: 'aaris-led--ok',
+  error: 'aaris-led--error',
+};
+
 export default function WelcomePage() {
   useDocumentTitle('Welcome');
   const { user } = useAuth();
@@ -501,7 +506,7 @@ export default function WelcomePage() {
                             onClick={() => navigate(`/vm/${routeNode(vm)}/${vm.vmid}`)}
                             className="w-full flex items-center gap-2.5 px-4 py-2.5 border-b border-gray-800/60 last:border-b-0 text-left hover:bg-gray-800/60 transition-colors group"
                           >
-                            <span className={`aaris-led ${vm.status === 'running' ? 'aaris-led--ok' : vm.status === 'error' ? 'aaris-led--error' : 'aaris-led--off'}`} />
+                            <span className={`aaris-led ${VM_STATUS_LED[vm.status] || 'aaris-led--off'}`} />
                             <span className="text-sm text-gray-200 truncate group-hover:text-gray-100">{vm.name || `VM ${vm.vmid}`}</span>
                             <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.1em] text-gray-600">{vm.vmid}</span>
                           </button>

@@ -1,6 +1,4 @@
-import { Client as SSHClient } from 'ssh2';
-import { decryptSecret } from './secrets.ts';
-import { sshHostFingerprint } from './sshHostKey.ts';
+import { connectSshHostPinned } from './sshConnect.ts';
 
 // ─── Caddyfile snippet sync ────────────────────────────────────────────────────
 // The admin API is ephemeral when Caddy's config comes from a Caddyfile: any
@@ -47,34 +45,10 @@ export function generateSnippet(sites) {
   return lines.join('\n');
 }
 
+const SSH_KEY_MISMATCH_ADVICE = 'If the host was rebuilt, re-save the server with a new SSH host to clear the pinned key.';
+
 function connectSsh(server) {
-  return new Promise((resolve, reject) => {
-    const conn = new SSHClient();
-    const expected = server.ssh_host_key || '';
-    let fingerprint = '';
-    let hostKeyError = '';
-    conn.on('ready', () => resolve({ conn, fingerprint }));
-    conn.on('error', (err) => {
-      reject(new Error(hostKeyError || `SSH connection to ${server.ssh_host} failed: ${err.message}`));
-    });
-    const secret = decryptSecret(server.ssh_secret);
-    const auth = server.ssh_auth_type === 'password' ? { password: secret } : { privateKey: secret };
-    conn.connect({
-      host: server.ssh_host,
-      port: server.ssh_port || 22,
-      username: server.ssh_user,
-      readyTimeout: 10000,
-      ...auth,
-      hostVerifier: (key) => {
-        fingerprint = sshHostFingerprint(key);
-        if (expected && fingerprint !== expected) {
-          hostKeyError = `SSH host key mismatch for ${server.ssh_host}: expected ${expected}, got ${fingerprint}. If the host was rebuilt, re-save the server with a new SSH host to clear the pinned key.`;
-          return false;
-        }
-        return true; // first connect: trust-on-first-use, pinned by the caller
-      },
-    });
-  });
+  return connectSshHostPinned(server, SSH_KEY_MISMATCH_ADVICE);
 }
 
 function execSsh(conn, command) {

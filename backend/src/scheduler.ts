@@ -90,6 +90,54 @@ function runAction(schedule: any, action: 'stop' | 'start') {
   });
 }
 
+// Resolve the per-row flags and window actions for one schedule. Kept out of
+// tick() so the OFF-window state machine stays readable and testable.
+function resolveScheduleFlags({
+  s, off, enteringOff, leavingOff, isRunning, isStopped, skipping,
+}: {
+  s: any; off: boolean; enteringOff: boolean; leavingOff: boolean;
+  isRunning: boolean; isStopped: boolean; skipping: boolean;
+}) {
+  let manual = Boolean(s.running_due_to_manual);
+  let stoppedThisWindow = Boolean(s.stopped_this_window);
+
+  // A fresh window boundary resets the per-window override/stop flags.
+  if (enteringOff || leavingOff) {
+    manual = false;
+    stoppedThisWindow = false;
+  }
+
+  if (skipping) return { manual, stoppedThisWindow };
+
+  if (!off) {
+    if (leavingOff && isStopped && !inFlight.has(`${s.node}/${s.vmid}`)) {
+      // Start edge: only act at the transition so a manual daytime
+      // shutdown outside the window is not fought.
+      runAction(s, 'start');
+    }
+    return { manual, stoppedThisWindow };
+  }
+
+  if (manual) return { manual, stoppedThisWindow };
+
+  if (isRunning) {
+    if (stoppedThisWindow) {
+      // We already stopped it this window, yet it's running →
+      // a manual start. Respect it until the next scheduled stop.
+      manual = true;
+      systemAudit('vm_schedule_manual_override', `${s.node}/${s.vmid}`, 'running inside off-window');
+    } else if (!inFlight.has(`${s.node}/${s.vmid}`)) {
+      runAction(s, 'stop');
+    }
+  } else if (isStopped) {
+    // Already off during the window — treat the window as satisfied
+    // so a subsequent manual start is detected as an override.
+    stoppedThisWindow = true;
+  }
+
+  return { manual, stoppedThisWindow };
+}
+
 async function tick() {
   if (ticking || stopping) return;
   ticking = true;
@@ -146,39 +194,9 @@ async function tick() {
         const enteringOff = off && prevOff !== 1;
         const leavingOff = !off && prevOff === 1;
 
-        let manual = Boolean(s.running_due_to_manual);
-        let stoppedThisWindow = Boolean(s.stopped_this_window);
-
-        // A fresh window boundary resets the per-window override/stop flags.
-        if (enteringOff || leavingOff) {
-          manual = false;
-          stoppedThisWindow = false;
-        }
-
-        if (!skipping) {
-          if (off) {
-            if (!manual) {
-              if (isRunning) {
-                if (stoppedThisWindow) {
-                  // We already stopped it this window, yet it's running →
-                  // a manual start. Respect it until the next scheduled stop.
-                  manual = true;
-                  systemAudit('vm_schedule_manual_override', `${s.node}/${s.vmid}`, 'running inside off-window');
-                } else if (!inFlight.has(`${s.node}/${s.vmid}`)) {
-                  runAction(s, 'stop');
-                }
-              } else if (isStopped) {
-                // Already off during the window — treat the window as satisfied
-                // so a subsequent manual start is detected as an override.
-                stoppedThisWindow = true;
-              }
-            }
-          } else if (leavingOff && isStopped && !inFlight.has(`${s.node}/${s.vmid}`)) {
-            // Start edge: only act at the transition so a manual daytime
-            // shutdown outside the window is not fought.
-            runAction(s, 'start');
-          }
-        }
+        const { manual, stoppedThisWindow } = resolveScheduleFlags({
+          s, off, enteringOff, leavingOff, isRunning, isStopped, skipping,
+        });
 
         // Optimistic compare-and-set: write the three flag columns only if the
         // row still holds the exact snapshot values we read this tick. If an

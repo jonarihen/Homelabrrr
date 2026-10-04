@@ -11,6 +11,8 @@ export function sendableCloseCode(code) {
   const n = Number(code);
   if (!Number.isInteger(n)) return null;
   if (n >= 3000 && n <= 4999) return n;
-  if (n >= 1000 && n <= 1014 && n !== 1004 && n !== 1005 && n !== 1006) return n;
+  const isStandardCode = n >= 1000 && n <= 1014;
+  const isReservedCode = n === 1004 || n === 1005 || n === 1006;
+  if (isStandardCode && !isReservedCode) return n;
   return null;
 }

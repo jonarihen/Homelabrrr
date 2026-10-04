@@ -4,6 +4,12 @@ import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
+
+function importSiteTargetLabel(s) {
+  if (s.kind !== 'reverse_proxy') return s.kind;
+  const scheme = s.upstreamTls ? 'https://' : '';
+  return `→ ${scheme}${s.upstreamHost}:${s.upstreamPort}`;
+}
 const selectCls = inputCls;
 
 const IN_FLIGHT = ['validating', 'pushing', 'issuing', 'inspecting', 'pending'];
@@ -347,7 +353,7 @@ export default function AdminWebsitesPage() {
                       {s.guarded && <span className="text-[9px] uppercase tracking-wider text-amber-300 bg-amber-500/10 ring-1 ring-amber-500/20 px-1.5 py-0.5 rounded-full" title="Access-restricted in Caddy (IP allowlist / basic auth)">restricted</span>}
                     </div>
                     <p className="text-[11px] text-gray-500 font-mono mt-0.5">
-                      {s.kind === 'reverse_proxy' ? `→ ${s.upstreamTls ? 'https://' : ''}${s.upstreamHost}:${s.upstreamPort}` : s.kind}
+                      {importSiteTargetLabel(s)}
                       {s.blockedReason && <span className="text-amber-400/80 font-sans ml-2">{s.blockedReason}</span>}
                     </p>
                   </div>

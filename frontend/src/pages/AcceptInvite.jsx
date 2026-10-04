@@ -107,7 +107,7 @@ export default function AcceptInvite() {
                   VLAN access: {preset.vlans.map(v => `${v.name} (${v.tag})`).join(', ')}
                 </p>
               )}
-              {(preset.quotas?.maxCores != null || preset.quotas?.maxMemoryGb != null || preset.quotas?.maxStorageGb != null) && (
+              {preset.quotas && Object.values(preset.quotas).some(v => v != null) && (
                 <p className="text-[11px] font-mono text-gray-500">
                   Quota:
                   {preset.quotas.maxCores != null ? ` ${preset.quotas.maxCores} cores` : ''}

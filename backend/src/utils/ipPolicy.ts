@@ -10,7 +10,8 @@ export function ipv4InCidr(ip, cidr) {
   const addressNumber = ipv4Number(ip);
   const networkNumber = ipv4Number(network);
   const prefix = Number(rawPrefix);
-  if (addressNumber === null || networkNumber === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  if (addressNumber === null || networkNumber === null) return false;
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
   const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
   return (addressNumber & mask) === (networkNumber & mask);
 }

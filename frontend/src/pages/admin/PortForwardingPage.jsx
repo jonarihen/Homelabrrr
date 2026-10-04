@@ -304,9 +304,15 @@ export default function PortForwardingPage() {
   const needsWanConfig = !fwConfig?.external_ip;
   const managedCount = vips.filter(v => v.managed).length;
   const externalCount = vips.filter(v => !v.managed).length;
+  const showManagedSeparator = managedCount > 0 && externalCount > 0;
 
   const isCustom = form.service === 'Custom';
   const canSubmit = missingFields.length === 0;
+
+  const vlanHint = selectedVm?.blocked?.message
+    || (canManageAllPortForwards
+      ? 'Could not auto-detect from VM VLAN'
+      : 'This VM is not on a firewall-synced VLAN assigned to you');
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
@@ -592,12 +598,7 @@ export default function PortForwardingPage() {
                     <span className="text-xs text-yellow-500/80">Auto-detection required</span>
                   )}
                   {!form.dstInterface && (
-                    <p className="text-[11px] text-yellow-500/80 mt-0.5">
-                      {selectedVm?.blocked?.message
-                        || (canManageAllPortForwards
-                          ? 'Could not auto-detect from VM VLAN'
-                          : 'This VM is not on a firewall-synced VLAN assigned to you')}
-                    </p>
+                    <p className="text-[11px] text-yellow-500/80 mt-0.5">{vlanHint}</p>
                   )}
                 </div>
                 <div>
@@ -733,7 +734,7 @@ export default function PortForwardingPage() {
               <span>{vips.length} VIP{vips.length !== 1 ? 's' : ''} total</span>
               <span>
                 {managedCount > 0 && <span className="text-blue-500/60">{managedCount} managed</span>}
-                {managedCount > 0 && externalCount > 0 && <span className="mx-1.5">&middot;</span>}
+                {showManagedSeparator && <span className="mx-1.5">&middot;</span>}
                 {externalCount > 0 && <span>{externalCount} external</span>}
               </span>
             </div>

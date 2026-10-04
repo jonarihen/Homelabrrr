@@ -1156,6 +1156,18 @@ function BackupTag({ led, children, title }) {
   );
 }
 
+const UNENCRYPTED_MARKERS = ['', '0', 'none', 'sign-only'];
+
+function backupEncrypted(b) {
+  if (b.encrypted === 1 || b.encrypted === true) return true;
+  if (typeof b.encrypted !== 'string') return false;
+  return !UNENCRYPTED_MARKERS.includes(b.encrypted);
+}
+
+function backupProtected(b) {
+  return b.protected === 1 || b.protected === '1' || b.protected === true;
+}
+
 function BackupsSection({ node, vmid }) {
   const [backups, setBackups] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1691,14 +1703,15 @@ function BackupsSection({ node, vmid }) {
                   <div className="divide-y divide-gray-800 border-t border-gray-800">
                     {g.items.map(b => {
                       // PVE reports `encrypted` as 1, a key fingerprint, or a crypt-mode string
-                      const isEncrypted = b.encrypted === 1 || b.encrypted === true ||
-                        (typeof b.encrypted === 'string' && b.encrypted !== '' && b.encrypted !== '0' && b.encrypted !== 'none' && b.encrypted !== 'sign-only');
-                      const isProtected = b.protected === 1 || b.protected === '1' || b.protected === true;
+                      const isEncrypted = backupEncrypted(b);
+                      const isProtected = backupProtected(b);
                       const verifyState = b.verification?.state;
                       // Flagged by the backend while a vzdump task is writing
                       // this archive. Its size, encryption and verification
                       // state are all meaningless until the dump finishes.
                       const isWriting = b.inProgress === true;
+                      const showTags = !isWriting && isPbs;
+                      const showProtectedTag = !isWriting && isProtected;
                       return (
                       <div key={b.volid} className="px-5 py-3.5 hover:bg-gray-800/30 transition-colors">
                         <div className="flex items-center justify-between">
@@ -1715,17 +1728,17 @@ function BackupsSection({ node, vmid }) {
                               )}
                               {/* Every tag below describes the finished archive, so they stay
                                   hidden until there is a finished archive to describe. */}
-                              {!isWriting && isPbs && (isEncrypted
+                              {showTags && (isEncrypted
                                 ? <BackupTag led="ok" title="This backup is encrypted on the backup server">Encrypted</BackupTag>
                                 : <BackupTag led="off" title="This backup is stored unencrypted">Not encrypted</BackupTag>
                               )}
-                              {!isWriting && isPbs && (verifyState === 'ok'
+                              {showTags && (verifyState === 'ok'
                                 ? <BackupTag led="ok" title="Last PBS verification passed">Verified</BackupTag>
                                 : verifyState === 'failed'
                                   ? <BackupTag led="error" title="Last PBS verification FAILED — this backup may be corrupt">Verify failed</BackupTag>
                                   : <BackupTag led="off" title="This backup has not been verified yet">Not verified</BackupTag>
                               )}
-                              {!isWriting && isProtected && <BackupTag led="warning" title="Protected — cannot be pruned or deleted until protection is removed">Protected</BackupTag>}
+                              {showProtectedTag && <BackupTag led="warning" title="Protected — cannot be pruned or deleted until protection is removed">Protected</BackupTag>}
                             </div>
                             <div className="flex items-center gap-4 mt-1 ml-[24px]">
                               <span className="text-xs text-gray-500">{fmtDate(b.ctime)}</span>

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import PrereqCallout from '../components/PrereqCallout.jsx';
 import ErrorCallout from '../components/ErrorCallout.jsx';
+import StorageSelect from '../components/StorageSelect.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
@@ -470,6 +471,25 @@ function fmtSize(bytes) {
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 }
 
+function ResourceInputs({ cores, onCoresChange, maxCores = 64, memory, onMemoryChange, disk, onDiskChange, minDisk = 1, diskLabel = 'Disk (GB)' }) {
+  return (
+    <div className="grid grid-cols-3 gap-4">
+      <div>
+        <label className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
+        <input type="number" min="1" max={maxCores} value={cores} onChange={e => onCoresChange(e.target.value)} className={inputCls} />
+      </div>
+      <div>
+        <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
+        <input type="number" min="0.5" step="0.5" value={memory} onChange={e => onMemoryChange(e.target.value)} className={inputCls} />
+      </div>
+      <div>
+        <label className="block text-xs text-gray-400 mb-1.5 font-medium">{diskLabel}</label>
+        <input type="number" min={minDisk} value={disk} onChange={e => onDiskChange(e.target.value)} className={inputCls} />
+      </div>
+    </div>
+  );
+}
+
 // ── Create from Cloud Image (direct, no template) ───────────────────────────
 
 function CloudImageForm({ onStarted }) {
@@ -523,11 +543,11 @@ function CloudImageForm({ onStarted }) {
           // Prefer this host's per-host default target (pool names differ per
           // host), then the legacy single default, then local-lvm, then first.
           const hostDefault = selected.deployTargets?.find(t => t.nodeRef === node)?.defaultStorage;
-          setForm(f => ({ ...f, storage:
-            imgCapable.find(s => s.storage === hostDefault)?.storage
-            || imgCapable.find(s => s.storage === selected.default_storage)?.storage
-            || imgCapable.find(s => s.storage === 'local-lvm')?.storage
-            || imgCapable[0]?.storage || '' }));
+          const byHostDefault = imgCapable.find(s => s.storage === hostDefault)?.storage;
+          const byLegacyDefault = imgCapable.find(s => s.storage === selected.default_storage)?.storage;
+          const byLvm = imgCapable.find(s => s.storage === 'local-lvm')?.storage;
+          const firstCapable = imgCapable[0]?.storage || '';
+          setForm(f => ({ ...f, storage: byHostDefault || byLegacyDefault || byLvm || firstCapable }));
         })
         .catch(() => setStorages([]));
     }
@@ -692,20 +712,15 @@ function CloudImageForm({ onStarted }) {
             <VmNamePreview value={form.name} />
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
-              <input type="number" min="1" max="64" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
-              <input type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk (GB)</label>
-              <input type="number" min="5" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className={inputCls} />
-            </div>
-          </div>
+          <ResourceInputs
+            cores={form.cores}
+            onCoresChange={v => setForm(f => ({ ...f, cores: v }))}
+            memory={form.memory}
+            onMemoryChange={v => setForm(f => ({ ...f, memory: v }))}
+            disk={form.diskGb}
+            onDiskChange={v => setForm(f => ({ ...f, diskGb: v }))}
+            minDisk={5}
+          />
 
           {user?.isAdmin && selected.deployTargets?.length > 1 && (
             <div>
@@ -989,40 +1004,23 @@ function CloneForm({ onStarted }) {
             <VmNamePreview value={form.name} />
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
-              <input type="number" min="1" max="64" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
-              <input type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk (GB)</label>
-              <input type="number" min="1" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className={inputCls} />
-            </div>
-          </div>
+          <ResourceInputs
+            cores={form.cores}
+            onCoresChange={v => setForm(f => ({ ...f, cores: v }))}
+            memory={form.memory}
+            onMemoryChange={v => setForm(f => ({ ...f, memory: v }))}
+            disk={form.diskGb}
+            onDiskChange={v => setForm(f => ({ ...f, diskGb: v }))}
+            minDisk={1}
+          />
 
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Storage</label>
-            {storages.length > 0 ? (
-              <select
-                value={form.storage}
-                onChange={e => setForm(f => ({ ...f, storage: e.target.value }))}
-                className={inputCls}
-              >
-                {!storages.find(s => s.storage === form.storage) && form.storage && (
-                  <option value={form.storage}>{form.storage}</option>
-                )}
-                {storages.filter(s => s.content?.includes('images')).map(s => (
-                  <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
-                ))}
-              </select>
-            ) : (
-              <input type="text" value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} placeholder="local-lvm" />
-            )}
-          </div>
+          <StorageSelect
+            label="Storage"
+            value={form.storage}
+            onChange={v => setForm(f => ({ ...f, storage: v }))}
+            storages={storages}
+            inputCls={inputCls}
+          />
 
           {vlans.length > 0 && (
             <div>
@@ -1195,20 +1193,16 @@ function CreateForm({ onStarted }) {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-4">
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">CPU Cores</label>
-            <input type="number" min="1" max="128" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Memory (GB)</label>
-            <input type="number" min="0.5" step="0.5" value={form.memory} onChange={e => setForm(f => ({ ...f, memory: e.target.value }))} className={inputCls} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">Disk Size (GB)</label>
-            <input type="number" min="1" value={form.diskSize} onChange={e => setForm(f => ({ ...f, diskSize: e.target.value }))} className={inputCls} />
-          </div>
-        </div>
+        <ResourceInputs
+          cores={form.cores}
+          onCoresChange={v => setForm(f => ({ ...f, cores: v }))}
+          maxCores={128}
+          memory={form.memory}
+          onMemoryChange={v => setForm(f => ({ ...f, memory: v }))}
+          disk={form.diskSize}
+          onDiskChange={v => setForm(f => ({ ...f, diskSize: v }))}
+          diskLabel="Disk Size (GB)"
+        />
 
         <div className={`grid ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'} gap-4`}>
           <div>

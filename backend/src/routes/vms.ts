@@ -928,20 +928,21 @@ router.put('/:node/:vmid/ip-management/:netInterface/reservation', async (req, r
       return res.status(400).json({ error: 'Reservation IP cannot be the gateway address' });
     }
 
+    const ifaceMac = normalizeMac(scope.iface.mac);
+    const isOtherDevice = (mac: string) => normalizeMac(mac) !== ifaceMac;
+
     const conflictReservation = scope.reservations.find((reservation) => (
-      reservation.ip === ip && reservation.mac !== normalizeMac(scope.iface.mac)
+      reservation.ip === ip && reservation.mac !== ifaceMac
     ));
     if (conflictReservation) {
       return res.status(400).json({ error: `IP ${ip} is already reserved for another device` });
     }
 
-    const conflictLease = scope.leases.find((lease) => (
-      lease.ip === ip
-      && normalizeMac(lease.mac) !== normalizeMac(scope.iface.mac)
-      && lease.interface === scope.sync.interface_name
-      && (!lease.type || lease.type === 'ipv4')
-      && lease.status === 'leased'
-    ));
+    const conflictLease = scope.leases.find((lease) => {
+      const sameIface = lease.interface === scope.sync.interface_name;
+      const leasedIpv4 = (!lease.type || lease.type === 'ipv4') && lease.status === 'leased';
+      return lease.ip === ip && isOtherDevice(lease.mac) && sameIface && leasedIpv4;
+    });
     if (conflictLease) {
       return res.status(400).json({ error: `IP ${ip} is currently leased to another device` });
     }
@@ -1686,8 +1687,8 @@ router.post('/:node/:vmid/snapshots', async (req, res) => {
   if (!name) return res.status(400).json({ error: 'Snapshot name is required' });
   try {
     let upid;
-    try { upid = await createSnapshot(node, vmid, 'qemu', name, description, vmstate); }
-    catch { upid = await createSnapshot(node, vmid, 'lxc', name, description, false); }
+    try { upid = await createSnapshot({ node, vmid, vmtype: 'qemu', name, description, vmstate }); }
+    catch { upid = await createSnapshot({ node, vmid, vmtype: 'lxc', name, description }); }
     await logAudit(req, 'snapshot_create', `${node}/${vmid}`, name);
     res.json({ ok: true, upid });
   } catch (err) {

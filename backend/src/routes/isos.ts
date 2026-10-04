@@ -2,15 +2,13 @@ import { Router } from 'express';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { isos } from '../db/schema/index.ts';
-import {
-  downloadUrlToStorage, deleteVolume, getTaskStatus, getStorageContent,
-} from '../proxmox.ts';
+import { downloadUrlToStorage, deleteVolume } from '../proxmox.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { logAudit } from '../utils/audit.ts';
 import { decodeNodeRef } from '../utils/nodeRef.ts';
 import { assertPublicDownloadUrl } from '../utils/urlGuard.ts';
-import { startBackgroundWork } from '../services/backgroundWork.ts';
+import { startDownloadTracking } from '../utils/downloadTask.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -26,19 +24,6 @@ function serializeIso(row: any) {
 
 async function setIsoStatus(id: number, status: string, detail = '') {
   await db.update(isos).set({ status, status_detail: detail }).where(eq(isos.id, id));
-}
-
-async function waitForTask(node: string, upid: string, { attempts = 240, intervalMs = 5000 } = {}) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    try {
-      const task = await getTaskStatus(node, upid);
-      if (task.status === 'stopped') {
-        return { ok: task.exitstatus === 'OK', exitstatus: task.exitstatus || '' };
-      }
-    } catch { /* keep polling */ }
-  }
-  return { ok: false, exitstatus: 'timeout' };
 }
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -76,32 +61,23 @@ router.post('/', async (req, res) => {
   const volid = `${storage}:iso/${filename}`;
 
   try {
-    const upid = await downloadUrlToStorage(node, storage, url, filename, checksum?.trim() || undefined, undefined, 'iso');
+    const upid = await downloadUrlToStorage({ node, storage, url, filename, checksum: checksum?.trim() || undefined, content: 'iso' });
     await db.update(isos).set({ volid, upid: upid || '' }).where(eq(isos.id, id));
     await logAudit(req, 'iso_download', name, `storage=${storage}; requestId=${req.requestId || ''}`);
 
     // Poll in the background; the row's status is the source of truth for the UI
-    startBackgroundWork(async () => {
-      const result = await waitForTask(node, upid);
-      if (!result.ok) {
-        await setIsoStatus(id, 'error', result.exitstatus === 'timeout'
-          ? 'Timed out waiting for the download'
-          : `Download failed: ${result.exitstatus}`);
-        return;
-      }
-      try {
-        const content = await getStorageContent(node, storage, 'iso');
-        const vol = content.find((c: any) => c.volid === volid);
-        if (!vol) {
-          await setIsoStatus(id, 'error', 'Download finished but the ISO was not found on the storage');
-          return;
-        }
-        await db.update(isos).set({ status: 'ready', status_detail: '', size: vol.size || 0 }).where(eq(isos.id, id));
-      } catch (err: any) {
-        await setIsoStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
-      }
-    }, { kind: 'iso-download', id, requestId: req.requestId })
-      .catch((err: any) => { setIsoStatus(id, 'error', sanitizeError(err.message)).catch(() => {}); });
+    startDownloadTracking({
+      kind: 'iso-download',
+      id,
+      requestId: req.requestId || '',
+      table: isos,
+      node,
+      upid,
+      storage,
+      contentKind: 'iso',
+      volid,
+      artifact: 'ISO',
+    });
 
     res.json({ id, status: 'downloading' });
   } catch (err: any) {

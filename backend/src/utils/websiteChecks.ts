@@ -5,6 +5,7 @@ import { db } from '../db/client.ts';
 import { vmAssignments, vmSshConfigs } from '../db/schema/index.ts';
 import { nodeLookupCandidates } from './nodeRef.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
+import { isInternalIPv4 } from './internalIp.ts';
 
 // ─── Field validation ─────────────────────────────────────────────────────────
 // Everything a user submits is validated here before it is ever built into a
@@ -42,37 +43,19 @@ export function parsePort(port) {
 // ─── Private / reserved address guard ─────────────────────────────────────────
 // Hygiene for DNS validation: a public domain's A record should resolve to the
 // homelab's *public* WAN IP, never to a private/reserved/loopback/metadata
-// address. (Same reasoning as utils/urlGuard.js, reimplemented here per the
-// issue since urlGuard is scoped to download-URL SSRF.)
-
-function isPrivateIPv4(ip) {
-  const parts = ip.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n))) return true;
-  const [a, b] = parts;
-  return (
-    a === 0 ||                              // "this network"
-    a === 10 ||                             // RFC1918
-    a === 127 ||                            // loopback
-    (a === 100 && b >= 64 && b <= 127) ||   // CGNAT 100.64/10
-    (a === 169 && b === 254) ||             // link-local / metadata
-    (a === 172 && b >= 16 && b <= 31) ||    // RFC1918
-    (a === 192 && b === 168) ||             // RFC1918
-    (a === 198 && (b === 18 || b === 19)) ||// benchmarking 198.18/15
-    a >= 224                                // multicast + reserved + broadcast
-  );
-}
+// address. Shares the range tables with utils/internalIp.ts.
 
 function isPrivateIPv6(ip) {
   const lower = ip.toLowerCase();
   const dotted = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (dotted) return isPrivateIPv4(dotted[1]);
+  if (dotted) return isInternalIPv4(dotted[1]);
   if (lower === '::' || lower === '::1') return true;
   return /^(fc|fd|fe[89ab]|fe[c-f])/.test(lower);
 }
 
 export function isPrivateOrReservedIp(address) {
   const version = isIP(address);
-  if (version === 4) return isPrivateIPv4(address);
+  if (version === 4) return isInternalIPv4(address);
   if (version === 6) return isPrivateIPv6(address);
   return true; // not a valid IP — refuse
 }
@@ -198,8 +181,8 @@ export async function userCanReachUpstream(userId, host, isAdmin) {
     return { ok: false, message: 'Upstream must be a private address of a VM assigned to you or inside your VLAN subnet.' };
   }
   const { vmIps, subnets } = await getUserAllowedUpstreams(userId);
-  if (vmIps.includes(host)) return { ok: true };
-  if (subnets.some((cidr) => ipv4InCidr(host, cidr))) return { ok: true };
+  const owned = vmIps.includes(host) || subnets.some((cidr) => ipv4InCidr(host, cidr));
+  if (owned) return { ok: true };
   return {
     ok: false,
     message: `You can only proxy to targets you own. ${host} is not an assigned VM's IP or inside one of your VLAN subnets${subnets.length ? ` (${subnets.join(', ')})` : ''}.`,

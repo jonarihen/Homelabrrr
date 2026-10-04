@@ -340,7 +340,14 @@ export const ACTIONS = {
         }
       }
       const dns = [p.dns1 || '', p.dns2 || ''];
-      const res = await client.createDhcpServer(iface, String(p.gateway), String(p.netmask), String(p.startIp), String(p.endIp), dns);
+      const res = await client.createDhcpServer({
+        interfaceName: iface,
+        gateway: String(p.gateway),
+        netmask: String(p.netmask),
+        startIp: String(p.startIp),
+        endIp: String(p.endIp),
+        dns,
+      });
       const dhcpServerId = res?.mkey ?? null;
       return {
         skipped: false,

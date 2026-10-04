@@ -18,37 +18,43 @@
 
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
 
-export function normalizeApiError(input, fallback = 'Something went wrong') {
-  const blank = { title: str(fallback) || 'Something went wrong', detail: '', action: '', href: '' };
-  if (input === null || input === undefined || input === false) return blank;
-
-  if (typeof input === 'string') {
-    return str(input) ? { ...blank, title: str(input) } : blank;
+function extractPayload(input) {
+  if (!input || typeof input !== 'object') {
+    return { title: typeof input === 'string' ? str(input) : '' };
   }
-  if (typeof input !== 'object') return blank;
 
   // axios error → the response body; anything else is treated as the body.
   const data = input.response?.data ?? input;
-
   if (typeof data === 'string') {
-    return str(data) ? { ...blank, title: str(data) } : blank;
+    return { title: str(data) };
   }
 
   if (data && typeof data === 'object') {
-    if (str(data.title)) {
+    const title = str(data.title);
+    if (title) {
       return {
-        title: str(data.title),
+        title,
         detail: str(data.detail),
         action: str(data.action),
         href: str(data.href),
       };
     }
-    if (str(data.error)) return { ...blank, title: str(data.error) };
+    if (str(data.error)) return { title: str(data.error) };
   }
 
   // Network failure, or a thrown Error that never reached the server.
-  if (str(input.message)) return { ...blank, title: str(input.message) };
-  return blank;
+  return { title: str(input.message) };
+}
+
+export function normalizeApiError(input, fallback = 'Something went wrong') {
+  const fallbackTitle = str(fallback) || 'Something went wrong';
+  const payload = extractPayload(input);
+  return {
+    title: payload.title || fallbackTitle,
+    detail: payload.detail || '',
+    action: payload.action || '',
+    href: payload.href || '',
+  };
 }
 
 /** Where a `href` points, in words. Keep in step with upstreamError.js. */

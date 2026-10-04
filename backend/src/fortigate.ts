@@ -140,7 +140,7 @@ export class FortiGateAPI {
    * Create VLAN interface at global scope, assigned to this.vdom.
    * Guide step 1: scope=global, role=undefined
    */
-  async createVlanInterface(name, vlanId, parentInterface, ip, netmask, opts = {}) {
+  async createVlanInterface({ name, vlanId, parentInterface, ip, netmask, description = '' }) {
     return this.request('POST', 'cmdb/system/interface', {
       name,
       vdom: this.vdom,
@@ -150,7 +150,7 @@ export class FortiGateAPI {
       ip: `${ip} ${netmask}`,
       allowaccess: 'ping',
       role: 'undefined',
-      ...(opts.description ? { description: opts.description } : {}),
+      ...(description ? { description } : {}),
     }, 'global');
   }
 
@@ -218,7 +218,7 @@ export class FortiGateAPI {
     return res.results?.[0] || res || null;
   }
 
-  async createDhcpServer(interfaceName, gateway, netmask, startIp, endIp, dns = ['1.1.1.1', '8.8.8.8']) {
+  async createDhcpServer({ interfaceName, gateway, netmask, startIp, endIp, dns = ['1.1.1.1', '8.8.8.8'] }) {
     const config = {
       'default-gateway': gateway,
       netmask,
@@ -624,11 +624,14 @@ export class FortiGateAPI {
       if (existing) {
         console.log(`[provision] Interface ${ifaceName} already exists, skipping`);
       } else {
-        await this.createVlanInterface(
-          ifaceName, tag, parentInterface,
-          subnet.ip, subnet.netmask,
-          { description: name }
-        );
+        await this.createVlanInterface({
+          name: ifaceName,
+          vlanId: tag,
+          parentInterface,
+          ip: subnet.ip,
+          netmask: subnet.netmask,
+          description: name,
+        });
         createdInterface = true;
         console.log(`[provision] Created interface ${ifaceName} (global scope, vdom=${this.vdom})`);
       }
@@ -701,10 +704,13 @@ export class FortiGateAPI {
           dhcpServerId = existingDhcp.id;
           console.log(`[provision] DHCP server for ${ifaceName} already exists (id: ${dhcpServerId}), skipping`);
         } else {
-          const dhcpRes = await this.createDhcpServer(
-            ifaceName, subnet.gateway, subnet.netmask,
-            subnet.dhcpStart, subnet.dhcpEnd
-          );
+          const dhcpRes = await this.createDhcpServer({
+            interfaceName: ifaceName,
+            gateway: subnet.gateway,
+            netmask: subnet.netmask,
+            startIp: subnet.dhcpStart,
+            endIp: subnet.dhcpEnd,
+          });
           if (dhcpRes?.mkey) {
             createdDhcpId = dhcpRes.mkey;
             dhcpServerId = dhcpRes.mkey;

@@ -33,9 +33,17 @@ const NET_INTERFACE_RE = /^net(?:[0-9]|[12][0-9]|3[01])$/;
 // verbatim — that lets a caller append arbitrary network properties. Only a
 // whole integer (or a string that is entirely digits) is accepted, and callers
 // must configure the returned `tag`, never the raw input.
+function isFalsyValue(value: unknown): boolean {
+  if (value === null || value === undefined) {
+    return true;
+  }
+  const v = typeof value === 'string' ? value.trim() : value;
+  return v === '' || value === 0 || value === '0';
+}
+
 export function parseVlanTag(value: unknown): ParsedVlanTag {
   const raw = typeof value === 'string' ? value.trim() : value;
-  if (raw === null || raw === undefined || raw === '' || raw === 0 || raw === '0') {
+  if (isFalsyValue(raw)) {
     return { untagged: true };
   }
   let tag: number;

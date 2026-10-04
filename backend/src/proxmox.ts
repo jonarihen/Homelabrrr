@@ -496,7 +496,7 @@ export async function getISOImages(node, storage) {
 // accepts as a disk source on PVE 9; the storage must have the Import content
 // type enabled. Pass content='iso' to populate the ISO catalog (storage needs
 // the ISO content type enabled). Returns the download task UPID.
-export async function downloadUrlToStorage(node, storage, url, filename, checksum, checksumAlgorithm, content = 'import') {
+export async function downloadUrlToStorage({ node, storage, url, filename, checksum, checksumAlgorithm, content = 'import' }) {
   const { host, nodeName } = await resolveNode(node);
   const body = { content, url, filename };
   if (checksum) {
@@ -782,7 +782,7 @@ export async function getSnapshots(node, vmid, vmtype = 'qemu') {
   return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/snapshot`);
 }
 
-export async function createSnapshot(node, vmid, vmtype = 'qemu', name, description = '', vmstate = false) {
+export async function createSnapshot({ node, vmid, vmtype = 'qemu', name, description = '', vmstate = false }) {
   const { host, nodeName } = await resolveNode(node, { vmid });
   const body = { snapname: name, ...(description && { description }), ...(vmtype === 'qemu' && { vmstate: vmstate ? 1 : 0 }) };
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/${vmtype}/${vmid}/snapshot`, body);

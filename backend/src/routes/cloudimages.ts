@@ -4,7 +4,7 @@ import { db } from '../db/client.ts';
 import { cloudImages, pveHosts, vmTemplates } from '../db/schema/index.ts';
 import {
   downloadUrlToStorage, deleteVolume, convertToTemplate,
-  getTaskStatus, getStorageContent, withFreshVmid, createVM, resizeVMDisk, getHost,
+  withFreshVmid, createVM, resizeVMDisk, getHost,
 } from '../proxmox.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
@@ -14,6 +14,7 @@ import { assertPublicDownloadUrl } from '../utils/urlGuard.ts';
 import { imageDeployTargets } from '../utils/cloudImageTargets.ts';
 import { hostHasSsh, runNodeCommands } from '../utils/pveSsh.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
+import { startDownloadTracking } from '../utils/downloadTask.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -28,19 +29,6 @@ function serializeImage(row: any) {
 
 async function setImageStatus(id: number, status: string, detail = '') {
   await db.update(cloudImages).set({ status, status_detail: detail }).where(eq(cloudImages.id, id));
-}
-
-async function waitForTask(node: string, upid: string, { attempts = 240, intervalMs = 5000 } = {}) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    try {
-      const task = await getTaskStatus(node, upid);
-      if (task.status === 'stopped') {
-        return { ok: task.exitstatus === 'OK', exitstatus: task.exitstatus || '' };
-      }
-    } catch { /* keep polling */ }
-  }
-  return { ok: false, exitstatus: 'timeout' };
 }
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -108,34 +96,23 @@ router.post('/', async (req, res) => {
   const volid = `${storage}:import/${filename}`;
 
   try {
-    const upid = await downloadUrlToStorage(node, storage, url, filename, checksum?.trim() || undefined);
+    const upid = await downloadUrlToStorage({ node, storage, url, filename, checksum: checksum?.trim() || undefined });
     await db.update(cloudImages).set({ volid, upid: upid || '' }).where(eq(cloudImages.id, id));
     await logAudit(req, 'cloud_image_download', name, `storage=${storage}; requestId=${req.requestId || ''}`);
 
     // Poll in the background; the row's status is the source of truth for the UI
-    startBackgroundWork(async () => {
-      const result = await waitForTask(node, upid);
-      if (!result.ok) {
-        await setImageStatus(id, 'error', result.exitstatus === 'timeout'
-          ? 'Timed out waiting for the download'
-          : `Download failed: ${result.exitstatus}`);
-        return;
-      }
-      try {
-        const content = await getStorageContent(node, storage, 'import');
-        const vol = content.find((c: any) => c.volid === volid);
-        if (!vol) {
-          await setImageStatus(id, 'error', 'Download finished but the image was not found on the storage');
-          return;
-        }
-        await db.update(cloudImages)
-          .set({ status: 'ready', status_detail: '', size: vol.size || 0 })
-          .where(eq(cloudImages.id, id));
-      } catch (err: any) {
-        await setImageStatus(id, 'error', `Could not verify download: ${sanitizeError(err.message)}`);
-      }
-    }, { kind: 'cloud-image-download', id, requestId: req.requestId })
-      .catch((err: any) => { setImageStatus(id, 'error', sanitizeError(err.message)).catch(() => {}); });
+    startDownloadTracking({
+      kind: 'cloud-image-download',
+      id,
+      requestId: req.requestId || '',
+      table: cloudImages,
+      node,
+      upid,
+      storage,
+      contentKind: 'import',
+      volid,
+      artifact: 'image',
+    });
 
     res.json({ id, status: 'downloading' });
   } catch (err: any) {

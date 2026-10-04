@@ -44,6 +44,33 @@ function findNextAvailableVlanTag(vlans, firewalls) {
   return null;
 }
 
+function FirewallSyncCell({ vlan, hasFirewalls, onSync }) {
+  if (vlan.firewallSync.length > 0) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+        <span className="text-xs text-green-400">
+          {vlan.firewallSync.map(s => s.firewallName).join(', ')}
+        </span>
+      </div>
+    );
+  }
+  if (vlan.mode === 'tagged_only') {
+    return <span className="text-xs text-fuchsia-300/80">Tagged only</span>;
+  }
+  if (hasFirewalls) {
+    return (
+      <button
+        onClick={() => onSync(vlan)}
+        className="text-xs text-orange-400 hover:text-orange-300 bg-orange-500/10 hover:bg-orange-500/20 px-2 py-1 rounded transition-colors"
+      >
+        Push to Firewall
+      </button>
+    );
+  }
+  return <span className="text-xs text-gray-600">No firewalls</span>;
+}
+
 export default function VLANsPage() {
   useDocumentTitle('VLANs');
   const { user } = useAuth();
@@ -168,25 +195,7 @@ export default function VLANsPage() {
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    {v.firewallSync.length > 0 ? (
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
-                        <span className="text-xs text-green-400">
-                          {v.firewallSync.map(s => s.firewallName).join(', ')}
-                        </span>
-                      </div>
-                    ) : v.mode === 'tagged_only' ? (
-                      <span className="text-xs text-fuchsia-300/80">Tagged only</span>
-                    ) : firewalls.length > 0 ? (
-                      <button
-                        onClick={() => setSyncModalVlan(v)}
-                        className="text-xs text-orange-400 hover:text-orange-300 bg-orange-500/10 hover:bg-orange-500/20 px-2 py-1 rounded transition-colors"
-                      >
-                        Push to Firewall
-                      </button>
-                    ) : (
-                      <span className="text-xs text-gray-600">No firewalls</span>
-                    )}
+                    <FirewallSyncCell vlan={v} hasFirewalls={firewalls.length > 0} onSync={setSyncModalVlan} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
@@ -259,6 +268,9 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [subnet, setSubnet] = useState(null);
   const isTaggedOnly = form.mode === 'tagged_only';
+  const tagMatchesSuggestion = String(form.tag) === String(suggestedTag);
+  const isNewManagedVlan = !vlan && !isTaggedOnly;
+  const showSuggestedTag = isNewManagedVlan && isAdmin && suggestedTag && tagMatchesSuggestion;
 
   // Compute subnet preview when tag changes
   useEffect(() => {
@@ -387,7 +399,7 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
               No free VLAN tags were found in the configured firewall pools. Ask an admin to expand the range or free a tag.
             </p>
           )}
-          {!vlan && !isTaggedOnly && isAdmin && suggestedTag && String(form.tag) === String(suggestedTag) && (
+          {showSuggestedTag && (
             <p className="mt-2 text-xs text-emerald-400">
               Suggested next available tag from the configured firewall ranges.
             </p>

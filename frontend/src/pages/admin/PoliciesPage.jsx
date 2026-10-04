@@ -97,7 +97,7 @@ function ellipseCircumference(radiusX, radiusY) {
   return Math.PI * (radiusX + radiusY) * (1 + ((3 * h) / (10 + Math.sqrt(4 - (3 * h)))));
 }
 
-function placeOnEllipse(tags, radiusX, radiusY, cx, cy, startAngle = -Math.PI / 2, spread = Math.PI * 2) {
+function placeOnEllipse(tags, { radiusX, radiusY, cx, cy, startAngle = -Math.PI / 2, spread = Math.PI * 2 }) {
   if (tags.length === 0) return [];
   return tags.map((tag, index) => {
     const angle = startAngle + (spread * index) / tags.length;
@@ -139,11 +139,11 @@ function placeAcrossBands(tags, {
     const count = Math.min(remaining.length, capacity);
     const slice = remaining.splice(0, count);
     const angleOffset = bandIndex % 2 === 0 ? 0 : Math.PI / Math.max(6, count);
-    placed.push(...placeOnEllipse(slice, radiusX, radiusY, cx, cy, startAngle + angleOffset));
+    placed.push(...placeOnEllipse(slice, { radiusX, radiusY, cx, cy, startAngle: startAngle + angleOffset }));
 
     bandIndex += 1;
     if (bandIndex > 8 && remaining.length > 0) {
-      placed.push(...placeOnEllipse(remaining.splice(0), maxRadiusX, maxRadiusY, cx, cy, startAngle + 0.2));
+      placed.push(...placeOnEllipse(remaining.splice(0), { radiusX: maxRadiusX, radiusY: maxRadiusY, cx, cy, startAngle: startAngle + 0.2 }));
       break;
     }
   }
@@ -153,6 +153,36 @@ function placeAcrossBands(tags, {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function splitPushAdjustment(adjustments, fixedA, fixedB, tagA, tagB, axis, dir, amount) {
+  if (!fixedA && !fixedB) {
+    adjustments[tagA][axis] -= dir * (amount / 2);
+    adjustments[tagB][axis] += dir * (amount / 2);
+  } else if (fixedA && !fixedB) {
+    adjustments[tagB][axis] += dir * amount;
+  } else if (!fixedA && fixedB) {
+    adjustments[tagA][axis] -= dir * amount;
+  }
+}
+
+function resolvePairOverlap({ a, b, tagA, tagB, indexA, indexB, fixedA, fixedB, adjustments }) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const overlapX = (NODE_CARD_SIZE + NODE_COLLISION_GAP) - Math.abs(dx);
+  const overlapY = (NODE_CARD_SIZE + NODE_COLLISION_GAP) - Math.abs(dy);
+
+  if (overlapX <= 0 || overlapY <= 0) return false;
+
+  const pushAlongX = overlapX < overlapY;
+  if (pushAlongX) {
+    const dirX = dx === 0 ? (indexA % 2 === 0 ? -1 : 1) : Math.sign(dx);
+    splitPushAdjustment(adjustments, fixedA, fixedB, tagA, tagB, 'x', dirX, overlapX + 0.5);
+  } else {
+    const dirY = dy === 0 ? (indexB % 2 === 0 ? -1 : 1) : Math.sign(dy);
+    splitPushAdjustment(adjustments, fixedA, fixedB, tagA, tagB, 'y', dirY, overlapY + 0.5);
+  }
+  return true;
 }
 
 function resolveSquareCollisions(initialPositions, width, height, fixedTags = new Set()) {
@@ -181,45 +211,18 @@ function resolveSquareCollisions(initialPositions, width, height, fixedTags = ne
 
     for (let i = 0; i < tags.length; i += 1) {
       for (let j = i + 1; j < tags.length; j += 1) {
-        const tagA = tags[i];
-        const tagB = tags[j];
-        const a = positions[tagA];
-        const b = positions[tagB];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const overlapX = (NODE_CARD_SIZE + NODE_COLLISION_GAP) - Math.abs(dx);
-        const overlapY = (NODE_CARD_SIZE + NODE_COLLISION_GAP) - Math.abs(dy);
-
-        if (overlapX <= 0 || overlapY <= 0) continue;
-
-        moved = true;
-        const pushAlongX = overlapX < overlapY;
-        const fixedA = fixedTags.has(tagA);
-        const fixedB = fixedTags.has(tagB);
-        const dirX = dx === 0 ? (i % 2 === 0 ? -1 : 1) : Math.sign(dx);
-        const dirY = dy === 0 ? (j % 2 === 0 ? -1 : 1) : Math.sign(dy);
-
-        if (pushAlongX) {
-          const amount = overlapX + 0.5;
-          if (!fixedA && !fixedB) {
-            adjustments[tagA].x -= dirX * (amount / 2);
-            adjustments[tagB].x += dirX * (amount / 2);
-          } else if (fixedA && !fixedB) {
-            adjustments[tagB].x += dirX * amount;
-          } else if (!fixedA && fixedB) {
-            adjustments[tagA].x -= dirX * amount;
-          }
-        } else {
-          const amount = overlapY + 0.5;
-          if (!fixedA && !fixedB) {
-            adjustments[tagA].y -= dirY * (amount / 2);
-            adjustments[tagB].y += dirY * (amount / 2);
-          } else if (fixedA && !fixedB) {
-            adjustments[tagB].y += dirY * amount;
-          } else if (!fixedA && fixedB) {
-            adjustments[tagA].y -= dirY * amount;
-          }
-        }
+        const hit = resolvePairOverlap({
+          a: positions[tags[i]],
+          b: positions[tags[j]],
+          tagA: tags[i],
+          tagB: tags[j],
+          indexA: i,
+          indexB: j,
+          fixedA: fixedTags.has(tags[i]),
+          fixedB: fixedTags.has(tags[j]),
+          adjustments,
+        });
+        moved = moved || hit;
       }
     }
 
@@ -304,13 +307,12 @@ function buildNodePositions(vlans, policies, srcTag, width, height) {
   }
 
   if (sortedTags.length <= 4) {
-    placeOnEllipse(
-      sortedTags,
-      Math.min(Math.max(safeRadiusX * 0.65, 160), safeRadiusX),
-      Math.min(Math.max(safeRadiusY * 0.6, 120), safeRadiusY),
+    placeOnEllipse(sortedTags, {
+      radiusX: Math.min(Math.max(safeRadiusX * 0.65, 160), safeRadiusX),
+      radiusY: Math.min(Math.max(safeRadiusY * 0.6, 120), safeRadiusY),
       cx,
-      cy
-    ).forEach(({ tag, x, y }) => {
+      cy,
+    }).forEach(({ tag, x, y }) => {
       positions[tag] = { x, y };
     });
     return resolveSquareCollisions(positions, width, height);
@@ -395,6 +397,30 @@ function buildLineModels(policies, positions, srcTag) {
       };
     })
     .filter(Boolean);
+}
+
+// ── Graph-node presentation tables (role → visual state) ────────────────────
+const NODE_CARD_CLASSES = {
+  source: 'border-cyan-300/80 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.22),0_0_0_12px_rgba(8,145,178,0.08),0_26px_60px_rgba(8,145,178,0.24)]',
+  destination: 'border-emerald-300/80 bg-emerald-500/10 shadow-[0_0_0_1px_rgba(16,185,129,0.2),0_0_0_10px_rgba(5,150,105,0.08),0_24px_60px_rgba(5,150,105,0.22)]',
+  peer: 'border-slate-500/80 bg-slate-800/92 hover:border-cyan-300/50',
+  plain: 'border-slate-800 bg-slate-900/88 hover:border-slate-600 hover:bg-slate-900',
+};
+
+const NODE_STATUS_TONES = {
+  source: 'border-cyan-400/25 bg-cyan-500/12 text-cyan-200',
+  destination: 'border-emerald-400/25 bg-emerald-500/12 text-emerald-200',
+  peer: 'border-slate-500/40 bg-slate-700/50 text-slate-200',
+  plain: 'border-slate-700/80 bg-slate-900 text-slate-400',
+};
+
+const NODE_SCALES = { source: 1.16, destination: 1.1, peer: 1.02, muted: 0.96, plain: 1 };
+
+function nodeCardRole({ isSource, isDestination, isPeer }) {
+  if (isSource) return 'source';
+  if (isDestination) return 'destination';
+  if (isPeer) return 'peer';
+  return 'plain';
 }
 
 function GraphLegend({ usedServices, hasDeny }) {
@@ -482,6 +508,8 @@ export default function PoliciesPage() {
   zoomRef.current = zoom;
   const panOffsetRef = useRef(panOffset);
   panOffsetRef.current = panOffset;
+
+  const viewChanged = panOffset.x !== 0 || panOffset.y !== 0 || zoom !== 1 || Object.keys(dragOverrides).length > 0;
 
   // ── Policy popover (click a route line) + VLAN search ──────────────────────
   const [linePopover, setLinePopover] = useState(null); // { id, x, y }
@@ -948,7 +976,7 @@ export default function PoliciesPage() {
             onPointerDown={handleCanvasPointerDown}
           >
             {/* Recenter button */}
-            {(panOffset.x !== 0 || panOffset.y !== 0 || zoom !== 1 || Object.keys(dragOverrides).length > 0) && (
+            {viewChanged && (
               <button
                 onClick={(e) => { e.stopPropagation(); recenterView(); }}
                 className="absolute top-3 right-3 z-20 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-300 backdrop-blur-sm transition-colors hover:bg-slate-800 hover:text-white"
@@ -1351,30 +1379,17 @@ export default function PoliciesPage() {
                       || String(vlan.tag).includes(query);
                     const routeCount = degreeMap.get(vlan.tag) || 0;
                     const peerCount = (peerMap.get(vlan.tag) || new Set()).size;
-                    const scale = isSource ? 1.16 : isDestination ? 1.1 : isPeer ? 1.02 : isMuted ? 0.96 : 1;
-                    const statusLabel = isSource ? 'Source' : isDestination ? 'Target' : isPeer ? 'Linked' : 'Open';
-                    const statusTone = isSource
-                      ? 'border-cyan-400/25 bg-cyan-500/12 text-cyan-200'
-                      : isDestination
-                        ? 'border-emerald-400/25 bg-emerald-500/12 text-emerald-200'
-                        : isPeer
-                          ? 'border-slate-500/40 bg-slate-700/50 text-slate-200'
-                          : 'border-slate-700/80 bg-slate-900 text-slate-400';
+                    const role = nodeCardRole({ isSource, isDestination, isPeer });
+                    const scale = isMuted ? NODE_SCALES.muted : NODE_SCALES[role];
+                    const statusTone = NODE_STATUS_TONES[role];
+                    const statusLabel = role === 'plain' ? 'Open' : role === 'source' ? 'Source' : role === 'destination' ? 'Target' : 'Linked';
 
                     return (
                       <button
                         key={vlan.tag}
                         onClick={() => handleCardClick(vlan)}
                         onPointerDown={(e) => handleNodePointerDown(e, vlan)}
-                        className={`absolute z-[5] h-36 w-36 cursor-grab rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${
-                          isSource
-                            ? 'border-cyan-300/80 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.22),0_0_0_12px_rgba(8,145,178,0.08),0_26px_60px_rgba(8,145,178,0.24)]'
-                            : isDestination
-                              ? 'border-emerald-300/80 bg-emerald-500/10 shadow-[0_0_0_1px_rgba(16,185,129,0.2),0_0_0_10px_rgba(5,150,105,0.08),0_24px_60px_rgba(5,150,105,0.22)]'
-                              : isPeer
-                                ? 'border-slate-500/80 bg-slate-800/92 hover:border-cyan-300/50'
-                                : 'border-slate-800 bg-slate-900/88 hover:border-slate-600 hover:bg-slate-900'
-                        }${query && matchesSearch ? ' ring-2 ring-amber-300/60' : ''}`}
+                        className={`absolute z-[5] h-36 w-36 cursor-grab rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${NODE_CARD_CLASSES[role]}${query && matchesSearch ? ' ring-2 ring-amber-300/60' : ''}`}
                         style={{
                           left: `${position.x}px`,
                           top: `${position.y}px`,
