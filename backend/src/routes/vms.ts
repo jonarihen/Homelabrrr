@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { and, desc, eq, inArray } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmSchedules, pveHosts, vmSshConfigs, vmSshUserConfigs, vlans, firewallVlanSync, firewalls,
   vmAssignments, vmMigrations, vmLeases, provisionedVms, backupTasks,
@@ -10,7 +10,7 @@ import {
 import {
   getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
-  restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType,
+  restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType, resolveLegacyVmNode,
   getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
   getTaskStatus, getTaskLog, getVMAgentInterfaces,
@@ -38,6 +38,8 @@ import { parseUpid, inProgressVolids } from '../utils/backupTask.ts';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.ts';
 import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.ts';
 import { validatePassword } from '../utils/validation.ts';
+import { isUniqueViolation } from '../db/errors.ts';
+import { assertVmPolicyLocation, vmMigrationPending, withVmMigrationLock, withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -480,7 +482,7 @@ router.post('/:node/:vmid/lease/renew', async (req, res) => {
   }
 
   try {
-    const lease = await renewLease(node, vmid, { createdBy: req.session.username });
+    const lease = await renewLease(node, vmid, { createdBy: req.session.username, actor: { userId: req.session.userId } });
     if (!lease) return res.status(404).json({ error: 'This VM has no lease to renew' });
     await logAudit(req, 'lease_renew', `${node}/${vmid}`, `renewal #${lease.renewal_count}`);
     res.json({ ok: true, lease: await summarizeLease(node, vmid) });
@@ -529,73 +531,98 @@ router.delete('/:node/:vmid', async (req, res) => {
     return res.status(403).json({ error: 'You can only delete VMs assigned to you' });
   }
 
-  // Never destroy the kept-behind source copy of a shared-storage migration —
-  // its disks are the SAME volumes the migrated VM uses on the other host.
-  // (PVE's protection flag also blocks this; this check gives a clear message
-  // instead of a raw upstream error.)
-  const [latestMigration] = await db
-    .select({
-      source_node: vmMigrations.source_node,
-      target_node: vmMigrations.target_node,
-      kept_source: vmMigrations.kept_source,
-    })
-    .from(vmMigrations)
-    .where(and(eq(vmMigrations.vmid, parseInt(vmid, 10)), eq(vmMigrations.status, 'ok')))
-    .orderBy(desc(vmMigrations.id))
-    .limit(1);
-  if (latestMigration?.kept_source) {
-    const requestCandidates = nodeLookupCandidates(node);
-    const sourceCandidates = nodeLookupCandidates(latestMigration.source_node);
-    if (sourceCandidates.some((c) => requestCandidates.includes(c))) {
-      return res.status(400).json({
-        error: `This is the migrated-away source copy — its disks belong to the live VM on the other host. Remove only its config from the source host shell: rm /etc/pve/qemu-server/${parseInt(vmid, 10)}.conf`,
-      });
-    }
-  }
-
   try {
-    // Collect backups first — after destruction the VMID no longer resolves to a host
-    let backups = [];
-    try {
-      backups = await getVMBackups(node, vmid);
-    } catch (err) {
-      console.warn(`[vm-delete] Could not list backups for ${node}/${vmid}: ${err.message}`);
-    }
-
-    await deleteVM(node, vmid);
-
-    // Purge every backup of this VMID so a future VM reusing the ID never inherits them
-    let deletedBackups = 0;
-    const failedBackups = [];
-    for (const backup of backups) {
-      try {
-        await deleteVMBackup(node, backup.storage, backup.volid);
-        deletedBackups += 1;
-      } catch (err) {
-        console.warn(`[vm-delete] Failed to delete backup ${backup.volid}: ${err.message}`);
-        failedBackups.push(backup.volid);
-      }
-    }
-
-    // Clean up portal records tied to this VM
     const parsedVmid = parseInt(vmid, 10);
-    const candidates = nodeLookupCandidates(node);
-    if (candidates.length > 0) {
-      // Each of these tables keys rows on (node, vmid); loop over the table
-      // objects rather than interpolating names into SQL.
-      const cleanupTables: any[] = [
-        vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules, backupTasks,
-      ];
-      for (const table of cleanupTables) {
-        await db.delete(table).where(and(eq(table.vmid, parsedVmid), inArray(table.node, candidates)));
+    const result = await withVmMigrationLock(parsedVmid, async (database) => {
+      if (await vmMigrationPending(database, parsedVmid)) {
+        throw httpError(409, 'VM migration is running or awaiting review; deletion is blocked');
       }
-    }
-
-    await logAudit(req, 'vm_delete', `${node}/${vmid}`, `backups_deleted=${deletedBackups}${failedBackups.length > 0 ? ` backups_failed=${failedBackups.length}` : ''}`);
-    res.json({ ok: true, deletedBackups, failedBackups });
-  } catch (err) {
-    sendError(res, err);
-  }
+      const [latestMigration] = await database.select().from(vmMigrations)
+        .where(and(eq(vmMigrations.vmid, parsedVmid), eq(vmMigrations.status, 'ok')))
+        .orderBy(desc(vmMigrations.id)).limit(1);
+      if (latestMigration?.kept_source) {
+        const requested = decodeNodeRef(node);
+        const source = decodeNodeRef(latestMigration.source_node);
+        const target = decodeNodeRef(latestMigration.target_node);
+        const isSource = source.nodeName === requested.nodeName
+          && (source.hostId === null ? requested.nodeRef !== target.nodeRef : requested.hostId === null || requested.hostId === source.hostId);
+        if (isSource) throw httpError(400, 'This is the migrated-away source copy; remove only its config, not its shared disks');
+      }
+      let currentNode = await assertVmPolicyLocation(database, node, parsedVmid);
+      const currentRef = decodeNodeRef(currentNode);
+      const cleanupTables: any[] = [vmAssignments, vmSshConfigs, vmSshUserConfigs, provisionedVms, vmLeases, vmSchedules];
+      let hasLegacyRows = currentRef.hostId === null;
+      for (const table of cleanupTables) {
+        const [legacy] = await database.select({ id: table.id }).from(table)
+          .where(and(eq(table.vmid, parsedVmid), eq(table.node, currentRef.nodeName))).limit(1);
+        if (legacy) hasLegacyRows = true;
+      }
+      if (hasLegacyRows) {
+        const verifiedNode = await resolveLegacyVmNode(currentRef.nodeName, parsedVmid, database);
+        if (currentRef.hostId !== null && verifiedNode !== currentRef.nodeRef) {
+          throw httpError(409, 'Legacy VM records belong to another host; reload its canonical location before deletion');
+        }
+        currentNode = verifiedNode;
+      }
+      const candidates = nodeLookupCandidates(currentNode);
+      const [actor] = await database.select({ is_admin: users.is_admin }).from(users).where(eq(users.id, req.session.userId));
+      const assignments = await database.select().from(vmAssignments)
+        .where(and(eq(vmAssignments.vmid, parsedVmid), inArray(vmAssignments.node, candidates)));
+      if (!actor || (!actor.is_admin && !assignments.some((assignment) => assignment.user_id === req.session.userId))) {
+        throw httpError(403, 'You can only delete VMs assigned to you');
+      }
+      if (hasLegacyRows) {
+        try {
+          await database.transaction(async (tx) => {
+            for (const table of cleanupTables) {
+              await tx.update(table).set({ node: currentNode })
+                .where(and(eq(table.vmid, parsedVmid), eq(table.node, currentRef.nodeName)));
+            }
+          });
+        } catch (err) {
+          if (isUniqueViolation(err)) throw httpError(409, 'Conflicting legacy VM aliases must be reconciled before deletion');
+          throw err;
+        }
+      }
+      let backups = [];
+      try {
+        backups = await getVMBackups(currentNode, vmid, database);
+      } catch (err) {
+        console.warn(`[vm-delete] Could not list backups for ${node}/${vmid}: ${err.message}`);
+      }
+      const deleted = await deleteVM(currentNode, vmid, { allowMissing: true }, database);
+      let deletedBackups = 0;
+      const failedBackups = [];
+      for (const backup of backups) {
+        try {
+          await deleteVMBackup(currentNode, backup.storage, backup.volid, database);
+          deletedBackups += 1;
+        } catch (err) {
+          console.warn(`[vm-delete] Failed to delete backup ${backup.volid}: ${err.message}`);
+          failedBackups.push(backup.volid);
+        }
+      }
+      if (currentNode) {
+        await database.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL lock_timeout = '2s'`);
+          await tx.execute(sql`LOCK TABLE ${sql.join(cleanupTables.map((table) => sql`${table}`), sql`, `)} IN SHARE ROW EXCLUSIVE MODE`);
+          for (const table of cleanupTables) {
+            const [unexpected] = await tx.select({ id: table.id }).from(table)
+              .where(and(eq(table.vmid, parsedVmid), eq(table.node, decodeNodeRef(currentNode).nodeName))).limit(1);
+            if (unexpected) throw httpError(409, 'New legacy VM aliases appeared during deletion; reconcile them before cleanup');
+          }
+          for (const table of cleanupTables) {
+            await tx.delete(table).where(and(eq(table.vmid, parsedVmid), eq(table.node, currentNode)));
+          }
+          await tx.delete(backupTasks).where(and(eq(backupTasks.vmid, parsedVmid), inArray(backupTasks.node, nodeLookupCandidates(currentNode))));
+          await tx.delete(vmMigrations).where(and(eq(vmMigrations.vmid, parsedVmid), inArray(vmMigrations.status, ['ok', 'error', 'failed', 'timeout'])));
+        });
+      }
+      return { ok: true, deletedBackups, failedBackups, alreadyAbsent: Boolean(deleted.alreadyAbsent) };
+    });
+    await logAudit(req, 'vm_delete', `${node}/${vmid}`, `backups_deleted=${result.deletedBackups}; already_absent=${result.alreadyAbsent}`);
+    res.json(result);
+  } catch (err) { sendError(res, err); }
 });
 
 // ─── VM RRD data ──────────────────────────────────────────────────────────────
@@ -1737,10 +1764,10 @@ router.post('/:node/:vmid/snapshots/:snapname/rollback', async (req, res) => {
 // Owners (and admins) define an automatic OFF window — stop_time/start_time on a
 // set of days in a timezone — enforced by the background scheduler (scheduler.js).
 
-async function loadScheduleRow(node, vmid) {
+async function loadScheduleRow(node, vmid, database: DbOrTx = db) {
   const candidates = nodeLookupCandidates(node);
   if (candidates.length === 0) return null;
-  const [row] = await db
+  const [row] = await database
     .select()
     .from(vmSchedules)
     .where(and(inArray(vmSchedules.node, candidates), eq(vmSchedules.vmid, parseInt(vmid, 10))))
@@ -1790,39 +1817,25 @@ router.put('/:node/:vmid/schedule', async (req, res) => {
   const parsedVmid = parseInt(vmid, 10);
   const enabledBool = !!enabled;
 
-  // Reset scheduler bookkeeping so a re-defined window is evaluated fresh.
-  // last_off (-1) and days stay numeric; the rest of the flags are booleans.
-  await db.insert(vmSchedules).values({
-    node,
-    vmid: parsedVmid,
-    enabled: enabledBool,
-    stop_time: stopTime,
-    start_time: startTime,
-    days: daysMask,
-    timezone,
-    skip_until: 0,
-    running_due_to_manual: false,
-    stopped_this_window: false,
-    last_off: -1,
-    updated_at: new Date(),
-  }).onConflictDoUpdate({
-    target: [vmSchedules.node, vmSchedules.vmid],
-    set: {
-      enabled: enabledBool,
-      stop_time: stopTime,
-      start_time: startTime,
-      days: daysMask,
-      timezone,
-      skip_until: 0,
-      running_due_to_manual: false,
-      stopped_this_window: false,
-      last_off: -1,
-      updated_at: new Date(),
-    },
-  });
-
-  await logAudit(req, 'vm_schedule_set', `${node}/${vmid}`, `${enabledBool ? 'on' : 'off'} stop=${stopTime} start=${startTime} days=${daysMask} tz=${timezone}`);
-  res.json({ schedule: serializeSchedule(await loadScheduleRow(node, vmid)) });
+  try {
+    const row = await withVmPolicyWrite(node, parsedVmid, async (tx, currentNode) => {
+      const existing = await loadScheduleRow(currentNode, vmid, tx);
+      const set = {
+        enabled: enabledBool, stop_time: stopTime, start_time: startTime, days: daysMask, timezone,
+        skip_until: 0, running_due_to_manual: false, stopped_this_window: false,
+        last_off: -1, updated_at: new Date(),
+      };
+      if (existing) {
+        const [updated] = await tx.update(vmSchedules).set(set).where(eq(vmSchedules.id, existing.id)).returning();
+        return updated;
+      }
+      const [inserted] = await tx.insert(vmSchedules).values({ node: currentNode, vmid: parsedVmid, ...set })
+        .onConflictDoUpdate({ target: [vmSchedules.node, vmSchedules.vmid], set }).returning();
+      return inserted;
+    }, { userId: req.session.userId });
+    await logAudit(req, 'vm_schedule_set', `${node}/${vmid}`, `${enabledBool ? 'on' : 'off'} stop=${stopTime} start=${startTime} days=${daysMask} tz=${timezone}`);
+    res.json({ schedule: serializeSchedule(row) });
+  } catch (err) { sendError(res, err); }
 });
 
 // Delete the schedule entirely.
@@ -1833,11 +1846,14 @@ router.delete('/:node/:vmid/schedule', async (req, res) => {
   }
   const candidates = nodeLookupCandidates(node);
   const parsedVmid = parseInt(vmid, 10);
-  if (candidates.length > 0) {
-    await db.delete(vmSchedules).where(and(eq(vmSchedules.vmid, parsedVmid), inArray(vmSchedules.node, candidates)));
-  }
-  await logAudit(req, 'vm_schedule_delete', `${node}/${vmid}`, '');
-  res.json({ ok: true });
+  try {
+    if (candidates.length > 0) {
+      await withVmPolicyWrite(node, parsedVmid, (tx, currentNode) =>
+        tx.delete(vmSchedules).where(and(eq(vmSchedules.vmid, parsedVmid), inArray(vmSchedules.node, nodeLookupCandidates(currentNode)))), { userId: req.session.userId });
+    }
+    await logAudit(req, 'vm_schedule_delete', `${node}/${vmid}`, '');
+    res.json({ ok: true });
+  } catch (err) { sendError(res, err); }
 });
 
 // "Skip tonight": suppress scheduler actions until the next start_time so the
@@ -1847,14 +1863,19 @@ router.post('/:node/:vmid/schedule/skip', async (req, res) => {
   if (!(await canEditSchedule(req, node, vmid))) {
     return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
   }
-  const row = await loadScheduleRow(node, vmid);
-  if (!row || !row.enabled || !isValidTime(row.start_time) || !isValidTimezone(row.timezone)) {
-    return res.status(400).json({ error: 'No active schedule to skip' });
-  }
-  const skipUntil = nextTimeOccurrence(Date.now(), row.timezone, timeToMinutes(row.start_time));
-  await db.update(vmSchedules).set({ skip_until: skipUntil }).where(eq(vmSchedules.id, row.id));
-  await logAudit(req, 'vm_schedule_skip', `${node}/${vmid}`, new Date(skipUntil).toISOString());
-  res.json({ schedule: serializeSchedule(await loadScheduleRow(node, vmid)) });
+  try {
+    const row = await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx, currentNode) => {
+      const existing = await loadScheduleRow(currentNode, vmid, tx);
+      if (!existing || !existing.enabled || !isValidTime(existing.start_time) || !isValidTimezone(existing.timezone)) {
+        throw httpError(400, 'No active schedule to skip');
+      }
+      const skipUntil = nextTimeOccurrence(Date.now(), existing.timezone, timeToMinutes(existing.start_time));
+      const [updated] = await tx.update(vmSchedules).set({ skip_until: skipUntil }).where(eq(vmSchedules.id, existing.id)).returning();
+      return updated;
+    }, { userId: req.session.userId });
+    await logAudit(req, 'vm_schedule_skip', `${node}/${vmid}`, new Date(row.skip_until || 0).toISOString());
+    res.json({ schedule: serializeSchedule(row) });
+  } catch (err) { sendError(res, err); }
 });
 
 // Cancel a pending "skip tonight".
@@ -1863,11 +1884,16 @@ router.delete('/:node/:vmid/schedule/skip', async (req, res) => {
   if (!(await canEditSchedule(req, node, vmid))) {
     return res.status(403).json({ error: 'You can only edit schedules for VMs assigned to you' });
   }
-  const row = await loadScheduleRow(node, vmid);
-  if (!row) return res.status(404).json({ error: 'No schedule found' });
-  await db.update(vmSchedules).set({ skip_until: 0 }).where(eq(vmSchedules.id, row.id));
-  await logAudit(req, 'vm_schedule_skip_cancel', `${node}/${vmid}`, '');
-  res.json({ schedule: serializeSchedule(await loadScheduleRow(node, vmid)) });
+  try {
+    const row = await withVmPolicyWrite(node, parseInt(vmid, 10), async (tx, currentNode) => {
+      const existing = await loadScheduleRow(currentNode, vmid, tx);
+      if (!existing) throw httpError(404, 'No schedule found');
+      const [updated] = await tx.update(vmSchedules).set({ skip_until: 0 }).where(eq(vmSchedules.id, existing.id)).returning();
+      return updated;
+    }, { userId: req.session.userId });
+    await logAudit(req, 'vm_schedule_skip_cancel', `${node}/${vmid}`, '');
+    res.json({ schedule: serializeSchedule(row) });
+  } catch (err) { sendError(res, err); }
 });
 
 // ─── User's allowed VLANs ────────────────────────────────────────────────────
