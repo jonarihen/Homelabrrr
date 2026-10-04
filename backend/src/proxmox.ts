@@ -1,8 +1,8 @@
 import https from 'https';
 import tls from 'tls';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { db } from './db/client.ts';
-import { pveHosts } from './db/schema/index.ts';
+import { pveHosts, provisionedVms } from './db/schema/index.ts';
 import { decryptSecret } from './utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.ts';
 import { pickVmid, isVmidTakenError, VmidReservations, VMID_MIN } from './utils/vmidAllocator.ts';
@@ -46,15 +46,27 @@ function tagUpstreamHost(err, host) {
 }
 
 function makeRequest(host, method, path, body) {
-  const url = new URL(`https://${host.host}:${host.port}/api2/json${path}`);
-  const authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
-  const payload = body && method !== 'DELETE' ? JSON.stringify(body) : null;
+  let url, authHeader, payload;
+  try {
+    url = new URL(`https://${host.host}:${host.port}/api2/json${path}`);
+    authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
+    payload = body && method !== 'DELETE' ? JSON.stringify(body) : null;
+  } catch (err) { err.submissionStarted = false; throw err; }
 
   return new Promise((resolve, reject) => {
-    const fail = (err) => reject(tagUpstreamHost(err, host));
-    const req = https.request(url, {
+    let submissionStarted = false;
+    const fail = (err) => {
+      err.submissionStarted = submissionStarted;
+      reject(tagUpstreamHost(err, host));
+    };
+    let agent;
+    try { agent = agentForHost(host); }
+    catch (err) { fail(err); return; }
+    let req;
+    try {
+      req = https.request(url, {
       method,
-      agent: agentForHost(host),
+      agent,
       headers: {
         Authorization: authHeader,
         'Content-Type': 'application/json',
@@ -65,14 +77,23 @@ function makeRequest(host, method, path, body) {
       res.on('data', (chunk) => { text += chunk; });
       res.on('end', () => {
         if (res.statusCode >= 400) {
-          fail(new Error(`Proxmox ${method} ${path} → ${res.statusCode}: ${text}`));
+          const error = new Error(`Proxmox ${method} ${path} → ${res.statusCode}: ${text}`);
+          error.upstreamStatusCode = res.statusCode;
+          error.definitiveRejection = res.statusCode < 500 && ![408, 429].includes(res.statusCode);
+          fail(error);
           return;
         }
         try { resolve(JSON.parse(text).data); }
         catch { resolve(text); }
       });
     });
+    } catch (err) { fail(err); return; }
 
+    req.on('socket', socket => {
+      const ready = () => { submissionStarted = true; };
+      if (req.reusedSocket || (!socket.connecting && socket.encrypted && socket.authorized)) ready();
+      else socket.once('secureConnect', ready);
+    });
     req.on('error', fail);
     req.setTimeout(15000, () => req.destroy(new Error('Proxmox request timeout')));
     if (payload) req.write(payload);
@@ -254,6 +275,15 @@ export async function getVMConfigCurrent(node, vmid) {
   return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config?current=1`);
 }
 
+export async function getProvisionVMConfig(node, vmid) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  const resources = await makeRequest(host, 'GET', '/cluster/resources?type=vm');
+  if (!resources.some(vm => Number(vm.vmid) === Number(vmid) && vm.node === nodeName && vm.type === 'qemu')) {
+    throw new Error('Provisioned VM is not present on the recorded Proxmox node');
+  }
+  return makeRequest(host, 'GET', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/config?current=1`);
+}
+
 // Addresses as the guest itself sees them. Requires qemu-guest-agent running
 // inside the VM — Proxmox answers 500 when the agent is absent, stopped, or
 // the VM is powered off, so every caller must treat a rejection as "unknown",
@@ -401,7 +431,9 @@ export async function getNextVmid() {
       } catch { /* next */ }
     }
   }
-  // Lowest free VMID that no other in-flight deploy is already holding
+  const pending = await db.select({ vmid: provisionedVms.vmid }).from(provisionedVms)
+    .where(inArray(provisionedVms.status, ['submitting', 'creating', 'cloning', 'configuring', 'needs_review', 'timeout']));
+  for (const job of pending) if (job.vmid > 0) usedIds.add(job.vmid);
   const vmid = pickVmid(usedIds, vmidReservations.active(), startAt);
   vmidReservations.reserve(vmid);
   return vmid;
@@ -412,32 +444,34 @@ export async function getNextVmid() {
 // as free that something outside this process took in the meantime. Returns
 // `{ vmid, result }`.
 //
-// On a collision the losing id stays reserved — it is genuinely taken upstream
-// — and one retry runs against a fresh allocation. Any other failure releases
-// the reservation immediately so a failed deploy doesn't burn an id.
-export async function withFreshVmid(fn) {
-  const vmid = await getNextVmid();
-  try {
-    return { vmid, result: await fn(vmid) };
-  } catch (err) {
-    if (!isVmidTakenError(err)) {
+export async function withFreshVmid(fn, { onReserved = async (_vmid) => {} } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let vmid;
+    try { vmid = await getNextVmid(); }
+    catch (err) { err.submissionStarted = false; throw err; }
+    try {
+      await onReserved(vmid);
+    } catch (err) {
       releaseVmid(vmid);
+      err.submissionStarted = false;
       throw err;
     }
-    console.warn(`[vmid] ${vmid} was taken upstream — retrying with a fresh id`);
-  }
-
-  const retryVmid = await getNextVmid();
-  try {
-    return { vmid: retryVmid, result: await fn(retryVmid) };
-  } catch (err) {
-    if (!isVmidTakenError(err)) releaseVmid(retryVmid);
-    throw err;
+    try {
+      return { vmid, result: await fn(vmid) };
+    } catch (err) {
+      const taken = isVmidTakenError(err);
+      if ((err.definitiveRejection || err.submissionStarted === false) && !taken) releaseVmid(vmid);
+      if (!taken || attempt === 1) throw err;
+      console.warn(`[vmid] ${vmid} was taken upstream — retrying with a fresh id`);
+    }
   }
 }
 
 export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {
-  const { host, nodeName } = await resolveNode(node, { vmid: templateVmid });
+  let resolved;
+  try { resolved = await resolveNode(node, { vmid: templateVmid }); }
+  catch (err) { err.submissionStarted = false; throw err; }
+  const { host, nodeName } = resolved;
   const body = {
     newid: newVmid,
     name,
@@ -450,7 +484,10 @@ export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {
 }
 
 export async function createVM(node, vmid, config) {
-  const { host, nodeName } = await resolveNode(node);
+  let resolved;
+  try { resolved = await resolveNode(node); }
+  catch (err) { err.submissionStarted = false; throw err; }
+  const { host, nodeName } = resolved;
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu`, { vmid, ...config });
 }
 

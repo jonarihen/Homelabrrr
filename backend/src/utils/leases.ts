@@ -1,8 +1,7 @@
 import { and, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { db, type DbOrTx } from '../db/client.ts';
 import { vmLeases, provisionedVms, vmAssignments } from '../db/schema/index.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
-import { isUniqueViolation } from '../db/errors.ts';
 import { logAuditEntry } from './audit.ts';
 import { getAllVMs, vmAction, lxcAction } from '../proxmox.ts';
 import { nodeLookupCandidates } from './nodeRef.ts';
@@ -23,17 +22,17 @@ export const LEASE_EXPIRING_SOON_DAYS = 3;
 
 const MS_PER_DAY = 86_400_000;
 
-async function readIntSetting(key: string, fallback: number): Promise<number> {
-  const value = await getSetting(key);
+async function readIntSetting(key: string, fallback: number, database: DbOrTx = db): Promise<number> {
+  const value = await getSetting(key, database);
   if (value === null) return fallback;
   const n = Number.parseInt(value, 10);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-export async function getLeaseSettings() {
+export async function getLeaseSettings(database: DbOrTx = db) {
   return {
-    defaultDays: await readIntSetting(LEASE_DEFAULT_DAYS_KEY, DEFAULT_LEASE_DAYS),
-    graceDays: await readIntSetting(LEASE_GRACE_DAYS_KEY, DEFAULT_GRACE_DAYS),
+    defaultDays: await readIntSetting(LEASE_DEFAULT_DAYS_KEY, DEFAULT_LEASE_DAYS, database),
+    graceDays: await readIntSetting(LEASE_GRACE_DAYS_KEY, DEFAULT_GRACE_DAYS, database),
   };
 }
 
@@ -52,7 +51,7 @@ export async function setLeaseSettings({ defaultDays, graceDays }: { defaultDays
 // Node values in vm_leases may be stored as a nodeRef ("1~pve") or a legacy
 // bare node name, so match through all nodeLookupCandidates in a single query,
 // ordering the matches by candidate preference (nodeRef before bare name).
-export async function getLeaseRow(node: unknown, vmid: unknown) {
+export async function getLeaseRow(node: unknown, vmid: unknown, database: DbOrTx = db) {
   const parsed = Number.parseInt(vmid as string, 10);
   if (!Number.isInteger(parsed)) return null;
   const candidates = nodeLookupCandidates(node);
@@ -63,7 +62,7 @@ export async function getLeaseRow(node: unknown, vmid: unknown) {
     sql` `,
   )} ELSE ${candidates.length} END`;
 
-  const [row] = await db
+  const [row] = await database
     .select()
     .from(vmLeases)
     .where(and(eq(vmLeases.vmid, parsed), inArray(vmLeases.node, candidates)))
@@ -74,32 +73,26 @@ export async function getLeaseRow(node: unknown, vmid: unknown) {
 
 // Create a lease for a VM at provisioning time (no-op if one already exists).
 // `leaseDays` overrides the configured default; 0 / unlimited → expires_at NULL.
-export async function createLeaseForVm(node: unknown, vmid: unknown, { createdBy = '', leaseDays }: { createdBy?: string; leaseDays?: unknown } = {}) {
+export async function createLeaseForVm(node: unknown, vmid: unknown, { createdBy = '', leaseDays }: { createdBy?: string; leaseDays?: unknown } = {}, database: DbOrTx = db) {
   const parsed = Number.parseInt(vmid as string, 10);
   if (!node || !Number.isInteger(parsed)) return null;
 
-  const existing = await getLeaseRow(node, vmid);
+  const existing = await getLeaseRow(node, vmid, database);
   if (existing) return existing;
 
-  const { defaultDays } = await getLeaseSettings();
+  const { defaultDays } = await getLeaseSettings(database);
   const requested = leaseDays !== undefined && leaseDays !== null ? Number.parseInt(leaseDays as string, 10) : defaultDays;
   const days = Number.isFinite(requested) && requested > 0 ? requested : 0; // 0 = unlimited
 
-  try {
-    await db.insert(vmLeases).values({
-      node: String(node),
-      vmid: parsed,
-      lease_days: days,
-      // started_at defaults to now(); expires_at is now + N days, or NULL when unlimited.
-      expires_at: days > 0 ? (sql`now() + make_interval(days => ${days})` as unknown as Date) : null,
-      created_by: createdBy || '',
-    });
-  } catch (err) {
-    // UNIQUE race — a lease already exists; fall through and read it back.
-    if (!isUniqueViolation(err)) throw err;
-  }
+  await database.insert(vmLeases).values({
+    node: String(node),
+    vmid: parsed,
+    lease_days: days,
+    expires_at: days > 0 ? (sql`now() + make_interval(days => ${days})` as unknown as Date) : null,
+    created_by: createdBy || '',
+  }).onConflictDoNothing({ target: [vmLeases.node, vmLeases.vmid] });
 
-  return getLeaseRow(node, vmid);
+  return getLeaseRow(node, vmid, database);
 }
 
 // Owner-initiated renewal: reset the clock from now using the lease's own

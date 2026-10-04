@@ -87,6 +87,20 @@ test('assertUserQuota rejects allocations over a limit with a 403-tagged error',
   await assert.rejects(quota.assertUserQuota(2, { addDiskGb: 101 }), /Storage quota exceeded/);
 });
 
+test('clone allocation sums actual disks, includes growth, and never shrinks or resizes a fallback disk', () => {
+  const disks = {
+    scsi0: 'local:vm-500-disk-0,size=64G',
+    virtio0: 'local:vm-500-disk-1,size=16G',
+    efidisk0: 'local:vm-500-disk-2,size=4M',
+    ide2: 'local:cloudinit,media=cdrom',
+    ide3: 'local:iso/installer.iso,media=cdrom',
+  };
+  assert.deepEqual(quota.cloneDiskAllocation(disks, 1), { diskGb: 80 + 4 / 1024, resizeDisk: null });
+  assert.deepEqual(quota.cloneDiskAllocation(disks, 128), { diskGb: 144 + 4 / 1024, resizeDisk: 'scsi0' });
+  assert.deepEqual(quota.cloneDiskAllocation({ virtio0: 'local:disk,size=1T' }, 2048), { diskGb: 2048, resizeDisk: 'virtio0' });
+  assert.throws(() => quota.cloneDiskAllocation({ scsi0: 'local:disk' }, 1), /Cannot determine/);
+});
+
 test('sizeToGb parses PVE disk size strings', () => {
   assert.equal(quota.sizeToGb('32G'), 32);
   assert.equal(quota.sizeToGb('512M'), 0.5);

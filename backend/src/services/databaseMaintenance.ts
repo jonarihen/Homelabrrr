@@ -11,7 +11,7 @@ function envDays(name: string, fallback: number) {
 // is a constant predicate emitted verbatim (never user input).
 const POLICIES = [
   { table: 'audit_log', timestamp: 'created_at', days: () => envDays('AUDIT_RETENTION_DAYS', 365), where: '1 = 1' },
-  { table: 'provisioned_vms', timestamp: 'created_at', days: () => envDays('JOB_RETENTION_DAYS', 90), where: "status IN ('ready','error','timeout','failed')" },
+  { table: 'provisioned_vms', timestamp: 'created_at', days: () => envDays('JOB_RETENTION_DAYS', 90), where: "status IN ('ready','error','timeout','failed') AND NOT (status = 'timeout' AND COALESCE(steps, '[]'::jsonb) @> '[{\"key\":\"reserve\",\"allocation\":{\"state\":\"pending\"}}]'::jsonb)" },
   { table: 'vm_migrations', timestamp: 'finished_at', days: () => envDays('JOB_RETENTION_DAYS', 90), where: "status IN ('ok','error','failed','timeout')" },
   { table: 'backup_tasks', timestamp: 'created_at', days: () => envDays('JOB_RETENTION_DAYS', 90), where: "status NOT IN ('running','queued')" },
   { table: 'workflow_runs', timestamp: 'created_at', days: () => envDays('JOB_RETENTION_DAYS', 90), where: "status NOT IN ('running','queued')" },

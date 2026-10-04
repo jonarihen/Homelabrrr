@@ -1,6 +1,8 @@
-import { eq } from 'drizzle-orm';
-import { db } from '../db/client.ts';
-import { users, roles, vmAssignments } from '../db/schema/index.ts';
+import { and, eq, inArray, sql } from 'drizzle-orm';
+import { nodeLookupCandidates } from './nodeRef.ts';
+import { db, type DbOrTx } from '../db/client.ts';
+import { users, roles, vmAssignments, provisionedVms } from '../db/schema/index.ts';
+import { provisionAllocation } from './provisionIntent.ts';
 import { getAllVMs } from '../proxmox.ts';
 import { httpError } from './httpError.ts';
 
@@ -30,25 +32,50 @@ export interface UserQuota {
  * mirrors what the PVE UI itself reports. Hosts that can't be reached are
  * skipped by getAllVMs (their VMs simply don't count until they're back).
  */
-export async function getUserResourceUsage(userId: number): Promise<ResourceUsage> {
-  const assignments = await db
-    .select({ vmid: vmAssignments.vmid })
-    .from(vmAssignments)
-    .where(eq(vmAssignments.user_id, userId));
-  const vmids = new Set(assignments.map((a) => Number(a.vmid)));
-  const usage: ResourceUsage = { cores: 0, memoryGb: 0, diskGb: 0, vmCount: 0 };
-  if (vmids.size === 0) return usage;
-
-  const vms = await getAllVMs();
+export async function getUserResourceUsage(userId: number, database: DbOrTx = db, liveVms?: any[]): Promise<ResourceUsage> {
+  const assignments = await database.select({ vmid: vmAssignments.vmid, resource_allocation: vmAssignments.resource_allocation })
+    .from(vmAssignments).where(eq(vmAssignments.user_id, userId));
+  const jobs = await database.select({ id: provisionedVms.id, vmid: provisionedVms.vmid, steps: provisionedVms.steps, status: provisionedVms.status })
+    .from(provisionedVms).where(inArray(provisionedVms.status, ['submitting', 'creating', 'cloning', 'configuring', 'needs_review', 'timeout', 'ready', 'warning']));
+  const vmids = new Set(assignments.map(a => Number(a.vmid)));
+  const allocated = new Map<number, ResourceUsage>();
+  const vms = vmids.size > 0 ? (liveVms ?? await getAllVMs()) : [];
   for (const vm of vms) {
     if (!vmids.has(Number(vm.vmid))) continue;
-    usage.vmCount += 1;
-    usage.cores += vm.maxcpu || 0;
-    usage.memoryGb += (vm.maxmem || 0) / GB;
-    usage.diskGb += (vm.maxdisk || 0) / GB;
+    allocated.set(Number(vm.vmid), {
+      cores: vm.maxcpu || 0, memoryGb: (vm.maxmem || 0) / GB,
+      diskGb: (vm.maxdisk || 0) / GB, vmCount: 1,
+    });
   }
-  usage.memoryGb = Math.round(usage.memoryGb * 10) / 10;
-  usage.diskGb = Math.round(usage.diskGb * 10) / 10;
+  for (const assignment of assignments) {
+    const floor = assignment.resource_allocation;
+    if (!floor) continue;
+    const current = allocated.get(assignment.vmid);
+    allocated.set(assignment.vmid, {
+      cores: Math.max(floor.cores, current?.cores || 0),
+      memoryGb: Math.max(floor.memoryMb / 1024, current?.memoryGb || 0),
+      diskGb: Math.max(floor.diskGb, current?.diskGb || 0), vmCount: 1,
+    });
+  }
+  for (const job of jobs) {
+    const intent = provisionAllocation(job.steps);
+    if (!intent || intent.userId !== userId || intent.state === 'released') continue;
+    if (intent.state === 'owned' && !vmids.has(job.vmid)) continue;
+    if (intent.state === 'owned' && assignments.some(a => a.vmid === job.vmid && a.resource_allocation)) continue;
+    const current = allocated.get(job.vmid);
+    allocated.set(job.vmid || -job.id, {
+      cores: Math.max(intent.cores, current?.cores || 0),
+      memoryGb: Math.max(intent.memoryMb / 1024, current?.memoryGb || 0),
+      diskGb: Math.max(intent.diskGb, current?.diskGb || 0), vmCount: 1,
+    });
+  }
+  const usage: ResourceUsage = { cores: 0, memoryGb: 0, diskGb: 0, vmCount: 0 };
+  for (const resource of allocated.values()) {
+    usage.cores += resource.cores;
+    usage.memoryGb += resource.memoryGb;
+    usage.diskGb += resource.diskGb;
+    usage.vmCount += resource.vmCount;
+  }
   return usage;
 }
 
@@ -57,8 +84,27 @@ export async function getUserResourceUsage(userId: number): Promise<ResourceUsag
  * user doesn't exist. Per metric: an explicit per-user value overrides the
  * role's default; otherwise the role's value applies (if any role is set).
  */
-export async function getUserQuota(userId: number): Promise<UserQuota | null> {
-  const [user] = await db
+export async function refreshHardwareAllocation(node: string, vmid: number, updates: { cores?: number; memoryMb?: number }) {
+  const candidates = nodeLookupCandidates(node);
+  if (!candidates.length) return;
+  await db.transaction(async tx => {
+    const owners = await tx.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
+      .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
+    for (const owner of owners) await tx.execute(sql`SELECT pg_advisory_xact_lock(208, ${owner.user_id})`);
+    const rows = await tx.select().from(vmAssignments)
+      .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates))).for('update');
+    for (const row of rows) {
+      if (!row.resource_allocation) continue;
+      await tx.update(vmAssignments).set({ resource_allocation: { ...row.resource_allocation,
+        ...(updates.cores !== undefined ? { cores: updates.cores } : {}),
+        ...(updates.memoryMb !== undefined ? { memoryMb: updates.memoryMb } : {}),
+      } }).where(eq(vmAssignments.id, row.id));
+    }
+  });
+}
+
+export async function getUserQuota(userId: number, database: DbOrTx = db): Promise<UserQuota | null> {
+  const [user] = await database
     .select({
       is_admin: users.is_admin,
       max_cores: users.max_cores,
@@ -89,13 +135,15 @@ export async function getUserQuota(userId: number): Promise<UserQuota | null> {
  */
 export async function assertUserQuota(
   userId: number,
-  { addCores = 0, addMemoryMb = 0, addDiskGb = 0 }: { addCores?: number; addMemoryMb?: number; addDiskGb?: number } = {}
+  { addCores = 0, addMemoryMb = 0, addDiskGb = 0 }: { addCores?: number; addMemoryMb?: number; addDiskGb?: number } = {},
+  database: DbOrTx = db,
+  liveVms?: any[],
 ): Promise<void> {
-  const quota = await getUserQuota(userId);
+  const quota = await getUserQuota(userId, database);
   if (!quota || quota.isAdmin) return;
   if (quota.maxCores == null && quota.maxMemoryGb == null && quota.maxStorageGb == null) return;
 
-  const usage = await getUserResourceUsage(userId);
+  const usage = await getUserResourceUsage(userId, database, liveVms);
   const addMemoryGb = addMemoryMb / 1024;
 
   if (quota.maxCores != null && usage.cores + addCores > quota.maxCores) {
@@ -113,6 +161,25 @@ export async function assertUserQuota(
       `Storage quota exceeded: ${usage.diskGb}/${quota.maxStorageGb} GB allocated, request needs ${addDiskGb} GB more`
     );
   }
+}
+
+export function cloneDiskAllocation(config: Record<string, unknown>, requestedGb: number) {
+  if (!Number.isFinite(requestedGb) || requestedGb <= 0) throw httpError(400, 'Invalid clone disk size');
+  const disks = new Map<string, number>();
+  for (const [key, value] of Object.entries(config)) {
+    if (!/^(?:(?:scsi|virtio|sata|ide|efidisk|tpmstate)\d+)$/.test(key) || typeof value !== 'string') continue;
+    const volume = value.split(',')[0];
+    if (volume === 'none' || volume.includes('cloudinit') || value.split(',').includes('media=cdrom')) continue;
+    const size = value.split(',').find(option => option.startsWith('size='))?.slice(5);
+    const gb = sizeToGb(size);
+    if (gb === null || gb <= 0) throw httpError(503, 'Cannot determine the template disk size safely');
+    disks.set(key, gb);
+  }
+  if (disks.size === 0) throw httpError(503, 'The template has no measurable clone disks');
+  const primary = disks.has('scsi0') ? 'scsi0' : disks.has('virtio0') ? 'virtio0' : null;
+  const total = [...disks.values()].reduce((sum, size) => sum + size, 0);
+  const growthGb = primary ? Math.max(0, requestedGb - disks.get(primary)!) : 0;
+  return { diskGb: total + growthGb, resizeDisk: growthGb > 0 ? primary : null };
 }
 
 /** Parse a PVE disk size string ("32G", "512M", "1T") to GB. */
