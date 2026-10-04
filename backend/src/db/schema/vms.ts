@@ -24,6 +24,7 @@ export const vmAssignments = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     node: text('node').notNull(),
     vmid: integer('vmid').notNull(),
+    resource_allocation: jsonb('resource_allocation').$type<{ cores: number; memoryMb: number; diskGb: number }>(),
   },
   (t) => [
     uniqueIndex('vm_assignments_node_vmid_unique').on(t.node, t.vmid),

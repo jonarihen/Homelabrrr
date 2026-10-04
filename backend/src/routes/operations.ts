@@ -135,9 +135,11 @@ router.post('/provision/:id/reconcile', requireRecentReauthentication, async (re
     const status = classified.status === 'error' ? 'error' : 'needs_review';
     const detail = classified.detail;
     const upstreamStatus = task.status === 'stopped' ? `stopped:${task.exitstatus || 'unknown'}` : String(task.status || 'running');
-    await db.update(provisionedVms)
+    if (!['needs_review', 'timeout'].includes(row.status!)) return res.status(409).json({ error: 'Only unresolved provisioning can be reconciled' });
+    const updated = await db.update(provisionedVms)
       .set({ status, status_detail: detail, upstream_status: upstreamStatus, upstream_checked_at: new Date() })
-      .where(eq(provisionedVms.id, row.id));
+      .where(and(eq(provisionedVms.id, row.id), eq(provisionedVms.status, row.status!)));
+    if (updated.rowCount !== 1) return res.status(409).json({ error: 'Provisioning was resolved while checking upstream' });
     if (task.status === 'stopped' && task.exitstatus === 'OK' && provisionAllocation(row.steps)) {
       await recordProvisionOwnership(row.id, true);
       await syncVmTagsSafe(row.node, row.vmid);
@@ -185,18 +187,26 @@ router.post('/provision/:id/resolve', requireRecentReauthentication, async (req,
   if (!['ready', 'error'].includes(status)) return res.status(400).json({ error: 'status must be ready or error' });
   const [row] = await db.select().from(provisionedVms).where(eq(provisionedVms.id, Number(req.params.id))).limit(1);
   if (!row) return res.status(404).json({ error: 'Provisioning operation not found' });
-  if (row.status !== 'needs_review') return res.status(409).json({ error: 'Only interrupted provisioning awaiting review can be resolved manually' });
+  if (!['needs_review', 'timeout'].includes(row.status!)) return res.status(409).json({ error: 'Only interrupted provisioning awaiting review can be resolved manually' });
   const detail = status === 'ready' ? 'Manually verified by an administrator after reconciliation.' : 'Marked failed by an administrator after reconciliation.';
   try {
     if (status === 'ready') {
-      await recordProvisionOwnership(row.id, true, detail);
+      let manualRecovery;
+      if (!row.upid) {
+        if (!req.session.isAdmin || req.body?.verified !== true || typeof req.body?.evidence !== 'string'
+          || req.body.evidence.trim().length < 10 || req.body.evidence.length > 1000) {
+          return res.status(403).json({ error: 'Administrator attestation with verification evidence is required without a saved task' });
+        }
+        manualRecovery = { operatorId: req.session.userId, evidence: req.body.evidence.trim() };
+      }
+      await recordProvisionOwnership(row.id, true, detail, manualRecovery);
     } else {
       const updated = await db.update(provisionedVms).set({ status, status_detail: detail })
-        .where(and(eq(provisionedVms.id, row.id), eq(provisionedVms.status, 'needs_review')));
+        .where(and(eq(provisionedVms.id, row.id), eq(provisionedVms.status, row.status!)));
       if (updated.rowCount !== 1) return res.status(409).json({ error: 'Provisioning changed during resolution' });
     }
     if (status === 'ready') await syncVmTagsSafe(row.node, row.vmid);
-    await logAudit(req, 'provision_operation_resolved', String(row.id), `from=${row.status}; to=${status}`);
+    await logAudit(req, 'provision_operation_resolved', String(row.id), `from=${row.status}; to=${status}; evidence=${typeof req.body?.evidence === 'string' ? req.body.evidence.slice(0, 1000) : ''}`);
     res.json({ ok: true, status, detail });
   } catch (err) { sendError(res, err); }
 });

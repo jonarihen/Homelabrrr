@@ -7,6 +7,8 @@ export interface ProvisionAllocation {
   diskGb: number;
   state: 'pending' | 'owned' | 'released';
   ownedAt?: number;
+  marker?: string;
+  recovery?: { operatorId: number; verifiedAt: string; evidence: string };
 }
 
 export function provisionAllocation(steps: unknown): ProvisionAllocation | null {

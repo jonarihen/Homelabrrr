@@ -46,15 +46,27 @@ function tagUpstreamHost(err, host) {
 }
 
 function makeRequest(host, method, path, body) {
-  const url = new URL(`https://${host.host}:${host.port}/api2/json${path}`);
-  const authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
-  const payload = body && method !== 'DELETE' ? JSON.stringify(body) : null;
+  let url, authHeader, payload;
+  try {
+    url = new URL(`https://${host.host}:${host.port}/api2/json${path}`);
+    authHeader = `PVEAPIToken=${host.token_id}=${decryptSecret(host.token_secret)}`;
+    payload = body && method !== 'DELETE' ? JSON.stringify(body) : null;
+  } catch (err) { err.submissionStarted = false; throw err; }
 
   return new Promise((resolve, reject) => {
-    const fail = (err) => reject(tagUpstreamHost(err, host));
-    const req = https.request(url, {
+    let submissionStarted = false;
+    const fail = (err) => {
+      err.submissionStarted = submissionStarted;
+      reject(tagUpstreamHost(err, host));
+    };
+    let agent;
+    try { agent = agentForHost(host); }
+    catch (err) { fail(err); return; }
+    let req;
+    try {
+      req = https.request(url, {
       method,
-      agent: agentForHost(host),
+      agent,
       headers: {
         Authorization: authHeader,
         'Content-Type': 'application/json',
@@ -75,9 +87,11 @@ function makeRequest(host, method, path, body) {
         catch { resolve(text); }
       });
     });
+    } catch (err) { fail(err); return; }
 
     req.on('error', fail);
     req.setTimeout(15000, () => req.destroy(new Error('Proxmox request timeout')));
+    submissionStarted = true;
     if (payload) req.write(payload);
     req.end();
   });
@@ -428,18 +442,21 @@ export async function getNextVmid() {
 //
 export async function withFreshVmid(fn, { onReserved = async (_vmid) => {} } = {}) {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const vmid = await getNextVmid();
+    let vmid;
+    try { vmid = await getNextVmid(); }
+    catch (err) { err.submissionStarted = false; throw err; }
     try {
       await onReserved(vmid);
     } catch (err) {
       releaseVmid(vmid);
+      err.submissionStarted = false;
       throw err;
     }
     try {
       return { vmid, result: await fn(vmid) };
     } catch (err) {
       const taken = isVmidTakenError(err);
-      if (err.definitiveRejection && !taken) releaseVmid(vmid);
+      if ((err.definitiveRejection || err.submissionStarted === false) && !taken) releaseVmid(vmid);
       if (!taken || attempt === 1) throw err;
       console.warn(`[vmid] ${vmid} was taken upstream — retrying with a fresh id`);
     }
@@ -447,7 +464,10 @@ export async function withFreshVmid(fn, { onReserved = async (_vmid) => {} } = {
 }
 
 export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {
-  const { host, nodeName } = await resolveNode(node, { vmid: templateVmid });
+  let resolved;
+  try { resolved = await resolveNode(node, { vmid: templateVmid }); }
+  catch (err) { err.submissionStarted = false; throw err; }
+  const { host, nodeName } = resolved;
   const body = {
     newid: newVmid,
     name,
@@ -460,7 +480,10 @@ export async function cloneVM(node, templateVmid, newVmid, name, opts = {}) {
 }
 
 export async function createVM(node, vmid, config) {
-  const { host, nodeName } = await resolveNode(node);
+  let resolved;
+  try { resolved = await resolveNode(node); }
+  catch (err) { err.submissionStarted = false; throw err; }
+  const { host, nodeName } = resolved;
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu`, { vmid, ...config });
 }
 

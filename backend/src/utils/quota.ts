@@ -32,7 +32,7 @@ export interface UserQuota {
  * skipped by getAllVMs (their VMs simply don't count until they're back).
  */
 export async function getUserResourceUsage(userId: number, database: DbOrTx = db, liveVms?: any[]): Promise<ResourceUsage> {
-  const assignments = await database.select({ vmid: vmAssignments.vmid })
+  const assignments = await database.select({ vmid: vmAssignments.vmid, resource_allocation: vmAssignments.resource_allocation })
     .from(vmAssignments).where(eq(vmAssignments.user_id, userId));
   const jobs = await database.select({ id: provisionedVms.id, vmid: provisionedVms.vmid, steps: provisionedVms.steps, status: provisionedVms.status })
     .from(provisionedVms).where(inArray(provisionedVms.status, ['submitting', 'creating', 'cloning', 'configuring', 'needs_review', 'timeout', 'ready', 'warning']));
@@ -46,12 +46,20 @@ export async function getUserResourceUsage(userId: number, database: DbOrTx = db
       diskGb: (vm.maxdisk || 0) / GB, vmCount: 1,
     });
   }
+  for (const assignment of assignments) {
+    const floor = assignment.resource_allocation;
+    if (!floor) continue;
+    const current = allocated.get(assignment.vmid);
+    allocated.set(assignment.vmid, {
+      cores: Math.max(floor.cores, current?.cores || 0),
+      memoryGb: Math.max(floor.memoryMb / 1024, current?.memoryGb || 0),
+      diskGb: Math.max(floor.diskGb, current?.diskGb || 0), vmCount: 1,
+    });
+  }
   for (const job of jobs) {
     const intent = provisionAllocation(job.steps);
     if (!intent || intent.userId !== userId || intent.state === 'released') continue;
     if (intent.state === 'owned' && !vmids.has(job.vmid)) continue;
-    if (intent.state === 'owned' && allocated.has(job.vmid) && ['ready', 'warning'].includes(job.status!)
-      && Date.now() - (intent.ownedAt ?? Date.now()) >= 5000) continue;
     const current = allocated.get(job.vmid);
     allocated.set(job.vmid || -job.id, {
       cores: Math.max(intent.cores, current?.cores || 0),

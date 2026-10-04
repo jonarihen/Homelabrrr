@@ -1,4 +1,5 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
 import { db, type DbOrTx } from '../db/client.ts';
 import { provisionedVms, users, vmAssignments } from '../db/schema/index.ts';
 import { getAllVMs, getTaskStatus, getProvisionVMConfig } from '../proxmox.ts';
@@ -17,11 +18,12 @@ async function lockQuota(database: DbOrTx, userId: number) {
 export async function submitProvision(
   row: ProvisionRow,
   intent: Omit<ProvisionAllocation, 'version' | 'state'>,
-  submit: (onReserved: (vmid: number) => Promise<void>) => Promise<{ vmid: number; result: string | null }>,
+  submit: (onReserved: (vmid: number) => Promise<void>, marker: string) => Promise<{ vmid: number; result: string | null }>,
 ) {
   if (!provisionAllocation([{ key: 'reserve', allocation: { ...intent, version: 1, state: 'pending' } }])) {
     throw httpError(400, 'Invalid provisioning owner or resource allocation');
   }
+  const marker = `homelabrrr-provision-${randomUUID()}`;
   const liveVms = await getAllVMs();
   const provisionId = await db.transaction(async tx => {
     const quotaUser = intent.userId ?? row.user_id;
@@ -34,21 +36,23 @@ export async function submitProvision(
     const steps = structuredClone(row.steps) as any[];
     const reserve = steps.find(step => step.key === 'reserve');
     if (!reserve) throw new Error('Provisioning reservation step is missing');
-    reserve.allocation = { ...intent, version: 1, state: 'pending' } satisfies ProvisionAllocation;
+    reserve.allocation = { ...intent, marker, version: 1, state: 'pending' } satisfies ProvisionAllocation;
     const [saved] = await tx.insert(provisionedVms).values({ ...row, steps, vmid: 0, status: 'submitting' })
       .returning({ id: provisionedVms.id });
     return saved.id;
   });
   let submitted: { vmid: number; result: string | null };
+  let prepared = false;
   try {
     submitted = await submit(async vmid => {
       await db.update(provisionedVms).set({ vmid }).where(eq(provisionedVms.id, provisionId));
-    });
+      prepared = true;
+    }, marker);
   } catch (err: any) {
-    const rejected = err?.definitiveRejection === true;
+    const rejected = !prepared || err?.submissionStarted === false || err?.definitiveRejection === true;
     await db.update(provisionedVms).set({
       status: rejected ? 'error' : 'needs_review',
-      status_detail: rejected ? 'Upstream submission was rejected' : 'Submission outcome is unknown — verify the reserved VMID and upstream task before resolving',
+      status_detail: rejected ? 'Submission did not start or was rejected upstream' : 'Submission outcome is unknown — verify the reserved VMID and upstream task before resolving',
     }).where(eq(provisionedVms.id, provisionId));
     throw err;
   }
@@ -67,56 +71,76 @@ export async function assertUserCanBeDeleted(database: DbOrTx, userId: number) {
   }
 }
 
-export async function recordProvisionOwnership(id: number, verifiedRecovery = false, resolvedDetail?: string) {
+export async function recordProvisionOwnership(id: number, verifiedRecovery = false, resolvedDetail?: string,
+  manualRecovery?: { operatorId: number; evidence: string }) {
   const [saved] = await db.select().from(provisionedVms).where(eq(provisionedVms.id, id)).limit(1);
-  if (!saved || !provisionAllocation(saved.steps)) {
-    throw httpError(409, 'This operation has no persisted owner intent; verify and assign it manually');
-  }
+  const intent = provisionAllocation(saved?.steps);
+  if (!saved || !intent) throw httpError(409, 'This operation has no persisted owner intent; verify and assign it manually');
   if (verifiedRecovery) {
-    if (saved.status !== 'needs_review') throw httpError(409, 'Only interrupted provisioning can recover ownership');
-    if (!saved.upid) throw httpError(409, 'Cannot recover ownership without a saved successful task');
-    const task = await getTaskStatus(saved.node, saved.upid);
-    if (task.status !== 'stopped' || task.exitstatus !== 'OK') throw httpError(409, 'The saved task has not completed successfully');
+    if (!['needs_review', 'timeout'].includes(saved.status!)) throw httpError(409, 'Only interrupted provisioning can recover ownership');
+    if (saved.upid) {
+      const task = await getTaskStatus(saved.node, saved.upid);
+      if (task.status !== 'stopped' || task.exitstatus !== 'OK') throw httpError(409, 'The saved task has not completed successfully');
+    } else if (!manualRecovery || !resolvedDetail || !intent.marker) {
+      throw httpError(409, 'Admin attestation and a persisted creation marker are required to recover a lost submission response');
+    }
     const config = await getProvisionVMConfig(saved.node, saved.vmid);
-    if (config.name !== saved.name) throw httpError(409, 'The current VM does not match this provisioning operation');
+    if (config.name !== saved.name || config.lock) throw httpError(409, 'The current VM does not match a completed provisioning operation');
+    if (!saved.upid && !String(config.description || '').split('\n').includes(intent.marker!)) {
+      throw httpError(409, 'The VM does not carry this operation’s creation marker');
+    }
   }
-  await db.transaction(async tx => {
-    const intent = provisionAllocation(saved.steps)!;
-    await lockQuota(tx, intent.userId ?? saved.user_id);
-    const [row] = await tx.select().from(provisionedVms).where(eq(provisionedVms.id, id)).for('update').limit(1);
-    if (!row || row.upid !== saved.upid || row.vmid !== saved.vmid) throw httpError(409, 'Provisioning changed during ownership recovery');
-    if (verifiedRecovery && row.status !== 'needs_review') throw httpError(409, 'Provisioning changed during ownership recovery');
-    if (!verifiedRecovery && !['creating', 'cloning', 'configuring', 'needs_review'].includes(row.status!)) {
-      throw httpError(409, 'Provisioning is no longer awaiting ownership');
-    }
-    const allocation = provisionAllocation(row.steps);
-    if (!allocation) throw httpError(409, 'Provisioning owner intent changed');
-    if (allocation.state === 'released') throw httpError(409, 'This provisioning allocation has been released');
-    if (allocation.state !== 'pending') {
-      if (resolvedDetail && allocation.state === 'owned') {
-        await tx.update(provisionedVms).set({ status: 'ready', status_detail: resolvedDetail }).where(eq(provisionedVms.id, id));
+  try {
+    await db.transaction(async tx => {
+      await lockQuota(tx, intent.userId ?? saved.user_id);
+      const [row] = await tx.select().from(provisionedVms).where(eq(provisionedVms.id, id)).for('update').limit(1);
+      if (!row || row.upid !== saved.upid || row.vmid !== saved.vmid) throw httpError(409, 'Provisioning changed during ownership recovery');
+      if (verifiedRecovery && row.status !== saved.status) throw httpError(409, 'Provisioning changed during ownership recovery');
+      if (!verifiedRecovery && !['creating', 'cloning', 'configuring', 'needs_review'].includes(row.status!)) {
+        throw httpError(409, 'Provisioning is no longer awaiting ownership');
       }
-      return;
+      const allocation = provisionAllocation(row.steps);
+      if (!allocation || allocation.userId !== intent.userId || allocation.marker !== intent.marker) {
+        throw httpError(409, 'Provisioning owner intent changed');
+      }
+      if (allocation.state === 'released') throw httpError(409, 'This provisioning allocation has been released');
+      const history = await tx.select({ id: provisionedVms.id }).from(provisionedVms)
+        .where(eq(provisionedVms.vmid, row.vmid));
+      if (history.some(job => job.id > row.id)) throw httpError(409, 'A newer provisioning operation uses this VMID; verify ownership manually');
+      const candidates = nodeLookupCandidates(row.node);
+      if (candidates.length === 0) throw httpError(409, 'Provisioning node is missing');
+      const assignments = await tx.select().from(vmAssignments)
+        .where(and(eq(vmAssignments.vmid, row.vmid), inArray(vmAssignments.node, candidates)));
+      if (assignments.some(assignment => assignment.user_id !== allocation.userId)) {
+        throw httpError(409, 'This VM already has a different owner; verify ownership manually');
+      }
+      if (manualRecovery) {
+        const [operator] = await tx.select({ is_admin: users.is_admin }).from(users)
+          .where(eq(users.id, manualRecovery.operatorId)).for('share').limit(1);
+        if (!operator?.is_admin || manualRecovery.evidence.trim().length < 10) throw httpError(403, 'Administrator verification evidence is required');
+      }
+      if (allocation.userId) {
+        const resource_allocation = { cores: allocation.cores, memoryMb: allocation.memoryMb, diskGb: allocation.diskGb };
+        if (assignments.length === 0) {
+          await tx.insert(vmAssignments).values({ user_id: allocation.userId, node: row.node, vmid: row.vmid, resource_allocation });
+        } else {
+          await tx.update(vmAssignments).set({ resource_allocation }).where(eq(vmAssignments.id, assignments[0].id));
+        }
+      }
+      await createLeaseForVm(row.node, row.vmid, { createdBy: allocation.createdBy }, tx);
+      const steps = structuredClone(row.steps) as any[];
+      const stored = steps.find(step => step.key === 'reserve').allocation;
+      stored.state = 'owned';
+      stored.ownedAt = allocation.ownedAt ?? Date.now();
+      if (manualRecovery) stored.recovery = { ...manualRecovery, verifiedAt: new Date().toISOString() };
+      await tx.update(provisionedVms).set({ steps, ...(resolvedDetail ? { status: 'ready', status_detail: resolvedDetail } : {}) })
+        .where(eq(provisionedVms.id, id));
+    });
+  } catch (err) {
+    if (!verifiedRecovery) {
+      await db.update(provisionedVms).set({ status: 'needs_review', status_detail: 'Ownership finalization failed — review the existing assignment and recover this operation in Admin Operations' })
+        .where(and(eq(provisionedVms.id, id), inArray(provisionedVms.status, ['creating', 'cloning', 'configuring'])));
     }
-    const history = await tx.select({ id: provisionedVms.id }).from(provisionedVms)
-      .where(eq(provisionedVms.vmid, row.vmid));
-    if (history.some(job => job.id > row.id)) throw httpError(409, 'A newer provisioning operation uses this VMID; verify ownership manually');
-    const candidates = nodeLookupCandidates(row.node);
-    if (candidates.length === 0) throw httpError(409, 'Provisioning node is missing');
-    const assignments = await tx.select().from(vmAssignments)
-      .where(and(eq(vmAssignments.vmid, row.vmid), inArray(vmAssignments.node, candidates)));
-    if (assignments.some(assignment => assignment.user_id !== allocation.userId)) {
-      throw httpError(409, 'This VM already has a different owner; verify ownership manually');
-    }
-    if (allocation.userId && assignments.length === 0) {
-      await tx.insert(vmAssignments).values({ user_id: allocation.userId, node: row.node, vmid: row.vmid });
-    }
-    await createLeaseForVm(row.node, row.vmid, { createdBy: allocation.createdBy }, tx);
-    const steps = structuredClone(row.steps) as any[];
-    const stored = steps.find(step => step.key === 'reserve').allocation;
-    stored.state = 'owned';
-    stored.ownedAt = Date.now();
-    await tx.update(provisionedVms).set({ steps, ...(resolvedDetail ? { status: 'ready', status_detail: resolvedDetail } : {}) })
-      .where(eq(provisionedVms.id, id));
-  });
+    throw err;
+  }
 }

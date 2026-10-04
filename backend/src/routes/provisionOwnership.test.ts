@@ -27,6 +27,14 @@ let configName = 'new-vm';
 let sourceDisks: Record<string, string> = {};
 let submitFailure: Error | null = null;
 let submitStatus = 200;
+let allocatorFailure = false;
+let constructionFailure = false;
+let taskGate: Promise<void> | null = null;
+let onTaskRead: (() => void) | null = null;
+let configDescription = '';
+let configLock = '';
+let postDescription = '';
+let withFreshVmid: typeof import('../proxmox.ts').withFreshVmid;
 const submittedVmids: number[] = [];
 let getNextVmid: typeof import('../proxmox.ts').getNextVmid;
 let releaseVmid: typeof import('../proxmox.ts').releaseVmid;
@@ -47,7 +55,7 @@ before(async () => {
   const router = (await import('./provision.ts')).default;
   const operations = (await import('./operations.ts')).default;
   const adminRouter = (await import('./admin.ts')).default;
-  ({ getNextVmid, releaseVmid } = await import('../proxmox.ts'));
+  ({ getNextVmid, releaseVmid, withFreshVmid } = await import('../proxmox.ts'));
   quota = await import('../utils/quota.ts');
   ({ submitProvision } = await import('../services/provisionOwnership.ts'));
   ({ reconcileInterruptedOperations } = await import('../db/init.ts'));
@@ -99,9 +107,17 @@ beforeEach(async t => {
   sourceDisks = { scsi0: 'local-lvm:vm-500-disk-0,size=20G' };
   submitFailure = null;
   submitStatus = 200;
+  allocatorFailure = false;
+  constructionFailure = false;
+  taskGate = null;
+  onTaskRead = null;
+  configDescription = '';
+  configLock = '';
+  postDescription = '';
   submittedVmids.length = 0;
   await testDb.db.update(users).set({ max_cores: null, max_memory_gb: null, max_storage_gb: null }).where(eq(users.id, ownerId));
   t.mock.method(https, 'request', (url: URL, options: any, callback: any) => {
+    if (constructionFailure && options.method === 'POST') throw new Error('Local request construction failed');
     const outgoing = new EventEmitter();
     let body = '';
     return Object.assign(outgoing, {
@@ -109,10 +125,13 @@ beforeEach(async t => {
       setTimeout() {},
       destroy(err: Error) { outgoing.emit('error', err); },
       end() {
-        queueMicrotask(() => {
+        queueMicrotask(async () => {
           let data: unknown;
           const path = url.pathname;
-          if (path === '/api2/json/cluster/resources') data = liveVms;
+          if (path === '/api2/json/cluster/resources') {
+            if (allocatorFailure) { outgoing.emit('error', new Error('Host unreachable')); return; }
+            data = liveVms;
+          }
           else if (path === '/api2/json/cluster/nextid') data = 100;
           else if (path === '/api2/json/nodes/pve/status') {
             data = { cpuinfo: { sockets: 1, cores: 8 }, memory: { total: 64 * 1024 ** 3 } };
@@ -120,11 +139,12 @@ beforeEach(async t => {
           else if ((path === '/api2/json/nodes/pve/qemu' || path.endsWith('/clone')) && options.method === 'POST') {
             const submitted = JSON.parse(body);
             submittedVmids.push(Number(submitted.vmid ?? submitted.newid));
+            postDescription = submitted.description || '';
             if (submitFailure) { outgoing.emit('error', submitFailure); return; }
             data = upid;
           }
-          else if (path.includes('/tasks/')) { taskCalls += 1; data = task; }
-          else if (path.endsWith('/config') && options.method === 'GET') data = { name: configName, net0: 'virtio,bridge=vmbr0,tag=200', ...sourceDisks };
+          else if (path.includes('/tasks/')) { taskCalls += 1; onTaskRead?.(); if (taskGate) await taskGate; data = task; }
+          else if (path.endsWith('/config') && options.method === 'GET') data = { name: configName, description: configDescription, lock: configLock, net0: 'virtio,bridge=vmbr0,tag=200', ...sourceDisks };
           else if (path.endsWith('/config') && options.method === 'PUT') { tagWrites.push(JSON.parse(body)); data = null; }
           else assert.fail(`Unexpected PVE request: ${options.method} ${url}`);
           const incoming = Object.assign(new EventEmitter(), { statusCode: options.method === 'POST' ? submitStatus : 200 });
@@ -202,7 +222,8 @@ test('a timed-out create never creates ownership while the upstream task is stil
   assert.equal(taskCalls, 120);
   assert.deepEqual(await ownership(created.vmid), { assignments: [], leases: [] });
   assert.deepEqual(tagWrites, []);
-  assert.equal((await provision(created.id)).status, 'timeout');
+  assert.equal((await provision(created.id)).status, 'needs_review');
+  assert.match((await provision(created.id)).status_detail!, /check the saved Proxmox task/);
 });
 
 test('successful create records ownership only after completion and before owner tag sync', async () => {
@@ -455,7 +476,7 @@ test('transport timeout and connection reset retain quota and durable VMID reser
     assert.ok(await provision(row.id));
     assert.equal((await cleanupOperationTracking(testDb.db, 'provision', row.id)).blocked, true);
     const ready = await request(app).post(`/operations/provision/${row.id}/resolve`).send({ status: 'ready' });
-    assert.equal(ready.status, 409);
+    assert.equal(ready.status, 403);
     await testDb.db.delete(provisionedVms);
   }
 });
@@ -490,6 +511,116 @@ test('clone quota reserves actual source disks and rejects underreported unknown
   await waitForBackgroundWork();
   sourceDisks = { scsi0: 'local-lvm:vm-501-disk-0' };
   assert.equal((await clone()).status, 503);
+});
+
+test('allocator failures before POST release all pending resource reservations and permit retry', async () => {
+  allocatorFailure = true;
+  await assert.rejects(submitProvision({
+    user_id: adminId, node, vmid: 0, name: 'new-vm', source_type: 'create', status: 'creating', steps: [{ key: 'reserve' }],
+  }, { userId: ownerId, createdBy: 'create-admin', cores: 2, memoryMb: 2048, diskGb: 80 },
+  onReserved => withFreshVmid(async () => { assert.fail('POST must not start'); }, { onReserved })), /globally unique VMID/);
+  const [row] = await testDb.db.select().from(provisionedVms);
+  assert.equal(row.vmid, 0);
+  assert.equal(row.status, 'error');
+  assert.equal(submittedVmids.length, 0);
+  assert.deepEqual(await quota.getUserResourceUsage(ownerId), { cores: 0, memoryGb: 0, diskGb: 0, vmCount: 0 });
+  allocatorFailure = false;
+  await quota.assertUserQuota(ownerId, { addCores: 2, addMemoryMb: 2048, addDiskGb: 80 });
+});
+
+test('local request construction failure after VMID allocation releases quota before any POST', async () => {
+  constructionFailure = true;
+  const response = await request(app).post('/provision/create').send({ node, name: 'new-vm', assignTo: ownerId });
+  assert.equal(response.status, 500);
+  const [row] = await testDb.db.select().from(provisionedVms);
+  assert.ok(row.vmid > 0);
+  assert.equal(row.status, 'error');
+  assert.equal(submittedVmids.length, 0);
+  assert.deepEqual(await quota.getUserResourceUsage(ownerId), { cores: 0, memoryGb: 0, diskGb: 0, vmCount: 0 });
+});
+
+test('completed allocation remains accurate after cache expiry and job cleanup without double counting', async () => {
+  const saved = await savedSubmission(930);
+  const row = await provision(saved.provisionId);
+  const steps = row.steps as any[];
+  const allocation = steps.find(step => step.key === 'reserve').allocation;
+  allocation.diskGb = 80;
+  await testDb.db.update(provisionedVms).set({ steps, status: 'needs_review' }).where(eq(provisionedVms.id, row.id));
+  liveVms = [{ vmid: 930, node: 'pve', type: 'qemu' }];
+  assert.equal((await request(app).post(`/operations/provision/${row.id}/resolve`).send({ status: 'ready' })).status, 200);
+  const completed = await provision(row.id);
+  (completed.steps as any[]).find(step => step.key === 'reserve').allocation.ownedAt = 1;
+  await testDb.db.update(provisionedVms).set({ steps: completed.steps, status: 'warning' }).where(eq(provisionedVms.id, row.id));
+  const live = [{ vmid: 930, maxcpu: 2, maxmem: 2 * 1024 ** 3, maxdisk: 64 * 1024 ** 3 }];
+  assert.deepEqual(await quota.getUserResourceUsage(ownerId, testDb.db, live), { cores: 2, memoryGb: 2, diskGb: 80, vmCount: 1 });
+  await testDb.db.update(provisionedVms).set({ status: 'ready' }).where(eq(provisionedVms.id, row.id));
+  assert.equal((await cleanupOperationTracking(testDb.db, 'provision', row.id)).ok, true);
+  assert.deepEqual(await quota.getUserResourceUsage(ownerId, testDb.db, live), { cores: 2, memoryGb: 2, diskGb: 80, vmCount: 1 });
+  await testDb.db.update(users).set({ max_cores: 3, max_memory_gb: 3, max_storage_gb: 150 }).where(eq(users.id, ownerId));
+  await assert.rejects(quota.assertUserQuota(ownerId, { addCores: 2 }, testDb.db, live), /CPU quota exceeded/);
+  await assert.rejects(quota.assertUserQuota(ownerId, { addMemoryMb: 2048 }, testDb.db, live), /Memory quota exceeded/);
+  await assert.rejects(quota.assertUserQuota(ownerId, { addDiskGb: 80 }, testDb.db, live), /Storage quota exceeded/);
+});
+
+test('lost-response recovery requires admin attestation and operation marker, not just matching name', async () => {
+  submitFailure = new Error('Proxmox request timeout');
+  assert.equal((await request(app).post('/provision/create').send({ node, name: 'new-vm', assignTo: ownerId })).status, 500);
+  const [row] = await testDb.db.select().from(provisionedVms);
+  assert.ok(postDescription.includes(provisionAllocation(row.steps)!.marker!));
+  liveVms = [{ vmid: row.vmid, node: 'pve', type: 'qemu' }];
+  const evidence = { status: 'ready', verified: true, evidence: 'Verified completed creation and disks in the Proxmox task log' };
+  const resolve = (body: any) => request(app).post(`/operations/provision/${row.id}/resolve`).send(body);
+  assert.equal((await resolve({ status: 'ready' })).status, 403);
+  await testDb.db.update(users).set({ is_admin: false }).where(eq(users.id, adminId));
+  configDescription = postDescription;
+  assert.equal((await resolve(evidence)).status, 403);
+  await testDb.db.update(users).set({ is_admin: true }).where(eq(users.id, adminId));
+  configDescription = 'same name, no unique marker';
+  assert.equal((await resolve(evidence)).status, 409);
+  configDescription = postDescription;
+  configLock = 'create';
+  assert.equal((await resolve(evidence)).status, 409);
+  configLock = '';
+  const recovered = await resolve(evidence);
+  assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+  assert.equal((await ownership(row.vmid)).assignments[0].user_id, ownerId);
+  assert.equal(provisionAllocation((await provision(row.id)).steps)?.recovery?.operatorId, adminId);
+});
+
+test('ownership conflict after successful task becomes actionable review instead of active forever', async () => {
+  const created = await create();
+  await testDb.db.insert(vmAssignments).values({ user_id: otherId, node, vmid: created.vmid });
+  await waitForBackgroundWork();
+  const row = await provision(created.id);
+  assert.equal(row.status, 'needs_review');
+  assert.match(row.status_detail!, /review the existing assignment/);
+  assert.equal((await ownership(created.vmid)).assignments[0].user_id, otherId);
+  assert.equal((await ownership(created.vmid)).leases.length, 0);
+});
+
+test('reconcile loses its conditional claim to explicit failure and never grants ownership', async () => {
+  const saved = await savedSubmission(931);
+  await reconcileInterruptedOperations();
+  let release!: () => void;
+  taskGate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { onTaskRead = resolve; });
+  const reconcile = request(app).post(`/operations/provision/${saved.provisionId}/reconcile`).send({}).then(response => response);
+  await started;
+  const failed = await request(app).post(`/operations/provision/${saved.provisionId}/resolve`).send({ status: 'error' });
+  assert.equal(failed.status, 200);
+  release();
+  assert.equal((await reconcile).status, 409);
+  assert.equal((await provision(saved.provisionId)).status, 'error');
+  assert.deepEqual(await ownership(931), { assignments: [], leases: [] });
+});
+
+test('protected legacy timeout can recover through the same operation resolution endpoint', async () => {
+  const saved = await savedSubmission(932);
+  await testDb.db.update(provisionedVms).set({ status: 'timeout' }).where(eq(provisionedVms.id, saved.provisionId));
+  liveVms = [{ vmid: 932, node: 'pve', type: 'qemu' }];
+  const response = await request(app).post(`/operations/provision/${saved.provisionId}/resolve`).send({ status: 'ready' });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal((await ownership(932)).assignments[0].user_id, ownerId);
 });
 
 test('successful upstream reconciliation does not classify existing ownership as failed-create leftovers', async () => {

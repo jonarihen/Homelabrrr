@@ -3,6 +3,7 @@ import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
 import { backupVerificationLabel } from '../../utils/backupVerification.js';
+import { operationNeedsReview, readyResolution } from '../../utils/operationRecovery.js';
 
 const card = 'bg-gray-900 border border-gray-800 rounded-2xl p-5';
 
@@ -53,13 +54,24 @@ export default function OperationsPage() {
     finally { setReauthBusy(false); }
   };
 
+  const resolveReady = (operation) => {
+    let evidence;
+    if (operation.type === 'provision' && !operation.upid) {
+      if (!window.confirm('Verify the VM has finished creating in Proxmox. Recovery checks its unique creation marker, recorded node and VMID, and existing ownership.')) return;
+      evidence = window.prompt('Record how you verified this VM and that its creation finished (10–1000 characters):');
+    }
+    const body = readyResolution(operation, evidence);
+    if (!body) return;
+    act(`ready-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, body));
+  };
+
   const cleanup = (operation) => {
     if (!window.confirm('Remove only this portal tracking record? This does not stop a Proxmox task or delete any VM, disk, or configuration.')) return;
     act(`cleanup-${operation.type}-${operation.id}`, () => api.delete(`/admin/operations/${operation.type}/${operation.id}`));
   };
 
   if (!data) return <div className="p-8 text-sm text-gray-400">{error || 'Loading operations…'}</div>;
-  const actionable = data.operations.filter((operation) => operation.status === 'needs_review');
+  const actionable = data.operations.filter(operationNeedsReview);
 
   return (
     <div className="p-6 lg:p-8 space-y-6">
@@ -110,8 +122,8 @@ export default function OperationsPage() {
                 </div>
                 <div className="flex gap-2">
                   {operation.upid && <button disabled={!!busy} onClick={() => act(`reconcile-${operation.type}-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/reconcile`))} className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs text-white">Check upstream</button>}
-                  {operation.status === 'needs_review' && <>
-                    <button disabled={!!busy} onClick={() => act(`ready-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, { status: operation.type === 'migration' ? 'ok' : 'ready' }))} className="px-3 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40 text-xs text-white">Verified ready</button>
+                  {operationNeedsReview(operation) && <>
+                    <button disabled={!!busy} onClick={() => resolveReady(operation)} className="px-3 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40 text-xs text-white">Verified ready</button>
                     <button disabled={!!busy} onClick={() => act(`error-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, { status: 'error' }))} className="px-3 py-2 rounded-lg bg-red-900 hover:bg-red-800 disabled:opacity-40 text-xs text-white">Mark failed</button>
                   </>}
                 </div>

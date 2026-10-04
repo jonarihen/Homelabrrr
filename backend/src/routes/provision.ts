@@ -30,6 +30,7 @@ import { resolveSshKeys, unusableKeysError, assertLoginPossible } from '../utils
 import { validatePassword } from '../utils/validation.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
 import { submitProvision, recordProvisionOwnership } from '../services/provisionOwnership.ts';
+import { provisionAllocation } from '../utils/provisionIntent.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -90,7 +91,7 @@ async function notifyDeployment(provisionId: number) {
       .where(eq(provisionedVms.id, provisionId))
       .limit(1);
     if (!row) return;
-    const failed = row.status === 'error' || row.status === 'timeout';
+    const failed = row.status === 'error' || row.status === 'timeout' || row.status === 'needs_review';
     const { nodeName } = decodeNodeRef(row.node);
     await notify(failed ? 'deployment.failed' : 'deployment.finished', {
       vm: `${row.name} (#${row.vmid}${nodeName ? ` on ${nodeName}` : ''})`,
@@ -401,12 +402,12 @@ router.post('/clone', async (req: any, res: any) => {
     // the duration of the clone submit, so a second deploy running right now
     // can't be handed the same id. withFreshVmid retries once if Proxmox says
     // the id is taken anyway, and releases the reservation if the clone fails.
-    const submit = (onReserved: (vmid: number) => Promise<void>) => withFreshVmid((vmid: number) => cloneVM(
+    const submit = (onReserved: (vmid: number) => Promise<void>, marker: string) => withFreshVmid((vmid: number) => cloneVM(
       template.node,
       template.vmid,
       vmid,
       vmName,
-      { storage: storage || template.default_storage, description: description || '' }
+      { storage: storage || template.default_storage, description: `${description || ''}\n${marker}` }
     ), { onReserved });
 
     // Track the provisioned VM — the clone/capacity work above is already done,
@@ -698,7 +699,7 @@ router.post('/from-image', async (req: any, res: any) => {
 
     // Late allocation + reservation (see /clone above): concurrent deploys can
     // no longer be handed the same id, and a failed create hands its id back.
-    const submit = (onReserved: (vmid: number) => Promise<void>) => withFreshVmid((id: number) => createVM(targetImage.node, id, {
+    const submit = (onReserved: (vmid: number) => Promise<void>, marker: string) => withFreshVmid((id: number) => createVM(targetImage.node, id, {
       name: vmName,
       cpu: 'host',
       sockets: cpuLayout.sockets,
@@ -712,7 +713,7 @@ router.post('/from-image', async (req: any, res: any) => {
       serial0: 'socket',
       vga: 'serial0',
       net0: tag ? `virtio,bridge=${safeBridge},tag=${tag}` : `virtio,bridge=${safeBridge}`,
-      ...(description && { description }),
+      description: `${description}\n${marker}`,
     }), { onReserved });
 
     const startNow = !!start;
@@ -881,7 +882,9 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
       userId: targetUser, createdBy: req.session.username,
       cores: cpuLayout.sockets * cpuLayout.cores,
       memoryMb: config.memory, diskGb: Number(String(diskSize).replace(/[^0-9]/g, '')) || 0,
-    }, onReserved => withFreshVmid((id: number) => createVM(node, id, config), { onReserved }));
+    }, (onReserved, marker) => withFreshVmid((id: number) => createVM(node, id, {
+      ...config, description: `${description}\n${marker}`,
+    }), { onReserved }));
 
     // Poll for completion, then stamp PVE owner/VLAN tags on the new VM
     if (upid) {
@@ -1114,7 +1117,7 @@ async function pollTaskCompletion(provisionId: number, node: string, upid: strin
     } catch { /* keep polling */ }
   }
   await db.update(provisionedVms)
-    .set({ status: 'timeout', status_detail: 'Timed out while waiting for the Proxmox task to finish' })
+    .set({ status: 'needs_review', status_detail: 'Monitoring timed out — check the saved Proxmox task in Admin Operations before releasing or recovering the reservation' })
     .where(eq(provisionedVms.id, provisionId));
   await notifyDeployment(provisionId);
   return false;
@@ -1147,7 +1150,11 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
       config.cores = cpuLayout.cores;
     }
     if (opts.memory) config.memory = parseInt(opts.memory);
-    if (opts.description) config.description = opts.description;
+    if (opts.description) {
+      const [saved] = await db.select({ steps: provisionedVms.steps }).from(provisionedVms).where(eq(provisionedVms.id, provisionId)).limit(1);
+      const marker = provisionAllocation(saved?.steps)?.marker;
+      config.description = `${opts.description}${marker ? `\n${marker}` : ''}`;
+    }
 
     // Cloud-init settings
     if (opts.cloudInit) {
