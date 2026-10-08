@@ -1,0 +1,1 @@
+ALTER TABLE "hardware_power_samples" ADD COLUMN "health" jsonb;
