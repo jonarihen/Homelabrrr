@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { hardwareConnections, pveHosts } from '../db/schema/index.ts';
+import { hardwareConnections, hardwareTelemetryState, pveHosts } from '../db/schema/index.ts';
 import { requireAuth, requirePermission, requireInteractiveSession } from '../middleware/auth.ts';
 import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
 import { decodeNodeRef, isValidNodeName } from '../utils/nodeRef.ts';
@@ -9,6 +9,7 @@ import { logAudit } from '../utils/audit.ts';
 import { isUniqueViolation } from '../db/errors.ts';
 import { discoverHardware, IloError } from '../services/iloAdapter.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
+import { HARDWARE_POLL_INTERVAL_MS, latestHardwareSample } from '../services/hardwareTelemetry.ts';
 
 const router = Router();
 router.use(requireAuth, requirePermission('can_manage_hosts'), requireInteractiveSession);
@@ -34,6 +35,55 @@ function parsedId(raw: string): number {
 router.get('/', async (_req, res) => {
   const rows = await db.select().from(hardwareConnections).where(eq(hardwareConnections.lifecycle_state, 'active'));
   res.json(rows.map(safeDto));
+});
+router.put('/:id/collection', async (req, res) => {
+  try {
+    const id = parsedId(req.params.id);
+    if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be boolean' });
+    const [row] = await db.update(hardwareConnections).set({ collection_enabled: req.body.enabled, config_version: sql`${hardwareConnections.config_version} + 1`, updated_at: new Date() })
+      .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)), ...(req.body.enabled ? [sql`${hardwareConnections.system_uuid} IS NOT NULL`] : []))).returning();
+    if (!row) return res.status(409).json({ error: 'Connection changed or has not passed a connection test' });
+    await db.insert(hardwareTelemetryState).values({ hardware_id: id, next_poll_at: new Date() }).onConflictDoUpdate({ target: hardwareTelemetryState.hardware_id, set: { next_poll_at: new Date() } });
+    await logAudit(req, req.body.enabled ? 'hardware_collection_enabled' : 'hardware_collection_disabled', String(id), `node=${row.node_ref}`);
+    res.json(safeDto(row));
+  } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
+});
+router.get('/:id/telemetry', async (req, res) => {
+  try {
+    const id = parsedId(req.params.id);
+    const [connection] = await db.select({ id: hardwareConnections.id, node_ref: hardwareConnections.node_ref, collection_enabled: hardwareConnections.collection_enabled, lifecycle_state: hardwareConnections.lifecycle_state }).from(hardwareConnections).where(eq(hardwareConnections.id, id)).limit(1);
+    if (!connection) return res.status(404).json({ error: 'Connection not found' });
+    const hours = Number(req.query.hours ?? 24);
+    if (!Number.isInteger(hours) || hours < 1 || hours > 168) return res.status(400).json({ error: 'hours must be between 1 and 168' });
+    const binSeconds = Math.max(60, Math.ceil(hours * 3600 / 500 / 60) * 60);
+    const start = new Date(Date.now() - hours * 3600_000);
+    const points = await db.execute(sql`
+      SELECT to_timestamp(floor(extract(epoch from observed_at) / ${binSeconds}) * ${binSeconds}) AS at,
+        min(watts)::text AS min_watts, avg(watts)::text AS mean_watts, max(watts)::text AS max_watts,
+        count(*)::integer AS count
+      FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start}
+      GROUP BY 1 ORDER BY 1 LIMIT 500
+    `);
+    const summary = await db.execute(sql`
+      WITH bounds AS (
+        SELECT (date_trunc('day', now() AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS day_start,
+          (date_trunc('month', now() AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS month_start
+      )
+      SELECT sum(kwh) FILTER (WHERE start_utc >= bounds.day_start)::text AS today_kwh,
+        sum(covered_seconds) FILTER (WHERE start_utc >= bounds.day_start)::integer AS today_covered_seconds,
+        floor(extract(epoch FROM now() - bounds.day_start))::integer AS today_expected_seconds,
+        sum(kwh)::text AS month_kwh, sum(covered_seconds)::integer AS month_covered_seconds,
+        floor(extract(epoch FROM now() - bounds.month_start))::integer AS month_expected_seconds
+      FROM bounds LEFT JOIN hardware_energy_intervals ON hardware_id = ${id} AND start_utc >= bounds.month_start AND start_utc <= now()
+      GROUP BY bounds.day_start, bounds.month_start
+    `);
+    const [state] = await db.select({ last_error_code: hardwareTelemetryState.last_error_code, last_attempt_at: hardwareTelemetryState.last_attempt_at, last_success_at: hardwareTelemetryState.last_success_at }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
+    const latest = await latestHardwareSample(id);
+    const ageSeconds = latest ? Math.max(0, Math.round((Date.now() - latest.observed_at.getTime()) / 1000)) : null;
+    res.json({ hardwareId: id, nodeRef: connection.node_ref, collectionEnabled: connection.collection_enabled, lifecycleState: connection.lifecycle_state,
+      latest: latest && { watts: latest.watts, mode: latest.mode, observedAt: latest.observed_at, ageSeconds, stale: (ageSeconds ?? Infinity) > Math.ceil(3 * HARDWARE_POLL_INTERVAL_MS / 1000) },
+      lastErrorCode: state?.last_error_code || null, lastAttemptAt: state?.last_attempt_at || null, points: points.rows, summary: summary.rows[0] || null });
+  } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
 });
 router.post('/', async (req, res) => {
   try {

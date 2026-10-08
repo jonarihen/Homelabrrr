@@ -19,6 +19,7 @@ import { join } from 'path';
 import authRoutes from './routes/auth.ts';
 import adminRoutes from './routes/admin.ts';
 import hardwareRoutes from './routes/hardware.ts';
+import { startHardwareTelemetry, stopHardwareTelemetry, runHardwareTelemetryRetention } from './services/hardwareTelemetry.ts';
 import vmRoutes, { vncSessions } from './routes/vms.ts';
 import sshRoutes, { sshSessions } from './routes/ssh.ts';
 import sftpRoutes from './routes/sftp.ts';
@@ -699,10 +700,13 @@ const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
 // Background enforcement of per-VM power schedules (vm_schedules).
 startScheduler();
 startElOverblikScheduler();
+startHardwareTelemetry();
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
     .catch((err) => { log('warn', 'database_maintenance_failed', { error: err }); });
+  Promise.resolve().then(() => runHardwareTelemetryRetention())
+    .catch((err) => { log('warn', 'hardware_telemetry_retention_failed', { error: err }); });
 };
 const maintenanceStartTimer = setTimeout(runDatabaseMaintenanceSafe, 5 * 60 * 1000);
 const databaseMaintenanceTimer = setInterval(runDatabaseMaintenanceSafe, 24 * 60 * 60 * 1000);
@@ -740,6 +744,7 @@ async function shutdown(signal) {
   if (nodeHealthTimer) clearInterval(nodeHealthTimer);
   stopScheduler();
   stopElOverblikScheduler();
+  stopHardwareTelemetry();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {

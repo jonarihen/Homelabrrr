@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import api from '../../api.js';
+import HardwareTelemetryView from './HardwareTelemetryView.jsx';
 
 const blank = { host: '', port: 443, username: '', password: '', verifyTls: true, caCertificate: '' };
 
@@ -52,9 +53,10 @@ export default function HardwareConnection({ nodeRef }) {
       <button disabled={busy} onClick={() => setEditing((v) => !v)} className="text-gray-200 hover:text-orange-400 disabled:opacity-50">{editing ? 'Cancel' : connection ? 'Edit' : 'Configure'}</button>
       {connection && <button disabled={busy} onClick={disconnect} className="text-red-400 hover:text-red-300 disabled:opacity-50">Decommission</button>}
     </div>
-    {connection && <p className="mt-2 text-gray-500">Collection disabled · Control disabled · Runtime write privilege unverified</p>}
+    {connection && <p className="mt-2 text-gray-500">Collection {connection.collection_enabled ? 'enabled' : 'disabled'} · Control disabled · Runtime write privilege unverified</p>}
     {discovery && <div className="mt-2 text-gray-300">Mode {discovery.mode.value} · Actual input {discovery.sample.watts == null ? 'unavailable' : `${discovery.sample.watts} W`} · Monitoring {discovery.capabilities.monitoring} · Runtime mode {discovery.capabilities.runtimeMode}</div>}
     {error && <p role="alert" className="mt-2 text-red-400">{error}</p>}
+    {connection && <HardwareTelemetryView connection={connection} onConnectionChange={setConnection} />}
     {editing && <form onSubmit={save} className="mt-3 grid gap-2 sm:grid-cols-2">
       <label className="text-gray-400">Management host<input required value={form.host} onChange={(e) => setForm((v) => ({ ...v, host: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
       <label className="text-gray-400">HTTPS port<input required type="number" min="1" max="65535" value={form.port} onChange={(e) => setForm((v) => ({ ...v, port: Number(e.target.value) }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
