@@ -5,6 +5,12 @@
 - Hardware administrators can save a Copenhagen weekly Power Regulator schedule, configure price cap and boost thresholds, pause automation, and request a temporary manual mode. All automatic hardware changes start disabled; live control requires a separate capability test, recent reauthentication, and explicit enablement.
 - One per-node controller resolves manual, schedule, and price decisions, claims work before dispatch, rechecks policy and price state, and verifies the resulting iLO mode. It only writes the three supported runtime Power Regulator values; it never requests a reboot, BIOS setting, watt cap, or VM action.
 - The price worker currently falls back to the configured schedule until the electricity price provider is integrated. These controls have only been exercised against tests and fixtures, not a live server.
+## 2026-10-08 — Configured electricity price foundation
+
+- Administrators can record dated spot or fixed all-in electricity terms, applicable variable tariffs, VAT treatment, and actual household bills. Missing terms keep the retail price incomplete; wholesale spot is labeled separately.
+- Published DayAheadPrices can be cached for DK1 or DK2 in 15-minute UTC intervals. The current-price service supplies the same exact basis and revisions to previews and price-aware power policy, without accessing meter consumption or changing hardware.
+- Lab cost calculations join measured server kWh to applicable price intervals. These are calculated operating expenses, separate from actual invoices or payments. No supplier rates or owner tariff facts are prefilled.
+- Monthly previews compare server energy with the household meter only when scope and coverage match, apply fixed fees by an explicit policy, and forecast with weekday/weekend evidence plus a labeled future price scenario. Closed months can be finalized as immutable revisioned statements.
 
 ## 2026-10-08 — Server power telemetry and history
 
