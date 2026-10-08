@@ -1,0 +1,144 @@
+import { randomUUID } from 'node:crypto';
+import { readCurrentMode, setRuntimeMode, type HardwareMode, type IloConfig } from './iloAdapter.ts';
+import {
+  resolvePowerDecision, type ApplicablePowerPrice, type PowerDecision, type PowerPricePolicy,
+  type PriceLatch, type WeeklyPowerSchedule, type WritablePowerMode,
+} from './powerPolicy.ts';
+
+export interface ControlSnapshot {
+  hardwareId: number;
+  configVersion: number;
+  policyVersion: number;
+  controlEnabled: boolean;
+  automationEnabled: boolean;
+  paused: boolean;
+  driftHold: boolean;
+  supportedModes: WritablePowerMode[];
+  schedule: WeeklyPowerSchedule;
+  pricePolicy: PowerPricePolicy;
+  latch: PriceLatch | null;
+  manualOverride: { mode: WritablePowerMode; expiresAt: Date | null } | null;
+  ilo: IloConfig;
+}
+
+export interface ClaimOutcome {
+  outcome: 'verified' | 'already_set' | 'unknown' | 'failed' | 'stale';
+  prior: HardwareMode | null;
+  target: WritablePowerMode;
+  decision: PowerDecision;
+  errorCategory?: string;
+}
+
+export interface ControlRepository {
+  load(hardwareId: number): Promise<ControlSnapshot | null>;
+  claim(snapshot: ControlSnapshot, token: string, expiresAt: Date): Promise<boolean>;
+  claimStillCurrent(snapshot: ControlSnapshot, token: string): Promise<boolean>;
+  finish(hardwareId: number, token: string, outcome: ClaimOutcome): Promise<void>;
+  observe(hardwareId: number, version: number, decision: PowerDecision, actual: HardwareMode): Promise<void>;
+}
+
+export interface ControllerDependencies {
+  repository: ControlRepository;
+  getApplicablePrice: (at: Date, policy: PowerPricePolicy) => Promise<ApplicablePowerPrice | null>;
+  readMode?: typeof readCurrentMode;
+  writeMode?: typeof setRuntimeMode;
+  now?: () => Date;
+}
+
+export interface ReconcileResult {
+  status: 'not_configured' | 'disabled' | 'busy' | 'hold' | 'already_set' | 'stale' | 'verified' | 'unknown' | 'failed';
+  decision?: PowerDecision;
+}
+
+function sameSelection(a: PowerDecision, b: PowerDecision): boolean {
+  return a.target === b.target && a.reason === b.reason
+    && a.validUntil?.getTime() === b.validUntil?.getTime()
+    && a.latch.priceRevision === b.latch.priceRevision
+    && a.latch.policyVersion === b.latch.policyVersion;
+}
+
+// All automatic paths (weekly and price) pass through this one reconciler.
+// The repository atomically leases each physical node across processes; the
+// in-process set avoids redundant local reads. No timer lives in this module.
+export class PowerController {
+  private readonly active = new Set<number>();
+  private readonly deps: Required<ControllerDependencies>;
+
+  constructor(deps: ControllerDependencies) {
+    this.deps = {
+      ...deps,
+      readMode: deps.readMode ?? readCurrentMode,
+      writeMode: deps.writeMode ?? setRuntimeMode,
+      now: deps.now ?? (() => new Date()),
+    };
+  }
+
+  private async decision(snapshot: ControlSnapshot, actualMode: HardwareMode): Promise<PowerDecision> {
+    const now = this.deps.now();
+    const price = snapshot.pricePolicy.enabled
+      ? await this.deps.getApplicablePrice(now, snapshot.pricePolicy) : null;
+    return resolvePowerDecision({
+      now, controlEnabled: snapshot.controlEnabled && snapshot.automationEnabled,
+      automationPaused: snapshot.paused, driftHold: snapshot.driftHold,
+      actualMode, supportedModes: snapshot.supportedModes,
+      schedule: snapshot.schedule, pricePolicy: snapshot.pricePolicy,
+      price, previousLatch: snapshot.latch, manualOverride: snapshot.manualOverride,
+    });
+  }
+
+  async reconcile(hardwareId: number): Promise<ReconcileResult> {
+    if (this.active.has(hardwareId)) return { status: 'busy' };
+    this.active.add(hardwareId);
+    try {
+      const initial = await this.deps.repository.load(hardwareId);
+      if (!initial) return { status: 'not_configured' };
+      if (!initial.controlEnabled || !initial.automationEnabled) return { status: 'disabled' };
+      const actual = await this.deps.readMode(initial.ilo);
+      const selected = await this.decision(initial, actual);
+      if (!selected.target) {
+        await this.deps.repository.observe(hardwareId, initial.policyVersion, selected, actual);
+        return { status: 'hold', decision: selected };
+      }
+      if (selected.target === actual) {
+        await this.deps.repository.observe(hardwareId, initial.policyVersion, selected, actual);
+        return { status: 'already_set', decision: selected };
+      }
+      const token = randomUUID();
+      // iLO's bounded GET/PATCH/readback sequence is at most ~15 seconds; the
+      // 60-second lease leaves room for DB and network jitter. Expired claims
+      // are reconciled by a fresh hardware read, never blindly replayed.
+      const claimed = await this.deps.repository.claim(initial, token, new Date(this.deps.now().getTime() + 60_000));
+      if (!claimed) return { status: 'busy', decision: selected };
+      let outcome: ClaimOutcome = { outcome: 'stale', prior: actual, target: selected.target, decision: selected };
+      try {
+        const fresh = await this.deps.repository.load(hardwareId);
+        if (!fresh || fresh.configVersion !== initial.configVersion || fresh.policyVersion !== initial.policyVersion
+          || !await this.deps.repository.claimStillCurrent(initial, token)) return { status: 'stale', decision: selected };
+        const current = await this.deps.readMode(fresh.ilo);
+        const renewed = await this.decision(fresh, current);
+        if (!sameSelection(selected, renewed) || !renewed.target) return { status: 'stale', decision: renewed };
+        if (current === renewed.target) {
+          outcome = { outcome: 'already_set', prior: current, target: renewed.target, decision: renewed };
+          return { status: 'already_set', decision: renewed };
+        }
+        const guard = async () => {
+          if (!await this.deps.repository.claimStillCurrent(initial, token)) return false;
+          const latest = await this.deps.repository.load(hardwareId);
+          if (!latest || latest.configVersion !== initial.configVersion || latest.policyVersion !== initial.policyVersion) return false;
+          const atDispatch = await this.decision(latest, current);
+          return sameSelection(renewed, atDispatch) && atDispatch.target === renewed.target;
+        };
+        const result = await this.deps.writeMode(fresh.ilo, renewed.target, undefined, undefined, guard);
+        outcome = { outcome: result.outcome, prior: result.prior, target: renewed.target, decision: renewed };
+        return { status: result.outcome, decision: renewed };
+      } catch (err) {
+        outcome = { ...outcome, outcome: 'failed', errorCategory: err instanceof Error ? err.name : 'unknown' };
+        return { status: 'failed', decision: selected };
+      } finally {
+        await this.deps.repository.finish(hardwareId, token, outcome);
+      }
+    } finally {
+      this.active.delete(hardwareId);
+    }
+  }
+}
