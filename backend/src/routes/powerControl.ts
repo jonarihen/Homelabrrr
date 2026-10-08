@@ -11,6 +11,7 @@ import { sanitizeError } from '../utils/sanitize.ts';
 import { PowerController } from '../services/powerController.ts';
 import { PowerControlStore } from '../services/powerControlStore.ts';
 import { buildPowerPreview } from '../services/powerPreview.ts';
+import { resolveManualExpiry } from '../services/manualPowerOverride.ts';
 
 const router = Router();
 router.use(requireAuth, requireAdmin, requireInteractiveSession);
@@ -258,16 +259,16 @@ router.post('/:id/manual', requireRecentReauthentication, async (req, res) => {
     const id = hardwareId(req.params.id);
     const version = Number(req.body?.version);
     const mode = req.body?.mode;
-    const untilCleared = req.body?.untilCleared === true;
-    const minutes = req.body?.durationMinutes == null ? 180 : Number(req.body.durationMinutes);
-    if (!Number.isSafeInteger(version) || version < 1 || !['low', 'dynamic', 'high'].includes(mode)
-      || (!untilCleared && (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440))) {
+    if (!Number.isSafeInteger(version) || version < 1 || !['low', 'dynamic', 'high'].includes(mode)) {
       return res.status(400).json({ error: 'Valid mode, policy version and duration required' });
     }
     const [connection] = await db.select({ control_enabled: hardwareConnections.control_enabled })
       .from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
     if (!connection?.control_enabled) return res.status(409).json({ error: 'Live iLO control must be enabled first' });
-    const expiresAt = untilCleared ? null : new Date(Date.now() + minutes * 60_000);
+    const [policy] = await db.select({ schedule: hardwarePowerPolicies.schedule })
+      .from(hardwarePowerPolicies).where(and(eq(hardwarePowerPolicies.hardware_id, id), eq(hardwarePowerPolicies.version, version))).limit(1);
+    if (!policy) return res.status(409).json({ error: 'Policy changed' });
+    const expiresAt = resolveManualExpiry(req.body, policy.schedule, new Date());
     const [row] = await db.update(hardwarePowerPolicies).set({
       manual_mode: mode, manual_expires_at: expiresAt, version: version + 1, updated_at: new Date(),
     }).where(and(eq(hardwarePowerPolicies.hardware_id, id), eq(hardwarePowerPolicies.version, version), isNull(hardwarePowerPolicies.claim_token)))
@@ -276,7 +277,11 @@ router.post('/:id/manual', requireRecentReauthentication, async (req, res) => {
     await logAudit(req, 'hardware_power_manual_requested', String(id), `mode=${mode}; expires=${expiresAt?.toISOString() || 'until_cleared'}`);
     const result = await manualController.reconcile(id, { manual: true });
     res.json({ mode, expiresAt, result });
-  } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
+  } catch (err) {
+    if (err instanceof Error && (err.message.startsWith('Invalid manual override') || err.message.startsWith('Enable a weekly schedule')
+      || err.message.startsWith('No next weekly schedule'))) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: sanitizeError(err) });
+  }
 });
 
 router.delete('/:id/manual', async (req, res) => {

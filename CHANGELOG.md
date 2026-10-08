@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08 — Manual power override durations
+
+- Hardware administrators can choose fixed minutes, the next saved weekly schedule boundary, or an explicit until-cleared iLO mode override. Fixed duration defaults to three hours. The next-boundary option follows Copenhagen daylight-saving transitions and requires an enabled schedule.
+
 ## 2026-10-08 — Seven-day power preview in administration
 
 - Hardware administrators can inspect upcoming Copenhagen schedule and published-price intervals, the selected mode and its reason, and the next known transition before enabling automatic control. Intervals beyond published price coverage are marked unknown.
