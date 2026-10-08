@@ -2,7 +2,7 @@ import { and, eq, gte, lte, desc, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { hardwareConnections, hardwarePowerSamples, hardwareEnergyIntervals, hardwareTelemetryState } from '../db/schema/index.ts';
 import { decryptSecret } from '../utils/secrets.ts';
-import { discoverHardware, IloError } from './iloAdapter.ts';
+import { discoverHardware, IloError, physicalSystemIdentity } from './iloAdapter.ts';
 import { integrateWattSamples } from './energyIntervals.ts';
 import { startBackgroundWork } from './backgroundWork.ts';
 import { log } from '../utils/logger.ts';
@@ -27,6 +27,11 @@ export function aggregationLookbackStart(observedAt: Date): Date {
   return new Date(currentBucketStart - 15 * 60_000);
 }
 
+export function aggregationLookaheadEnd(observedAt: Date): Date {
+  const currentBucketStart = Math.floor(observedAt.getTime() / (15 * 60_000)) * (15 * 60_000);
+  return new Date(currentBucketStart + 30 * 60_000);
+}
+
 export async function pollHardwareConnection(id: number, now = () => new Date(), reader = discoverHardware) {
   const current = now();
   const lease = new Date(current.getTime() + LEASE_MS);
@@ -49,8 +54,8 @@ export async function pollHardwareConnection(id: number, now = () => new Date(),
     try {
       const sample = await reader({ host: connection.target_host, port: connection.target_port, username: connection.username, password: decryptSecret(connection.secret), verifyTls: connection.verify_tls, caCertificate: connection.ca_certificate });
       // A changed physical identity must never silently extend the old energy series.
-      const identity = sample.identity.uuid || (sample.identity.serial ? `serial:${sample.identity.serial}` : null);
-      if (identity !== connection.system_uuid) throw new Error('HARDWARE_IDENTITY_CHANGED');
+      const identity = physicalSystemIdentity(sample.identity);
+      if (identity !== connection.system_uuid.trim().toLowerCase()) throw new Error('HARDWARE_IDENTITY_CHANGED');
       const measurement = validateInstantaneousWatts(sample.sample.watts, sample.sample.observedAt, now());
       if (!sample.sample.origin || sample.sample.unit !== 'W') throw new Error('INVALID_HARDWARE_SAMPLE');
       const origin = sample.sample.origin;
@@ -63,7 +68,10 @@ export async function pollHardwareConnection(id: number, now = () => new Date(),
         // lookback would later recompute an older bucket without its first
         // sample and overwrite a complete aggregate with partial energy.
         const since = aggregationLookbackStart(measurement.observedAt);
-        const recent = await tx.select().from(hardwarePowerSamples).where(and(eq(hardwarePowerSamples.hardware_id, id), gte(hardwarePowerSamples.observed_at, since), lte(hardwarePowerSamples.observed_at, measurement.observedAt))).orderBy(hardwarePowerSamples.observed_at);
+        // An out-of-order observation can alter energy between itself and an
+        // already stored later sample. Recompute through that later sample.
+        const through = aggregationLookaheadEnd(measurement.observedAt);
+        const recent = await tx.select().from(hardwarePowerSamples).where(and(eq(hardwarePowerSamples.hardware_id, id), gte(hardwarePowerSamples.observed_at, since), lte(hardwarePowerSamples.observed_at, through))).orderBy(hardwarePowerSamples.observed_at);
         const intervals = integrateWattSamples(recent.map((row) => ({ hardwareId: id, observedAt: row.observed_at, watts: Number(row.watts), deviceEpoch: row.device_epoch })), { intervalMs: HARDWARE_POLL_INTERVAL_MS });
         for (const interval of intervals) {
           await tx.insert(hardwareEnergyIntervals).values({ hardware_id: id, start_utc: interval.startUtc, end_utc: interval.endUtc, kwh: interval.kwh, covered_seconds: Math.round(interval.coveredSeconds), expected_seconds: interval.expectedSeconds, quality: interval.quality, method_version: interval.methodVersion })
