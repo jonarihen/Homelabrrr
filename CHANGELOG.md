@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-08 — Hardware identity and telemetry reliability
+
+- Connection edits preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
+- Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+
 ## 2026-10-08 — Server power telemetry and history
 
 - iLO collection can now be enabled per tested physical node. The backend records actual input watts and regulator mode without an open browser; collection never writes a hardware setting.

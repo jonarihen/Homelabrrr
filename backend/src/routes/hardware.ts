@@ -7,12 +7,9 @@ import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
 import { decodeNodeRef, isValidNodeName } from '../utils/nodeRef.ts';
 import { logAudit } from '../utils/audit.ts';
 import { isUniqueViolation } from '../db/errors.ts';
-import { discoverHardware, IloError } from '../services/iloAdapter.ts';
+import { discoverHardware, IloError, physicalSystemIdentity } from '../services/iloAdapter.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { HARDWARE_POLL_INTERVAL_MS, latestHardwareSample } from '../services/hardwareTelemetry.ts';
-
-const router = Router();
-router.use(requireAuth, requirePermission('can_manage_hosts'), requireInteractiveSession);
 
 function safeDto(row: any) {
   const { secret: _secret, ca_certificate: _ca, ...safe } = row;
@@ -32,6 +29,9 @@ function validOptionalSecrets(body: any): boolean {
 function parsedId(raw: string): number {
   const n = Number(raw); if (!Number.isSafeInteger(n) || n < 1) throw new Error('Invalid connection id'); return n;
 }
+export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware) {
+const router = Router();
+router.use(requireAuth, requirePermission('can_manage_hosts'), requireInteractiveSession);
 router.get('/', async (_req, res) => {
   const rows = await db.select().from(hardwareConnections).where(eq(hardwareConnections.lifecycle_state, 'active'));
   res.json(rows.map(safeDto));
@@ -46,7 +46,7 @@ router.put('/:id/collection', async (req, res) => {
     await db.insert(hardwareTelemetryState).values({ hardware_id: id, next_poll_at: new Date() }).onConflictDoUpdate({ target: hardwareTelemetryState.hardware_id, set: { next_poll_at: new Date() } });
     await logAudit(req, req.body.enabled ? 'hardware_collection_enabled' : 'hardware_collection_disabled', String(id), `node=${row.node_ref}`);
     res.json(safeDto(row));
-  } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
+  } catch (err) { if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
 });
 router.get('/:id/telemetry', async (req, res) => {
   try {
@@ -83,7 +83,7 @@ router.get('/:id/telemetry', async (req, res) => {
     res.json({ hardwareId: id, nodeRef: connection.node_ref, collectionEnabled: connection.collection_enabled, lifecycleState: connection.lifecycle_state,
       latest: latest && { watts: latest.watts, mode: latest.mode, observedAt: latest.observed_at, ageSeconds, stale: (ageSeconds ?? Infinity) > Math.ceil(3 * HARDWARE_POLL_INTERVAL_MS / 1000) },
       lastErrorCode: state?.last_error_code || null, lastAttemptAt: state?.last_attempt_at || null, points: points.rows, summary: summary.rows[0] || null });
-  } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
+  } catch (err) { if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
 });
 router.post('/', async (req, res) => {
   try {
@@ -110,7 +110,10 @@ router.put('/:id', async (req, res) => {
     const input = target(req.body);
     const verifyTls = req.body?.verifyTls !== false;
     if (!verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') return res.status(400).json({ error: 'Unverified TLS is disabled' });
-    const [row] = await db.update(hardwareConnections).set({ target_host: input.host, target_port: input.port, username: input.username, secret: req.body.password ? encryptSecret(String(req.body.password)) : existing.secret, ca_certificate: req.body.clearCaCertificate ? null : (req.body.caCertificate || existing.ca_certificate), verify_tls: verifyTls, collection_enabled: false, control_enabled: false, config_version: existing.config_version + 1, system_uuid: null, model: null, generation: null, firmware: null, capabilities: null, last_status: 'not_tested', updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.config_version, Number(req.body?.configVersion)))).returning();
+    // Keep the physical identity attached to historical samples. Credential or
+    // address edits require a fresh test, and that test must prove it is still
+    // the same machine before collection/control can resume.
+    const [row] = await db.update(hardwareConnections).set({ target_host: input.host, target_port: input.port, username: input.username, secret: req.body.password ? encryptSecret(String(req.body.password)) : existing.secret, ca_certificate: req.body.clearCaCertificate ? null : (req.body.caCertificate || existing.ca_certificate), verify_tls: verifyTls, collection_enabled: false, control_enabled: false, config_version: existing.config_version + 1, model: null, generation: null, firmware: null, capabilities: null, last_status: 'not_tested', updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)))).returning();
     if (!row) return res.status(409).json({ error: 'Connection was changed concurrently' });
     await logAudit(req, 'hardware_connection_updated', String(id), `node=${row.node_ref}`);
     res.json(safeDto(row));
@@ -121,19 +124,27 @@ router.post('/:id/test', async (req, res) => {
     const id = parsedId(req.params.id);
     const [row] = await db.select().from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
     if (!row) return res.status(404).json({ error: 'Connection not found' });
-    const discovery = await discoverHardware({ host: row.target_host, port: row.target_port, username: row.username, password: decryptSecret(row.secret), verifyTls: row.verify_tls, caCertificate: row.ca_certificate });
-    const systemUuid = discovery.identity.uuid || (discovery.identity.serial ? `serial:${discovery.identity.serial}` : null);
+    const discovery = await hardwareReader({ host: row.target_host, port: row.target_port, username: row.username, password: decryptSecret(row.secret), verifyTls: row.verify_tls, caCertificate: row.ca_certificate });
+    const systemUuid = physicalSystemIdentity(discovery.identity);
+    if (row.system_uuid && row.system_uuid.trim().toLowerCase() !== systemUuid) {
+      await db.update(hardwareConnections).set({ collection_enabled: false, control_enabled: false,
+        last_status: 'identity_changed', updated_at: new Date() })
+        .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.config_version, row.config_version), eq(hardwareConnections.lifecycle_state, 'active')));
+      await logAudit(req, 'hardware_identity_mismatch', String(id), `node=${row.node_ref}; automatic control disabled`);
+      return res.status(409).json({ error: 'Physical system identity changed; decommission this connection before binding another server' });
+    }
     if (systemUuid) {
-      const [duplicate] = await db.select({ id: hardwareConnections.id }).from(hardwareConnections).where(and(eq(hardwareConnections.system_uuid, systemUuid), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
+      const [duplicate] = await db.select({ id: hardwareConnections.id }).from(hardwareConnections).where(and(sql`lower(trim(${hardwareConnections.system_uuid})) = ${systemUuid}`, eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
       if (duplicate && duplicate.id !== id) return res.status(409).json({ error: 'This physical system is already bound to another node' });
     }
-    const [saved] = await db.update(hardwareConnections).set({ system_uuid: systemUuid, model: discovery.model, generation: discovery.generation, firmware: discovery.firmware, capabilities: discovery.capabilities, last_status: 'online', last_test_at: new Date(), updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.config_version, row.config_version), eq(hardwareConnections.lifecycle_state, 'active'))).returning();
+    const [saved] = await db.update(hardwareConnections).set({ system_uuid: systemUuid, model: discovery.model, generation: discovery.generation, firmware: discovery.firmware, capabilities: discovery.capabilities, last_status: systemUuid ? 'online' : 'unsupported_identity', last_test_at: new Date(), updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.config_version, row.config_version), eq(hardwareConnections.lifecycle_state, 'active'))).returning();
     if (!saved) return res.status(409).json({ error: 'Connection changed while test was running' });
-    await logAudit(req, 'hardware_connection_tested', String(id), `node=${row.node_ref}; status=online`);
+    await logAudit(req, 'hardware_connection_tested', String(id), `node=${row.node_ref}; status=${saved.last_status}`);
     res.json({ connection: safeDto(saved), discovery });
   } catch (err) {
+    if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message });
     if (isUniqueViolation(err)) return res.status(409).json({ error: 'This physical system is already bound to another node' });
-    if (err instanceof IloError) return res.status(err.code === 'authentication_failed' ? 403 : 502).json({ status: err.code, error: err.message });
+    if (err instanceof IloError) return res.status(err.code === 'authentication_failed' ? 403 : 502).json({ status: err.code, error: `iLO connection test failed (${err.code})` });
     res.status(500).json({ error: sanitizeError(err) });
   }
 });
@@ -144,6 +155,8 @@ router.delete('/:id', async (req, res) => {
     if (!row) return res.status(404).json({ error: 'Connection not found' });
     await logAudit(req, 'hardware_connection_decommissioned', String(id), `node=${row.node_ref}`);
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
+  } catch (err) { if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
 });
-export default router;
+return router;
+}
+export default createHardwareRouter();
