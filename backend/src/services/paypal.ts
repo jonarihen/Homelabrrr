@@ -31,6 +31,14 @@ async function configured(value: unknown) {
 function credentials(row: Awaited<ReturnType<typeof configured>>): PayPalCredentials {
   return { environment: environment(row.environment), clientId: row.client_id!, clientSecret: decryptSecret(row.client_secret!)!, version: row.config_version };
 }
+export function paypalApprovalUrl(value: unknown, env: PayPalEnvironment) {
+  let url: URL;
+  try { url = new URL(String(value)); } catch { throw new PayPalError('APPROVAL_URL_INVALID'); }
+  const host = env === 'sandbox' ? 'www.sandbox.paypal.com' : 'www.paypal.com';
+  if (url.protocol !== 'https:' || url.host !== host || url.username || url.password)
+    throw new PayPalError('APPROVAL_URL_INVALID');
+  return url.href;
+}
 export async function paypalSetupStatus() {
   const rows = await db.select().from(paypalConfigs);
   return rows.map((row) => ({ environment: row.environment, configured: Boolean(row.client_id && row.client_secret && row.merchant_id && row.webhook_id),
@@ -85,9 +93,7 @@ export async function createOneOff(userId: number, amount: string, value: unknow
   if (typeof order.id !== 'string' || !['CREATED', 'PAYER_ACTION_REQUIRED'].includes(order.status)) throw new PayPalError('ORDER_CREATE_UNKNOWN');
   await db.update(paypalIntents).set({ provider_id: order.id, status: 'approval_pending', updated_at: new Date() }).where(eq(paypalIntents.id, id));
   const approval = Array.isArray(order.links) ? order.links.find((link: any) => link.rel === 'approve' || link.rel === 'payer-action')?.href : null;
-  const url = typeof approval === 'string' ? new URL(approval) : null;
-  if (!url || url.protocol !== 'https:' || !['www.paypal.com', 'www.sandbox.paypal.com'].includes(url.host)) throw new PayPalError('APPROVAL_URL_INVALID');
-  return { intentId: id, approvalUrl: url.href, status: 'approval_pending' };
+  return { intentId: id, approvalUrl: paypalApprovalUrl(approval, row.environment as PayPalEnvironment), status: 'approval_pending' };
 }
 export async function captureOneOff(userId: number, intentId: string) {
   const [intent] = await db.select().from(paypalIntents).where(and(eq(paypalIntents.id, intentId), eq(paypalIntents.user_id, userId))).limit(1);
@@ -289,9 +295,7 @@ export async function createMonthly(userId: number, value: unknown) {
       merchant_id: row.merchant_id!, status: 'APPROVAL_PENDING', plan_id: row.monthly_plan_id!, amount_ore: row.monthly_amount_ore! });
   });
   const approval = Array.isArray(result.links) ? result.links.find((link: any) => link.rel === 'approve')?.href : null;
-  const url = typeof approval === 'string' ? new URL(approval) : null;
-  if (!url || url.protocol !== 'https:' || !['www.paypal.com', 'www.sandbox.paypal.com'].includes(url.host)) throw new PayPalError('APPROVAL_URL_INVALID');
-  return { intentId: id, subscriptionId: result.id, approvalUrl: url.href, status: 'approval_pending' };
+  return { intentId: id, subscriptionId: result.id, approvalUrl: paypalApprovalUrl(approval, row.environment as PayPalEnvironment), status: 'approval_pending' };
 }
 export async function cancelMonthly(userId: number, id: string) {
   const [subscription] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.id, id), eq(paypalSubscriptions.user_id, userId))).limit(1);

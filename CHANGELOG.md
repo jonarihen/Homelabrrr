@@ -3,6 +3,7 @@
 ## 2026-10-08 — PayPal webhook evidence retention
 
 - Processed PayPal webhook payloads are removed after 30 days, while event IDs and verified ledger records remain for duplicate protection and accounting. Events needing review retain their evidence.
+- PayPal approval links must match the configured sandbox or live host before the portal sends a member to checkout.
 
 ## 2026-10-08 — PayPal capture retry readback
 
