@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-08 — iLO transport and energy history safeguards
+
+- Fixture tests now exercise bounded iLO GET/PATCH transport failures, legacy iLO 4 fallback, redirect refusal and credential-safe errors without contacting hardware.
+- Copenhagen daily energy rollups now use the correct 23-hour and 25-hour daylight-saving lengths. Retention keeps a complete local cutoff day so later runs cannot overwrite its total with partial data.
+
 ## 2026-10-08 — Day-ahead price source compatibility
 
 - The Energi Data Service request now sends Copenhagen local `start` and `end` values accepted by the live API, while stored price intervals continue to use unambiguous UTC timestamps across daylight-saving changes.

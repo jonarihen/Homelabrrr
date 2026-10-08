@@ -149,8 +149,8 @@ export async function runHardwareTelemetryRetention(now = new Date()) {
         WHERE start_utc < (date_trunc('day', ${now}::timestamptz AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen')
       )
       SELECT hardware_id, local_date, sum(kwh), sum(covered_seconds),
-        extract(epoch FROM ((local_date + 1) AT TIME ZONE 'Europe/Copenhagen') - (local_date AT TIME ZONE 'Europe/Copenhagen'))::integer,
-        CASE WHEN sum(covered_seconds) = extract(epoch FROM ((local_date + 1) AT TIME ZONE 'Europe/Copenhagen') - (local_date AT TIME ZONE 'Europe/Copenhagen'))::integer
+        extract(epoch FROM (((local_date + 1)::timestamp AT TIME ZONE 'Europe/Copenhagen') - (local_date::timestamp AT TIME ZONE 'Europe/Copenhagen')))::integer,
+        CASE WHEN sum(covered_seconds) = extract(epoch FROM (((local_date + 1)::timestamp AT TIME ZONE 'Europe/Copenhagen') - (local_date::timestamp AT TIME ZONE 'Europe/Copenhagen')))::integer
           THEN 'integrated_complete' ELSE 'integrated_partial' END,
         'trapezoid_v1'
       FROM local_intervals GROUP BY hardware_id, local_date
@@ -159,7 +159,11 @@ export async function runHardwareTelemetryRetention(now = new Date()) {
         quality = EXCLUDED.quality, method_version = EXCLUDED.method_version
     `);
     const raw = await tx.execute(sql`DELETE FROM hardware_power_samples WHERE observed_at < ${rawCutoff}`);
-    const intervals = await tx.execute(sql`DELETE FROM hardware_energy_intervals WHERE start_utc < ${intervalCutoff}
+    // Retain the entire local cutoff day. Deleting just its early buckets
+    // would make the next rollup overwrite a complete daily row with a
+    // partial total after the first retention run.
+    const intervals = await tx.execute(sql`DELETE FROM hardware_energy_intervals WHERE start_utc <
+      (date_trunc('day', ${intervalCutoff}::timestamptz AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen')
       AND EXISTS (SELECT 1 FROM hardware_energy_days WHERE hardware_energy_days.hardware_id = hardware_energy_intervals.hardware_id
         AND hardware_energy_days.local_date = (hardware_energy_intervals.start_utc AT TIME ZONE 'Europe/Copenhagen')::date)`);
     const days = await tx.execute(sql`DELETE FROM hardware_energy_days WHERE local_date < (${dayCutoff}::timestamptz AT TIME ZONE 'Europe/Copenhagen')::date`);
