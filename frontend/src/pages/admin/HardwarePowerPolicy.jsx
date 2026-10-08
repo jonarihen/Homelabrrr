@@ -20,7 +20,7 @@ function PowerPreviewTimeline({ preview }) {
   const visible = showAll ? segments : segments.slice(0, 48);
   return <section className="mt-3 border border-gray-700 bg-gray-900/60 p-3" aria-label="Seven-day power mode preview">
     <h3 className="uppercase tracking-wider text-orange-400">Saved policy · next seven days</h3>
-    <p className="mt-2 text-gray-300">At {copenhagenTime(preview.at)} · observed {preview.observedMode === 'unknown' ? 'Unknown' : modeLabel(preview.observedMode)} · selected {preview.selectedMode ? modeLabel(preview.selectedMode) : 'No automatic change'} · reason {preview.reason.replaceAll('_', ' ')}.</p>
+    <p className="mt-2 text-gray-300">At {copenhagenTime(preview.at)} · observed {preview.observedMode === 'unknown' ? 'Unknown' : preview.observedMode === 'os_control' ? 'OS Control' : modeLabel(preview.observedMode)} · selected {preview.selectedMode ? modeLabel(preview.selectedMode) : 'No automatic change'} · reason {preview.reason.replaceAll('_', ' ')}.</p>
     <p className="mt-1 text-gray-400">Next schedule change: {copenhagenTime(timeline?.nextScheduleTransition)} · next known selected-mode change: {copenhagenTime(timeline?.nextKnownTransition)}.</p>
     <p className="mt-1 text-amber-400">Future selections after published price coverage are unknown. This preview is read-only and uses the saved policy.</p>
     <div className="mt-3 max-h-80 overflow-auto border border-gray-700">
