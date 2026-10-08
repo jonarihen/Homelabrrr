@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08 — Server energy history
+
+- Energy & Budget now charts integrated server kWh alongside instantaneous watts for 24-hour and seven-day views, with coverage in an accessible interval table. Missing intervals leave visible gaps in both trend lines.
+
 ## 2026-10-08 — Day-ahead price source compatibility
 
 - The Energi Data Service request now sends Copenhagen local `start` and `end` values accepted by the live API, while stored price intervals continue to use unambiguous UTC timestamps across daylight-saving changes.

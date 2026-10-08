@@ -21,3 +21,18 @@ export function wattPath(points) {
   const max = Math.max(1, ...values.map((point) => point.watts));
   return values.map((point, index) => `${index ? 'L' : 'M'}${(index / (values.length - 1) * 600).toFixed(1)},${(110 - point.watts / max * 100).toFixed(1)}`).join(' ');
 }
+export function historyPath(points, field, from, through, binSeconds) {
+  const start = Date.parse(from);
+  const end = Date.parse(through);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !Number.isFinite(binSeconds) || binSeconds <= 0) return '';
+  const valid = (points || []).filter((point) => Number.isFinite(point[field]) && Number.isFinite(Date.parse(point.at)));
+  if (valid.length < 2) return '';
+  const max = Math.max(0.000001, ...valid.map((point) => point[field]));
+  let previous = null;
+  return valid.map((point) => {
+    const at = Date.parse(point.at);
+    const command = previous === null || at - previous > binSeconds * 1500 ? 'M' : 'L';
+    previous = at;
+    return `${command}${(Math.max(0, Math.min(1, (at - start) / (end - start))) * 600).toFixed(1)},${(110 - point[field] / max * 100).toFixed(1)}`;
+  }).join(' ');
+}

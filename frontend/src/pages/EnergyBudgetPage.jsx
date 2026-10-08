@@ -4,7 +4,7 @@ import Layout from '../components/Layout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
-import { currentMonth, dkk, fundingProgress, localTime, monthLabel, quantity, shiftMonth, wattPath } from '../utils/energyView.js';
+import { currentMonth, dkk, fundingProgress, historyPath, localTime, monthLabel, quantity, shiftMonth } from '../utils/energyView.js';
 
 function Tile({ label, value, detail, status }) {
   return <div className="border border-gray-700 bg-gray-900/80 p-4 min-h-28">
@@ -54,7 +54,9 @@ export default function EnergyBudgetPage() {
   const funding = summary?.funding;
   const price = summary?.price;
   const points = history?.points || [];
-  const path = wattPath(points);
+  const path = historyPath(points, 'watts', history?.from, history?.through, history?.energy?.binSeconds);
+  const energyPoints = history?.energy?.points || [];
+  const energyPath = historyPath(energyPoints, 'kwh', history?.from, history?.through, history?.energy?.binSeconds);
   const progress = ['calculated', 'estimated', 'finalized'].includes(cost?.status) ? fundingProgress(cost?.actualOre, funding?.appliedOre) : null;
 
   return <Layout><div className="mx-auto max-w-6xl px-5 py-8 text-gray-100 sm:px-8">
@@ -76,6 +78,9 @@ export default function EnergyBudgetPage() {
       <div className="flex flex-wrap items-center justify-between gap-3"><p className="font-mono text-xs uppercase tracking-widest text-gray-400">Measured input / watts</p><div className="flex gap-2">{['24h', '7d'].map((value) => <button key={value} onClick={() => setRange(value)} aria-pressed={range === value} className={`border px-3 py-1 font-mono text-xs focus-visible:outline-2 focus-visible:outline-orange-500 ${range === value ? 'border-orange-500 text-orange-300' : 'border-gray-700 text-gray-400'}`}>{value}</button>)}</div></div>
       {path ? <svg className="mt-5 h-32 w-full" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label={`Server power over the last ${range}`}><path d={path} fill="none" stroke="#fb923c" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg> : <p className="mt-6 text-sm text-gray-400">No measured trend yet.</p>}
       {points.length > 0 && <details className="mt-3 text-sm"><summary className="cursor-pointer text-orange-300 focus-visible:outline-2 focus-visible:outline-orange-500">Power readings table</summary><div className="mt-2 max-h-64 overflow-auto"><table className="w-full text-left"><thead><tr><th className="py-2 font-normal text-gray-400">Time</th><th className="py-2 font-normal text-gray-400">Watts</th><th className="py-2 font-normal text-gray-400">Servers measured</th></tr></thead><tbody>{points.map((point) => <tr key={point.at} className="border-t border-gray-800"><td className="py-2">{localTime(point.at)}</td><td>{quantity(point.watts, 0)}</td><td>{point.measuredHosts}</td></tr>)}</tbody></table></div></details>}
+      <p className="mt-6 border-t border-gray-800 pt-4 font-mono text-xs uppercase tracking-widest text-gray-400">Integrated server energy / kWh per {range === '24h' ? 'hour' : 'two hours'}</p>
+      {energyPath ? <svg className="mt-3 h-32 w-full" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label={`Integrated server energy over the last ${range}`}><path d={energyPath} fill="none" stroke="#60a5fa" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg> : <p className="mt-4 text-sm text-gray-400">No integrated energy trend yet.</p>}
+      {energyPoints.length > 0 && <details className="mt-3 text-sm"><summary className="cursor-pointer text-orange-300 focus-visible:outline-2 focus-visible:outline-orange-500">Energy intervals table</summary><div className="mt-2 max-h-64 overflow-auto"><table className="w-full text-left"><thead><tr><th className="py-2 font-normal text-gray-400">Time</th><th className="py-2 font-normal text-gray-400">Server kWh</th><th className="py-2 font-normal text-gray-400">Coverage</th></tr></thead><tbody>{energyPoints.map((point) => <tr key={point.at} className="border-t border-gray-800"><td className="py-2">{localTime(point.at)}</td><td>{quantity(point.kwh, 3)}</td><td>{point.expectedSeconds > 0 ? `${quantity(point.coveredSeconds / point.expectedSeconds * 100, 0)}%` : 'Unknown'}</td></tr>)}</tbody></table></div></details>}
     </div></Section>
 
     <Section number="03" title="Server modes"><div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{hosts?.hosts?.length ? hosts.hosts.map((host) => <div key={host.alias} className="border border-gray-700 bg-gray-900/80 p-4"><div className="flex justify-between gap-2"><h3 className="font-mono text-xs uppercase tracking-widest text-orange-300">{host.alias}</h3><span className="font-mono text-xs text-gray-400">{host.stale ? 'Stale' : host.monitoring}</span></div><p className="mt-3 text-lg">{host.observedMode || 'Mode unknown'}</p><p className="mt-1 text-sm text-gray-400">{host.watts == null ? 'Power unknown' : `${quantity(host.watts, 0)} W`} · {host.ageSeconds == null ? 'No observation' : `${host.ageSeconds}s old`}</p><p className="mt-2 text-xs text-gray-500">{host.reason ? `Policy: ${host.reason.replaceAll('_', ' ')} · baseline ${host.baseMode || 'unknown'} · selected ${host.desiredMode || 'none'}` : 'Control reason unavailable'}{host.priceValidUntil ? ` · price valid until ${localTime(host.priceValidUntil)}` : ''}</p></div>) : <p className="text-sm text-gray-400">No server mode observations are configured.</p>}</div><p className="mt-3 text-xs text-gray-500">Displayed modes are hardware observations. The policy selection is calculated from the latest available configuration and price; an observation may be stale.</p></Section>
