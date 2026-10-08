@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import api from '../../api.js';
 import { formatFan, formatTemperature, healthAvailability } from '../../utils/hardwareHealth.js';
+import { hardwareWattPath } from '../../utils/hardwareHistory.js';
+import { localTime, quantity } from '../../utils/energyView.js';
 
 export default function HardwareTelemetryView({ connection, onConnectionChange }) {
   const [telemetry, setTelemetry] = useState(null);
@@ -25,13 +27,13 @@ export default function HardwareTelemetryView({ connection, onConnectionChange }
     finally { setBusy(false); }
   }
   const points = telemetry?.points || [];
-  const maxWatts = Math.max(1, ...points.map((p) => Number(p.max_watts)));
-  const line = points.map((p, i) => `${i ? 'L' : 'M'}${(i / Math.max(1, points.length - 1) * 300).toFixed(1)},${(80 - Number(p.mean_watts) / maxWatts * 75).toFixed(1)}`).join(' ');
+  const line = hardwareWattPath(points, telemetry?.from, telemetry?.through, telemetry?.binSeconds);
   const summary = telemetry?.summary;
   const latest = telemetry?.latest;
   const health = latest?.health;
   const capabilities = connection.capabilities || {};
   const formatKwh = (value, covered, expected) => value == null ? 'No covered interval' : `${Number(value).toFixed(3)} kWh · ${Math.round(100 * Number(covered || 0) / Math.max(1, Number(expected || 1)))}% coverage`;
+  const reading = (value) => value == null || value === '' ? 'Unknown' : quantity(Number(value), 0);
   return <section className="mt-3 border-t border-gray-700/50 pt-3 text-xs font-mono">
     <div className="flex flex-wrap items-center gap-3">
       <span className="uppercase tracking-widest text-orange-400">Power telemetry</span>
@@ -55,7 +57,7 @@ export default function HardwareTelemetryView({ connection, onConnectionChange }
           <div><div className="text-orange-400">Power supplies · {healthAvailability(latest, capabilities.powerSupplies, health?.powerSupplies)}</div>{health?.powerSupplies?.slice(0, 4).map((item, index) => <div key={`${item.name}-${index}`} className="text-gray-300">{item.name}: {item.health || item.state || 'Status unavailable'}</div>)}{health?.powerSupplies?.length > 4 && <div className="text-gray-500">+{health.powerSupplies.length - 4} more supplies</div>}<div className="mt-1 text-gray-400">Redundancy: {health?.powerRedundancy?.health || health?.powerRedundancy?.state || (capabilities.powerRedundancy === 'unsupported' ? 'Unsupported' : 'Unavailable')}</div></div>
         </div>
       </div>
-      <div className="mt-2 border border-gray-700 p-3"><div className="mb-2 text-gray-500">Input power · last 24 hours · watts</div>{points.length ? <svg viewBox="0 0 300 85" role="img" aria-label="Server power history in watts" className="h-24 w-full" preserveAspectRatio="none"><path d={line} fill="none" stroke="var(--accent, #ff5a1f)" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg> : <p className="text-gray-500">No readings yet</p>}</div>
+      <div className="mt-2 border border-gray-700 p-3"><div className="mb-2 text-gray-500">Input power · last 24 hours · watts</div>{line ? <svg viewBox="0 0 600 120" role="img" aria-label="Server power history in watts; gaps have no line" className="h-24 w-full" preserveAspectRatio="none"><path d={line} fill="none" stroke="var(--accent, #ff5a1f)" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg> : <p className="text-gray-500">No continuous measured trend yet</p>}{points.length > 0 && <details className="mt-3"><summary className="cursor-pointer text-orange-300">Power readings table</summary><div className="mt-2 max-h-64 overflow-auto"><table className="w-full text-left"><thead><tr className="text-gray-500"><th className="py-2 font-normal">Time</th><th className="py-2 font-normal">Min W</th><th className="py-2 font-normal">Mean W</th><th className="py-2 font-normal">Max W</th></tr></thead><tbody>{points.map((point) => <tr key={point.at} className="border-t border-gray-800"><td className="py-1">{localTime(point.at)}</td><td>{reading(point.min_watts)}</td><td>{reading(point.mean_watts)}</td><td>{reading(point.max_watts)}</td></tr>)}</tbody></table></div></details>}</div>
     </>}
   </section>;
 }
