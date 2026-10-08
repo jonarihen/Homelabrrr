@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-08 — Configured electricity price foundation
+
+- Administrators can record dated spot or fixed all-in electricity terms, applicable variable tariffs, VAT treatment, and actual household bills. Missing terms keep the retail price incomplete; wholesale spot is labeled separately.
+- Published DayAheadPrices can be cached for DK1 or DK2 in 15-minute UTC intervals. The current-price service supplies the same exact basis and revisions to previews and price-aware power policy, without accessing meter consumption or changing hardware.
+- Lab cost calculations join measured server kWh to applicable price intervals. These are calculated operating expenses, separate from actual invoices or payments. No supplier rates or owner tariff facts are prefilled.
+
 ## 2026-10-08 — Server power telemetry and history
 
 - iLO collection can now be enabled per tested physical node. The backend records actual input watts and regulator mode without an open browser; collection never writes a hardware setting.

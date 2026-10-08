@@ -45,3 +45,66 @@ export const eloverblikChargeSnapshots = pgTable('eloverblik_charge_snapshots', 
   uniqueIndex('eloverblik_charge_version').on(t.meter_id, t.content_hash),
   index('eloverblik_charge_recent').on(t.meter_id, t.observed_at),
 ]);
+
+// Pricing is independent of delayed meter consumption. Contract and charge
+// revisions are effective-dated; changing one never rewrites a finalized bill.
+export const electricityContracts = pgTable('electricity_contracts', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  label: text('label').notNull(),
+  kind: text('kind').notNull(), // spot or fixed_all_in
+  area: text('area').notNull(), // DK1 or DK2
+  valid_from: timestamp('valid_from', { withTimezone: true, mode: 'date' }).notNull(),
+  valid_to: timestamp('valid_to', { withTimezone: true, mode: 'date' }),
+  fixed_dkk_per_kwh: numeric('fixed_dkk_per_kwh', { precision: 12, scale: 6 }),
+  spot_margin_dkk_per_kwh: numeric('spot_margin_dkk_per_kwh', { precision: 12, scale: 6 }),
+  vat_rate: numeric('vat_rate', { precision: 8, scale: 6 }),
+  required_components: jsonb('required_components'),
+  fixed_monthly_ore: integer('fixed_monthly_ore'),
+  revision: integer('revision').notNull().default(1),
+  active: boolean('active').notNull().default(false),
+  provenance: text('provenance').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [index('electricity_contract_validity').on(t.active, t.valid_from, t.valid_to)]);
+
+export const electricityTariffs = pgTable('electricity_tariffs', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  contract_id: integer('contract_id').notNull().references(() => electricityContracts.id, { onDelete: 'restrict' }),
+  component: text('component').notNull(), // network, system, tax, retailer
+  valid_from: timestamp('valid_from', { withTimezone: true, mode: 'date' }).notNull(),
+  valid_to: timestamp('valid_to', { withTimezone: true, mode: 'date' }).notNull(),
+  dkk_per_kwh: numeric('dkk_per_kwh', { precision: 12, scale: 6 }).notNull(),
+  vat_included: boolean('vat_included').notNull().default(false),
+  provenance: text('provenance').notNull(),
+  revision: integer('revision').notNull().default(1),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [index('electricity_tariff_validity').on(t.contract_id, t.component, t.valid_from, t.valid_to)]);
+
+export const electricitySpotPrices = pgTable('electricity_spot_prices', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  area: text('area').notNull(),
+  start_utc: timestamp('start_utc', { withTimezone: true, mode: 'date' }).notNull(),
+  end_utc: timestamp('end_utc', { withTimezone: true, mode: 'date' }).notNull(),
+  dkk_per_kwh: numeric('dkk_per_kwh', { precision: 12, scale: 6 }).notNull(),
+  source_revision: text('source_revision').notNull(),
+  fetched_at: timestamp('fetched_at', { withTimezone: true, mode: 'date' }).notNull(),
+}, (t) => [
+  uniqueIndex('electricity_spot_identity').on(t.area, t.start_utc),
+  index('electricity_spot_range').on(t.area, t.start_utc, t.end_utc),
+]);
+
+export const electricityBills = pgTable('electricity_bills', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  contract_id: integer('contract_id').notNull().references(() => electricityContracts.id, { onDelete: 'restrict' }),
+  period_start: timestamp('period_start', { withTimezone: true, mode: 'date' }).notNull(),
+  period_end: timestamp('period_end', { withTimezone: true, mode: 'date' }).notNull(),
+  amount_ore: integer('amount_ore').notNull(),
+  billed_kwh: numeric('billed_kwh', { precision: 20, scale: 6 }),
+  status: text('status').notNull().default('due'),
+  paid_at: timestamp('paid_at', { withTimezone: true, mode: 'date' }),
+  paid_ore: integer('paid_ore'),
+  reference: text('reference'),
+  note: text('note'),
+  kind: text('kind').notNull().default('settlement'),
+  finalized: boolean('finalized').notNull().default(false),
+  revision: integer('revision').notNull().default(1),
+}, (t) => [index('electricity_bill_period').on(t.contract_id, t.period_start, t.period_end)]);
