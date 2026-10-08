@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-08 — Electricity accounting corrections
+
+- Month-end forecasts include a known allocated monthly fixed fee once. When allocation is incomplete, the total forecast remains unavailable.
+- Historical Energy & Budget cost uses a contract covering the requested month; the displayed current price continues to use the current contract. Partial server coverage stays marked partial.
+
 ## 2026-10-08 — Power mode policy foundation
 
 - Hardware administrators can save a Copenhagen weekly Power Regulator schedule, configure price cap and boost thresholds, pause automation, and request a temporary manual mode. All automatic hardware changes start disabled; live control requires a separate capability test, recent reauthentication, and explicit enablement.

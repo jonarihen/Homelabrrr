@@ -132,20 +132,28 @@ export async function energySummary(month: string, now = new Date()) {
     .where(and(eq(electricityContracts.active, true), lte(electricityContracts.valid_from, now), gt(electricityContracts.valid_to, now))).limit(1);
   const [openEnded] = contract ? [] : await db.select({ id: electricityContracts.id }).from(electricityContracts)
     .where(and(eq(electricityContracts.active, true), lte(electricityContracts.valid_from, now), sql`${electricityContracts.valid_to} IS NULL`)).limit(1);
-  const contractRef = contract?.id ?? openEnded?.id;
+  const currentContractRef = contract?.id ?? openEnded?.id;
   let price: { status: string; orePerKwh: number | null; basis: string | null; validUntil: string | null } =
     { status: 'unavailable', orePerKwh: null, basis: null, validUntil: null };
   let cost: { status: string; actualOre: string | null; forecastOre: string | null; components: Array<{ label: string; ore: string }> } =
     { status: 'unavailable', actualOre: null, forecastOre: null, components: [] };
-  if (contractRef) {
-    const applicable = await getApplicablePrice(now, String(contractRef));
+  if (currentContractRef) {
+    const applicable = await getApplicablePrice(now, String(currentContractRef));
     if (applicable?.status === 'valid' && applicable.dkk_per_kwh) {
       price = { status: 'valid', orePerKwh: Number(applicable.dkk_per_kwh) * 100,
         basis: applicable.basis, validUntil: applicable.end_utc };
     } else if (applicable) price = { ...price, status: 'incomplete', basis: applicable.basis };
+  }
+  // A historical month must be priced under the contract that covered that
+  // month, even after it is deactivated. Require one contract to span the full
+  // period so a mid-month switch cannot produce a deceptively complete total.
+  const costContracts = await db.select({ id: electricityContracts.id }).from(electricityContracts)
+    .where(and(lte(electricityContracts.valid_from, measured.period.startAt),
+      sql`(${electricityContracts.valid_to} IS NULL OR ${electricityContracts.valid_to} >= ${measured.period.endAt})`)).limit(2);
+  if (costContracts.length === 1) {
     try {
-      const calculation = await previewMonthlyElectricity(month, String(contractRef), now);
-      cost = { status: calculation.variableCostComplete && calculation.fixedFeeStatus === 'known' ? 'calculated' : 'partial',
+      const calculation = await previewMonthlyElectricity(month, String(costContracts[0].id), now);
+      cost = { status: calculation.variableCostComplete && calculation.labCoveredSeconds === calculation.expectedSeconds && calculation.fixedFeeStatus === 'known' ? 'calculated' : 'partial',
         actualOre: calculation.calculatedLabCostOre, forecastOre: calculation.forecast?.forecastTotalOre ?? null,
         components: [{ label: 'Measured server variable cost', ore: calculation.variableCostOre },
           { label: 'Allocated fixed fees', ore: calculation.allocatedFixedFeeOre }] };

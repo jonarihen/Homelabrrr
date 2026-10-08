@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareHouseholdEnergy, allocateFixedFee, forecastMonthlyCost, startOfLocalDateUtc } from './energyAccounting.ts';
+import { compareHouseholdEnergy, allocateFixedFee, forecastMonthlyCost, includeMonthlyFixedFee, startOfLocalDateUtc } from './energyAccounting.ts';
 
 test('household comparison never adds embedded server use', () => {
   const share = compareHouseholdEnergy('100.000000000', '500.000000000', 3600, 3600, 3600, 'household');
@@ -23,6 +23,16 @@ test('forecast requires both weekday/weekend evidence and an explicit scenario p
   assert.equal(known.knownPriceSeconds, 900);
   assert.equal(forecastMonthlyCost({ ...input, scenarioDkkPerKwh: null }).status, 'missing_price_scenario');
   assert.equal(forecastMonthlyCost({ ...input, dailyEvidence: days.slice(0, 5) }).status, 'insufficient_data');
+});
+
+test('monthly fixed fee is added once only when allocation is known', () => {
+  const forecast = { status: 'scenario' as const, actualCostOre: 300n, futureCostOre: 700n, forecastTotalOre: 1000n,
+    baselineDays: 20, baselineCoverage: 1, method: 'weekday_weekend_28d_v1' as const, priceBasis: 'scenario' as const, knownPriceSeconds: 0 };
+  assert.equal(includeMonthlyFixedFee(forecast, 125n, 'known').forecastTotalOre, 1125n);
+  assert.equal(includeMonthlyFixedFee(forecast, 125n, 'known').actualCostOre, 300n);
+  assert.equal(includeMonthlyFixedFee(forecast, 0n, 'incomplete').forecastTotalOre, null);
+  assert.equal(includeMonthlyFixedFee(forecast, 0n, 'incomplete').status, 'fixed_fee_incomplete');
+  assert.equal(includeMonthlyFixedFee({ ...forecast, forecastTotalOre: null }, 125n, 'known').forecastTotalOre, null);
 });
 
 test('Copenhagen DST days can carry 23 or 25 hours of evidence without a 24-hour assumption', () => {
