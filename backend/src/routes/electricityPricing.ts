@@ -52,6 +52,17 @@ router.post('/contracts', requireRecentReauthentication, async (req, res) => {
     res.status(201).json(result);
   } catch (err) { fail(res, err); }
 });
+router.post('/contracts/:id/deactivate', requireRecentReauthentication, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'INVALID_CONTRACT' });
+  try {
+    const [row] = await db.update(electricityContracts).set({ active: false, revision: sql`${electricityContracts.revision} + 1` })
+      .where(and(eq(electricityContracts.id, id), eq(electricityContracts.active, true))).returning();
+    if (!row) return res.status(404).json({ error: 'ACTIVE_CONTRACT_NOT_FOUND' });
+    await logAudit(req, 'electricity_contract_deactivated', String(id));
+    res.json(row);
+  } catch (err) { fail(res, err); }
+});
 router.post('/contracts/:id/tariffs', requireRecentReauthentication, async (req, res) => {
   try {
     const id = Number(req.params.id); const b = req.body || {};

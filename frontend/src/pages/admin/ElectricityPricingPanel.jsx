@@ -5,6 +5,7 @@ const inputClass = 'w-full border border-slate-700 bg-slate-950 px-2 py-2 text-s
 const initialContract = { label: '', kind: 'spot', area: 'DK1', validFrom: '', validTo: '', fixedDkkPerKwh: '', spotMarginDkkPerKwh: '', vatRate: '', fixedMonthlyOre: '', fixedFeeAllocation: 'none', fixedFeeManualShare: '', provenance: '', requiredComponents: ['network', 'system', 'tax'], active: false };
 const initialTariff = { component: 'network', validFrom: '', validTo: '', dkkPerKwh: '', vatIncluded: false, provenance: '' };
 const initialBill = { periodStart: '', periodEnd: '', amountOre: '', billedKwh: '', kind: 'settlement', reference: '', note: '' };
+const currentCopenhagenMonth = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit' }).format(new Date());
 
 export default function ElectricityPricingPanel() {
   const [contracts, setContracts] = useState([]);
@@ -16,7 +17,7 @@ export default function ElectricityPricingPanel() {
   const [revision, setRevision] = useState({ effectiveFrom: '', dkkPerKwh: '', vatIncluded: false, reason: '' });
   const [bill, setBill] = useState(initialBill);
   const [current, setCurrent] = useState(null);
-  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [month, setMonth] = useState(currentCopenhagenMonth);
   const [scenario, setScenario] = useState('');
   const [preview, setPreview] = useState(null);
   const [finalizeReason, setFinalizeReason] = useState('');
@@ -40,6 +41,7 @@ export default function ElectricityPricingPanel() {
   }, [selected, contracts]);
   useEffect(() => { setPreview(null); }, [selected, month, scenario]);
   const action = async (work) => { setBusy(true); setMessage(''); try { await work(); await load(); setMessage('Saved.'); } catch (err) { setMessage(err.response?.data?.error || 'Request failed.'); } finally { setBusy(false); } };
+  const selectedContract = contracts.find((item) => String(item.id) === selected);
   return <section className="space-y-4 border border-slate-700 bg-slate-900 p-5">
     <div><p className="font-mono text-xs uppercase tracking-widest text-orange-500">Pricing / private</p><h2 className="text-lg font-semibold uppercase">Electricity contract & cost</h2><p className="text-sm text-slate-400">Enter actual supplier terms and tariffs. Wholesale spot is never the full household price. Nothing here changes server modes.</p></div>
     {message && <p role="status" className="border border-orange-700 p-2 text-sm">{message}</p>}
@@ -47,6 +49,7 @@ export default function ElectricityPricingPanel() {
       <label className="text-xs text-slate-400">Contract<select value={selected} onChange={(e) => setSelected(e.target.value)} className={inputClass}><option value="">Choose</option>{contracts.map((c) => <option key={c.id} value={c.id}>{c.label} · {c.kind} · {c.active ? 'active' : 'draft'}</option>)}</select></label>
       <div className="border border-slate-700 p-3 text-sm"><span className="font-mono text-xs uppercase text-slate-500">Applicable now</span><div className="mt-1 text-xl text-slate-100">{current?.status === 'valid' ? `${current.dkk_per_kwh} DKK/kWh` : 'Unavailable'}</div><div className="text-xs text-slate-500">{current?.basis || 'variable retail incl. VAT'} · {current?.reason || 'Current interval'} · {current?.end_utc ? `until ${new Date(current.end_utc).toLocaleString()}` : 'no valid interval'}</div></div>
     </div>
+    {selectedContract?.active && <button disabled={busy} onClick={() => { if (window.confirm('Deactivate this electricity contract? Price-based power rules will fall back to the schedule until another configured contract is selected.')) action(() => api.post(`/admin/electricity-pricing/contracts/${selected}/deactivate`)); }} className="border border-red-700 px-3 py-2 font-mono text-xs uppercase text-red-400 disabled:opacity-50">Deactivate selected contract</button>}
     <form onSubmit={(e) => { e.preventDefault(); action(() => api.post('/admin/electricity-pricing/contracts', { ...contract, fixedMonthlyOre: contract.fixedMonthlyOre === '' ? null : Number(contract.fixedMonthlyOre), validFrom: new Date(contract.validFrom).toISOString(), validTo: contract.validTo ? new Date(contract.validTo).toISOString() : null })); }} className="grid gap-2 border-t border-slate-700 pt-4 md:grid-cols-2">
       <h3 className="font-mono text-xs uppercase tracking-widest text-orange-400 md:col-span-2">Add contract revision</h3>
       <label className="text-xs text-slate-400">Label<input required value={contract.label} onChange={(e) => setContract((v) => ({ ...v, label: e.target.value }))} className={inputClass} /></label>

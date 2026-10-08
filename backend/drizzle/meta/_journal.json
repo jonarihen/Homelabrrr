@@ -57,6 +57,13 @@
       "when": 1791474007223,
       "tag": "0007_power_control",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791474897795,
+      "tag": "0008_electricity_pricing",
+      "breakpoints": true
     }
   ]
 }

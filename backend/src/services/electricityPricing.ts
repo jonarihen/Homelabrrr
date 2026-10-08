@@ -6,10 +6,13 @@ import { resolveApplicablePrice, type ApplicablePrice, type ContractPriceInput, 
 import { calculateIntervalCost } from './costMath.ts';
 import type { PriceBasis } from './powerPolicy.ts';
 import { startBackgroundWork } from './backgroundWork.ts';
+import { log } from '../utils/logger.ts';
 
 let spotRefresh: Promise<{ imported: number }> | null = null;
 let lastAttempt = 0;
 let retryAfter = 0;
+let syncTimer: ReturnType<typeof setInterval> | null = null;
+let syncStartTimer: ReturnType<typeof setTimeout> | null = null;
 
 function contractInput(row: typeof electricityContracts.$inferSelect): ContractPriceInput {
   return { ref: String(row.id), kind: row.kind as ContractPriceInput['kind'], area: row.area as ContractPriceInput['area'], validFrom: row.valid_from,
@@ -41,11 +44,12 @@ export async function getApplicablePrice(atUtc: Date, selection: string | { cont
 export async function syncPublishedSpotPrices(now = new Date(), fetcher = fetchDayAheadPrices): Promise<{ imported: number }> {
   if (spotRefresh) return spotRefresh;
   if (now.getTime() < Math.max(lastAttempt + 6 * 3600_000, retryAfter)) return { imported: 0 };
-  lastAttempt = now.getTime();
   const work = startBackgroundWork(async () => {
     const contracts = await db.select({ area: electricityContracts.area }).from(electricityContracts)
       .where(and(eq(electricityContracts.active, true), eq(electricityContracts.kind, 'spot')));
     const areas = [...new Set(contracts.map((row) => row.area))].filter((area): area is 'DK1' | 'DK2' => area === 'DK1' || area === 'DK2');
+    if (!areas.length) return { imported: 0 };
+    lastAttempt = now.getTime();
     let imported = 0;
     for (const area of areas) {
       try {
@@ -64,6 +68,20 @@ export async function syncPublishedSpotPrices(now = new Date(), fetcher = fetchD
   }, { kind: 'electricity-price-sync' }) as unknown as Promise<{ imported: number }>;
   spotRefresh = work;
   try { return await work; } finally { if (spotRefresh === work) spotRefresh = null; }
+}
+
+export function startElectricityPriceSync() {
+  if (syncTimer) return;
+  const run = () => { void syncPublishedSpotPrices().catch((err) => log('warn', 'electricity_spot_sync_failed', { error: err })); };
+  syncStartTimer = setTimeout(run, 30_000);
+  syncTimer = setInterval(run, 60 * 60_000);
+  syncStartTimer.unref(); syncTimer.unref();
+}
+
+export function stopElectricityPriceSync() {
+  if (syncStartTimer) clearTimeout(syncStartTimer);
+  if (syncTimer) clearInterval(syncTimer);
+  syncStartTimer = null; syncTimer = null;
 }
 
 export async function calculateLabCost(startUtc: Date, endUtc: Date, contractRef: string) {

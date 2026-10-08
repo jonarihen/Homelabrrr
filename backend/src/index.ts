@@ -37,6 +37,9 @@ import workflowRoutes from './routes/workflows.ts';
 import publicIpRoutes from './routes/publicIps.ts';
 import operationsRoutes from './routes/operations.ts';
 import energyDataRoutes from './routes/energyData.ts';
+import electricityPricingRoutes from './routes/electricityPricing.ts';
+import { getApplicablePrice, startElectricityPriceSync, stopElectricityPriceSync } from './services/electricityPricing.ts';
+import type { ApplicablePowerPrice } from './services/powerPolicy.ts';
 import { startElOverblikScheduler, stopElOverblikScheduler } from './services/eloverblik.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.ts';
@@ -176,6 +179,7 @@ app.use(enforceTwoFactorEnrollmentOnly);
 app.use('/api/auth',  authRoutes);
 app.use('/api/admin/operations', operationsRoutes);
 app.use('/api/admin/energy-data', energyDataRoutes);
+app.use('/api/admin/electricity-pricing', electricityPricingRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin/hardware-connections', hardwareRoutes);
 app.use('/api/admin/power-control', powerControlRoutes);
@@ -704,10 +708,12 @@ const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
 startScheduler();
 startElOverblikScheduler();
 startHardwareTelemetry();
-// Until a complete retail/spot price is configured, price rules use the
-// documented weekly/default fallback. The pricing service replaces this
-// callback when #237 is integrated; it never fetches on a browser read.
-startPowerControlWorker(async () => null);
+startElectricityPriceSync();
+startPowerControlWorker(async (at, policy) => {
+  const price = await getApplicablePrice(at, policy);
+  if (!price || price.status !== 'valid' || !price.dkk_per_kwh || !price.start_utc || !price.end_utc) return null;
+  return price as ApplicablePowerPrice;
+});
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -751,6 +757,7 @@ async function shutdown(signal) {
   if (nodeHealthTimer) clearInterval(nodeHealthTimer);
   stopScheduler();
   stopElOverblikScheduler();
+  stopElectricityPriceSync();
   stopHardwareTelemetry();
   stopPowerControlWorker();
   stopWebsiteMaintenance();
