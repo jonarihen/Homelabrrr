@@ -47,6 +47,7 @@ export const paypalSubscriptions = pgTable('paypal_subscriptions', {
   amount_ore: integer('amount_ore').notNull(),
   cancellation_requested_at: timestamp('cancellation_requested_at', { withTimezone: true, mode: 'date' }),
   cancelled_at: timestamp('cancelled_at', { withTimezone: true, mode: 'date' }),
+  reconciled_through_at: timestamp('reconciled_through_at', { withTimezone: true, mode: 'date' }),
   next_billing_at: timestamp('next_billing_at', { withTimezone: true, mode: 'date' }),
   updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
 }, (t) => [index('paypal_subscription_user').on(t.user_id), index('paypal_subscription_status').on(t.status)]);
@@ -76,6 +77,7 @@ export const paypalPostings = pgTable('paypal_postings', {
   provider_transaction_id: text('provider_transaction_id').notNull(),
   posting_kind: text('posting_kind').notNull(),
   source_id: text('source_id').notNull(),
+  original_transaction_id: text('original_transaction_id'),
   intent_id: text('intent_id').references(() => paypalIntents.id),
   user_id: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
   amount_ore: integer('amount_ore').notNull(),
@@ -96,3 +98,28 @@ export const paypalReconciliation = pgTable('paypal_reconciliation', {
   status: text('status').notNull().default('idle'),
   error_code: text('error_code'),
 });
+
+
+// Provider transaction state is independent of append-only economic postings.
+// A completed receipt with unknown fee/net is retained here but not allocated.
+export const paypalTransactions = pgTable('paypal_transactions', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  environment: text('environment').notNull(),
+  merchant_id: text('merchant_id').notNull(),
+  provider_transaction_id: text('provider_transaction_id').notNull(),
+  provider_kind: text('provider_kind').notNull(),
+  original_transaction_id: text('original_transaction_id'),
+  intent_id: text('intent_id').references(() => paypalIntents.id),
+  user_id: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+  status: text('status').notNull(),
+  currency: text('currency').notNull(),
+  gross_ore: integer('gross_ore'),
+  fee_ore: integer('fee_ore'),
+  net_ore: integer('net_ore'),
+  effective_at: timestamp('effective_at', { withTimezone: true, mode: 'date' }),
+  observed_at: timestamp('observed_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('paypal_transaction_identity').on(t.environment, t.merchant_id, t.provider_transaction_id),
+  index('paypal_transaction_unresolved').on(t.status, t.observed_at),
+  index('paypal_transaction_intent').on(t.intent_id),
+]);

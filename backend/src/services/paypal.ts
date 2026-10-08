@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, desc, lt, notInArray } from 'drizzle-orm';
+import { and, eq, desc, lt, gt, or, notInArray, sql, count } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { paypalConfigs, paypalIntents, paypalPostings, paypalSubscriptions, paypalWebhookInbox } from '../db/schema/index.ts';
+import { paypalConfigs, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
 import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
 import { PayPalError, paypalClient, type PayPalEnvironment, type PayPalCredentials } from './paypalClient.ts';
-import { normalizeCompletedCapture, oreToDkk, parseDkkOre } from './paypalMoney.ts';
+import { normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund, oreToDkk, parseDkkOre } from './paypalMoney.ts';
+import { postReceipt, postCaptureRefund } from './paypalLedger.ts';
 
 function environment(value: unknown): PayPalEnvironment {
   if (value !== 'sandbox' && value !== 'live') throw new PayPalError('INVALID_ENVIRONMENT', 400);
@@ -105,23 +106,11 @@ export async function captureOneOff(userId: number, intentId: string) {
 export async function ingestOneOffCapture(config: PayPalCredentials, intent: typeof paypalIntents.$inferSelect, captureId: string, verification: string) {
   const detail = await paypalClient.getCapture(config, captureId);
   const normalized = normalizeCompletedCapture(detail, { orderId: intent.provider_id!, merchantId: intent.merchant_id, amountOre: intent.amount_ore });
-  const feeOre = normalized.feeOre;
-  if (normalized.netOre === null || feeOre === null) {
-    await db.update(paypalIntents).set({ status: 'net_unresolved' }).where(eq(paypalIntents.id, intent.id));
-    return { status: 'net_unresolved' };
-  }
-  await db.transaction(async (tx) => {
-    await tx.insert(paypalPostings).values([
-      { environment: intent.environment, merchant_id: intent.merchant_id, provider_transaction_id: normalized.transactionId,
-        posting_kind: 'gross', source_id: captureId, intent_id: intent.id, user_id: intent.user_id, amount_ore: normalized.grossOre,
-        currency: 'DKK', effective_at: normalized.effectiveAt, verification },
-      { environment: intent.environment, merchant_id: intent.merchant_id, provider_transaction_id: normalized.transactionId,
-        posting_kind: 'fee', source_id: captureId, intent_id: intent.id, user_id: intent.user_id, amount_ore: -feeOre,
-        currency: 'DKK', effective_at: normalized.effectiveAt, verification },
-    ]).onConflictDoNothing();
-    await tx.update(paypalIntents).set({ status: 'verified', updated_at: new Date() }).where(eq(paypalIntents.id, intent.id));
-  });
-  return { status: 'verified' };
+  const result = await postReceipt({ environment: intent.environment, merchantId: intent.merchant_id, intentId: intent.id, userId: intent.user_id },
+    'capture', normalized, verification);
+  await db.update(paypalIntents).set({ status: result.status === 'posted' ? 'verified' : 'net_unresolved', updated_at: new Date() })
+    .where(eq(paypalIntents.id, intent.id));
+  return { status: result.status === 'posted' ? 'verified' : 'net_unresolved' };
 }
 export async function storeVerifiedWebhook(value: unknown, headers: Record<string, string | string[] | undefined>, raw: Buffer) {
   const row = await configured(value);
@@ -164,8 +153,28 @@ export async function processPaypalInbox(limit = 20) {
         const row = await configured(entry.environment);
         if (row.merchant_id !== entry.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
         await ingestOneOffCapture(credentials(row), intent, resource.id, 'verified_webhook');
+      } else if (entry.event_type === 'PAYMENT.CAPTURE.REFUNDED') {
+        const row = await configured(entry.environment);
+        if (row.merchant_id !== entry.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
+        await ingestCaptureRefund(credentials(row), resource.id, 'verified_webhook');
+      } else if (entry.event_type === 'PAYMENT.SALE.COMPLETED') {
+        const subscriptionId = resource?.billing_agreement_id || resource?.subscription_id;
+        const [sub] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.id, subscriptionId),
+          eq(paypalSubscriptions.environment, entry.environment), eq(paypalSubscriptions.merchant_id, entry.merchant_id))).limit(1);
+        if (!sub) throw new PayPalError('UNLINKED_SALE', 409);
+        const center = limitedTime(event.create_time);
+        await reconcileSubscription(sub, new Date(center.getTime() - 2 * 86_400_000),
+          new Date(center.getTime() + 86_400_000), resource.id);
+      } else if (entry.event_type.startsWith('BILLING.SUBSCRIPTION.')) {
+        const [sub] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.id, resource.id),
+          eq(paypalSubscriptions.environment, entry.environment), eq(paypalSubscriptions.merchant_id, entry.merchant_id))).limit(1);
+        if (!sub) throw new PayPalError('UNLINKED_SUBSCRIPTION', 409);
+        const center = limitedTime(event.create_time);
+        await reconcileSubscription(sub, new Date(center.getTime() - 2 * 86_400_000), new Date(center.getTime() + 86_400_000));
+      } else if (['PAYMENT.SALE.REFUNDED', 'PAYMENT.SALE.REVERSED', 'PAYMENT.CAPTURE.REVERSED'].includes(entry.event_type)) {
+        throw new PayPalError('ADJUSTMENT_LOOKUP_REQUIRED', 409);
       }
-      // Activation/pending/unknown events are evidence, never income.
+      // Pending/denied/unknown events are evidence, never income.
       await db.update(paypalWebhookInbox).set({ status: 'processed', processed_at: new Date(), error_code: null })
         .where(eq(paypalWebhookInbox.id, entry.id));
     } catch (err) {
@@ -218,3 +227,150 @@ export function startPaypalInboxWorker() {
   void processPaypalInbox().catch(() => {});
 }
 export function stopPaypalInboxWorker() { if (inboxTimer) clearInterval(inboxTimer); inboxTimer = null; }
+
+function limitedTime(value: unknown): Date {
+  const date = new Date(String(value || ''));
+  if (!Number.isFinite(date.getTime())) throw new PayPalError('MALFORMED');
+  return date;
+}
+function linkedCaptureId(refund: any, env: string): string {
+  const link = Array.isArray(refund.links) ? refund.links.find((entry: any) => entry.rel === 'up' && entry.method === 'GET') : null;
+  let url: URL;
+  try { url = new URL(link?.href); } catch { throw new PayPalError('REFUND_LINK_MISSING', 409); }
+  const expected = env === 'sandbox' ? ['api-m.sandbox.paypal.com', 'api.sandbox.paypal.com'] : ['api-m.paypal.com', 'api.paypal.com'];
+  const match = /^\/v2\/payments\/captures\/([A-Za-z0-9_-]{1,128})$/.exec(url.pathname);
+  if (url.protocol !== 'https:' || !expected.includes(url.host) || url.search || url.hash || !match) throw new PayPalError('REFUND_LINK_INVALID', 409);
+  return match[1];
+}
+export async function ingestCaptureRefund(config: PayPalCredentials, refundId: string, verification: string) {
+  const refund = await paypalClient.getRefund(config, refundId);
+  const normalized = normalizeCaptureRefund(refund);
+  if (!normalized || normalized.transactionId !== refundId) throw new PayPalError('REFUND_NOT_COMPLETE', 409);
+  const captureId = linkedCaptureId(refund, config.environment);
+  const capture = await paypalClient.getCapture(config, captureId);
+  const orderId = capture?.supplementary_data?.related_ids?.order_id;
+  const [intent] = await db.select().from(paypalIntents).where(and(eq(paypalIntents.environment, config.environment),
+    eq(paypalIntents.provider_id, orderId))).limit(1);
+  if (!intent || intent.kind !== 'one_off' || intent.merchant_id !== capture?.payee?.merchant_id) throw new PayPalError('UNLINKED_REFUND', 409);
+  await ingestOneOffCapture(config, intent, captureId, verification);
+  return postCaptureRefund({ environment: intent.environment, merchantId: intent.merchant_id, intentId: intent.id, userId: intent.user_id },
+    captureId, normalized, verification);
+}
+
+export async function reconcileSubscription(subscription: typeof paypalSubscriptions.$inferSelect, from: Date, to: Date, expectedSaleId?: string) {
+  const configRow = await configured(subscription.environment);
+  if (configRow.merchant_id !== subscription.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
+  const config = credentials(configRow);
+  const detail = await paypalClient.getSubscription(config, subscription.id);
+  if (detail.id !== subscription.id || detail.plan_id !== subscription.plan_id || detail.custom_id !== subscription.intent_id)
+    throw new PayPalError('SUBSCRIPTION_MISMATCH', 409);
+  const page = await paypalClient.listSubscriptionTransactions(config, subscription.id, from, to);
+  if (!Array.isArray(page.transactions) || Number(page.total_pages || 1) > 1 || page.transactions.length > 200)
+    throw new PayPalError('TRANSACTIONS_INCOMPLETE', 409);
+  if (expectedSaleId && !page.transactions.some((item: any) => item.id === expectedSaleId)) throw new PayPalError('SALE_NOT_FOUND', 409);
+  for (const item of page.transactions) {
+    if (['PARTIALLY_REFUNDED', 'REFUNDED'].includes(item.status) && typeof item.id === 'string') {
+      await db.insert(paypalTransactions).values({ environment: subscription.environment, merchant_id: subscription.merchant_id,
+        provider_transaction_id: `adjustment:${item.id}`, provider_kind: 'sale_adjustment', original_transaction_id: item.id,
+        intent_id: subscription.intent_id, user_id: subscription.user_id, status: 'net_unresolved', currency: 'DKK' })
+        .onConflictDoNothing();
+      continue;
+    }
+    const normalized = normalizeSubscriptionTransaction(item, { amountOre: subscription.amount_ore });
+    if (!normalized) continue;
+    await postReceipt({ environment: subscription.environment, merchantId: subscription.merchant_id,
+      intentId: subscription.intent_id, userId: subscription.user_id }, 'sale', normalized, 'subscription_transactions');
+  }
+  const nextBilling = detail.billing_info?.next_billing_time ? limitedTime(detail.billing_info.next_billing_time) : null;
+  const statuses = ['APPROVAL_PENDING', 'ACTIVE', 'SUSPENDED', 'CANCELLED', 'EXPIRED'];
+  await db.update(paypalSubscriptions).set({ status: statuses.includes(detail.status) ? detail.status : 'UNKNOWN',
+    next_billing_at: nextBilling, reconciled_through_at: to, updated_at: new Date(),
+    cancelled_at: detail.status === 'CANCELLED' && detail.status_update_time ? limitedTime(detail.status_update_time) : subscription.cancelled_at })
+    .where(eq(paypalSubscriptions.id, subscription.id));
+  return { checked: page.transactions.length };
+}
+
+const reconciliationRunning = new Map<string, Promise<unknown>>();
+export async function reconcilePaypal(value: unknown, now = new Date()) {
+  const selectedEnvironment = environment(value);
+  const active = reconciliationRunning.get(selectedEnvironment);
+  if (active) return active;
+  const work = (async () => {
+    const env = environment(value);
+    const row = await configured(env);
+    const current = row.config_version;
+    await db.insert(paypalReconciliation).values({ environment: env, status: 'running', last_run_at: now })
+      .onConflictDoUpdate({ target: paypalReconciliation.environment, set: { status: 'running', last_run_at: now } });
+    let checked = 0;
+    try {
+      const unresolved = await db.select().from(paypalIntents).where(and(eq(paypalIntents.environment, env),
+        eq(paypalIntents.merchant_id, row.merchant_id!), eq(paypalIntents.status, 'capture_unknown'))).limit(10);
+      for (const intent of unresolved) {
+        if (!intent.provider_id) continue;
+        const order = await paypalClient.getOrder(credentials(row), intent.provider_id);
+        const captures = order.purchase_units?.[0]?.payments?.captures;
+        if (!Array.isArray(captures)) continue;
+        for (const capture of captures.slice(0, 2)) if (capture.status === 'COMPLETED') {
+          await ingestOneOffCapture(credentials(row), intent, capture.id, 'reconciliation'); checked++;
+        }
+      }
+      const subscriptions = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.environment, env),
+        eq(paypalSubscriptions.merchant_id, row.merchant_id!), or(
+          notInArray(paypalSubscriptions.status, ['CANCELLED', 'EXPIRED']),
+          gt(paypalSubscriptions.updated_at, new Date(now.getTime() - 90 * 86_400_000)))))
+        .orderBy(paypalSubscriptions.reconciled_through_at).limit(10);
+      for (const sub of subscriptions) {
+        const from = sub.reconciled_through_at ? new Date(sub.reconciled_through_at.getTime() - 7 * 86_400_000) :
+          new Date(Math.max(0, now.getTime() - 30 * 86_400_000));
+        const to = new Date(Math.min(now.getTime(), from.getTime() + 30 * 86_400_000));
+        if (to <= from) continue;
+        await reconcileSubscription(sub, from, to);
+        checked++;
+      }
+      const after = await configured(env);
+      if (after.config_version !== current || after.merchant_id !== row.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
+      await db.update(paypalReconciliation).set({ status: 'ok', cursor_at: now, error_code: null }).where(eq(paypalReconciliation.environment, env));
+      return { status: 'ok', checked };
+    } catch (err) {
+      await db.update(paypalReconciliation).set({ status: 'partial', error_code: err instanceof PayPalError ? err.code : 'RECONCILIATION_FAILED' })
+        .where(eq(paypalReconciliation.environment, env));
+      throw err;
+    }
+  })();
+  reconciliationRunning.set(selectedEnvironment, work);
+  try { return await work; } finally { if (reconciliationRunning.get(selectedEnvironment) === work) reconciliationRunning.delete(selectedEnvironment); }
+}
+
+let reconciliationTimer: NodeJS.Timeout | null = null;
+export function startPaypalReconciliation() {
+  if (reconciliationTimer) return;
+  reconciliationTimer = setInterval(() => { void Promise.allSettled([reconcilePaypal('sandbox'), reconcilePaypal('live')]); }, 6 * 60 * 60_000);
+  reconciliationTimer.unref();
+}
+export function stopPaypalReconciliation() { if (reconciliationTimer) clearInterval(reconciliationTimer); reconciliationTimer = null; }
+
+export async function verifiedContributionSnapshot(value: unknown = 'live') {
+  const env = environment(value);
+  const [totals] = await db.select({
+    grossOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} = 'gross' then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
+    feeDebitsOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} = 'fee' then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
+    refundDebitsOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} = 'refund' then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
+    feeCreditsOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} = 'fee_credit' then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
+    revision: sql<number>`coalesce(max(${paypalPostings.id}), 0)::int`,
+  }).from(paypalPostings).where(eq(paypalPostings.environment, env));
+  const [{ unresolved }] = await db.select({ unresolved: count() }).from(paypalTransactions)
+    .where(and(eq(paypalTransactions.environment, env), eq(paypalTransactions.status, 'net_unresolved')));
+  const [{ review }] = await db.select({ review: count() }).from(paypalWebhookInbox)
+    .where(and(eq(paypalWebhookInbox.environment, env), eq(paypalWebhookInbox.status, 'needs_review')));
+  const knownNetOre = totals.grossOre + totals.feeDebitsOre + totals.refundDebitsOre + totals.feeCreditsOre;
+  return { environment: env, grossOre: totals.grossOre, feeDebitsOre: totals.feeDebitsOre,
+    refundDebitsOre: totals.refundDebitsOre, feeCreditsOre: totals.feeCreditsOre, knownNetOre,
+    eligibleNetOre: unresolved || review ? null : Math.max(0, knownNetOre), unresolvedTransactions: unresolved,
+    reviewEvents: review, ledgerRevision: totals.revision, paypalAccountBalanceKnown: false };
+}
+export async function reconcilePaypalManual(value: unknown, now = new Date()) {
+  const env = environment(value);
+  const [row] = await db.select().from(paypalReconciliation).where(eq(paypalReconciliation.environment, env)).limit(1);
+  if (row?.last_run_at && now.getTime() - row.last_run_at.getTime() < 5 * 60_000) throw new PayPalError('RESYNC_RATE_LIMIT', 429);
+  return reconcilePaypal(env, now);
+}

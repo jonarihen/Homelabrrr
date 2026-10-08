@@ -34,7 +34,7 @@ import publicIpRoutes from './routes/publicIps.ts';
 import operationsRoutes from './routes/operations.ts';
 import paymentsWebhookRoutes from './routes/paymentsWebhook.ts';
 import paymentsRoutes from './routes/payments.ts';
-import { startPaypalInboxWorker, stopPaypalInboxWorker } from './services/paypal.ts';
+import { startPaypalInboxWorker, stopPaypalInboxWorker, startPaypalReconciliation, stopPaypalReconciliation } from './services/paypal.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.ts';
 import { decryptSecret, encryptSecret } from './utils/secrets.ts';
@@ -700,6 +700,7 @@ const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
 // Background enforcement of per-VM power schedules (vm_schedules).
 startScheduler();
 startPaypalInboxWorker();
+startPaypalReconciliation();
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -741,6 +742,7 @@ async function shutdown(signal) {
   if (nodeHealthTimer) clearInterval(nodeHealthTimer);
   stopScheduler();
   stopPaypalInboxWorker();
+  stopPaypalReconciliation();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {

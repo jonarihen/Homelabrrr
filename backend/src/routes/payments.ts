@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
-import { captureOneOff, createOneOff, createMonthly, cancelMonthly, ownPaymentHistory, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled } from '../services/paypal.ts';
+import { captureOneOff, createOneOff, createMonthly, cancelMonthly, ownPaymentHistory, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual } from '../services/paypal.ts';
 import { PayPalError } from '../services/paypalClient.ts';
 import { logAudit } from '../utils/audit.ts';
 
@@ -22,6 +22,8 @@ router.post('/monthly', async (req, res) => {
 router.post('/monthly/:id/cancel', async (req, res) => {
   try { res.json(await cancelMonthly(req.session.userId!, req.params.id)); } catch (err) { fail(res, err); }
 });
+router.get('/admin/summary', requireAdmin, async (_req, res) => { try { res.json(await verifiedContributionSnapshot('live')); } catch (err) { fail(res, err); } });
+router.post('/admin/reconcile', requireAdmin, async (req, res) => { try { res.json(await reconcilePaypalManual(req.body?.environment ?? 'live')); } catch (err) { fail(res, err); } });
 router.get('/admin/config', requireAdmin, async (_req, res) => { try { res.json(await paypalSetupStatus()); } catch (err) { fail(res, err); } });
 router.post('/admin/config', requireAdmin, requireRecentReauthentication, async (req, res) => {
   try { await savePaypalConfiguration(req.body); await logAudit(req, 'paypal.config.save'); res.json(await paypalSetupStatus()); }

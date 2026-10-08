@@ -37,10 +37,12 @@ function pathWithId(prefix: string, id: string, suffix = ''): string {
 export class PayPalClient {
   private fetcher: typeof fetch;
   private now: () => number;
+  private sleep: (ms: number) => Promise<void>;
   private tokens = new Map<string, { value: string; expires: number }>();
   private pending = new Map<string, Promise<string>>();
-  constructor({ fetcher = fetch, now = Date.now }: { fetcher?: typeof fetch; now?: () => number } = {}) {
-    this.fetcher = fetcher; this.now = now;
+  constructor({ fetcher = fetch, now = Date.now, sleep = (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)) }:
+    { fetcher?: typeof fetch; now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) {
+    this.fetcher = fetcher; this.now = now; this.sleep = sleep;
   }
   invalidate() { this.tokens.clear(); this.pending.clear(); }
   private key(config: PayPalCredentials) { return `${config.environment}:${config.clientId}:${config.version}`; }
@@ -76,15 +78,28 @@ export class PayPalClient {
   }
   async request(config: PayPalCredentials, method: 'GET' | 'POST', path: string, body?: object, requestId?: string): Promise<any> {
     const token = await this.token(config);
-    return this.raw(config, path, { method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json',
+    const init = { method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json',
       ...(body ? { 'Content-Type': 'application/json' } : {}), ...(requestId ? { 'PayPal-Request-Id': requestId } : {}) },
-      body: body ? JSON.stringify(body) : undefined });
+      body: body ? JSON.stringify(body) : undefined };
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.raw(config, path, init); }
+      catch (err) {
+        if (method !== 'GET' || !(err instanceof PayPalError) || ![429, 503].includes(err.status) || attempt >= 2) throw err;
+        await this.sleep(Math.min(60_000, err.retryAfterMs ?? (attempt + 1) * 1000));
+      }
+    }
   }
   async createOrder(config: PayPalCredentials, amount: string, customId: string, requestId: string) {
     return this.request(config, 'POST', '/v2/checkout/orders', { intent: 'CAPTURE', purchase_units: [{ amount: { currency_code: 'DKK', value: amount }, custom_id: customId }] }, requestId);
   }
   async getOrder(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/checkout/orders', id)); }
   async captureOrder(config: PayPalCredentials, id: string, requestId: string) { return this.request(config, 'POST', pathWithId('/v2/checkout/orders', id, '/capture'), {}, requestId); }
+  async getRefund(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/payments/refunds', id)); }
+  async listSubscriptionTransactions(config: PayPalCredentials, id: string, from: Date, to: Date) {
+    if (!(from < to) || to.getTime() - from.getTime() > 30 * 86_400_000) throw new PayPalError('INVALID_RANGE', 400);
+    const path = pathWithId('/v1/billing/subscriptions', id, '/transactions');
+    return this.request(config, 'GET', `${path}?start_time=${encodeURIComponent(from.toISOString())}&end_time=${encodeURIComponent(to.toISOString())}`);
+  }
   async getCapture(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/payments/captures', id)); }
   async createSubscription(config: PayPalCredentials, planId: string, customId: string, requestId: string) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(planId)) throw new PayPalError('INVALID_ID', 400);

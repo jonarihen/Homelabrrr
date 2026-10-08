@@ -1832,3 +1832,7 @@ Proxmox-frontend/
 ## 2026-10-08 — Private PayPal support foundation
 
 Added disabled-by-default PayPal sandbox/live configuration, server-side one-off order handling, fixed-plan monthly approval and cancellation, verified webhook intake, and a deduplicated posting foundation. Live checkout remains off pending full reconciliation and accounting integration.
+
+## 2026-10-08 — PayPal receipt reconciliation
+
+Added bounded subscription transaction reconciliation, exact reported fee posting, and verified capture-refund accounting. Unresolved adjustments are held from finalized support totals for administrator review.
