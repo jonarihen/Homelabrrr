@@ -20,6 +20,8 @@ import authRoutes from './routes/auth.ts';
 import adminRoutes from './routes/admin.ts';
 import hardwareRoutes from './routes/hardware.ts';
 import { startHardwareTelemetry, stopHardwareTelemetry, runHardwareTelemetryRetention } from './services/hardwareTelemetry.ts';
+import powerControlRoutes from './routes/powerControl.ts';
+import { startPowerControlWorker, stopPowerControlWorker } from './services/powerControlWorker.ts';
 import vmRoutes, { vncSessions } from './routes/vms.ts';
 import sshRoutes, { sshSessions } from './routes/ssh.ts';
 import sftpRoutes from './routes/sftp.ts';
@@ -35,6 +37,9 @@ import workflowRoutes from './routes/workflows.ts';
 import publicIpRoutes from './routes/publicIps.ts';
 import operationsRoutes from './routes/operations.ts';
 import energyDataRoutes from './routes/energyData.ts';
+import electricityPricingRoutes from './routes/electricityPricing.ts';
+import { getApplicablePrice, startElectricityPriceSync, stopElectricityPriceSync } from './services/electricityPricing.ts';
+import type { ApplicablePowerPrice } from './services/powerPolicy.ts';
 import { startElOverblikScheduler, stopElOverblikScheduler } from './services/eloverblik.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.ts';
@@ -174,8 +179,10 @@ app.use(enforceTwoFactorEnrollmentOnly);
 app.use('/api/auth',  authRoutes);
 app.use('/api/admin/operations', operationsRoutes);
 app.use('/api/admin/energy-data', energyDataRoutes);
+app.use('/api/admin/electricity-pricing', electricityPricingRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin/hardware-connections', hardwareRoutes);
+app.use('/api/admin/power-control', powerControlRoutes);
 app.use('/api/vms',   vmRoutes);
 app.use('/api/ssh',   sshRoutes);
 app.use('/api/sftp',  sftpRoutes);
@@ -701,6 +708,12 @@ const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
 startScheduler();
 startElOverblikScheduler();
 startHardwareTelemetry();
+startElectricityPriceSync();
+startPowerControlWorker(async (at, policy) => {
+  const price = await getApplicablePrice(at, policy);
+  if (!price || price.status !== 'valid' || !price.dkk_per_kwh || !price.start_utc || !price.end_utc) return null;
+  return price as ApplicablePowerPrice;
+});
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -744,7 +757,9 @@ async function shutdown(signal) {
   if (nodeHealthTimer) clearInterval(nodeHealthTimer);
   stopScheduler();
   stopElOverblikScheduler();
+  stopElectricityPriceSync();
   stopHardwareTelemetry();
+  stopPowerControlWorker();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {
