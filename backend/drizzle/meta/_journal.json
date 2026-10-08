@@ -78,6 +78,13 @@
       "when": 1791475635459,
       "tag": "0010_paypal_month_allocations",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1791476309848,
+      "tag": "0011_hardware_health",
+      "breakpoints": true
     }
   ]
 }
