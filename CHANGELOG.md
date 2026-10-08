@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08 — Admin PayPal subscription management
+
+- Administrators can inspect linked subscriptions by environment and request provider-verified cancellation with recent reauthentication. Member access to this management route is denied.
+
 ## 2026-10-08 — PayPal webhook evidence retention
 
 - Processed PayPal webhook payloads are removed after 30 days, while event IDs and verified ledger records remain for duplicate protection and accounting. Events needing review retain their evidence.

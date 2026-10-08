@@ -303,6 +303,29 @@ export async function cancelMonthly(userId: number, id: string) {
   return cancelSubscriptionRecord(subscription);
 }
 
+export async function adminPaypalSubscriptions(value: unknown, offset = 0) {
+  const env = environment(value);
+  if (!Number.isInteger(offset) || offset < 0 || offset > 10_000) throw new PayPalError('INVALID_OFFSET', 400);
+  const rows = await db.select({ id: paypalSubscriptions.id, userId: paypalSubscriptions.user_id,
+    status: paypalSubscriptions.status, amountOre: paypalSubscriptions.amount_ore,
+    nextBillingAt: paypalSubscriptions.next_billing_at, cancellationRequestedAt: paypalSubscriptions.cancellation_requested_at,
+    updatedAt: paypalSubscriptions.updated_at })
+    .from(paypalSubscriptions).where(eq(paypalSubscriptions.environment, env))
+    .orderBy(sql`CASE WHEN ${paypalSubscriptions.status} IN ('CANCELLED', 'EXPIRED') THEN 1 ELSE 0 END`,
+      desc(paypalSubscriptions.updated_at), desc(paypalSubscriptions.id))
+    .limit(101).offset(offset);
+  return { environment: env, items: rows.slice(0, 100), nextOffset: rows.length > 100 ? offset + 100 : null };
+}
+
+export async function adminCancelMonthly(value: unknown, id: string) {
+  const env = environment(value);
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new PayPalError('INVALID_ID', 400);
+  const [subscription] = await db.select().from(paypalSubscriptions)
+    .where(and(eq(paypalSubscriptions.environment, env), eq(paypalSubscriptions.id, id))).limit(1);
+  if (!subscription) throw new PayPalError('SUBSCRIPTION_NOT_FOUND', 404);
+  return cancelSubscriptionRecord(subscription);
+}
+
 export function isTerminalSubscriptionStatus(status: string) {
   return status === 'CANCELLED' || status === 'EXPIRED';
 }

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
-import { captureOneOff, createOneOff, createMonthly, cancelMonthly, ownPaymentHistory, memberPaypalStatus, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual } from '../services/paypal.ts';
+import { captureOneOff, createOneOff, createMonthly, cancelMonthly, adminPaypalSubscriptions, adminCancelMonthly, ownPaymentHistory, memberPaypalStatus, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual } from '../services/paypal.ts';
 import { latestPaypalAllocation, recalculatePaypalAllocations } from '../services/paypalAllocation.ts';
 import { PayPalError } from '../services/paypalClient.ts';
 import { logAudit } from '../utils/audit.ts';
@@ -39,6 +39,14 @@ router.post('/admin/allocate', requireAdmin, requireRecentReauthentication, asyn
   catch (err) { fail(res, err); }
 });
 router.post('/admin/reconcile', requireAdmin, async (req, res) => { try { res.json(await reconcilePaypalManual(req.body?.environment ?? 'live')); } catch (err) { fail(res, err); } });
+router.get('/admin/subscriptions', requireAdmin, async (req, res) => {
+  try { res.json(await adminPaypalSubscriptions(req.query.environment ?? 'live', Number(req.query.offset ?? 0))); } catch (err) { fail(res, err); }
+});
+router.post('/admin/subscriptions/:id/cancel', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try { const result = await adminCancelMonthly(req.body?.environment, req.params.id);
+    await logAudit(req, 'paypal.subscription.cancel', req.params.id); res.json(result); }
+  catch (err) { fail(res, err); }
+});
 router.get('/admin/config', requireAdmin, async (_req, res) => { try { res.json(await paypalSetupStatus()); } catch (err) { fail(res, err); } });
 router.post('/admin/config', requireAdmin, requireRecentReauthentication, async (req, res) => {
   try { await savePaypalConfiguration(req.body); await logAudit(req, 'paypal.config.save'); res.json(await paypalSetupStatus()); }
