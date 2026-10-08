@@ -16,7 +16,7 @@ function snapshot(): ControlSnapshot {
       expensive: { enabled: false, threshold: '', hysteresis: '', capMode: 'dynamic' },
       cheap: { enabled: false, threshold: '', hysteresis: '' }, version: 1,
     },
-    latch: null, manualOverride: null, lastVerifiedMode: null,
+    latch: null, manualOverride: null, lastVerifiedMode: null, lastAutomaticUpshiftAt: null,
     ilo: { host: 'ilo.fixture', port: 443, username: 'fixture', password: 'fixture', verifyTls: true },
   };
 }
@@ -107,4 +107,33 @@ test('an unexpected external mode change holds automatic writes', async () => {
   });
   assert.equal((await controller.reconcile(1)).status, 'hold');
   assert.equal(state.driftHold, true);
+});
+
+test('automatic price upshift dwell delays another increase but never delays a restriction', async () => {
+  const state = snapshot();
+  state.pricePolicy.enabled = true;
+  state.pricePolicy.contractRef = 'contract';
+  state.pricePolicy.area = 'DK2';
+  state.pricePolicy.minAutomaticUpshiftMinutes = 5;
+  state.lastAutomaticUpshiftAt = new Date(instant.getTime() - 60_000);
+  const repo = repository(state);
+  let writes = 0;
+  const controller = new PowerController({ repository: repo.value, getApplicablePrice: async () => null,
+    readMode: async () => 'low', now: () => instant,
+    writeMode: async () => { writes++; return { prior: 'low', target: 'high', outcome: 'verified' }; },
+  });
+  assert.equal((await controller.reconcile(1)).status, 'hold');
+  assert.equal(writes, 0);
+  state.lastAutomaticUpshiftAt = new Date(instant.getTime() - 6 * 60_000);
+  assert.equal((await controller.reconcile(1)).status, 'verified');
+  assert.equal(writes, 1);
+  state.lastAutomaticUpshiftAt = instant;
+  const restrict = new PowerController({ repository: repo.value, getApplicablePrice: async () => null,
+    readMode: async () => 'high', now: () => instant,
+    writeMode: async (_config, target) => { assert.equal(target, 'low'); return { prior: 'high', target, outcome: 'verified' }; },
+  });
+  state.schedule.defaultMode = 'low';
+  state.schedule.enabled = false;
+  state.pricePolicy.priceOnlyDefault = 'low';
+  assert.equal((await restrict.reconcile(1)).status, 'verified');
 });

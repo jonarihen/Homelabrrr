@@ -19,10 +19,12 @@ export interface ControlSnapshot {
   latch: PriceLatch | null;
   manualOverride: { mode: WritablePowerMode; expiresAt: Date | null } | null;
   lastVerifiedMode: HardwareMode | null;
+  lastAutomaticUpshiftAt: Date | null;
   ilo: IloConfig;
 }
 
 export interface ClaimOutcome {
+  actor: 'manual' | 'automation';
   outcome: 'verified' | 'already_set' | 'unknown' | 'failed' | 'stale';
   prior: HardwareMode | null;
   target: WritablePowerMode;
@@ -88,6 +90,14 @@ export class PowerController {
     });
   }
 
+  private withinUpshiftDwell(snapshot: ControlSnapshot, actual: HardwareMode, target: WritablePowerMode, manual: boolean): boolean {
+    if (manual || !snapshot.pricePolicy.enabled || !snapshot.lastAutomaticUpshiftAt) return false;
+    const order = { low: 0, dynamic: 1, high: 2, os_control: -1, unknown: -1 };
+    if (order[target] <= order[actual]) return false;
+    const minutes = snapshot.pricePolicy.minAutomaticUpshiftMinutes ?? 5;
+    return this.deps.now().getTime() < snapshot.lastAutomaticUpshiftAt.getTime() + minutes * 60_000;
+  }
+
   async reconcile(hardwareId: number, { manual = false }: { manual?: boolean } = {}): Promise<ReconcileResult> {
     if (this.active.has(hardwareId)) return { status: 'busy' };
     this.active.add(hardwareId);
@@ -109,13 +119,14 @@ export class PowerController {
         await this.deps.repository.observe(hardwareId, initial.policyVersion, selected, actual);
         return { status: 'already_set', decision: selected };
       }
+      if (this.withinUpshiftDwell(initial, actual, selected.target, manual)) return { status: 'hold', decision: selected };
       const token = randomUUID();
       // iLO's bounded GET/PATCH/readback sequence is at most ~15 seconds; the
       // 60-second lease leaves room for DB and network jitter. Expired claims
       // are reconciled by a fresh hardware read, never blindly replayed.
       const claimed = await this.deps.repository.claim(initial, token, new Date(this.deps.now().getTime() + 60_000));
       if (!claimed) return { status: 'busy', decision: selected };
-      let outcome: ClaimOutcome = { outcome: 'stale', prior: actual, target: selected.target, decision: selected };
+      let outcome: ClaimOutcome = { actor: manual ? 'manual' : 'automation', outcome: 'stale', prior: actual, target: selected.target, decision: selected };
       try {
         const fresh = await this.deps.repository.load(hardwareId);
         if (!fresh || fresh.configVersion !== initial.configVersion || fresh.policyVersion !== initial.policyVersion
@@ -124,18 +135,20 @@ export class PowerController {
         const renewed = await this.decision(fresh, current, manual);
         if (!sameSelection(selected, renewed) || !renewed.target) return { status: 'stale', decision: renewed };
         if (current === renewed.target) {
-          outcome = { outcome: 'already_set', prior: current, target: renewed.target, decision: renewed };
+          outcome = { actor: manual ? 'manual' : 'automation', outcome: 'already_set', prior: current, target: renewed.target, decision: renewed };
           return { status: 'already_set', decision: renewed };
         }
+        if (this.withinUpshiftDwell(fresh, current, renewed.target, manual)) return { status: 'hold', decision: renewed };
         const guard = async () => {
           if (!await this.deps.repository.claimStillCurrent(initial, token, manual)) return false;
           const latest = await this.deps.repository.load(hardwareId);
           if (!latest || latest.configVersion !== initial.configVersion || latest.policyVersion !== initial.policyVersion) return false;
           const atDispatch = await this.decision(latest, current, manual);
-          return sameSelection(renewed, atDispatch) && atDispatch.target === renewed.target;
+          return sameSelection(renewed, atDispatch) && atDispatch.target === renewed.target
+            && !this.withinUpshiftDwell(latest, current, renewed.target, manual);
         };
         const result = await this.deps.writeMode(fresh.ilo, renewed.target, undefined, undefined, guard);
-        outcome = { outcome: result.outcome, prior: result.prior, target: renewed.target, decision: renewed };
+        outcome = { actor: manual ? 'manual' : 'automation', outcome: result.outcome, prior: result.prior, target: renewed.target, decision: renewed };
         return { status: result.outcome, decision: renewed };
       } catch (err) {
         outcome = { ...outcome, outcome: 'failed', errorCategory: err instanceof Error ? err.name : 'unknown' };

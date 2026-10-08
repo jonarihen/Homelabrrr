@@ -1,4 +1,4 @@
-import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { hardwareConnections, hardwarePowerOperations, hardwarePowerPolicies } from '../db/schema/index.ts';
 import { decryptSecret } from '../utils/secrets.ts';
@@ -24,6 +24,13 @@ export class PowerControlStore implements ControlRepository {
       : [];
     const manual = policy.manual_mode && WRITABLE.has(policy.manual_mode as WritablePowerMode)
       ? { mode: policy.manual_mode as WritablePowerMode, expiresAt: policy.manual_expires_at } : null;
+    const [lastUpshift] = await db.select({ occurred_at: hardwarePowerOperations.occurred_at })
+      .from(hardwarePowerOperations)
+      .where(and(eq(hardwarePowerOperations.hardware_id, hardwareId), eq(hardwarePowerOperations.actor, 'automation'),
+        eq(hardwarePowerOperations.outcome, 'verified'),
+        sql`CASE ${hardwarePowerOperations.target_mode} WHEN 'high' THEN 2 WHEN 'dynamic' THEN 1 ELSE 0 END
+          > CASE ${hardwarePowerOperations.prior_mode} WHEN 'high' THEN 2 WHEN 'dynamic' THEN 1 ELSE 0 END`))
+      .orderBy(desc(hardwarePowerOperations.occurred_at)).limit(1);
     return {
       hardwareId,
       configVersion: connection.config_version,
@@ -38,6 +45,7 @@ export class PowerControlStore implements ControlRepository {
       latch: policy.latch,
       manualOverride: manual,
       lastVerifiedMode: (policy.last_verified_mode as HardwareMode | null) ?? null,
+      lastAutomaticUpshiftAt: lastUpshift?.occurred_at ?? null,
       ilo: {
         host: connection.target_host, port: connection.target_port, username: connection.username,
         password: decryptSecret(connection.secret), verifyTls: connection.verify_tls,
@@ -92,7 +100,7 @@ export class PowerControlStore implements ControlRepository {
         .returning({ hardware_id: hardwarePowerPolicies.hardware_id });
       if (!released) return;
       await tx.insert(hardwarePowerOperations).values({
-        hardware_id: hardwareId, actor: 'automation', prior_mode: outcome.prior,
+        hardware_id: hardwareId, actor: outcome.actor, prior_mode: outcome.prior,
         target_mode: outcome.target, reason: outcome.decision.reason,
         outcome: outcome.outcome, policy_version: outcome.decision.latch.policyVersion,
         price_revision: outcome.decision.latch.priceRevision || null,

@@ -45,6 +45,20 @@ test('weekday preset owns overnight windows by start day', () => {
   assert.equal(scheduledModeAt(schedule, at('2026-10-18T20:00:00Z')), 'low');
 });
 
+test('Copenhagen spring gap and repeated autumn hour follow wall-clock schedule', () => {
+  const schedule = weekdayPreset();
+  schedule.windows = [{ days: 1, start: '01:30', end: '04:00', mode: 'high' }];
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T00:29:00Z')), 'low');
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T00:30:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T01:30:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T01:31:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T02:00:00Z')), 'low');
+  schedule.windows = [{ days: 1, start: '02:00', end: '03:00', mode: 'high' }];
+  assert.equal(scheduledModeAt(schedule, at('2026-10-25T00:30:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-10-25T01:30:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-10-25T02:00:00Z')), 'low');
+});
+
 test('window overlap includes overnight Sunday to Monday', () => {
   const schedule = weekdayPreset();
   schedule.windows = [

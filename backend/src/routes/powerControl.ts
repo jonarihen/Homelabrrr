@@ -22,7 +22,7 @@ function hardwareId(value: string): number {
 
 function defaultPricePolicy(): PowerPricePolicy {
   return {
-    enabled: false, basis: 'variable_retail_including_vat', contractRef: '', area: '', priceOnlyDefault: 'low',
+    enabled: false, basis: 'variable_retail_including_vat', contractRef: '', area: '', priceOnlyDefault: 'low', minAutomaticUpshiftMinutes: 5,
     expensive: { enabled: false, threshold: '', hysteresis: '', capMode: 'dynamic' },
     cheap: { enabled: false, threshold: '', hysteresis: '' }, version: 1,
   };
@@ -190,6 +190,9 @@ router.post('/:id/manual', requireRecentReauthentication, async (req, res) => {
       || (!untilCleared && (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440))) {
       return res.status(400).json({ error: 'Valid mode, policy version and duration required' });
     }
+    const [connection] = await db.select({ control_enabled: hardwareConnections.control_enabled })
+      .from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
+    if (!connection?.control_enabled) return res.status(409).json({ error: 'Live iLO control must be enabled first' });
     const expiresAt = untilCleared ? null : new Date(Date.now() + minutes * 60_000);
     const [row] = await db.update(hardwarePowerPolicies).set({
       manual_mode: mode, manual_expires_at: expiresAt, version: version + 1, updated_at: new Date(),

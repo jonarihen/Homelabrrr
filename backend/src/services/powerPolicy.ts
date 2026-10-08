@@ -31,6 +31,7 @@ export interface PowerPricePolicy {
   contractRef: string;
   area: string;
   priceOnlyDefault?: WritablePowerMode;
+  minAutomaticUpshiftMinutes?: number;
   expensive: PriceRule & { capMode: 'low' | 'dynamic' };
   cheap: PriceRule;
   version: number;
@@ -155,6 +156,9 @@ export function validatePricePolicy(policy: PowerPricePolicy): void {
   }
   if (policy.enabled && (!policy.contractRef || !policy.area)) throw new Error('Price contract and area required');
   if (policy.priceOnlyDefault && !(policy.priceOnlyDefault in MODE_ORDER)) throw new Error('Invalid price-only default');
+  if (policy.minAutomaticUpshiftMinutes !== undefined
+    && (!Number.isInteger(policy.minAutomaticUpshiftMinutes) || policy.minAutomaticUpshiftMinutes < 0
+      || policy.minAutomaticUpshiftMinutes > 1440)) throw new Error('Invalid minimum automatic upshift interval');
   if (!['low', 'dynamic'].includes(policy.expensive.capMode)) throw new Error('Invalid expensive-price cap mode');
   const upper = policy.expensive.enabled ? parseDkkPerKwh(policy.expensive.threshold) : 0n;
   const lower = policy.cheap.enabled ? parseDkkPerKwh(policy.cheap.threshold) : 0n;
