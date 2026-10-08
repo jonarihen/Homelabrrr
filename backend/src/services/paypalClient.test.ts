@@ -58,6 +58,15 @@ test('event recovery reads a bounded range from the fixed PayPal origin', async 
   assert(requests.some((url) => url.startsWith('https://api-m.sandbox.paypal.com/v1/notifications/webhooks-events?page_size=100&start_time=')));
   await assert.rejects(client.listWebhookEvents(config, new Date('2026-09-01T00:00:00Z'), new Date('2026-10-07T00:00:00Z')), /INVALID_RANGE/);
 });
+test('adjustment search is exact-ID and bounded to one reporting page', async () => {
+  const requests: string[] = [];
+  const fetcher = async (url: string) => { requests.push(url); return Response.json(url.endsWith('/oauth2/token') ?
+    { access_token: 'access', expires_in: 3600 } : { transaction_details: [], total_pages: 1 }); };
+  const client = new PayPalClient({ fetcher: fetcher as typeof fetch });
+  await client.findReportedTransaction(config, 'RF123', new Date('2026-10-01T00:00:00Z'), new Date('2026-10-05T00:00:00Z'));
+  assert(requests.some((url) => url.includes('/v1/reporting/transactions?transaction_id=RF123&start_date=') && url.endsWith('&fields=transaction_info&page_size=100&page=1')));
+  await assert.rejects(client.findReportedTransaction(config, '../../x', new Date('2026-10-01'), new Date('2026-10-05')), /INVALID_RANGE/);
+});
 test('GET retries 429 with bounded Retry-After but POST does not retry', async () => {
   let reads = 0; const delays: number[] = [];
   const fetcher = async (url: string) => {

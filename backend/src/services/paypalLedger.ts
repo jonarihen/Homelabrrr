@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { paypalPostings, paypalTransactions } from '../db/schema/index.ts';
 import { PayPalError } from './paypalClient.ts';
@@ -43,44 +43,52 @@ export async function postReceipt(scope: Scope, kind: 'capture' | 'sale', receip
 }
 
 export async function postCaptureRefund(scope: Scope, originalCaptureId: string, refund: Refund, verification: string) {
+  return postProviderAdjustment(scope, originalCaptureId, 'capture', 'refund', refund, verification);
+}
+
+export async function postProviderAdjustment(scope: Scope, originalId: string, originalKind: 'capture' | 'sale',
+  adjustmentKind: 'refund' | 'reversal', adjustment: Refund, verification: string) {
   const outcome = await db.transaction(async (tx) => {
     const [original] = await tx.select().from(paypalTransactions).where(and(
       eq(paypalTransactions.environment, scope.environment), eq(paypalTransactions.merchant_id, scope.merchantId),
-      eq(paypalTransactions.provider_transaction_id, originalCaptureId), eq(paypalTransactions.provider_kind, 'capture'))).for('update');
+      eq(paypalTransactions.provider_transaction_id, originalId), eq(paypalTransactions.provider_kind, originalKind))).for('update');
     if (!original || original.intent_id !== scope.intentId) throw new PayPalError('ORIGINAL_RECEIPT_MISSING', 409);
-    const complete = refund.feeCreditOre !== null && refund.netDebitOre !== null;
-    const record = { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: refund.transactionId,
-      provider_kind: 'refund', original_transaction_id: originalCaptureId, intent_id: scope.intentId, user_id: scope.userId,
-      status: 'net_unresolved', currency: 'DKK', gross_ore: refund.grossOre, fee_ore: refund.feeCreditOre,
-      net_ore: refund.netDebitOre, effective_at: refund.effectiveAt, observed_at: new Date() };
+    if (!Number.isSafeInteger(adjustment.grossOre) || adjustment.grossOre <= 0 || adjustment.feeCreditOre !== null &&
+        (adjustment.feeCreditOre < 0 || adjustment.feeCreditOre > adjustment.grossOre)) throw new PayPalError('INVALID_ADJUSTMENT', 409);
+    const complete = adjustment.feeCreditOre !== null && adjustment.netDebitOre !== null &&
+      adjustment.grossOre - adjustment.feeCreditOre === adjustment.netDebitOre;
+    const record = { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: adjustment.transactionId,
+      provider_kind: adjustmentKind, original_transaction_id: originalId, intent_id: scope.intentId, user_id: scope.userId,
+      status: 'net_unresolved', currency: 'DKK', gross_ore: adjustment.grossOre, fee_ore: adjustment.feeCreditOre,
+      net_ore: adjustment.netDebitOre, effective_at: adjustment.effectiveAt, observed_at: new Date() };
     await tx.insert(paypalTransactions).values(record).onConflictDoNothing();
     const [prior] = await tx.select().from(paypalTransactions).where(and(
       eq(paypalTransactions.environment, scope.environment), eq(paypalTransactions.merchant_id, scope.merchantId),
-      eq(paypalTransactions.provider_transaction_id, refund.transactionId))).for('update');
-    if (!prior || prior.provider_kind !== 'refund' || prior.original_transaction_id !== originalCaptureId || prior.gross_ore !== refund.grossOre)
+      eq(paypalTransactions.provider_transaction_id, adjustment.transactionId))).for('update');
+    if (!prior || prior.provider_kind !== adjustmentKind || prior.original_transaction_id !== originalId || prior.gross_ore !== adjustment.grossOre)
       throw new PayPalError('TRANSACTION_CONFLICT', 409);
     if (prior.status === 'posted') {
-      if (complete && (prior.fee_ore !== refund.feeCreditOre || prior.net_ore !== refund.netDebitOre))
+      if (complete && (prior.fee_ore !== adjustment.feeCreditOre || prior.net_ore !== adjustment.netDebitOre))
         throw new PayPalError('POSTED_AMOUNT_CHANGED', 409);
       return 'posted';
     }
     const [{ refunded }] = await tx.select({ refunded: sql<number>`coalesce(sum(${-1} * ${paypalPostings.amount_ore}), 0)::int` })
       .from(paypalPostings).where(and(eq(paypalPostings.environment, scope.environment),
-        eq(paypalPostings.merchant_id, scope.merchantId), eq(paypalPostings.original_transaction_id, originalCaptureId),
-        eq(paypalPostings.posting_kind, 'refund')));
-    if (refunded + refund.grossOre > original.gross_ore!) throw new PayPalError('REFUND_EXCEEDS_RECEIPT', 409);
+        eq(paypalPostings.merchant_id, scope.merchantId), eq(paypalPostings.original_transaction_id, originalId),
+        inArray(paypalPostings.posting_kind, ['refund', 'reversal'])));
+    if (refunded + adjustment.grossOre > original.gross_ore!) throw new PayPalError('REFUND_EXCEEDS_RECEIPT', 409);
     if (complete && prior.status !== 'posted') await tx.update(paypalTransactions).set({ status: 'posted',
-      fee_ore: refund.feeCreditOre, net_ore: refund.netDebitOre, observed_at: new Date() }).where(eq(paypalTransactions.id, prior.id));
+      fee_ore: adjustment.feeCreditOre, net_ore: adjustment.netDebitOre, observed_at: new Date() }).where(eq(paypalTransactions.id, prior.id));
     if (!complete) return 'net_unresolved';
     await tx.insert(paypalPostings).values([
-      { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: refund.transactionId,
-        posting_kind: 'refund', source_id: refund.transactionId, original_transaction_id: originalCaptureId,
-        intent_id: scope.intentId, user_id: scope.userId, amount_ore: -refund.grossOre, currency: 'DKK',
-        effective_at: refund.effectiveAt, verification },
-      { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: refund.transactionId,
-        posting_kind: 'fee_credit', source_id: refund.transactionId, original_transaction_id: originalCaptureId,
-        intent_id: scope.intentId, user_id: scope.userId, amount_ore: refund.feeCreditOre!, currency: 'DKK',
-        effective_at: refund.effectiveAt, verification },
+      { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: adjustment.transactionId,
+        posting_kind: adjustmentKind, source_id: adjustment.transactionId, original_transaction_id: originalId,
+        intent_id: scope.intentId, user_id: scope.userId, amount_ore: -adjustment.grossOre, currency: 'DKK',
+        effective_at: adjustment.effectiveAt, verification },
+      { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: adjustment.transactionId,
+        posting_kind: 'fee_credit', source_id: adjustment.transactionId, original_transaction_id: originalId,
+        intent_id: scope.intentId, user_id: scope.userId, amount_ore: adjustment.feeCreditOre!, currency: 'DKK',
+        effective_at: adjustment.effectiveAt, verification },
     ]).onConflictDoNothing();
     return 'posted';
   });

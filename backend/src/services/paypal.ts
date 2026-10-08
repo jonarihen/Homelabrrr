@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, desc, lt, gt, or, notInArray, sql, count } from 'drizzle-orm';
+import { and, eq, desc, lt, gt, or, isNull, lte, notInArray, sql, count } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { paypalConfigs, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
 import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
 import { PayPalError, paypalClient, type PayPalEnvironment, type PayPalCredentials } from './paypalClient.ts';
-import { normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund, oreToDkk, parseDkkOre } from './paypalMoney.ts';
-import { postReceipt, postCaptureRefund } from './paypalLedger.ts';
+import { normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund, normalizeReportedAdjustment, oreToDkk, parseDkkOre } from './paypalMoney.ts';
+import { postReceipt, postCaptureRefund, postProviderAdjustment } from './paypalLedger.ts';
 
 function environment(value: unknown): PayPalEnvironment {
   if (value !== 'sandbox' && value !== 'live') throw new PayPalError('INVALID_ENVIRONMENT', 400);
@@ -159,10 +159,12 @@ export async function ownPaymentHistory(userId: number) {
 export async function processPaypalInbox(limit = 20) {
   await db.update(paypalWebhookInbox).set({ status: 'pending', processing_at: null })
     .where(and(eq(paypalWebhookInbox.status, 'processing'), lt(paypalWebhookInbox.processing_at, new Date(Date.now() - 10 * 60_000))));
-  const pending = await db.select().from(paypalWebhookInbox).where(eq(paypalWebhookInbox.status, 'pending'))
+  const pending = await db.select().from(paypalWebhookInbox).where(and(eq(paypalWebhookInbox.status, 'pending'),
+    or(isNull(paypalWebhookInbox.next_attempt_at), lte(paypalWebhookInbox.next_attempt_at, new Date()))))
     .orderBy(paypalWebhookInbox.received_at).limit(Math.max(1, Math.min(limit, 50)));
   for (const entry of pending) {
-    const claim = await db.update(paypalWebhookInbox).set({ status: 'processing', processing_at: new Date() })
+    const claim = await db.update(paypalWebhookInbox).set({ status: 'processing', processing_at: new Date(),
+      attempt_count: entry.attempt_count + 1 })
       .where(and(eq(paypalWebhookInbox.id, entry.id), eq(paypalWebhookInbox.status, 'pending')));
     if (claim.rowCount !== 1) continue;
     try {
@@ -196,16 +198,26 @@ export async function processPaypalInbox(limit = 20) {
         const center = limitedTime(event.create_time);
         await reconcileSubscription(sub, new Date(center.getTime() - 2 * 86_400_000), new Date(center.getTime() + 86_400_000));
       } else if (['PAYMENT.SALE.REFUNDED', 'PAYMENT.SALE.REVERSED', 'PAYMENT.CAPTURE.REVERSED'].includes(entry.event_type)) {
-        throw new PayPalError('ADJUSTMENT_LOOKUP_REQUIRED', 409);
+        const row = await configured(entry.environment);
+        if (row.merchant_id !== entry.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
+        await ingestReportedAdjustment(credentials(row), resource.id, entry.event_type, limitedTime(event.create_time), entry.source);
       }
       // Pending/denied/unknown events are evidence, never income.
       await db.update(paypalWebhookInbox).set({ status: 'processed', processed_at: new Date(), error_code: null })
         .where(eq(paypalWebhookInbox.id, entry.id));
     } catch (err) {
       const code = err instanceof PayPalError ? err.code : 'PROCESSING_FAILED';
-      await db.update(paypalWebhookInbox).set({ status: 'needs_review', error_code: code }).where(eq(paypalWebhookInbox.id, entry.id));
+      const retryable = ['ADJUSTMENT_NOT_READY', 'UNLINKED_ADJUSTMENT', 'UNLINKED_CAPTURE', 'UNLINKED_SALE', 'UNLINKED_REFUND', 'ORIGINAL_RECEIPT_MISSING',
+        'HTTP_429', 'HTTP_503', 'NETWORK'].includes(code);
+      const retry = retryable && entry.attempt_count < 10;
+      await db.update(paypalWebhookInbox).set({ status: retry ? 'pending' : 'needs_review', error_code: code,
+        processing_at: null, next_attempt_at: retry ? new Date(Date.now() + paypalInboxRetryDelayMs(entry.attempt_count + 1)) : null })
+        .where(eq(paypalWebhookInbox.id, entry.id));
     }
   }
+}
+export function paypalInboxRetryDelayMs(attempt: number) {
+  return Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.max(0, Math.min(attempt - 1, 10)));
 }
 
 export async function createMonthly(userId: number, value: unknown) {
@@ -321,6 +333,24 @@ export async function ingestCaptureRefund(config: PayPalCredentials, refundId: s
     captureId, normalized, verification);
 }
 
+export async function ingestReportedAdjustment(config: PayPalCredentials, adjustmentId: string, eventType: string, eventAt: Date, verification: string) {
+  const kind = eventType.endsWith('.REFUNDED') ? 'refund' : 'reversal';
+  const from = new Date(eventAt.getTime() - 2 * 86_400_000);
+  const to = new Date(eventAt.getTime() + 2 * 86_400_000);
+  const result = await paypalClient.findReportedTransaction(config, adjustmentId, from, to);
+  if (!Array.isArray(result.transaction_details) || result.transaction_details.length !== 1 || Number(result.total_pages || 1) > 1)
+    throw new PayPalError('ADJUSTMENT_NOT_READY', 409);
+  const normalized = normalizeReportedAdjustment(result.transaction_details[0], adjustmentId, kind);
+  const originalKind = eventType.startsWith('PAYMENT.SALE.') ? 'sale' : 'capture';
+  const [original] = await db.select().from(paypalTransactions).where(and(eq(paypalTransactions.environment, config.environment),
+    eq(paypalTransactions.provider_transaction_id, normalized.originalTransactionId),
+    eq(paypalTransactions.provider_kind, originalKind))).limit(1);
+  if (!original || !original.intent_id || original.merchant_id !== (await configured(config.environment)).merchant_id)
+    throw new PayPalError('UNLINKED_ADJUSTMENT', 409);
+  return postProviderAdjustment({ environment: original.environment, merchantId: original.merchant_id,
+    intentId: original.intent_id, userId: original.user_id }, normalized.originalTransactionId, originalKind, kind, normalized, verification);
+}
+
 export async function reconcileSubscription(subscription: typeof paypalSubscriptions.$inferSelect, from: Date, to: Date, expectedSaleId?: string) {
   const configRow = await configured(subscription.environment);
   if (configRow.merchant_id !== subscription.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
@@ -333,17 +363,25 @@ export async function reconcileSubscription(subscription: typeof paypalSubscript
     throw new PayPalError('TRANSACTIONS_INCOMPLETE', 409);
   if (expectedSaleId && !page.transactions.some((item: any) => item.id === expectedSaleId)) throw new PayPalError('SALE_NOT_FOUND', 409);
   for (const item of page.transactions) {
+    const normalized = normalizeSubscriptionTransaction(item, { amountOre: subscription.amount_ore });
+    if (normalized) await postReceipt({ environment: subscription.environment, merchantId: subscription.merchant_id,
+      intentId: subscription.intent_id, userId: subscription.user_id }, 'sale', normalized, 'subscription_transactions');
     if (['PARTIALLY_REFUNDED', 'REFUNDED'].includes(item.status) && typeof item.id === 'string') {
       await db.insert(paypalTransactions).values({ environment: subscription.environment, merchant_id: subscription.merchant_id,
         provider_transaction_id: `adjustment:${item.id}`, provider_kind: 'sale_adjustment', original_transaction_id: item.id,
         intent_id: subscription.intent_id, user_id: subscription.user_id, status: 'net_unresolved', currency: 'DKK' })
         .onConflictDoNothing();
+      if (item.status === 'REFUNDED') {
+        const [total] = await db.select({ amount: sql<number>`coalesce(sum(-${paypalPostings.amount_ore}), 0)::int` })
+          .from(paypalPostings).where(and(eq(paypalPostings.environment, subscription.environment),
+            eq(paypalPostings.merchant_id, subscription.merchant_id), eq(paypalPostings.original_transaction_id, item.id),
+            sql`${paypalPostings.posting_kind} IN ('refund', 'reversal')`));
+        if (total.amount >= subscription.amount_ore) await db.update(paypalTransactions).set({ status: 'posted', observed_at: new Date() })
+          .where(and(eq(paypalTransactions.environment, subscription.environment), eq(paypalTransactions.merchant_id, subscription.merchant_id),
+            eq(paypalTransactions.provider_transaction_id, `adjustment:${item.id}`)));
+      }
       continue;
     }
-    const normalized = normalizeSubscriptionTransaction(item, { amountOre: subscription.amount_ore });
-    if (!normalized) continue;
-    await postReceipt({ environment: subscription.environment, merchantId: subscription.merchant_id,
-      intentId: subscription.intent_id, userId: subscription.user_id }, 'sale', normalized, 'subscription_transactions');
   }
   const nextBilling = detail.billing_info?.next_billing_time ? limitedTime(detail.billing_info.next_billing_time) : null;
   const statuses = ['APPROVAL_PENDING', 'APPROVED', 'ACTIVE', 'SUSPENDED', 'CANCELLED', 'EXPIRED'];
@@ -432,7 +470,7 @@ export async function verifiedContributionSnapshot(value: unknown = 'live') {
   const [totals] = await db.select({
     grossOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} = 'gross' then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
     feeDebitsOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} = 'fee' then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
-    refundDebitsOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} = 'refund' then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
+    refundDebitsOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} in ('refund', 'reversal') then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
     feeCreditsOre: sql<number>`coalesce(sum(case when ${paypalPostings.posting_kind} = 'fee_credit' then ${paypalPostings.amount_ore} else 0 end), 0)::int`,
     revision: sql<number>`coalesce(max(${paypalPostings.id}), 0)::int`,
   }).from(paypalPostings).where(eq(paypalPostings.environment, env));

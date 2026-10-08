@@ -66,6 +66,8 @@ export const paypalWebhookInbox = pgTable('paypal_webhook_inbox', {
   received_at: timestamp('received_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   event_at: timestamp('event_at', { withTimezone: true, mode: 'date' }),
   processing_at: timestamp('processing_at', { withTimezone: true, mode: 'date' }),
+  next_attempt_at: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
+  attempt_count: integer('attempt_count').notNull().default(0),
   processed_at: timestamp('processed_at', { withTimezone: true, mode: 'date' }),
   error_code: text('error_code'),
 }, (t) => [index('paypal_webhook_pending').on(t.status, t.received_at)]);

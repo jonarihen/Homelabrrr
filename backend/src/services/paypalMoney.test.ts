@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDkkOre, oreToDkk, normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund } from './paypalMoney.ts';
+import { parseDkkOre, oreToDkk, normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund, normalizeReportedAdjustment } from './paypalMoney.ts';
 
 const expected = { orderId: 'ORDER123', merchantId: 'MERCHANT123', amountOre: 10000 };
 function capture(overrides: any = {}) { return { id: 'CAPTURE123', status: 'COMPLETED', payee: { merchant_id: 'MERCHANT123' },
@@ -31,6 +31,7 @@ test('subscription installments use actual fee and never treat pending as receip
   assert.deepEqual(normalizeSubscriptionTransaction(entry, { amountOre: 10000 }), { transactionId: 'SALE123', grossOre: 10000,
     feeOre: 400, netOre: 9600, effectiveAt: new Date('2026-10-08T12:00:00Z'), status: 'COMPLETED' });
   assert.equal(normalizeSubscriptionTransaction({ ...entry, status: 'PENDING' }, { amountOre: 10000 }), null);
+  assert.equal(normalizeSubscriptionTransaction({ ...entry, status: 'REFUNDED' }, { amountOre: 10000 })?.grossOre, 10000);
   assert.throws(() => normalizeSubscriptionTransaction(entry, { amountOre: 9000 }), /SALE_AMOUNT_MISMATCH/);
 });
 test('refund fee credit is actual and cumulative refunded amount is ignored', () => {
@@ -46,3 +47,16 @@ test('refund fee credit is actual and cumulative refunded amount is ignored', ()
   assert.equal(normalizeCaptureRefund(missingFee)?.feeCreditOre, null);
 });
 function requireMoney() { return { normalizeSubscriptionTransaction, normalizeCaptureRefund }; }
+test('reporting adjustment requires a linked, successful negative DKK transaction', () => {
+  const detail = { transaction_info: { transaction_id: 'RF123', paypal_reference_id: 'SALE123',
+    paypal_reference_id_type: 'TXN', transaction_event_code: 'T1107', transaction_status: 'S',
+    transaction_amount: { currency_code: 'DKK', value: '-20.00' }, fee_amount: { currency_code: 'DKK', value: '0.50' },
+    transaction_initiation_date: '2026-10-08T13:00:00Z' } };
+  assert.deepEqual(normalizeReportedAdjustment(detail, 'RF123', 'refund'), { transactionId: 'RF123',
+    originalTransactionId: 'SALE123', grossOre: 2000, feeCreditOre: 50, netDebitOre: 1950,
+    effectiveAt: new Date('2026-10-08T13:00:00Z') });
+  assert.throws(() => normalizeReportedAdjustment(detail, 'OTHER', 'refund'), /ADJUSTMENT_MISMATCH/);
+  assert.throws(() => normalizeReportedAdjustment({ transaction_info: { ...detail.transaction_info,
+    transaction_amount: { currency_code: 'USD', value: '-20.00' } } }, 'RF123', 'refund'), /ADJUSTMENT_AMOUNT_UNKNOWN/);
+  assert.equal(normalizeReportedAdjustment({ transaction_info: { ...detail.transaction_info, fee_amount: undefined } }, 'RF123', 'refund').netDebitOre, null);
+});

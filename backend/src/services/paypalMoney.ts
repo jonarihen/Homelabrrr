@@ -14,6 +14,31 @@ export function providerOre(amount: any): number | null {
   const ore = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
   return Number.isSafeInteger(ore) ? ore : null;
 }
+export function providerSignedOre(amount: any): number | null {
+  if (!amount || amount.currency_code !== 'DKK' || typeof amount.value !== 'string' || !/^-?\d+(?:\.\d{1,2})?$/.test(amount.value)) return null;
+  const sign = amount.value.startsWith('-') ? -1 : 1;
+  const [whole, fraction = ''] = amount.value.replace(/^-/, '').split('.');
+  const ore = sign * (Number(whole) * 100 + Number(fraction.padEnd(2, '0')));
+  return Number.isSafeInteger(ore) ? ore : null;
+}
+export function normalizeReportedAdjustment(detail: any, expectedId: string, kind: 'refund' | 'reversal') {
+  const info = detail?.transaction_info;
+  const codes = kind === 'refund' ? ['T1107'] : ['T1100', 'T1118'];
+  if (info?.transaction_id !== expectedId || info?.paypal_reference_id_type !== 'TXN' ||
+      typeof info.paypal_reference_id !== 'string' || !codes.includes(info.transaction_event_code))
+    throw new PayPalError('ADJUSTMENT_MISMATCH', 409);
+  if (info.transaction_status === 'P') throw new PayPalError('ADJUSTMENT_NOT_READY', 409);
+  if (info.transaction_status !== 'S') throw new PayPalError('ADJUSTMENT_MISMATCH', 409);
+  const signedGross = providerSignedOre(info.transaction_amount);
+  const feeCredit = providerSignedOre(info.fee_amount);
+  if (signedGross === null || signedGross >= 0 || feeCredit !== null && feeCredit < 0)
+    throw new PayPalError('ADJUSTMENT_AMOUNT_UNKNOWN', 409);
+  const effectiveAt = new Date(info.transaction_initiation_date || info.transaction_updated_date);
+  if (!Number.isFinite(effectiveAt.getTime())) throw new PayPalError('MALFORMED', 409);
+  return { transactionId: expectedId, originalTransactionId: info.paypal_reference_id,
+    grossOre: -signedGross, feeCreditOre: feeCredit, netDebitOre: feeCredit === null ? null : -signedGross - feeCredit,
+    effectiveAt };
+}
 export function normalizeCompletedCapture(capture: any, expected: { orderId: string; merchantId: string; amountOre: number }) {
   if (!capture || !['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(capture.status) || typeof capture.id !== 'string' ||
     capture.payee?.merchant_id !== expected.merchantId ||
@@ -31,7 +56,8 @@ export function normalizeCompletedCapture(capture: any, expected: { orderId: str
 }
 
 export function normalizeSubscriptionTransaction(transaction: any, expected: { amountOre: number }) {
-  if (!transaction || typeof transaction.id !== 'string' || transaction.status !== 'COMPLETED') return null;
+  if (!transaction || typeof transaction.id !== 'string' ||
+      !['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(transaction.status)) return null;
   const breakdown = transaction.amount_with_breakdown;
   const gross = providerOre(breakdown?.gross_amount);
   const fee = providerOre(breakdown?.fee_amount);

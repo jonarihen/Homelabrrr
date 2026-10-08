@@ -95,6 +95,11 @@ export class PayPalClient {
   async getOrder(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/checkout/orders', id)); }
   async captureOrder(config: PayPalCredentials, id: string, requestId: string) { return this.request(config, 'POST', pathWithId('/v2/checkout/orders', id, '/capture'), {}, requestId); }
   async getRefund(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/payments/refunds', id)); }
+  async findReportedTransaction(config: PayPalCredentials, id: string, from: Date, to: Date) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || !Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) ||
+        !(from < to) || to.getTime() - from.getTime() > 30 * 86_400_000) throw new PayPalError('INVALID_RANGE', 400);
+    return this.request(config, 'GET', `/v1/reporting/transactions?transaction_id=${encodeURIComponent(id)}&start_date=${encodeURIComponent(from.toISOString())}&end_date=${encodeURIComponent(to.toISOString())}&fields=transaction_info&page_size=100&page=1`);
+  }
   async listWebhookEvents(config: PayPalCredentials, from: Date, to: Date) {
     if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || !(from < to) ||
         to.getTime() - from.getTime() > 7 * 86_400_000) throw new PayPalError('INVALID_RANGE', 400);

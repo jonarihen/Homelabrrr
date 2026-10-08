@@ -1838,3 +1838,4 @@ Added disabled-by-default PayPal sandbox/live configuration, server-side one-off
 Added bounded subscription transaction reconciliation, exact reported fee posting, and verified capture-refund accounting. Unresolved adjustments are held from finalized support totals for administrator review.
 The reconciliation pass also imports missed app-scoped PayPal webhook events through a bounded authenticated lookup, including one-off refund notifications.
 Member deletion now waits for confirmed cancellation of linked monthly subscriptions; unknown cancellation outcomes retain the account and retry through reconciliation.
+Targeted Transaction Search readback can now post linked refund and reversal adjustments with provider-reported fee credits. Pending or ambiguous adjustments retry with bounded backoff, then require review.
