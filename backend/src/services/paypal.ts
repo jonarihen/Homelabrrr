@@ -11,6 +11,17 @@ function environment(value: unknown): PayPalEnvironment {
   if (value !== 'sandbox' && value !== 'live') throw new PayPalError('INVALID_ENVIRONMENT', 400);
   return value;
 }
+function checkoutReturnUrls(kind: 'one_off' | 'monthly') {
+  const configured = process.env.PORTAL_BASE_URL || process.env.ALLOWED_ORIGIN;
+  let base: URL;
+  try { base = new URL(configured || ''); } catch { throw new PayPalError('RETURN_ORIGIN_NOT_CONFIGURED', 409); }
+  if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(base.hostname))) ||
+      base.username || base.password || base.pathname !== '/' || base.search || base.hash ||
+      (process.env.ALLOWED_ORIGIN && base.origin !== process.env.ALLOWED_ORIGIN))
+    throw new PayPalError('RETURN_ORIGIN_INVALID', 409);
+  const path = kind === 'monthly' ? '/support?paypal=monthly' : '/support?paypal=one-off';
+  return { returnUrl: `${base.origin}${path}`, cancelUrl: `${base.origin}/support?paypal=cancelled` };
+}
 async function configured(value: unknown) {
   const env = environment(value);
   const [row] = await db.select().from(paypalConfigs).where(eq(paypalConfigs.environment, env)).limit(1);
@@ -69,7 +80,8 @@ export async function createOneOff(userId: number, amount: string, value: unknow
   const id = randomUUID(); const requestId = randomUUID();
   await db.insert(paypalIntents).values({ id, user_id: userId, environment: row.environment, merchant_id: row.merchant_id!, kind: 'one_off',
     amount_ore: amountOre, create_request_id: requestId, config_version: row.config_version });
-  const order = await paypalClient.createOrder(credentials(row), oreToDkk(amountOre), id, requestId);
+  const { returnUrl, cancelUrl } = checkoutReturnUrls('one_off');
+  const order = await paypalClient.createOrder(credentials(row), oreToDkk(amountOre), id, requestId, returnUrl, cancelUrl);
   if (typeof order.id !== 'string' || !['CREATED', 'PAYER_ACTION_REQUIRED'].includes(order.status)) throw new PayPalError('ORDER_CREATE_UNKNOWN');
   await db.update(paypalIntents).set({ provider_id: order.id, status: 'approval_pending', updated_at: new Date() }).where(eq(paypalIntents.id, id));
   const approval = Array.isArray(order.links) ? order.links.find((link: any) => link.rel === 'approve' || link.rel === 'payer-action')?.href : null;
@@ -153,7 +165,23 @@ export async function ownPaymentHistory(userId: number) {
   const intents = await db.select({ id: paypalIntents.id, kind: paypalIntents.kind, status: paypalIntents.status,
     amountOre: paypalIntents.amount_ore, createdAt: paypalIntents.created_at, environment: paypalIntents.environment })
     .from(paypalIntents).where(eq(paypalIntents.user_id, userId)).orderBy(desc(paypalIntents.created_at)).limit(100);
-  return intents;
+  const postings = await db.select({ postingKind: paypalPostings.posting_kind, amountOre: paypalPostings.amount_ore,
+    effectiveAt: paypalPostings.effective_at, environment: paypalPostings.environment })
+    .from(paypalPostings).where(eq(paypalPostings.user_id, userId)).orderBy(desc(paypalPostings.effective_at)).limit(100);
+  const subscriptions = await db.select({ id: paypalSubscriptions.id, status: paypalSubscriptions.status,
+    amountOre: paypalSubscriptions.amount_ore, environment: paypalSubscriptions.environment,
+    nextBillingAt: paypalSubscriptions.next_billing_at, cancellationRequestedAt: paypalSubscriptions.cancellation_requested_at })
+    .from(paypalSubscriptions).where(eq(paypalSubscriptions.user_id, userId)).orderBy(desc(paypalSubscriptions.updated_at)).limit(50);
+  return { items: intents, postings, subscriptions };
+}
+export async function memberPaypalStatus() {
+  const [row] = await db.select({ enabled: paypalConfigs.enabled, monthly_plan_id: paypalConfigs.monthly_plan_id,
+    monthly_amount_ore: paypalConfigs.monthly_amount_ore, client_id: paypalConfigs.client_id,
+    client_secret: paypalConfigs.client_secret, merchant_id: paypalConfigs.merchant_id, webhook_id: paypalConfigs.webhook_id })
+    .from(paypalConfigs).where(eq(paypalConfigs.environment, 'live')).limit(1);
+  return { environment: 'live', configured: Boolean(row?.client_id && row.client_secret && row.merchant_id && row.webhook_id),
+    checkoutEnabled: row?.enabled === true, monthlyAvailable: row?.enabled === true && Boolean(row.monthly_plan_id && row.monthly_amount_ore),
+    monthlyAmountOre: row?.enabled === true ? row.monthly_amount_ore : null };
 }
 
 export async function processPaypalInbox(limit = 20) {
@@ -226,7 +254,8 @@ export async function createMonthly(userId: number, value: unknown) {
   const id = randomUUID(); const requestId = randomUUID();
   await db.insert(paypalIntents).values({ id, user_id: userId, environment: row.environment, merchant_id: row.merchant_id!, kind: 'monthly',
     amount_ore: row.monthly_amount_ore, create_request_id: requestId, config_version: row.config_version });
-  const result = await paypalClient.createSubscription(credentials(row), row.monthly_plan_id, id, requestId);
+  const { returnUrl, cancelUrl } = checkoutReturnUrls('monthly');
+  const result = await paypalClient.createSubscription(credentials(row), row.monthly_plan_id, id, requestId, returnUrl, cancelUrl);
   if (typeof result.id !== 'string' || result.status !== 'APPROVAL_PENDING') throw new PayPalError('SUBSCRIPTION_CREATE_UNKNOWN');
   await db.transaction(async (tx) => {
     await tx.update(paypalIntents).set({ provider_id: result.id, status: 'approval_pending', updated_at: new Date() }).where(eq(paypalIntents.id, id));
