@@ -71,6 +71,13 @@
       "when": 1791475072624,
       "tag": "0009_paypal_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791475635459,
+      "tag": "0010_paypal_month_allocations",
+      "breakpoints": true
     }
   ]
 }

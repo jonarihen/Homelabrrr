@@ -78,3 +78,19 @@ test('GET retries 429 with bounded Retry-After but POST does not retry', async (
   await client.getOrder(config, 'ORDER123');
   assert.deepEqual(delays, [3000]); assert.equal(reads, 2);
 });
+test('hosted checkout receives only fixed portal return URLs', async () => {
+  const bodies: any[] = [];
+  const client = new PayPalClient({ fetcher: (async (url: string, init: RequestInit) => {
+    if (url.endsWith('/oauth2/token')) return Response.json({ access_token: 'access', expires_in: 3600 });
+    bodies.push(JSON.parse(String(init.body)));
+    return Response.json({ id: 'PROVIDER123' });
+  }) as typeof fetch });
+  await client.createOrder(config, '50.00', 'INTENT123', 'REQUEST123', 'https://portal.example/support?paypal=one-off', 'https://portal.example/support?paypal=cancelled');
+  await client.createSubscription(config, 'PLAN12345', 'INTENT456', 'REQUEST456', 'https://portal.example/support?paypal=monthly', 'https://portal.example/support?paypal=cancelled');
+  assert.deepEqual(bodies[0].payment_source.paypal.experience_context, {
+    return_url: 'https://portal.example/support?paypal=one-off', cancel_url: 'https://portal.example/support?paypal=cancelled', user_action: 'PAY_NOW',
+  });
+  assert.deepEqual(bodies[1].application_context, {
+    return_url: 'https://portal.example/support?paypal=monthly', cancel_url: 'https://portal.example/support?paypal=cancelled', user_action: 'SUBSCRIBE_NOW',
+  });
+});

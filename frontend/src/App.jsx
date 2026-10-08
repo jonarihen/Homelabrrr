@@ -32,6 +32,8 @@ import AdminWebsitesPage from './pages/admin/WebsitesPage.jsx';
 import OperationsPage from './pages/admin/OperationsPage.jsx';
 import EnergyDataPage from './pages/admin/EnergyDataPage.jsx';
 import EnergyBudgetPage from './pages/EnergyBudgetPage.jsx';
+import SupportPage from './pages/SupportPage.jsx';
+import PayPalPage from './pages/admin/PayPalPage.jsx';
 import { adminRoutePermissions, makeCan } from './utils/navSections.js';
 
 function PrivateRoute({ children, allow2faBypass }) {
@@ -119,6 +121,7 @@ const router = createBrowserRouter(createRoutesFromElements(
     <Route path="/welcome" element={<PrivateRoute><WelcomePage /></PrivateRoute>} />
     <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
     <Route path="/energy" element={<PrivateRoute><EnergyBudgetPage /></PrivateRoute>} />
+    <Route path="/support" element={<PrivateRoute><SupportPage /></PrivateRoute>} />
 
     <Route path="/vm/:node/:vmid" element={<PrivateRoute><VMPage /></PrivateRoute>} />
     <Route path="/vnc/:node/:vmid" element={<PrivateRoute><VNCPage /></PrivateRoute>} />
@@ -136,6 +139,7 @@ const router = createBrowserRouter(createRoutesFromElements(
       <Route path="assignments" element={<AdminPermissionRoute path="/admin/assignments"><AssignmentsPage /></AdminPermissionRoute>} />
       <Route path="hosts" element={<AdminPermissionRoute path="/admin/hosts"><PVEHostsPage /></AdminPermissionRoute>} />
       <Route path="energy-data" element={<AdminPermissionRoute path="/admin/energy-data"><EnergyDataPage /></AdminPermissionRoute>} />
+      <Route path="paypal" element={<AdminPermissionRoute path="/admin/paypal"><PayPalPage /></AdminPermissionRoute>} />
       <Route path="operations" element={<AdminPermissionRoute path="/admin/operations"><OperationsPage /></AdminPermissionRoute>} />
       <Route path="firewalls" element={<AdminPermissionRoute path="/admin/firewalls"><FirewallsPage /></AdminPermissionRoute>} />
       <Route path="workflows" element={<AdminPermissionRoute path="/admin/workflows"><WorkflowsPage /></AdminPermissionRoute>} />

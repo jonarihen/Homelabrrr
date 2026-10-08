@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSubscriptionIdentity, isTerminalSubscriptionStatus, paypalInboxRetryDelayMs } from './paypal.ts';
+// The helpers are pure, but the module imports the shared DB pool. The URL is
+// deliberately unreachable; these tests never connect to it.
+process.env.DATABASE_URL ||= 'postgres://unused:unused@127.0.0.1:1/unused';
+const { assertSubscriptionIdentity, isTerminalSubscriptionStatus, paypalInboxRetryDelayMs } = await import('./paypal.ts');
 
 test('only confirmed terminal PayPal states permit member deletion', () => {
   assert.equal(isTerminalSubscriptionStatus('CANCELLED'), true);

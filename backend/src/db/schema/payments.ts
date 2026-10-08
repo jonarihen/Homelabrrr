@@ -1,5 +1,6 @@
 import { pgTable, integer, text, boolean, timestamp, jsonb, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { users } from './auth.ts';
+import { electricityCostStatements } from './energy.ts';
 
 // Environment and merchant form a hard accounting boundary. Secrets are encrypted.
 export const paypalConfigs = pgTable('paypal_configs', {
@@ -127,3 +128,25 @@ export const paypalTransactions = pgTable('paypal_transactions', {
   index('paypal_transaction_unresolved').on(t.status, t.observed_at),
   index('paypal_transaction_intent').on(t.intent_id),
 ]);
+
+// Immutable month-by-month applications of verified live net receipts to lab
+// cost. Recalculation appends a revision and propagates changed carry forward.
+export const paypalMonthAllocations = pgTable('paypal_month_allocations', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  month: text('month').notNull(),
+  revision: integer('revision').notNull(),
+  previous_id: integer('previous_id'),
+  source_fingerprint: text('source_fingerprint').notNull(),
+  cost_statement_id: integer('cost_statement_id').references(() => electricityCostStatements.id, { onDelete: 'restrict' }),
+  ledger_revision: integer('ledger_revision').notNull().default(0),
+  status: text('status').notNull(),
+  cost_ore: integer('cost_ore'),
+  received_net_ore: integer('received_net_ore').notNull(),
+  opening_balance_ore: integer('opening_balance_ore'),
+  applied_ore: integer('applied_ore'),
+  owner_remainder_ore: integer('owner_remainder_ore'),
+  owner_adjustment_ore: integer('owner_adjustment_ore'),
+  closing_balance_ore: integer('closing_balance_ore'),
+  unresolved_count: integer('unresolved_count').notNull().default(0),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [uniqueIndex('paypal_month_allocation_revision').on(t.month, t.revision), index('paypal_month_allocation_month').on(t.month)]);

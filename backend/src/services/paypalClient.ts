@@ -89,8 +89,9 @@ export class PayPalClient {
       }
     }
   }
-  async createOrder(config: PayPalCredentials, amount: string, customId: string, requestId: string) {
-    return this.request(config, 'POST', '/v2/checkout/orders', { intent: 'CAPTURE', purchase_units: [{ amount: { currency_code: 'DKK', value: amount }, custom_id: customId }] }, requestId);
+  async createOrder(config: PayPalCredentials, amount: string, customId: string, requestId: string, returnUrl: string, cancelUrl: string) {
+    return this.request(config, 'POST', '/v2/checkout/orders', { intent: 'CAPTURE', purchase_units: [{ amount: { currency_code: 'DKK', value: amount }, custom_id: customId }],
+      payment_source: { paypal: { experience_context: { return_url: returnUrl, cancel_url: cancelUrl, user_action: 'PAY_NOW' } } } }, requestId);
   }
   async getOrder(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/checkout/orders', id)); }
   async captureOrder(config: PayPalCredentials, id: string, requestId: string) { return this.request(config, 'POST', pathWithId('/v2/checkout/orders', id, '/capture'), {}, requestId); }
@@ -111,9 +112,10 @@ export class PayPalClient {
     return this.request(config, 'GET', `${path}?start_time=${encodeURIComponent(from.toISOString())}&end_time=${encodeURIComponent(to.toISOString())}`);
   }
   async getCapture(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/payments/captures', id)); }
-  async createSubscription(config: PayPalCredentials, planId: string, customId: string, requestId: string) {
+  async createSubscription(config: PayPalCredentials, planId: string, customId: string, requestId: string, returnUrl: string, cancelUrl: string) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(planId)) throw new PayPalError('INVALID_ID', 400);
-    return this.request(config, 'POST', '/v1/billing/subscriptions', { plan_id: planId, custom_id: customId }, requestId);
+    return this.request(config, 'POST', '/v1/billing/subscriptions', { plan_id: planId, custom_id: customId,
+      application_context: { return_url: returnUrl, cancel_url: cancelUrl, user_action: 'SUBSCRIBE_NOW' } }, requestId);
   }
   async getPlan(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v1/billing/plans', id)); }
   async getSubscription(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v1/billing/subscriptions', id)); }
