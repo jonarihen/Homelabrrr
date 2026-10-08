@@ -60,6 +60,7 @@ export const paypalWebhookInbox = pgTable('paypal_webhook_inbox', {
   event_type: text('event_type').notNull(),
   resource_id: text('resource_id'),
   payload: jsonb('payload').notNull(),
+  source: text('source').notNull().default('verified_webhook'),
   status: text('status').notNull().default('pending'),
   received_at: timestamp('received_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   event_at: timestamp('event_at', { withTimezone: true, mode: 'date' }),

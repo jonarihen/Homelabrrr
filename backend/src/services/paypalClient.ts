@@ -95,6 +95,11 @@ export class PayPalClient {
   async getOrder(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/checkout/orders', id)); }
   async captureOrder(config: PayPalCredentials, id: string, requestId: string) { return this.request(config, 'POST', pathWithId('/v2/checkout/orders', id, '/capture'), {}, requestId); }
   async getRefund(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/payments/refunds', id)); }
+  async listWebhookEvents(config: PayPalCredentials, from: Date, to: Date) {
+    if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || !(from < to) ||
+        to.getTime() - from.getTime() > 7 * 86_400_000) throw new PayPalError('INVALID_RANGE', 400);
+    return this.request(config, 'GET', `/v1/notifications/webhooks-events?page_size=100&start_time=${encodeURIComponent(from.toISOString())}&end_time=${encodeURIComponent(to.toISOString())}`);
+  }
   async listSubscriptionTransactions(config: PayPalCredentials, id: string, from: Date, to: Date) {
     if (!(from < to) || to.getTime() - from.getTime() > 30 * 86_400_000) throw new PayPalError('INVALID_RANGE', 400);
     const path = pathWithId('/v1/billing/subscriptions', id, '/transactions');

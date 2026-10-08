@@ -1836,3 +1836,4 @@ Added disabled-by-default PayPal sandbox/live configuration, server-side one-off
 ## 2026-10-08 — PayPal receipt reconciliation
 
 Added bounded subscription transaction reconciliation, exact reported fee posting, and verified capture-refund accounting. Unresolved adjustments are held from finalized support totals for administrator review.
+The reconciliation pass also imports missed app-scoped PayPal webhook events through a bounded authenticated lookup, including one-off refund notifications.

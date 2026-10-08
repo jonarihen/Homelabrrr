@@ -125,6 +125,30 @@ export async function storeVerifiedWebhook(value: unknown, headers: Record<strin
     event_at: event.create_time ? new Date(event.create_time) : null }).onConflictDoNothing();
   return { acknowledged: true };
 }
+// The OAuth-authenticated, app-scoped event list recovers deliveries lost during an
+// outage. Events still pass the normal local intent/merchant linkage checks.
+export async function recoverPaypalEvents(row: Awaited<ReturnType<typeof configured>>, now: Date, cursor: Date | null) {
+  const from = new Date(Math.max(now.getTime() - 30 * 86_400_000,
+    (cursor?.getTime() ?? now.getTime() - 30 * 86_400_000) - 24 * 60 * 60_000));
+  const to = new Date(Math.min(now.getTime(), from.getTime() + 7 * 86_400_000));
+  if (to <= from) return { through: now, stored: 0 };
+  const page = await paypalClient.listWebhookEvents(credentials(row), from, to);
+  if (!Array.isArray(page.events) || page.events.length > 100 ||
+      (Array.isArray(page.links) && page.links.some((link: any) => link?.rel === 'next')))
+    throw new PayPalError('EVENTS_INCOMPLETE', 409);
+  let stored = 0;
+  for (const event of page.events) {
+    if (!event || typeof event.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(event.id) ||
+        typeof event.event_type !== 'string' || typeof event.resource !== 'object' || !event.resource)
+      throw new PayPalError('EVENT_MALFORMED', 409);
+    const result = await db.insert(paypalWebhookInbox).values({ id: `${row.environment}:${row.merchant_id}:${event.id}`,
+      environment: row.environment, merchant_id: row.merchant_id!, event_type: event.event_type,
+      resource_id: String(event.resource.id || ''), payload: event, source: 'provider_readback',
+      event_at: event.create_time ? limitedTime(event.create_time) : null }).onConflictDoNothing();
+    stored += result.rowCount ?? 0;
+  }
+  return { through: to, stored };
+}
 export async function ownPaymentHistory(userId: number) {
   const intents = await db.select({ id: paypalIntents.id, kind: paypalIntents.kind, status: paypalIntents.status,
     amountOre: paypalIntents.amount_ore, createdAt: paypalIntents.created_at, environment: paypalIntents.environment })
@@ -152,11 +176,11 @@ export async function processPaypalInbox(limit = 20) {
         if (!intent || intent.kind !== 'one_off') throw new PayPalError('UNLINKED_CAPTURE', 409);
         const row = await configured(entry.environment);
         if (row.merchant_id !== entry.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
-        await ingestOneOffCapture(credentials(row), intent, resource.id, 'verified_webhook');
+        await ingestOneOffCapture(credentials(row), intent, resource.id, entry.source);
       } else if (entry.event_type === 'PAYMENT.CAPTURE.REFUNDED') {
         const row = await configured(entry.environment);
         if (row.merchant_id !== entry.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
-        await ingestCaptureRefund(credentials(row), resource.id, 'verified_webhook');
+        await ingestCaptureRefund(credentials(row), resource.id, entry.source);
       } else if (entry.event_type === 'PAYMENT.SALE.COMPLETED') {
         const subscriptionId = resource?.billing_agreement_id || resource?.subscription_id;
         const [sub] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.id, subscriptionId),
@@ -299,10 +323,13 @@ export async function reconcilePaypal(value: unknown, now = new Date()) {
     const env = environment(value);
     const row = await configured(env);
     const current = row.config_version;
+    const [prior] = await db.select().from(paypalReconciliation).where(eq(paypalReconciliation.environment, env)).limit(1);
     await db.insert(paypalReconciliation).values({ environment: env, status: 'running', last_run_at: now })
       .onConflictDoUpdate({ target: paypalReconciliation.environment, set: { status: 'running', last_run_at: now } });
     let checked = 0;
     try {
+      const recovered = await recoverPaypalEvents(row, now, prior?.cursor_at ?? null);
+      checked += recovered.stored;
       const unresolved = await db.select().from(paypalIntents).where(and(eq(paypalIntents.environment, env),
         eq(paypalIntents.merchant_id, row.merchant_id!), eq(paypalIntents.status, 'capture_unknown'))).limit(10);
       for (const intent of unresolved) {
@@ -329,7 +356,7 @@ export async function reconcilePaypal(value: unknown, now = new Date()) {
       }
       const after = await configured(env);
       if (after.config_version !== current || after.merchant_id !== row.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
-      await db.update(paypalReconciliation).set({ status: 'ok', cursor_at: now, error_code: null }).where(eq(paypalReconciliation.environment, env));
+      await db.update(paypalReconciliation).set({ status: 'ok', cursor_at: recovered.through, error_code: null }).where(eq(paypalReconciliation.environment, env));
       return { status: 'ok', checked };
     } catch (err) {
       await db.update(paypalReconciliation).set({ status: 'partial', error_code: err instanceof PayPalError ? err.code : 'RECONCILIATION_FAILED' })

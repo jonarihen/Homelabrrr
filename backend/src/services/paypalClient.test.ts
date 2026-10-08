@@ -47,6 +47,17 @@ test('subscription transaction lookup is bounded and uses only its mapped subscr
   assert(requests.some((url) => url.includes('/v1/billing/subscriptions/SUB123/transactions?start_time=')));
   await assert.rejects(client.listSubscriptionTransactions(config, 'SUB123', new Date('2026-01-01'), new Date('2026-10-08')), /INVALID_RANGE/);
 });
+test('event recovery reads a bounded range from the fixed PayPal origin', async () => {
+  const requests: string[] = [];
+  const fetcher = async (url: string) => {
+    requests.push(url);
+    return Response.json(url.endsWith('/oauth2/token') ? { access_token: 'access', expires_in: 3600 } : { events: [], count: 0 });
+  };
+  const client = new PayPalClient({ fetcher: fetcher as typeof fetch });
+  await client.listWebhookEvents(config, new Date('2026-10-01T00:00:00Z'), new Date('2026-10-07T00:00:00Z'));
+  assert(requests.some((url) => url.startsWith('https://api-m.sandbox.paypal.com/v1/notifications/webhooks-events?page_size=100&start_time=')));
+  await assert.rejects(client.listWebhookEvents(config, new Date('2026-09-01T00:00:00Z'), new Date('2026-10-07T00:00:00Z')), /INVALID_RANGE/);
+});
 test('GET retries 429 with bounded Retry-After but POST does not retry', async () => {
   let reads = 0; const delays: number[] = [];
   const fetcher = async (url: string) => {
