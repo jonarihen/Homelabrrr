@@ -18,6 +18,7 @@ export interface ControlSnapshot {
   pricePolicy: PowerPricePolicy;
   latch: PriceLatch | null;
   manualOverride: { mode: WritablePowerMode; expiresAt: Date | null } | null;
+  lastVerifiedMode: HardwareMode | null;
   ilo: IloConfig;
 }
 
@@ -32,9 +33,10 @@ export interface ClaimOutcome {
 export interface ControlRepository {
   load(hardwareId: number): Promise<ControlSnapshot | null>;
   claim(snapshot: ControlSnapshot, token: string, expiresAt: Date): Promise<boolean>;
-  claimStillCurrent(snapshot: ControlSnapshot, token: string): Promise<boolean>;
+  claimStillCurrent(snapshot: ControlSnapshot, token: string, manual?: boolean): Promise<boolean>;
   finish(hardwareId: number, token: string, outcome: ClaimOutcome): Promise<void>;
   observe(hardwareId: number, version: number, decision: PowerDecision, actual: HardwareMode): Promise<void>;
+  holdExternalDrift(hardwareId: number, version: number, actual: HardwareMode): Promise<void>;
 }
 
 export interface ControllerDependencies {
@@ -73,28 +75,32 @@ export class PowerController {
     };
   }
 
-  private async decision(snapshot: ControlSnapshot, actualMode: HardwareMode): Promise<PowerDecision> {
+  private async decision(snapshot: ControlSnapshot, actualMode: HardwareMode, manual = false): Promise<PowerDecision> {
     const now = this.deps.now();
-    const price = snapshot.pricePolicy.enabled
+    const price = snapshot.pricePolicy.enabled && !manual
       ? await this.deps.getApplicablePrice(now, snapshot.pricePolicy) : null;
     return resolvePowerDecision({
-      now, controlEnabled: snapshot.controlEnabled && snapshot.automationEnabled,
-      automationPaused: snapshot.paused, driftHold: snapshot.driftHold,
+      now, controlEnabled: snapshot.controlEnabled && (snapshot.automationEnabled || manual),
+      automationPaused: snapshot.paused, driftHold: snapshot.driftHold, manualAction: manual,
       actualMode, supportedModes: snapshot.supportedModes,
       schedule: snapshot.schedule, pricePolicy: snapshot.pricePolicy,
       price, previousLatch: snapshot.latch, manualOverride: snapshot.manualOverride,
     });
   }
 
-  async reconcile(hardwareId: number): Promise<ReconcileResult> {
+  async reconcile(hardwareId: number, { manual = false }: { manual?: boolean } = {}): Promise<ReconcileResult> {
     if (this.active.has(hardwareId)) return { status: 'busy' };
     this.active.add(hardwareId);
     try {
       const initial = await this.deps.repository.load(hardwareId);
       if (!initial) return { status: 'not_configured' };
-      if (!initial.controlEnabled || !initial.automationEnabled) return { status: 'disabled' };
+      if (!initial.controlEnabled || (!manual && !initial.automationEnabled)) return { status: 'disabled' };
       const actual = await this.deps.readMode(initial.ilo);
-      const selected = await this.decision(initial, actual);
+      if (!manual && initial.lastVerifiedMode && initial.lastVerifiedMode !== actual && !initial.driftHold) {
+        await this.deps.repository.holdExternalDrift(hardwareId, initial.policyVersion, actual);
+        return { status: 'hold' };
+      }
+      const selected = await this.decision(initial, actual, manual);
       if (!selected.target) {
         await this.deps.repository.observe(hardwareId, initial.policyVersion, selected, actual);
         return { status: 'hold', decision: selected };
@@ -113,19 +119,19 @@ export class PowerController {
       try {
         const fresh = await this.deps.repository.load(hardwareId);
         if (!fresh || fresh.configVersion !== initial.configVersion || fresh.policyVersion !== initial.policyVersion
-          || !await this.deps.repository.claimStillCurrent(initial, token)) return { status: 'stale', decision: selected };
+          || !await this.deps.repository.claimStillCurrent(initial, token, manual)) return { status: 'stale', decision: selected };
         const current = await this.deps.readMode(fresh.ilo);
-        const renewed = await this.decision(fresh, current);
+        const renewed = await this.decision(fresh, current, manual);
         if (!sameSelection(selected, renewed) || !renewed.target) return { status: 'stale', decision: renewed };
         if (current === renewed.target) {
           outcome = { outcome: 'already_set', prior: current, target: renewed.target, decision: renewed };
           return { status: 'already_set', decision: renewed };
         }
         const guard = async () => {
-          if (!await this.deps.repository.claimStillCurrent(initial, token)) return false;
+          if (!await this.deps.repository.claimStillCurrent(initial, token, manual)) return false;
           const latest = await this.deps.repository.load(hardwareId);
           if (!latest || latest.configVersion !== initial.configVersion || latest.policyVersion !== initial.policyVersion) return false;
-          const atDispatch = await this.decision(latest, current);
+          const atDispatch = await this.decision(latest, current, manual);
           return sameSelection(renewed, atDispatch) && atDispatch.target === renewed.target;
         };
         const result = await this.deps.writeMode(fresh.ilo, renewed.target, undefined, undefined, guard);

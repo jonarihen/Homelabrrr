@@ -2,6 +2,7 @@ import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { hardwareConnections, hardwarePowerOperations, hardwarePowerPolicies } from '../db/schema/index.ts';
 import { decryptSecret } from '../utils/secrets.ts';
+import { getSetting } from '../db/settings.ts';
 import type { HardwareMode } from './iloAdapter.ts';
 import type { PowerDecision, WritablePowerMode } from './powerPolicy.ts';
 import type { ClaimOutcome, ControlRepository, ControlSnapshot } from './powerController.ts';
@@ -29,13 +30,14 @@ export class PowerControlStore implements ControlRepository {
       policyVersion: policy.version,
       controlEnabled: connection.control_enabled,
       automationEnabled: policy.automation_enabled,
-      paused: policy.paused,
+      paused: policy.paused || await getSetting('power_automation_paused') === 'true',
       driftHold: policy.drift_hold,
       supportedModes,
       schedule: policy.schedule,
       pricePolicy: policy.price_policy,
       latch: policy.latch,
       manualOverride: manual,
+      lastVerifiedMode: (policy.last_verified_mode as HardwareMode | null) ?? null,
       ilo: {
         host: connection.target_host, port: connection.target_port, username: connection.username,
         password: decryptSecret(connection.secret), verifyTls: connection.verify_tls,
@@ -58,7 +60,8 @@ export class PowerControlStore implements ControlRepository {
     return rows.length === 1;
   }
 
-  async claimStillCurrent(snapshot: ControlSnapshot, token: string): Promise<boolean> {
+  async claimStillCurrent(snapshot: ControlSnapshot, token: string, manual = false): Promise<boolean> {
+    if (!manual && await getSetting('power_automation_paused') === 'true') return false;
     const [row] = await db.select({
       claim_token: hardwarePowerPolicies.claim_token,
       claim_expires_at: hardwarePowerPolicies.claim_expires_at,
@@ -73,7 +76,7 @@ export class PowerControlStore implements ControlRepository {
     return Boolean(row && row.claim_token === token && row.claim_expires_at
       && row.claim_expires_at.getTime() > Date.now()
       && row.version === snapshot.policyVersion && row.config_version === snapshot.configVersion
-      && row.automation_enabled && row.control_enabled && row.lifecycle_state === 'active');
+      && (manual || row.automation_enabled) && row.control_enabled && row.lifecycle_state === 'active');
   }
 
   async finish(hardwareId: number, token: string, outcome: ClaimOutcome): Promise<void> {
@@ -102,6 +105,12 @@ export class PowerControlStore implements ControlRepository {
     if (decision.target === actual) set.last_verified_mode = actual;
     await db.update(hardwarePowerPolicies).set(set)
       .where(and(eq(hardwarePowerPolicies.hardware_id, hardwareId), eq(hardwarePowerPolicies.version, version), isNull(hardwarePowerPolicies.claim_token)));
+  }
+
+  async holdExternalDrift(hardwareId: number, version: number, actual: HardwareMode): Promise<void> {
+    await db.update(hardwarePowerPolicies).set({
+      drift_hold: true, last_outcome: `external_drift:${actual}`, version: version + 1, updated_at: new Date(),
+    }).where(and(eq(hardwarePowerPolicies.hardware_id, hardwareId), eq(hardwarePowerPolicies.version, version), isNull(hardwarePowerPolicies.claim_token)));
   }
 
   async automatedHardwareIds(): Promise<number[]> {

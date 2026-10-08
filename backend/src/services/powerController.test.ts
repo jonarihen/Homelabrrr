@@ -16,7 +16,7 @@ function snapshot(): ControlSnapshot {
       expensive: { enabled: false, threshold: '', hysteresis: '', capMode: 'dynamic' },
       cheap: { enabled: false, threshold: '', hysteresis: '' }, version: 1,
     },
-    latch: null, manualOverride: null,
+    latch: null, manualOverride: null, lastVerifiedMode: null,
     ilo: { host: 'ilo.fixture', port: 443, username: 'fixture', password: 'fixture', verifyTls: true },
   };
 }
@@ -31,6 +31,7 @@ function repository(state: ControlSnapshot) {
     claimStillCurrent: async () => claimed,
     finish: async (_id, _token, result) => { finished.push(result); claimed = false; },
     observe: async (_id, _version, result) => { observed.push(result); },
+    holdExternalDrift: async () => { state.driftHold = true; },
   };
   return { value, finished, observed };
 }
@@ -96,4 +97,14 @@ test('one physical node is reconciled once while a prior read is in flight', asy
   assert.equal((await controller.reconcile(1)).status, 'busy');
   release();
   assert.equal((await first).status, 'already_set');
+});
+
+test('an unexpected external mode change holds automatic writes', async () => {
+  const state = snapshot(); state.lastVerifiedMode = 'dynamic';
+  const repo = repository(state);
+  const controller = new PowerController({ repository: repo.value, getApplicablePrice: async () => null,
+    readMode: async () => 'low', writeMode: async () => { throw new Error('must not write'); }, now: () => instant,
+  });
+  assert.equal((await controller.reconcile(1)).status, 'hold');
+  assert.equal(state.driftHold, true);
 });

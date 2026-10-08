@@ -67,6 +67,7 @@ export interface PowerDecisionInput {
   price: ApplicablePowerPrice | null;
   previousLatch?: PriceLatch | null;
   manualOverride?: { mode: WritablePowerMode; expiresAt: Date | null } | null;
+  manualAction?: boolean;
 }
 
 export interface PowerDecision {
@@ -195,11 +196,15 @@ export function resolvePowerDecision(input: PowerDecisionInput): PowerDecision {
   });
 
   if (!input.controlEnabled) return result('disabled', null);
-  if (input.automationPaused) return result('paused', null);
-  if (input.driftHold) return result('drift_hold', null);
   if (input.actualMode === 'os_control' || input.actualMode === 'unknown') return result('unsafe_actual_mode', null);
 
   const override = input.manualOverride;
+  if (input.manualAction && override && (!override.expiresAt || override.expiresAt.getTime() > input.now.getTime())) {
+    return input.supportedModes.includes(override.mode) ? result('manual', override.mode)
+      : result('unsupported_mode', null);
+  }
+  if (input.automationPaused) return result('paused', null);
+  if (input.driftHold) return result('drift_hold', null);
   if (override && (!override.expiresAt || override.expiresAt.getTime() > input.now.getTime())) {
     return input.supportedModes.includes(override.mode) ? result('manual', override.mode)
       : result('unsupported_mode', null);
@@ -216,8 +221,8 @@ export function resolvePowerDecision(input: PowerDecisionInput): PowerDecision {
     if (validPrice(input)) {
       const price = input.price!;
       const current = parseDkkPerKwh(price.dkk_per_kwh);
-      const upper = parseDkkPerKwh(policy.expensive.threshold);
-      const lower = parseDkkPerKwh(policy.cheap.threshold);
+      const upper = policy.expensive.enabled ? parseDkkPerKwh(policy.expensive.threshold) : 0n;
+      const lower = policy.cheap.enabled ? parseDkkPerKwh(policy.cheap.threshold) : 0n;
       const old = input.previousLatch;
       const samePolicy = old?.policyVersion === policy.version;
       latch.expensive = policy.expensive.enabled && (current > upper

@@ -123,3 +123,14 @@ test('overlapping release bands are invalid', () => {
   invalid.cheap.threshold = '2.95';
   assert.throws(() => validatePricePolicy(invalid), /overlap/);
 });
+
+test('one enabled price rule does not parse the disabled rule blank threshold', () => {
+  const x = input();
+  x.pricePolicy.cheap = { enabled: false, threshold: '', hysteresis: '' };
+  x.price!.dkk_per_kwh = '3.50';
+  assert.equal(resolvePowerDecision(x).reason, 'price_high');
+  x.pricePolicy.expensive = { enabled: false, threshold: '', hysteresis: '', capMode: 'dynamic' };
+  x.pricePolicy.cheap = { enabled: true, threshold: '1.00', hysteresis: '0.10' };
+  x.price!.dkk_per_kwh = '0.50';
+  assert.equal(resolvePowerDecision(x).reason, 'price_low');
+});
