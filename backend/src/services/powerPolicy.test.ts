@@ -132,6 +132,20 @@ test('mismatched basis and incomplete prices cannot trigger High', () => {
   assert.equal(resolvePowerDecision(x).reason, 'price_unavailable_fallback');
 });
 
+test('15-minute price interval ends exclusively and clears a prior cheap latch', () => {
+  const x = input(at('2026-10-12T16:14:59Z'));
+  x.price!.start_utc = '2026-10-12T16:00:00Z';
+  x.price!.end_utc = '2026-10-12T16:15:00Z';
+  x.price!.dkk_per_kwh = '0.75';
+  const cheap = resolvePowerDecision(x);
+  assert.equal(cheap.reason, 'price_low');
+  x.previousLatch = cheap.latch;
+  x.now = at('2026-10-12T16:15:00Z');
+  const expired = resolvePowerDecision(x);
+  assert.equal(expired.reason, 'price_unavailable_fallback');
+  assert.equal(expired.latch.cheap, false);
+});
+
 test('overlapping release bands are invalid', () => {
   const invalid = structuredClone(policy);
   invalid.cheap.threshold = '2.95';
