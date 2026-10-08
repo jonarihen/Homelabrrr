@@ -31,6 +31,12 @@ export const NAV_SECTIONS = [
         icon: 'M13.5 2.25L4.5 13.5h6l-1.5 8.25 10.5-12h-6l0-7.5z',
       },
       {
+        to: '/admin/paypal',
+        label: 'PayPal',
+        perms: [ADMIN_ONLY],
+        icon: 'M4.5 6h15v12h-15zM7.5 9h4.5m-4.5 3h9m-9 3h6',
+      },
+      {
         to: '/admin/operations',
         label: 'Operations',
         perms: ['canManageHosts'],
