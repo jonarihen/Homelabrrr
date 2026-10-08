@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-08 — Power policy transition preview
+
+- The saved hardware policy preview now includes seven days of schedule and published-price decisions, the next schedule boundary, and the next known selected-mode change. Future price-dependent selections beyond published coverage are explicitly unknown.
+- Weekly power windows resolve Copenhagen daylight-saving gaps and repeated hours to stable UTC boundaries, including custom windows during the repeated autumn hour.
+
 ## 2026-10-08 — Server energy history
 
 - Energy & Budget now charts integrated server kWh alongside instantaneous watts for 24-hour and seven-day views, with coverage in an accessible interval table. Missing intervals leave visible gaps in both trend lines.

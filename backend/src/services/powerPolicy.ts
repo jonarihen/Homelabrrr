@@ -1,4 +1,4 @@
-import { isValidTime, isValidTimezone, timeToMinutes, zonedParts } from '../utils/schedule.ts';
+import { isValidTime, isValidTimezone, timeToMinutes } from '../utils/schedule.ts';
 
 export type WritablePowerMode = 'low' | 'dynamic' | 'high';
 export type ObservedPowerMode = WritablePowerMode | 'os_control' | 'unknown';
@@ -142,12 +142,79 @@ export function validatePowerSchedule(schedule: WeeklyPowerSchedule): void {
 
 export function scheduledModeAt(schedule: WeeklyPowerSchedule, now: Date): WritablePowerMode {
   validatePowerSchedule(schedule);
-  const { weekday, minuteOfDay } = zonedParts(now, schedule.timezone);
-  const minuteOfWeek = weekday * 1440 + minuteOfDay;
-  for (const window of schedule.windows) {
-    if (occupiedMinutes(window).has(minuteOfWeek)) return window.mode;
+  const local = localDateParts(now, schedule.timezone);
+  const today = Date.UTC(local.year, local.month - 1, local.day);
+  for (const day of [today - 86_400_000, today]) {
+    const weekday = new Date(day).getUTCDay();
+    for (const window of schedule.windows) {
+      if (!(window.days & (1 << weekday))) continue;
+      const start = localBoundary(day, window.start, schedule.timezone, 'earlier');
+      const overnight = timeToMinutes(window.end) < timeToMinutes(window.start);
+      const end = localBoundary(day + (overnight ? 86_400_000 : 0), window.end, schedule.timezone, 'later');
+      if (start <= now.getTime() && now.getTime() < end) return window.mode;
+    }
   }
   return schedule.defaultMode;
+}
+
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+function localDateParts(date: Date, timezone: string) {
+  let formatter = dateFormatters.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    dateFormatters.set(timezone, formatter);
+  }
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, Number(part.value)]));
+  return { year: parts.year, month: parts.month, day: parts.day, hour: parts.hour % 24, minute: parts.minute };
+}
+
+// Resolve wall-clock boundaries to instants. Spring gaps advance to the first
+// valid local minute; autumn starts use the earlier occurrence and ends the
+// later occurrence, so an active window cannot oscillate when clocks go back.
+function localBoundary(localDayUtc: number, wallTime: string, timezone: string, occurrence: 'earlier' | 'later'): number {
+  const minute = timeToMinutes(wallTime);
+  const naive = localDayUtc + minute * 60_000;
+  const day = new Date(localDayUtc);
+  for (let advance = 0; advance <= 180; advance += 1) {
+    const desired = naive + advance * 60_000;
+    const matches = new Set<number>();
+    const offsets = new Set<number>();
+    for (let hours = -36; hours <= 36; hours += 6) {
+      const probe = desired + hours * 3_600_000;
+      const local = localDateParts(new Date(probe), timezone);
+      offsets.add((Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute) - probe) / 60_000);
+    }
+    for (const offset of offsets) {
+      const instant = desired - offset * 60_000;
+      const p = localDateParts(new Date(instant), timezone);
+      const wanted = new Date(desired);
+      if (p.year === wanted.getUTCFullYear() && p.month === wanted.getUTCMonth() + 1
+        && p.day === wanted.getUTCDate() && p.hour === wanted.getUTCHours() && p.minute === wanted.getUTCMinutes()) matches.add(instant);
+    }
+    if (matches.size) return occurrence === 'earlier' ? Math.min(...matches) : Math.max(...matches);
+  }
+  throw new Error(`Unable to resolve local power boundary for ${day.toISOString()}`);
+}
+
+export function scheduleBoundaryInstants(schedule: WeeklyPowerSchedule, from: Date, to: Date): Date[] {
+  validatePowerSchedule(schedule);
+  if (!schedule.enabled) return [];
+  const local = localDateParts(from, schedule.timezone);
+  const first = Date.UTC(local.year, local.month - 1, local.day) - 86_400_000;
+  const days = Math.ceil((to.getTime() - from.getTime()) / 86_400_000) + 4;
+  const boundaries = new Set<number>();
+  for (let index = 0; index < days; index += 1) {
+    const day = first + index * 86_400_000;
+    for (const window of schedule.windows) {
+      if (!(window.days & (1 << new Date(day).getUTCDay()))) continue;
+      const start = localBoundary(day, window.start, schedule.timezone, 'earlier');
+      const end = localBoundary(day + (timeToMinutes(window.end) < timeToMinutes(window.start) ? 86_400_000 : 0), window.end, schedule.timezone, 'later');
+      if (start > from.getTime() && start < to.getTime()) boundaries.add(start);
+      if (end > from.getTime() && end < to.getTime()) boundaries.add(end);
+    }
+  }
+  return [...boundaries].sort((a, b) => a - b).map((value) => new Date(value));
 }
 
 export function validatePricePolicy(policy: PowerPricePolicy): void {
