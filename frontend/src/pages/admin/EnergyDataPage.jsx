@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '../../api.js';
+import ElectricityPricingPanel from './ElectricityPricingPanel.jsx';
+import ExtraLabLoadsPanel from './ExtraLabLoadsPanel.jsx';
 
 export default function EnergyDataPage() {
   const [status, setStatus] = useState(null);
@@ -43,5 +45,7 @@ export default function EnergyDataPage() {
       <p className="text-sm text-slate-400">Last sync: {status.lastSuccessAt ? new Date(status.lastSuccessAt).toLocaleString() : 'Never'} · Latest interval: {status.latestIntervalEnd ? new Date(status.latestIntervalEnd).toLocaleString() : 'Unknown'} · Error: {status.lastErrorCode || 'None'}</p>
       <div className="flex gap-3"><button disabled={busy || !status.enabled} onClick={() => action('sync')} className="rounded border border-slate-600 px-4 py-2 disabled:opacity-50">Sync now</button><button disabled={busy} onClick={() => action('disconnect')} className="rounded border border-red-700 px-4 py-2 disabled:opacity-50">Disconnect and keep history</button></div>
     </section>}
+    <ElectricityPricingPanel />
+    <ExtraLabLoadsPanel />
   </main>;
 }

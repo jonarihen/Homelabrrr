@@ -50,6 +50,48 @@
       "when": 1791446400000,
       "tag": "0006_hardware_telemetry",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791474007223,
+      "tag": "0007_power_control",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791474897795,
+      "tag": "0008_electricity_pricing",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791475072624,
+      "tag": "0009_paypal_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791475635459,
+      "tag": "0010_paypal_month_allocations",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1791476309848,
+      "tag": "0011_hardware_health",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1791476770097,
+      "tag": "0012_extra_lab_loads",
+      "breakpoints": true
     }
   ]
 }
