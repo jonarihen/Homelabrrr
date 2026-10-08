@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08 — Private energy dashboard foundation
+
+Added an authenticated Energy & Budget page with server power, measured kWh and bounded history. Missing electricity pricing and contribution accounting appear as unknown until verified sources are integrated.
+
 ## 2026-10-08 — Server power telemetry and history
 
 - iLO collection can now be enabled per tested physical node. The backend records actual input watts and regulator mode without an open browser; collection never writes a hardware setting.
