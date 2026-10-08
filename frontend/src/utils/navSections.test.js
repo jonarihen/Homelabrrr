@@ -35,7 +35,7 @@ test('a user with no permissions at all sees no admin sections', () => {
 test('an admin sees every section and every link, admin-only children included', () => {
   const sections = visibleSections(canFrom(user({}, true)));
   assert.deepEqual(shape(sections), [
-    ['Infrastructure', ['PVE Hosts', 'Operations', 'Firewalls', 'Workflows', 'Templates', 'VM Leases']],
+    ['Infrastructure', ['PVE Hosts', 'Energy Data', 'Operations', 'Firewalls', 'Workflows', 'Templates', 'VM Leases']],
     ['Networking', ['VLANs', 'Policies', 'Port Forwarding', 'Websites', 'Assignments']],
     ['Access', ['Users', 'Roles', 'Notifications', 'Audit Log']],
   ]);
@@ -49,6 +49,7 @@ test('admin-only links stay hidden from every granular grant', () => {
   const labels = sections.flatMap((s) => s.links.map((l) => l.label));
   assert.equal(labels.includes('VM Leases'), false);
   assert.equal(labels.includes('Notifications'), false);
+  assert.equal(labels.includes('Energy Data'), false);
   // ...but everything else is there, in order.
   assert.deepEqual(shape(sections), [
     ['Infrastructure', ['PVE Hosts', 'Operations', 'Firewalls', 'Workflows', 'Templates']],
@@ -178,7 +179,7 @@ test('behavior is unchanged except where the old section gate swallowed Port For
   for (const u of [...everyGrantCombination().map((p) => user(p)), user({}, true)]) {
     const legacy = legacySidebar(u);
     const next = shape(visibleSections(makeCan(u)))
-      .map(([section, links]) => [section, links.filter((label) => label !== 'Operations')])
+      .map(([section, links]) => [section, links.filter((label) => label !== 'Operations' && label !== 'Energy Data')])
       .filter(([, links]) => links.length > 0);
     const p = u.permissions;
     const legacyHidNetworking = !(p.canManageVlans || p.canManagePolicies || p.canManageAssignments || p.canManageWebsites) && !u.isAdmin;

@@ -25,6 +25,12 @@ export const NAV_SECTIONS = [
         icon: 'M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7',
       },
       {
+        to: '/admin/energy-data',
+        label: 'Energy Data',
+        perms: [ADMIN_ONLY],
+        icon: 'M13.5 2.25L4.5 13.5h6l-1.5 8.25 10.5-12h-6l0-7.5z',
+      },
+      {
         to: '/admin/operations',
         label: 'Operations',
         perms: ['canManageHosts'],

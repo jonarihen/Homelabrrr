@@ -36,6 +36,13 @@
       "when": 1791446400000,
       "tag": "0004_hardware_connections",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791473540373,
+      "tag": "0005_eloverblik_foundation",
+      "breakpoints": true
     }
   ]
 }
