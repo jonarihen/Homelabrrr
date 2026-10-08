@@ -4,7 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { hardwareConnections, pveHosts, users } from '../db/schema/index.ts';
+import { hardwareConnections, hardwarePowerSamples, pveHosts, users } from '../db/schema/index.ts';
 import type { HardwareDiscovery } from '../services/iloAdapter.ts';
 import { IloError } from '../services/iloAdapter.ts';
 
@@ -152,6 +152,35 @@ test('missing stable identity cannot enable telemetry', async () => {
   assert.equal(result.body.connection.last_status, 'unsupported_identity');
   const enabled = await request(app).put(`/${row.id}/collection`).set('x-test-role', 'admin').send({ enabled: true, configVersion: result.body.connection.config_version });
   assert.equal(enabled.status, 409);
+});
+
+test('unsupported power monitoring cannot be enabled even with stable identity', async () => {
+  const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-b`));
+  discovery = async () => ({ ...found('second-server'), sample: { watts: null, origin: null, unit: 'W', observedAt: new Date().toISOString() },
+    capabilities: { monitoring: 'unsupported', runtimeMode: 'supported', writePrivilege: 'unverified' } });
+  const result = await request(app).post(`/${row.id}/test`).set('x-test-role', 'admin');
+  assert.equal(result.status, 200);
+  const enabled = await request(app).put(`/${row.id}/collection`).set('x-test-role', 'admin').send({ enabled: true, configVersion: result.body.connection.config_version });
+  assert.equal(enabled.status, 409);
+});
+
+test('explicit rebind keeps hardware ID and historical node snapshot while disabling automation', async () => {
+  const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-b`));
+  const observedAt = new Date('2026-10-08T12:00:00Z');
+  await fixture.db.insert(hardwarePowerSamples).values({ hardware_id: row.id, node_ref: row.node_ref, observed_at: observedAt, watts: '250', mode: 'dynamic', origin: 'fixture', device_epoch: row.system_uuid });
+  await fixture.db.update(hardwareConnections).set({ collection_enabled: true, control_enabled: true }).where(eq(hardwareConnections.id, row.id));
+  const stale = await request(app).post(`/${row.id}/rebind`).set('x-test-role', 'admin').send({ nodeRef: `${hostId}~pve-renamed`, configVersion: row.config_version + 1 });
+  assert.equal(stale.status, 409);
+  const rebound = await request(app).post(`/${row.id}/rebind`).set('x-test-role', 'admin').send({ nodeRef: `${hostId}~pve-renamed`, configVersion: row.config_version });
+  assert.equal(rebound.status, 200, JSON.stringify(rebound.body));
+  assert.equal(rebound.body.id, row.id);
+  assert.equal(rebound.body.system_uuid, 'second-server');
+  assert.equal(rebound.body.collection_enabled, false);
+  assert.equal(rebound.body.control_enabled, false);
+  assert.equal(rebound.body.last_status, 'not_tested');
+  const [sample] = await fixture.db.select().from(hardwarePowerSamples).where(eq(hardwarePowerSamples.hardware_id, row.id));
+  assert.equal(sample.node_ref, `${hostId}~pve-b`);
+  assert.equal((await request(app).get('/').set('x-test-role', 'admin')).body.some((connection: any) => connection.node_ref === `${hostId}~pve-renamed`), true);
 });
 
 test('decommission preserves identity and history while making the old binding inactive', async () => {
