@@ -33,6 +33,8 @@ import websiteRoutes, { startWebsiteMaintenance, stopWebsiteMaintenance } from '
 import workflowRoutes from './routes/workflows.ts';
 import publicIpRoutes from './routes/publicIps.ts';
 import operationsRoutes from './routes/operations.ts';
+import energyDataRoutes from './routes/energyData.ts';
+import { startElOverblikScheduler, stopElOverblikScheduler } from './services/eloverblik.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.ts';
 import { decryptSecret, encryptSecret } from './utils/secrets.ts';
@@ -170,6 +172,7 @@ app.use(enforceTwoFactorEnrollmentOnly);
 
 app.use('/api/auth',  authRoutes);
 app.use('/api/admin/operations', operationsRoutes);
+app.use('/api/admin/energy-data', energyDataRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin/hardware-connections', hardwareRoutes);
 app.use('/api/vms',   vmRoutes);
@@ -695,6 +698,7 @@ const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
   : null;
 // Background enforcement of per-VM power schedules (vm_schedules).
 startScheduler();
+startElOverblikScheduler();
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -735,6 +739,7 @@ async function shutdown(signal) {
   stopBackupScheduler();
   if (nodeHealthTimer) clearInterval(nodeHealthTimer);
   stopScheduler();
+  stopElOverblikScheduler();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {

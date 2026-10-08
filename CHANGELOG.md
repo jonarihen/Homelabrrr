@@ -1834,3 +1834,7 @@ Proxmox-frontend/
 - `makeRequest` does NOT send body on DELETE requests (`if (body && method !== 'DELETE')`)
 - Download proxy uses `https.request()` not `fetch()` for TLS agent support
 - Express routes use `/*` wildcard for Proxmox volids that contain slashes
+
+## 2026-10-08 — ElOverblik electricity meter foundation
+
+Added a private administrator setup flow for ElOverblik Customer API credentials and meter selection, with encrypted tokens, normalized consumption intervals, versioned charge snapshots and disabled-by-default syncing. Household meter data remains separate from server power data.
