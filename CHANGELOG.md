@@ -5,6 +5,7 @@
 - Administrators can record dated spot or fixed all-in electricity terms, applicable variable tariffs, VAT treatment, and actual household bills. Missing terms keep the retail price incomplete; wholesale spot is labeled separately.
 - Published DayAheadPrices can be cached for DK1 or DK2 in 15-minute UTC intervals. The current-price service supplies the same exact basis and revisions to previews and price-aware power policy, without accessing meter consumption or changing hardware.
 - Lab cost calculations join measured server kWh to applicable price intervals. These are calculated operating expenses, separate from actual invoices or payments. No supplier rates or owner tariff facts are prefilled.
+- Monthly previews compare server energy with the household meter only when scope and coverage match, apply fixed fees by an explicit policy, and forecast with weekday/weekend evidence plus a labeled future price scenario. Closed months can be finalized as immutable revisioned statements.
 
 ## 2026-10-08 — Server power telemetry and history
 

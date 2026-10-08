@@ -60,6 +60,8 @@ export const electricityContracts = pgTable('electricity_contracts', {
   vat_rate: numeric('vat_rate', { precision: 8, scale: 6 }),
   required_components: jsonb('required_components'),
   fixed_monthly_ore: integer('fixed_monthly_ore'),
+  fixed_fee_allocation: text('fixed_fee_allocation').notNull().default('none'),
+  fixed_fee_manual_share: numeric('fixed_fee_manual_share', { precision: 8, scale: 6 }),
   revision: integer('revision').notNull().default(1),
   active: boolean('active').notNull().default(false),
   provenance: text('provenance').notNull(),
@@ -108,3 +110,21 @@ export const electricityBills = pgTable('electricity_bills', {
   finalized: boolean('finalized').notNull().default(false),
   revision: integer('revision').notNull().default(1),
 }, (t) => [index('electricity_bill_period').on(t.contract_id, t.period_start, t.period_end)]);
+
+// Immutable calculation revisions. A finalized statement is never edited in
+// place; explicit recalculation appends a new revision with the prior ID.
+export const electricityCostStatements = pgTable('electricity_cost_statements', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  contract_id: integer('contract_id').notNull().references(() => electricityContracts.id, { onDelete: 'restrict' }),
+  period_start: timestamp('period_start', { withTimezone: true, mode: 'date' }).notNull(),
+  period_end: timestamp('period_end', { withTimezone: true, mode: 'date' }).notNull(),
+  revision: integer('revision').notNull(),
+  previous_id: integer('previous_id'),
+  calculation: jsonb('calculation').notNull(),
+  finalized: boolean('finalized').notNull().default(true),
+  reason: text('reason').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('electricity_statement_revision').on(t.contract_id, t.period_start, t.period_end, t.revision),
+  index('electricity_statement_period').on(t.contract_id, t.period_start),
+]);

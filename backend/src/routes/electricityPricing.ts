@@ -1,17 +1,22 @@
 import { Router } from 'express';
-import { and, eq, lt, gt, or, isNull, sql } from 'drizzle-orm';
+import { and, eq, lt, gt, or, isNull, sql, desc } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { electricityContracts, electricityTariffs, electricityBills } from '../db/schema/index.ts';
+import { electricityContracts, electricityTariffs, electricityBills, electricityCostStatements } from '../db/schema/index.ts';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
 import { logAudit } from '../utils/audit.ts';
 import { parseDkkPerKwh } from '../services/powerPolicy.ts';
 import { calculateLabCost, getApplicablePrice, syncPublishedSpotPrices } from '../services/electricityPricing.ts';
+import { previewMonthlyElectricity, finalizeMonthlyElectricity } from '../services/monthlyElectricity.ts';
+import { startOfLocalDateUtc } from '../services/energyAccounting.ts';
 
 const router = Router();
 router.use(requireAuth, requireAdmin, requireInteractiveSession);
 const rate = (value: unknown) => { if (typeof value !== 'string') throw new Error('INVALID_RATE'); parseDkkPerKwh(value); return value; };
 const instant = (value: unknown) => { const date = new Date(String(value)); if (!Number.isFinite(date.getTime())) throw new Error('INVALID_DATE'); return date; };
-const fail = (res: any, err: unknown) => res.status(err instanceof Error && /^INVALID_|^OVERLAPPING_|^MISSING_/.test(err.message) ? 400 : 500).json({ error: err instanceof Error && /^INVALID_|^OVERLAPPING_|^MISSING_/.test(err.message) ? err.message : 'INTERNAL' });
+const fail = (res: any, err: unknown) => {
+  const known = err instanceof Error && (/^(INVALID_|OVERLAPPING_|MISSING_|FINALIZED_)/.test(err.message) || ['Cannot finalize an open month', 'Incomplete calculation cannot be finalized', 'Recalculation reason required', 'Invalid billing month', 'Invalid statement input', 'Month has not started', 'Calculation inputs changed; preview again'].includes(err.message));
+  return res.status(known ? 400 : 500).json({ error: known ? (err as Error).message : 'INTERNAL' });
+};
 
 router.get('/contracts', async (_req, res) => { res.json(await db.select().from(electricityContracts).orderBy(electricityContracts.valid_from)); });
 router.get('/contracts/:id/tariffs', async (req, res) => {
@@ -32,11 +37,15 @@ router.post('/contracts', requireRecentReauthentication, async (req, res) => {
     if (b.kind === 'spot' && (!Array.isArray(b.requiredComponents) || b.requiredComponents.some((x: unknown) => !['network', 'system', 'tax', 'retailer'].includes(String(x))) || new Set(b.requiredComponents).size !== b.requiredComponents.length)) throw new Error('INVALID_COMPONENTS');
     const monthly = b.fixedMonthlyOre == null ? null : Number(b.fixedMonthlyOre);
     if (monthly != null && (!Number.isSafeInteger(monthly) || monthly < 0)) throw new Error('INVALID_FIXED_FEE');
+    const feePolicy = b.fixedFeeAllocation || 'none';
+    if (!['none', 'manual_share', 'energy_proportion'].includes(feePolicy)) throw new Error('INVALID_FIXED_FEE_POLICY');
+    const feeShare = feePolicy === 'manual_share' ? rate(b.fixedFeeManualShare) : null;
+    if (feeShare && (parseDkkPerKwh(feeShare) < 0n || parseDkkPerKwh(feeShare) > 1_000_000n)) throw new Error('INVALID_FIXED_FEE_SHARE');
     const result = await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(237001)`);
       const overlapping = await tx.select({ id: electricityContracts.id }).from(electricityContracts).where(and(eq(electricityContracts.active, true), lt(electricityContracts.valid_from, to || new Date('9999-12-31T00:00:00Z')), or(isNull(electricityContracts.valid_to), gt(electricityContracts.valid_to, from)))).limit(1);
       if (b.active && overlapping.length) throw new Error('OVERLAPPING_CONTRACT');
-      const [created] = await tx.insert(electricityContracts).values({ label: b.label.trim(), kind: b.kind, area: b.area, valid_from: from, valid_to: to, fixed_dkk_per_kwh: fixed, spot_margin_dkk_per_kwh: margin, vat_rate: vat, required_components: b.kind === 'spot' ? b.requiredComponents : null, fixed_monthly_ore: monthly, active: b.active === true, provenance: b.provenance.trim() }).returning();
+      const [created] = await tx.insert(electricityContracts).values({ label: b.label.trim(), kind: b.kind, area: b.area, valid_from: from, valid_to: to, fixed_dkk_per_kwh: fixed, spot_margin_dkk_per_kwh: margin, vat_rate: vat, required_components: b.kind === 'spot' ? b.requiredComponents : null, fixed_monthly_ore: monthly, fixed_fee_allocation: feePolicy, fixed_fee_manual_share: feeShare, active: b.active === true, provenance: b.provenance.trim() }).returning();
       return created;
     });
     await logAudit(req, 'electricity_contract_created', String(result.id), `kind=${result.kind}; area=${result.area}; active=${result.active}`);
@@ -60,6 +69,29 @@ router.post('/contracts/:id/tariffs', requireRecentReauthentication, async (req,
     });
     await logAudit(req, 'electricity_tariff_created', String(result.id), `contract=${id}; component=${result.component}`);
     res.status(201).json(result);
+  } catch (err) { fail(res, err); }
+});
+router.post('/contracts/:id/tariffs/:tariffId/revise', requireRecentReauthentication, async (req, res) => {
+  try {
+    const contractId = Number(req.params.id); const tariffId = Number(req.params.tariffId);
+    const from = instant(req.body?.effectiveFrom);
+    const newRate = rate(req.body?.dkkPerKwh);
+    const reason = String(req.body?.reason || '').trim();
+    if (!Number.isSafeInteger(contractId) || contractId < 1 || !Number.isSafeInteger(tariffId) || tariffId < 1 || !reason || reason.length > 1000 || typeof req.body?.vatIncluded !== 'boolean') throw new Error('INVALID_TARIFF_REVISION');
+    const created = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(237002)`);
+      const [old] = await tx.select().from(electricityTariffs).where(and(eq(electricityTariffs.id, tariffId), eq(electricityTariffs.contract_id, contractId))).for('update').limit(1);
+      if (!old || from <= old.valid_from || from >= old.valid_to) throw new Error('INVALID_TARIFF_REVISION');
+      const [finalized] = await tx.select({ id: electricityCostStatements.id }).from(electricityCostStatements)
+        .where(and(eq(electricityCostStatements.contract_id, contractId), gt(electricityCostStatements.period_end, from), lt(electricityCostStatements.period_start, old.valid_to))).limit(1);
+      if (finalized) throw new Error('FINALIZED_PERIOD');
+      await tx.update(electricityTariffs).set({ valid_to: from }).where(eq(electricityTariffs.id, tariffId));
+      const [next] = await tx.insert(electricityTariffs).values({ contract_id: contractId, component: old.component, valid_from: from, valid_to: old.valid_to,
+        dkk_per_kwh: newRate, vat_included: req.body.vatIncluded, provenance: `revision: ${reason}`, revision: old.revision + 1 }).returning();
+      return next;
+    });
+    await logAudit(req, 'electricity_tariff_revised', String(created.id), `contract=${contractId}; prior=${tariffId}; reason=${reason}`);
+    res.status(201).json(created);
   } catch (err) { fail(res, err); }
 });
 router.get('/current', async (req, res) => {
@@ -99,4 +131,22 @@ router.post('/bills/:id/paid', requireRecentReauthentication, async (req, res) =
   } catch (err) { fail(res, err); }
 });
 router.get('/cost', async (req, res) => { try { res.json(await calculateLabCost(instant(req.query.from), instant(req.query.to), String(req.query.contractRef || ''))); } catch (err) { fail(res, err); } });
+router.get('/months/:month/preview', async (req, res) => {
+  try { res.json(await previewMonthlyElectricity(String(req.params.month), String(req.query.contractRef || ''), new Date(), req.query.scenarioDkkPerKwh ? String(req.query.scenarioDkkPerKwh) : null)); }
+  catch (err) { fail(res, err); }
+});
+router.get('/months/:month/statements', async (req, res) => {
+  const contractId = Number(req.query.contractRef);
+  if (!Number.isSafeInteger(contractId) || contractId < 1 || !/^\d{4}-(0[1-9]|1[0-2])$/.test(req.params.month)) return res.status(400).json({ error: 'INVALID_PERIOD' });
+  const start = startOfLocalDateUtc(`${req.params.month}-01`);
+  res.json(await db.select().from(electricityCostStatements).where(and(eq(electricityCostStatements.contract_id, contractId), eq(electricityCostStatements.period_start, start))).orderBy(desc(electricityCostStatements.revision)).limit(120));
+});
+router.post('/months/:month/finalize', requireRecentReauthentication, async (req, res) => {
+  try {
+    if (typeof req.body?.reason !== 'string') return res.status(400).json({ error: 'INVALID_REASON' });
+    const result = await finalizeMonthlyElectricity(String(req.params.month), String(req.body.contractRef || ''), req.body.reason);
+    await logAudit(req, 'electricity_month_finalized', String(result.id), `contract=${result.contract_id}; month=${req.params.month}; revision=${result.revision}`);
+    res.status(201).json(result);
+  } catch (err) { fail(res, err); }
+});
 export default router;
