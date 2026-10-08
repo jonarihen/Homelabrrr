@@ -19,6 +19,7 @@ app.use((req, _res, next) => {
   if (role) req.session = { userId: 1, username: role, isAdmin: role === 'admin',
     reauthenticatedAt: req.get('x-test-reauth') === 'yes' ? Date.now() : undefined } as typeof req.session;
   if (req.get('x-test-api-token') === 'yes') req.apiToken = {} as typeof req.apiToken;
+  if (req.get('x-test-api-token') === 'yes') req.apiToken = {} as typeof req.apiToken;
   next();
 });
 app.use('/api/admin/electricity-pricing', electricityRoutes);
@@ -34,6 +35,7 @@ test('admin-only dated extra load is priced separately and same-source overlap i
     provenance: 'test fixture', active: true, fixed_fee_allocation: 'none' }).returning();
   assert.equal((await request(app).get(endpoint)).status, 401);
   assert.equal((await request(app).get(endpoint).set('x-test-role', 'member')).status, 403);
+  assert.equal((await request(app).get(endpoint).set('x-test-role', 'admin').set('x-test-api-token', 'yes')).status, 403);
   assert.equal((await request(app).post(endpoint).set('x-test-role', 'admin').send(valid)).body.code, 'REAUTHENTICATION_REQUIRED');
   assert.equal((await request(app).post(endpoint).set('x-test-role', 'admin').set('x-test-reauth', 'yes')
     .send({ ...valid, sourceScope: 'inclusive_upstream' })).status, 400);
@@ -57,4 +59,7 @@ test('admin-only dated extra load is priced separately and same-source overlap i
   assert.equal(preview.variableCostOre, '600');
   assert.equal(preview.forecast?.status, 'insufficient_data');
   assert.equal(preview.forecast?.estimatedExtraFutureOre, '600');
+  const concurrent = await Promise.all([0, 1].map(() => request(app).post(endpoint).set('x-test-role', 'admin').set('x-test-reauth', 'yes')
+    .send({ ...valid, sourceKey: 'independent-aux-load', label: 'Auxiliary load' })));
+  assert.deepEqual(concurrent.map((response) => response.status).sort(), [201, 400]);
 });
