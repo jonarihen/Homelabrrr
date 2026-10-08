@@ -229,18 +229,58 @@ export async function createMonthly(userId: number, value: unknown) {
 export async function cancelMonthly(userId: number, id: string) {
   const [subscription] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.id, id), eq(paypalSubscriptions.user_id, userId))).limit(1);
   if (!subscription) throw new PayPalError('SUBSCRIPTION_NOT_FOUND', 404);
-  if (subscription.status === 'CANCELLED') return { status: 'cancelled' };
+  return cancelSubscriptionRecord(subscription);
+}
+
+export function isTerminalSubscriptionStatus(status: string) {
+  return status === 'CANCELLED' || status === 'EXPIRED';
+}
+export function assertSubscriptionIdentity(detail: any, subscription: Pick<typeof paypalSubscriptions.$inferSelect, 'id' | 'plan_id' | 'intent_id'>) {
+  if (detail?.id !== subscription.id || detail?.plan_id !== subscription.plan_id || detail?.custom_id !== subscription.intent_id)
+    throw new PayPalError('SUBSCRIPTION_MISMATCH', 409);
+}
+
+async function cancelSubscriptionRecord(subscription: typeof paypalSubscriptions.$inferSelect) {
+  if (isTerminalSubscriptionStatus(subscription.status)) return { status: 'cancelled' };
   const row = await configured(subscription.environment);
   if (row.merchant_id !== subscription.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
-  await db.update(paypalSubscriptions).set({ status: 'CANCELLATION_REQUESTED', cancellation_requested_at: new Date() }).where(eq(paypalSubscriptions.id, id));
-  try { await paypalClient.cancelSubscription(credentials(row), id, randomUUID()); }
-  catch { return { status: 'cancellation_unknown' }; }
-  const detail = await paypalClient.getSubscription(credentials(row), id);
-  if (detail.status === 'CANCELLED') {
-    await db.update(paypalSubscriptions).set({ status: 'CANCELLED', cancelled_at: new Date(), updated_at: new Date() }).where(eq(paypalSubscriptions.id, id));
+  const config = credentials(row);
+  const requestId = subscription.cancel_request_id || randomUUID();
+  const [claimed] = await db.update(paypalSubscriptions).set({ status: 'CANCELLATION_REQUESTED',
+    cancellation_requested_at: subscription.cancellation_requested_at || new Date(), cancel_request_id: requestId, updated_at: new Date() })
+    .where(and(eq(paypalSubscriptions.id, subscription.id), eq(paypalSubscriptions.status, subscription.status))).returning();
+  if (!claimed) return { status: 'cancellation_unknown' };
+  // Read back before a retry: a lost POST response may already have cancelled it.
+  let detail = await paypalClient.getSubscription(config, subscription.id);
+  assertSubscriptionIdentity(detail, subscription);
+  if (detail.status !== 'CANCELLED' && detail.status !== 'EXPIRED') {
+    try { await paypalClient.cancelSubscription(config, subscription.id, requestId); }
+    catch { /* Provider may have committed despite a lost response. */ }
+    detail = await paypalClient.getSubscription(config, subscription.id);
+    assertSubscriptionIdentity(detail, subscription);
+  }
+  if (isTerminalSubscriptionStatus(detail.status)) {
+    await db.update(paypalSubscriptions).set({ status: detail.status,
+      cancelled_at: detail.status === 'CANCELLED' ? new Date(detail.status_update_time || Date.now()) : subscription.cancelled_at,
+      updated_at: new Date() }).where(eq(paypalSubscriptions.id, subscription.id));
     return { status: 'cancelled' };
   }
   return { status: 'cancellation_unknown' };
+}
+
+export async function cancelSubscriptionsBeforeUserDeletion(userId: number) {
+  const subscriptions = await db.select().from(paypalSubscriptions).where(eq(paypalSubscriptions.user_id, userId)).limit(101);
+  if (subscriptions.length > 100) throw new PayPalError('SUBSCRIPTION_REVIEW_REQUIRED', 409);
+  for (const subscription of subscriptions) {
+    if (isTerminalSubscriptionStatus(subscription.status)) continue;
+    try {
+      const result = await cancelSubscriptionRecord(subscription);
+      if (result.status !== 'cancelled') throw new PayPalError('SUBSCRIPTION_CANCELLATION_UNCONFIRMED', 409);
+    } catch (err) {
+      if (err instanceof PayPalError && err.status === 409) throw err;
+      throw new PayPalError('SUBSCRIPTION_CANCELLATION_UNCONFIRMED', 409);
+    }
+  }
 }
 
 let inboxTimer: NodeJS.Timeout | null = null;
@@ -306,8 +346,10 @@ export async function reconcileSubscription(subscription: typeof paypalSubscript
       intentId: subscription.intent_id, userId: subscription.user_id }, 'sale', normalized, 'subscription_transactions');
   }
   const nextBilling = detail.billing_info?.next_billing_time ? limitedTime(detail.billing_info.next_billing_time) : null;
-  const statuses = ['APPROVAL_PENDING', 'ACTIVE', 'SUSPENDED', 'CANCELLED', 'EXPIRED'];
-  await db.update(paypalSubscriptions).set({ status: statuses.includes(detail.status) ? detail.status : 'UNKNOWN',
+  const statuses = ['APPROVAL_PENDING', 'APPROVED', 'ACTIVE', 'SUSPENDED', 'CANCELLED', 'EXPIRED'];
+  const providerStatus = statuses.includes(detail.status) ? detail.status : 'UNKNOWN';
+  await db.update(paypalSubscriptions).set({ status: subscription.cancellation_requested_at && !isTerminalSubscriptionStatus(providerStatus) ?
+    'CANCELLATION_REQUESTED' : providerStatus,
     next_billing_at: nextBilling, reconciled_through_at: to, updated_at: new Date(),
     cancelled_at: detail.status === 'CANCELLED' && detail.status_update_time ? limitedTime(detail.status_update_time) : subscription.cancelled_at })
     .where(eq(paypalSubscriptions.id, subscription.id));
@@ -345,8 +387,16 @@ export async function reconcilePaypal(value: unknown, now = new Date()) {
         eq(paypalSubscriptions.merchant_id, row.merchant_id!), or(
           notInArray(paypalSubscriptions.status, ['CANCELLED', 'EXPIRED']),
           gt(paypalSubscriptions.updated_at, new Date(now.getTime() - 90 * 86_400_000)))))
-        .orderBy(paypalSubscriptions.reconciled_through_at).limit(10);
+        .orderBy(sql`CASE WHEN ${paypalSubscriptions.cancellation_requested_at} IS NOT NULL AND ${paypalSubscriptions.status} = 'CANCELLATION_REQUESTED' THEN 0 ELSE 1 END`,
+          paypalSubscriptions.reconciled_through_at).limit(10);
+      let cancellationUnconfirmed = false;
       for (const sub of subscriptions) {
+        if (sub.status === 'CANCELLATION_REQUESTED') {
+          try {
+            const cancellation = await cancelSubscriptionRecord(sub);
+            if (cancellation.status !== 'cancelled') cancellationUnconfirmed = true;
+          } catch { cancellationUnconfirmed = true; }
+        }
         const from = sub.reconciled_through_at ? new Date(sub.reconciled_through_at.getTime() - 7 * 86_400_000) :
           new Date(Math.max(0, now.getTime() - 30 * 86_400_000));
         const to = new Date(Math.min(now.getTime(), from.getTime() + 30 * 86_400_000));
@@ -354,6 +404,7 @@ export async function reconcilePaypal(value: unknown, now = new Date()) {
         await reconcileSubscription(sub, from, to);
         checked++;
       }
+      if (cancellationUnconfirmed) throw new PayPalError('SUBSCRIPTION_CANCELLATION_UNCONFIRMED', 409);
       const after = await configured(env);
       if (after.config_version !== current || after.merchant_id !== row.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
       await db.update(paypalReconciliation).set({ status: 'ok', cursor_at: recovered.through, error_code: null }).where(eq(paypalReconciliation.environment, env));

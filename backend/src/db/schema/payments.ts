@@ -46,6 +46,7 @@ export const paypalSubscriptions = pgTable('paypal_subscriptions', {
   plan_id: text('plan_id').notNull(),
   amount_ore: integer('amount_ore').notNull(),
   cancellation_requested_at: timestamp('cancellation_requested_at', { withTimezone: true, mode: 'date' }),
+  cancel_request_id: text('cancel_request_id'),
   cancelled_at: timestamp('cancelled_at', { withTimezone: true, mode: 'date' }),
   reconciled_through_at: timestamp('reconciled_through_at', { withTimezone: true, mode: 'date' }),
   next_billing_at: timestamp('next_billing_at', { withTimezone: true, mode: 'date' }),
