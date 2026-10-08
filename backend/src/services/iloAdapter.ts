@@ -3,6 +3,14 @@ import dns from 'node:dns/promises';
 import { isIP } from 'node:net';
 
 export type HardwareMode = 'low' | 'dynamic' | 'high' | 'os_control' | 'unknown';
+export type OptionalCapability = 'supported' | 'unsupported' | 'unavailable';
+export type HardwareHealth = {
+  temperatures: { name: string; celsius: number | null; health: string | null }[];
+  fans: { name: string; value: number | null; unit: 'percent' | 'rpm' | null; health: string | null }[];
+  powerSupplies: { name: string; health: string | null; state: string | null }[];
+  powerRedundancy: { health: string | null; state: string | null } | null;
+  limited: boolean;
+};
 export type IloConfig = { host: string; port: number; username: string; password: string; verifyTls: boolean; caCertificate?: string | null };
 export type IloTransport = (path: string) => Promise<Record<string, any>>;
 export type RuntimePatchTransport = (path: string, oem: 'Hp' | 'Hpe', value: 'Min' | 'Dynamic' | 'Max') => Promise<void>;
@@ -12,9 +20,61 @@ export type HardwareDiscovery = {
   generation: 'ilo4' | 'ilo5' | 'unknown';
   firmware: string | null;
   mode: { value: HardwareMode; origin: string | null };
-  capabilities: { monitoring: 'supported' | 'unsupported'; runtimeMode: 'supported' | 'unsupported'; writePrivilege: 'unverified' };
-  sample: { watts: number | null; origin: string | null; unit: 'W'; observedAt: string };
+  capabilities: { monitoring: 'supported' | 'unsupported'; runtimeMode: 'supported' | 'unsupported'; writePrivilege: 'unverified';
+    temperatures?: OptionalCapability; fans?: OptionalCapability; powerSupplies?: OptionalCapability; powerRedundancy?: OptionalCapability };
+  sample: { watts: number | null; origin: string | null; unit: 'W'; observedAt: string; health?: HardwareHealth };
 };
+
+function safeName(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64) || fallback : fallback;
+}
+function safeStatus(value: unknown): string | null {
+  return typeof value === 'string' && /^(OK|Warning|Critical|Unknown|Enabled|Disabled|Absent|Offline|Degraded|Failed|Redundant|NonRedundant)$/i.test(value) ? value : null;
+}
+function boundedNumber(value: unknown, min: number, max: number): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : null;
+}
+
+// Redfish iLO 4 and 5 use different names for several thermal properties.
+// This projection deliberately excludes raw vendor payloads and identifiers.
+export function normalizeHardwareHealth(thermal: any, power: any): HardwareHealth {
+  const temperatures = Array.isArray(thermal?.Temperatures) ? thermal.Temperatures : [];
+  const fans = Array.isArray(thermal?.Fans) ? thermal.Fans : [];
+  const supplies = Array.isArray(power?.PowerSupplies) ? power.PowerSupplies : [];
+  const redundancies = Array.isArray(power?.Redundancy) ? power.Redundancy : [];
+  return {
+    temperatures: temperatures.slice(0, 64).map((item: any, index: number) => ({
+      name: safeName(item?.Name ?? item?.SensorName, `Temperature ${index + 1}`),
+      celsius: item?.ReadingCelsius != null ? boundedNumber(item.ReadingCelsius, -40, 125)
+        : item?.Units === 'Celsius' ? boundedNumber(item.CurrentReading, -40, 125) : null,
+      health: safeStatus(item?.Status?.Health),
+    })),
+    fans: fans.slice(0, 32).map((item: any, index: number) => {
+      const unit = item?.ReadingUnits === 'Percent' || item?.Units === 'Percent' ? 'percent' as const
+        : item?.ReadingUnits === 'RPM' || item?.Units === 'RPM' || item?.ReadingRPM != null ? 'rpm' as const : null;
+      const reading = item?.Reading ?? item?.CurrentReading ?? item?.ReadingRPM;
+      return { name: safeName(item?.Name ?? item?.FanName, `Fan ${index + 1}`),
+        value: unit ? boundedNumber(reading, 0, unit === 'percent' ? 100 : 50_000) : null,
+        unit, health: safeStatus(item?.Status?.Health) };
+    }),
+    powerSupplies: supplies.slice(0, 16).map((item: any, index: number) => ({
+      name: safeName(item?.Name ?? item?.MemberId, `Power supply ${index + 1}`),
+      health: safeStatus(item?.Status?.Health ?? item?.Oem?.Hp?.PowerSupplyStatus?.State ?? item?.Oem?.Hpe?.PowerSupplyStatus?.State),
+      state: safeStatus(item?.Status?.State),
+    })),
+    powerRedundancy: redundancies[0] ? { health: safeStatus(redundancies[0]?.Status?.Health), state: safeStatus(redundancies[0]?.Status?.State) } : null,
+    limited: temperatures.length > 64 || fans.length > 32 || supplies.length > 16 || redundancies.length > 1,
+  };
+}
+
+// iLO firmware may vary UUID letter case or pad a serial with whitespace.
+// Persist one comparison form so identity checks survive those variations.
+export function physicalSystemIdentity(identity: { uuid: string | null; serial: string | null }): string | null {
+  const uuid = identity.uuid?.trim();
+  if (uuid) return uuid.toLowerCase();
+  const serial = identity.serial?.trim();
+  return serial ? `serial:${serial.toLowerCase()}` : null;
+}
 
 export class IloError extends Error {
   code: 'invalid_target' | 'unreachable' | 'authentication_failed' | 'tls_failed' | 'timeout' | 'malformed_response' | 'oversized_response' | 'missing_endpoint';
@@ -96,14 +156,23 @@ export async function discoverHardware(config: IloConfig, injectedTransport?: Il
   const oem = system.value.Oem?.Hpe ? 'Hpe' : system.value.Oem?.Hp ? 'Hp' : null;
   const rawMode = oem ? system.value.Oem[oem]?.PowerRegulatorMode : undefined;
   const powerPath = link(chassis?.value?.Power);
+  const thermalPath = link(chassis?.value?.Thermal);
   let watts: number | null = null; let origin: string | null = null;
+  let power: Record<string, any> | null = null;
   if (powerPath) {
-    const power = await get(powerPath);
+    power = await get(powerPath);
     const direct = power.PowerConsumedWatts;
     const control = Array.isArray(power.PowerControl) ? power.PowerControl.find((x: any) => typeof x?.PowerConsumedWatts === 'number') : null;
     const measured = typeof direct === 'number' ? direct : control?.PowerConsumedWatts;
     if (typeof measured === 'number' && Number.isFinite(measured) && measured >= 0) { watts = measured; origin = `${powerPath}${typeof direct === 'number' ? '#PowerConsumedWatts' : '#PowerControl.PowerConsumedWatts'}`; }
   }
+  let thermal: Record<string, any> | null = null;
+  let thermalStatus: OptionalCapability = 'unsupported';
+  if (thermalPath) {
+    try { thermal = await get(thermalPath); thermalStatus = 'supported'; }
+    catch (err) { thermalStatus = err instanceof IloError && err.code === 'missing_endpoint' ? 'unsupported' : 'unavailable'; }
+  }
+  const health = normalizeHardwareHealth(thermal, power);
   const managerType = `${manager?.value?.Model || ''} ${manager?.value?.Name || ''}`;
   const generation = /iLO\s*5/i.test(managerType) || oem === 'Hpe' ? 'ilo5' : /iLO\s*4/i.test(managerType) || oem === 'Hp' ? 'ilo4' : 'unknown';
   return {
@@ -112,8 +181,12 @@ export async function discoverHardware(config: IloConfig, injectedTransport?: Il
     generation,
     firmware: manager?.value?.FirmwareVersion || null,
     mode: { value: normalizeMode(rawMode), origin: oem ? `${system.path}#Oem.${oem}.PowerRegulatorMode` : null },
-    capabilities: { monitoring: watts === null ? 'unsupported' : 'supported', runtimeMode: oem ? 'supported' : 'unsupported', writePrivilege: 'unverified' },
-    sample: { watts, origin, unit: 'W', observedAt: now().toISOString() },
+    capabilities: { monitoring: watts === null ? 'unsupported' : 'supported', runtimeMode: oem ? 'supported' : 'unsupported', writePrivilege: 'unverified',
+      temperatures: thermalStatus === 'supported' && !Array.isArray(thermal?.Temperatures) ? 'unsupported' : thermalStatus,
+      fans: thermalStatus === 'supported' && !Array.isArray(thermal?.Fans) ? 'unsupported' : thermalStatus,
+      powerSupplies: Array.isArray(power?.PowerSupplies) ? 'supported' : 'unsupported',
+      powerRedundancy: Array.isArray(power?.Redundancy) ? 'supported' : 'unsupported' },
+    sample: { watts, origin, unit: 'W', observedAt: now().toISOString(), health },
   };
 }
 export async function readCurrentMode(config: IloConfig, transport?: IloTransport): Promise<HardwareMode> {
@@ -164,6 +237,7 @@ export async function setRuntimeMode(
   target: 'low' | 'dynamic' | 'high',
   readTransport?: IloTransport,
   patchTransport?: RuntimePatchTransport,
+  preDispatchGuard?: () => Promise<boolean>,
 ): Promise<{ prior: HardwareMode; target: typeof target; outcome: 'already_set' | 'verified' | 'unknown' }> {
   if (!(target in RUNTIME_VALUES)) throw new IloError('invalid_target', 'Unsupported runtime power mode');
   const before = await discoverHardware(config, readTransport);
@@ -177,6 +251,9 @@ export async function setRuntimeMode(
     : property === 'Oem.Hpe.PowerRegulatorMode' ? 'Hpe' : null;
   if (!oem || !/^\/(?:redfish|rest)\/v1\/Systems\/[^/?#]+\/?$/.test(path)) {
     throw new IloError('missing_endpoint', 'Runtime Power Regulator target was not discovered');
+  }
+  if (preDispatchGuard && !await preDispatchGuard()) {
+    throw new IloError('invalid_target', 'Power policy changed before dispatch');
   }
   const patch = patchTransport ?? await createRuntimePatchTransport(config);
   try { await patch(path, oem, RUNTIME_VALUES[target]); }
