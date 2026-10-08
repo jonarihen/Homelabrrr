@@ -5,6 +5,7 @@ import { isIP } from 'node:net';
 export type HardwareMode = 'low' | 'dynamic' | 'high' | 'os_control' | 'unknown';
 export type IloConfig = { host: string; port: number; username: string; password: string; verifyTls: boolean; caCertificate?: string | null };
 export type IloTransport = (path: string) => Promise<Record<string, any>>;
+export type RuntimePatchTransport = (path: string, oem: 'Hp' | 'Hpe', value: 'Min' | 'Dynamic' | 'Max') => Promise<void>;
 export type HardwareDiscovery = {
   identity: { uuid: string | null; serial: string | null };
   model: string | null;
@@ -117,4 +118,78 @@ export async function discoverHardware(config: IloConfig, injectedTransport?: Il
 }
 export async function readCurrentMode(config: IloConfig, transport?: IloTransport): Promise<HardwareMode> {
   return (await discoverHardware(config, transport)).mode.value;
+}
+
+const RUNTIME_VALUES = { low: 'Min', dynamic: 'Dynamic', high: 'Max' } as const;
+
+// This is the only hardware write primitive for the power feature. The path
+// must come from discovery's ComputerSystem link, and the JSON body contains
+// exactly one PowerRegulatorMode property. No reset, BIOS or watt-cap API is
+// available through this interface.
+export async function createRuntimePatchTransport(config: IloConfig): Promise<RuntimePatchTransport> {
+  const address = await validateManagementTarget(config.host);
+  if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
+  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true');
+  const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
+  return (path, oem, value) => new Promise((resolve, reject) => {
+    if (!/^\/(?:redfish|rest)\/v1\/Systems\/[^/?#]+\/?$/.test(path) || path.includes('..')
+      || !['Hp', 'Hpe'].includes(oem) || !['Min', 'Dynamic', 'Max'].includes(value)) {
+      return reject(new IloError('invalid_target', 'Invalid runtime mode target'));
+    }
+    const body = JSON.stringify({ Oem: { [oem]: { PowerRegulatorMode: value } } });
+    const req = https.request({
+      hostname: config.host, port: config.port, path, method: 'PATCH', timeout: 5000,
+      rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined,
+      lookup: (_host, _options, callback) => callback(null, address, isIP(address)),
+      headers: { Authorization: auth, Accept: 'application/json', 'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body), 'OData-Version': '4.0' },
+    }, (res) => {
+      let size = 0;
+      res.on('data', (chunk: Buffer) => { size += chunk.length; if (size > 64 * 1024) req.destroy(new IloError('oversized_response', 'iLO response exceeded limit')); });
+      res.on('end', () => {
+        if ((res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300) resolve();
+        else if (res.statusCode === 401 || res.statusCode === 403) reject(new IloError('authentication_failed', 'iLO write permission denied'));
+        else if ((res.statusCode || 0) >= 300 && (res.statusCode || 0) < 400) reject(new IloError('invalid_target', 'iLO redirect refused'));
+        else reject(new IloError('unreachable', 'iLO runtime mode request failed'));
+      });
+    });
+    req.on('timeout', () => req.destroy(new IloError('timeout', 'iLO mode request timed out')));
+    req.on('error', (err: Error & { code?: string }) => reject(err instanceof IloError ? err : new IloError(err.code?.startsWith('ERR_TLS') || err.code?.startsWith('CERT') ? 'tls_failed' : 'unreachable', 'iLO mode connection failed')));
+    req.end(body);
+  });
+}
+
+export async function setRuntimeMode(
+  config: IloConfig,
+  target: 'low' | 'dynamic' | 'high',
+  readTransport?: IloTransport,
+  patchTransport?: RuntimePatchTransport,
+): Promise<{ prior: HardwareMode; target: typeof target; outcome: 'already_set' | 'verified' | 'unknown' }> {
+  if (!(target in RUNTIME_VALUES)) throw new IloError('invalid_target', 'Unsupported runtime power mode');
+  const before = await discoverHardware(config, readTransport);
+  if (before.mode.value === 'os_control' || before.mode.value === 'unknown'
+    || before.capabilities.runtimeMode !== 'supported' || !before.mode.origin) {
+    throw new IloError('missing_endpoint', 'Runtime Power Regulator mode is unavailable');
+  }
+  if (before.mode.value === target) return { prior: before.mode.value, target, outcome: 'already_set' };
+  const [path, property] = before.mode.origin.split('#');
+  const oem = property === 'Oem.Hp.PowerRegulatorMode' ? 'Hp'
+    : property === 'Oem.Hpe.PowerRegulatorMode' ? 'Hpe' : null;
+  if (!oem || !/^\/(?:redfish|rest)\/v1\/Systems\/[^/?#]+\/?$/.test(path)) {
+    throw new IloError('missing_endpoint', 'Runtime Power Regulator target was not discovered');
+  }
+  const patch = patchTransport ?? await createRuntimePatchTransport(config);
+  try { await patch(path, oem, RUNTIME_VALUES[target]); }
+  catch (err) {
+    // A transport timeout may mean the device applied the PATCH; callers must
+    // read current mode before deciding whether any later retry is safe.
+    if (err instanceof IloError && err.code === 'timeout') return { prior: before.mode.value, target, outcome: 'unknown' };
+    throw err;
+  }
+  try {
+    const actual = await readCurrentMode(config, readTransport);
+    return { prior: before.mode.value, target, outcome: actual === target ? 'verified' : 'unknown' };
+  } catch {
+    return { prior: before.mode.value, target, outcome: 'unknown' };
+  }
 }
