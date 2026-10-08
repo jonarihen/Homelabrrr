@@ -1,6 +1,6 @@
 // Part of the Drizzle ORM PostgreSQL schema — conventions in docs/postgres-conventions.md.
 
-import { pgTable, integer, text, boolean, timestamp, index, uniqueIndex, jsonb } from 'drizzle-orm/pg-core';
+import { pgTable, integer, text, boolean, timestamp, index, uniqueIndex, jsonb, numeric, date } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { users } from './auth.ts';
 
@@ -67,6 +67,58 @@ export const hardwareConnections = pgTable('hardware_connections', {
   uniqueIndex('hardware_connections_active_node_unique').on(t.node_ref).where(sql`lifecycle_state = 'active'`),
   uniqueIndex('hardware_connections_active_system_unique').on(t.system_uuid).where(sql`lifecycle_state = 'active' AND system_uuid IS NOT NULL`),
   index('hardware_connections_host_idx').on(t.pve_host_id),
+]);
+
+export const hardwareTelemetryState = pgTable('hardware_telemetry_state', {
+  hardware_id: integer('hardware_id').primaryKey().references(() => hardwareConnections.id, { onDelete: 'cascade' }),
+  lease_until: timestamp('lease_until', { withTimezone: true, mode: 'date' }),
+  next_poll_at: timestamp('next_poll_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  failure_count: integer('failure_count').notNull().default(0),
+  last_error_code: text('last_error_code'),
+  last_attempt_at: timestamp('last_attempt_at', { withTimezone: true, mode: 'date' }),
+  last_success_at: timestamp('last_success_at', { withTimezone: true, mode: 'date' }),
+});
+
+export const hardwarePowerSamples = pgTable('hardware_power_samples', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  hardware_id: integer('hardware_id').notNull().references(() => hardwareConnections.id, { onDelete: 'restrict' }),
+  node_ref: text('node_ref').notNull(),
+  observed_at: timestamp('observed_at', { withTimezone: true, mode: 'date' }).notNull(),
+  watts: numeric('watts', { precision: 12, scale: 3 }).notNull(),
+  mode: text('mode').notNull(),
+  origin: text('origin').notNull(),
+  device_epoch: text('device_epoch'),
+  quality: text('quality').notNull().default('instantaneous'),
+}, (t) => [
+  uniqueIndex('hardware_power_sample_identity').on(t.hardware_id, t.observed_at),
+  index('hardware_power_sample_range').on(t.hardware_id, t.observed_at),
+]);
+
+export const hardwareEnergyIntervals = pgTable('hardware_energy_intervals', {
+  hardware_id: integer('hardware_id').notNull().references(() => hardwareConnections.id, { onDelete: 'restrict' }),
+  start_utc: timestamp('start_utc', { withTimezone: true, mode: 'date' }).notNull(),
+  end_utc: timestamp('end_utc', { withTimezone: true, mode: 'date' }).notNull(),
+  kwh: numeric('kwh', { precision: 20, scale: 9 }).notNull(),
+  covered_seconds: integer('covered_seconds').notNull(),
+  expected_seconds: integer('expected_seconds').notNull(),
+  quality: text('quality').notNull(),
+  method_version: text('method_version').notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('hardware_energy_interval_identity').on(t.hardware_id, t.start_utc),
+  index('hardware_energy_interval_range').on(t.hardware_id, t.start_utc),
+]);
+
+export const hardwareEnergyDays = pgTable('hardware_energy_days', {
+  hardware_id: integer('hardware_id').notNull().references(() => hardwareConnections.id, { onDelete: 'restrict' }),
+  local_date: date('local_date').notNull(),
+  kwh: numeric('kwh', { precision: 20, scale: 9 }).notNull(),
+  covered_seconds: integer('covered_seconds').notNull(),
+  expected_seconds: integer('expected_seconds').notNull(),
+  quality: text('quality').notNull(),
+  method_version: text('method_version').notNull(),
+}, (t) => [
+  uniqueIndex('hardware_energy_day_identity').on(t.hardware_id, t.local_date),
 ]);
 
 export const firewalls = pgTable('firewalls', {

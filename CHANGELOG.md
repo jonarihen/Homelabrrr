@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-08 — Server power telemetry and history
+
+- iLO collection can now be enabled per tested physical node. The backend records actual input watts and regulator mode without an open browser; collection never writes a hardware setting.
+- The Hardware view shows current watts, observation age, a 24-hour power graph, and today/month integrated kWh with measured coverage. Failed reads remain stale or unknown instead of becoming zero.
+- Samples integrate into 15-minute UTC energy buckets; older data rolls into Copenhagen-local daily summaries with coverage and daylight-saving-aware day length. Collection starts disabled.
+
 ## 2026-10-08 — Per-node iLO connection foundation
 
 - PVE Hosts now has a Hardware/iLO connection section for each physical node. Setup and connection tests read the HPE Redfish API without changing server settings.
