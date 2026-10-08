@@ -1856,3 +1856,13 @@ Proxmox-frontend/
 ## 2026-10-08 — ElOverblik electricity meter foundation
 
 Added a private administrator setup flow for ElOverblik Customer API credentials and meter selection, with encrypted tokens, normalized consumption intervals, versioned charge snapshots and disabled-by-default syncing. Household meter data remains separate from server power data.
+## 2026-10-08 — Private PayPal support foundation
+
+Added disabled-by-default PayPal sandbox/live configuration, server-side one-off order handling, fixed-plan monthly approval and cancellation, verified webhook intake, and a deduplicated posting foundation. Live checkout remains off pending full reconciliation and accounting integration.
+
+## 2026-10-08 — PayPal receipt reconciliation
+
+Added bounded subscription transaction reconciliation, exact reported fee posting, and verified capture-refund accounting. Unresolved adjustments are held from finalized support totals for administrator review.
+The reconciliation pass also imports missed app-scoped PayPal webhook events through a bounded authenticated lookup, including one-off refund notifications.
+Member deletion now waits for confirmed cancellation of linked monthly subscriptions; unknown cancellation outcomes retain the account and retry through reconciliation.
+Targeted Transaction Search readback can now post linked refund and reversal adjustments with provider-reported fee credits. Pending or ambiguous adjustments retry with bounded backoff, then require review.
