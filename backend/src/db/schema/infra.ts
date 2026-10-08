@@ -89,6 +89,9 @@ export const hardwarePowerSamples = pgTable('hardware_power_samples', {
   origin: text('origin').notNull(),
   device_epoch: text('device_epoch'),
   quality: text('quality').notNull().default('instantaneous'),
+  // Bounded, normalized thermal/fan/PSU snapshot from the same observation.
+  // Null denotes samples predating health collection or an unavailable source.
+  health: jsonb('health'),
 }, (t) => [
   uniqueIndex('hardware_power_sample_identity').on(t.hardware_id, t.observed_at),
   index('hardware_power_sample_range').on(t.hardware_id, t.observed_at),

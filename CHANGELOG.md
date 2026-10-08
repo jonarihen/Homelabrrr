@@ -1,5 +1,54 @@
 # Changelog
 
+## 2026-10-08 — Server energy history
+
+- Energy & Budget now charts integrated server kWh alongside instantaneous watts for 24-hour and seven-day views, with coverage in an accessible interval table. Missing intervals leave visible gaps in both trend lines.
+
+## 2026-10-08 — Day-ahead price source compatibility
+
+- The Energi Data Service request now sends Copenhagen local `start` and `end` values accepted by the live API, while stored price intervals continue to use unambiguous UTC timestamps across daylight-saving changes.
+
+## 2026-10-08 — Private funding figures in Energy & Budget
+
+- The dashboard now separates verified live gross support, actual PayPal fees, fee credits, refunds, and known net receipts. It shows finalized monthly credit applied, owner-funded remainder, owner adjustments, and carried credit only when the allocation snapshot is current.
+- Monthly allocations refresh in a bounded background job and can be recalculated by an administrator. Contributor and merchant identifiers stay out of the shared dashboard response.
+
+## 2026-10-08 — Electricity accounting corrections
+
+- Month-end forecasts include a known allocated monthly fixed fee once. When allocation is incomplete, the total forecast remains unavailable.
+- Historical Energy & Budget cost uses a contract covering the requested month; the displayed current price continues to use the current contract. Partial server coverage stays marked partial.
+
+## 2026-10-08 — Private PayPal support controls and budget allocation
+
+- Members can review their own verified PayPal postings and subscriptions, start an optional PayPal-hosted one-off or monthly approval when live checkout is enabled, and request subscription cancellation. Approval redirects alone never count as receipts.
+- Administrators can configure separate sandbox and live merchant credentials, keep checkout disabled by default, inspect verified live ledger totals, reconcile with PayPal, and calculate append-only monthly allocations of net support to finalized lab electricity costs.
+- Late refunds revise subsequent credit balances. Unknown provider fees or incomplete costs remain explicitly unresolved; negative balances are owner-funded adjustments, never contributor debts. No live PayPal transaction has been performed.
+
+## 2026-10-08 — Power mode policy foundation
+
+- Hardware administrators can save a Copenhagen weekly Power Regulator schedule, configure price cap and boost thresholds, pause automation, and request a temporary manual mode. All automatic hardware changes start disabled; live control requires a separate capability test, recent reauthentication, and explicit enablement.
+- One per-node controller resolves manual, schedule, and price decisions, claims work before dispatch, rechecks policy and price state, and verifies the resulting iLO mode. It only writes the three supported runtime Power Regulator values; it never requests a reboot, BIOS setting, watt cap, or VM action.
+- The price worker currently falls back to the configured schedule until the electricity price provider is integrated. These controls have only been exercised against tests and fixtures, not a live server.
+## 2026-10-08 — Configured electricity price foundation
+
+- Administrators can record dated spot or fixed all-in electricity terms, applicable variable tariffs, VAT treatment, and actual household bills. Missing terms keep the retail price incomplete; wholesale spot is labeled separately.
+- Published DayAheadPrices can be cached for DK1 or DK2 in 15-minute UTC intervals. The current-price service supplies the same exact basis and revisions to previews and price-aware power policy, without accessing meter consumption or changing hardware.
+- Lab cost calculations join measured server kWh to applicable price intervals. These are calculated operating expenses, separate from actual invoices or payments. No supplier rates or owner tariff facts are prefilled.
+- Monthly previews compare server energy with the household meter only when scope and coverage match, apply fixed fees by an explicit policy, and forecast with weekday/weekend evidence plus a labeled future price scenario. Closed months can be finalized as immutable revisioned statements.
+## 2026-10-08 — Private energy dashboard foundation
+
+Added an authenticated Energy & Budget page with server power, measured kWh and bounded history. Missing electricity pricing and contribution accounting appear as unknown until verified sources are integrated.
+
+## 2026-10-08 — Optional iLO hardware health
+
+- Hardware discovery and telemetry now capture bounded temperatures, fan readings, power-supply status and redundancy when supported on iLO 4 or iLO 5.
+- The Hardware panel labels stale, partial, unsupported and unavailable health without interpreting missing readings as zero. Raw vendor payloads and PSU serials are excluded.
+
+## 2026-10-08 — Hardware identity and telemetry reliability
+
+- Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
+- Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+
 ## 2026-10-08 — Server power telemetry and history
 
 - iLO collection can now be enabled per tested physical node. The backend records actual input watts and regulator mode without an open browser; collection never writes a hardware setting.
@@ -1844,3 +1893,13 @@ Proxmox-frontend/
 ## 2026-10-08 — ElOverblik electricity meter foundation
 
 Added a private administrator setup flow for ElOverblik Customer API credentials and meter selection, with encrypted tokens, normalized consumption intervals, versioned charge snapshots and disabled-by-default syncing. Household meter data remains separate from server power data.
+## 2026-10-08 — Private PayPal support foundation
+
+Added disabled-by-default PayPal sandbox/live configuration, server-side one-off order handling, fixed-plan monthly approval and cancellation, verified webhook intake, and a deduplicated posting foundation. Live checkout remains off pending full reconciliation and accounting integration.
+
+## 2026-10-08 — PayPal receipt reconciliation
+
+Added bounded subscription transaction reconciliation, exact reported fee posting, and verified capture-refund accounting. Unresolved adjustments are held from finalized support totals for administrator review.
+The reconciliation pass also imports missed app-scoped PayPal webhook events through a bounded authenticated lookup, including one-off refund notifications.
+Member deletion now waits for confirmed cancellation of linked monthly subscriptions; unknown cancellation outcomes retain the account and retry through reconciliation.
+Targeted Transaction Search readback can now post linked refund and reversal adjustments with provider-reported fee credits. Pending or ambiguous adjustments retry with bounded backoff, then require review.
