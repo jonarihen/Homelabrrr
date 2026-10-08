@@ -32,6 +32,9 @@ import websiteRoutes, { startWebsiteMaintenance, stopWebsiteMaintenance } from '
 import workflowRoutes from './routes/workflows.ts';
 import publicIpRoutes from './routes/publicIps.ts';
 import operationsRoutes from './routes/operations.ts';
+import paymentsWebhookRoutes from './routes/paymentsWebhook.ts';
+import paymentsRoutes from './routes/payments.ts';
+import { startPaypalInboxWorker, stopPaypalInboxWorker } from './services/paypal.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.ts';
 import { decryptSecret, encryptSecret } from './utils/secrets.ts';
@@ -90,6 +93,8 @@ app.get('/api/health/ready', async (_req, res) => {
   const status = await readiness();
   res.status(status.ok ? 200 : 503).json(status);
 });
+// The sole unauthenticated provider ingress receives original bytes before JSON/CSRF/session middleware.
+app.use('/api/payments/paypal/webhook', paymentsWebhookRoutes);
 app.use(express.json({ limit: '1mb' }));
 if (ALLOWED_ORIGIN) {
   app.use(cors({
@@ -168,6 +173,7 @@ app.use(auditMutations);
 app.use(enforceTwoFactorEnrollmentOnly);
 
 app.use('/api/auth',  authRoutes);
+app.use('/api/payments', paymentsRoutes);
 app.use('/api/admin/operations', operationsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/vms',   vmRoutes);
@@ -693,6 +699,7 @@ const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
   : null;
 // Background enforcement of per-VM power schedules (vm_schedules).
 startScheduler();
+startPaypalInboxWorker();
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -733,6 +740,7 @@ async function shutdown(signal) {
   stopBackupScheduler();
   if (nodeHealthTimer) clearInterval(nodeHealthTimer);
   stopScheduler();
+  stopPaypalInboxWorker();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {

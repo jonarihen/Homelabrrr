@@ -1828,3 +1828,7 @@ Proxmox-frontend/
 - `makeRequest` does NOT send body on DELETE requests (`if (body && method !== 'DELETE')`)
 - Download proxy uses `https.request()` not `fetch()` for TLS agent support
 - Express routes use `/*` wildcard for Proxmox volids that contain slashes
+
+## 2026-10-08 — Private PayPal support foundation
+
+Added disabled-by-default PayPal sandbox/live configuration, server-side one-off order handling, fixed-plan monthly approval and cancellation, verified webhook intake, and a deduplicated posting foundation. Live checkout remains off pending full reconciliation and accounting integration.
