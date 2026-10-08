@@ -55,3 +55,11 @@ test('manual control endpoint rejects missing acknowledgement context and bad in
     .set('x-test-role', 'admin').set('x-test-reauth', 'yes').send({});
   assert.equal(enable.status, 400);
 });
+
+test('saved-policy preview is admin-only, bounded to valid instants, and read-only', async () => {
+  const path = '/api/admin/power-control/1/preview';
+  assert.equal((await request(app).get(path)).status, 401);
+  assert.equal((await request(app).get(path).set('x-test-role', 'member')).status, 403);
+  assert.equal((await request(app).get(`${path}?at=invalid`).set('x-test-role', 'admin')).status, 400);
+  assert.equal((await request(app).get(path).set('x-test-role', 'admin')).status, 404);
+});
