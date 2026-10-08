@@ -1,4 +1,9 @@
-export const dkk = (ore) => Number.isFinite(ore) ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(ore / 100) : 'Unknown';
+export const dkk = (ore) => {
+  // PostgreSQL financial aggregates are serialized as decimal strings. Only
+  // whole, safely representable øre may be converted to a JS number here.
+  const amount = typeof ore === 'string' && /^-?\d+$/.test(ore) ? Number(ore) : ore;
+  return Number.isSafeInteger(amount) ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(amount / 100) : 'Unknown';
+};
 export const quantity = (value, digits = 1) => Number.isFinite(value) ? new Intl.NumberFormat('da-DK', { maximumFractionDigits: digits }).format(value) : 'Unknown';
 export const localTime = (value) => {
   if (!value || !Number.isFinite(new Date(value).getTime())) return 'Unknown';

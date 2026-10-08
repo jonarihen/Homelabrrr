@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-08 — Private energy dashboard verification
+
+- Calculated lab costs and forecasts now display when the backend returns exact decimal-string øre amounts; unsafe or malformed amounts stay unknown.
+- Missing electricity-price validity is labeled unavailable. Dashboard browser and API tests cover signed-out access, member-only aggregate data, stale hardware, missing price and history, and hidden contributor and infrastructure identifiers.
+
 ## 2026-10-08 — Server energy history
 
 - Energy & Budget now charts integrated server kWh alongside instantaneous watts for 24-hour and seven-day views, with coverage in an accessible interval table. Missing intervals leave visible gaps in both trend lines.
