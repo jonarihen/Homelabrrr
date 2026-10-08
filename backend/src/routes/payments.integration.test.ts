@@ -68,7 +68,7 @@ globalThis.fetch = (async (url: string | URL | Request, init: RequestInit = {}) 
 
 const { default: paymentRoutes } = await import('./payments.ts');
 const { default: webhookRoutes } = await import('./paymentsWebhook.ts');
-const { processPaypalInbox, reconcileSubscription, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot } = await import('../services/paypal.ts');
+const { processPaypalInbox, pruneProcessedPaypalWebhookEvidence, reconcileSubscription, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot } = await import('../services/paypal.ts');
 const { postReceipt } = await import('../services/paypalLedger.ts');
 const { waitForBackgroundWork } = await import('../services/backgroundWork.ts');
 const app = express();
@@ -178,4 +178,20 @@ test('sandbox provider fixture: authorization, capture, webhook replay, refund a
     'capture', { ...unknown, feeOre: 40, netOre: 960 }, 'fixture')).status, 'posted');
   assert.equal((await fixture.db.select().from(paypalPostings)).length, 8);
   assert.equal((await verifiedContributionSnapshot('sandbox')).eligibleNetOre, 13_410);
+
+  await fixture.db.update(paypalWebhookInbox).set({ processed_at: new Date('2026-08-01T00:00:00Z') })
+    .where(eq(paypalWebhookInbox.status, 'processed'));
+  await fixture.db.insert(paypalWebhookInbox).values({ id: 'sandbox:MERCHANT123:REVIEW123', environment: 'sandbox',
+    merchant_id: 'MERCHANT123', event_type: 'PAYMENT.CAPTURE.COMPLETED', payload: { review: 'retain evidence' },
+    status: 'needs_review', processed_at: new Date('2026-08-01T00:00:00Z') });
+  const beforePrune = (await fixture.db.select().from(paypalWebhookInbox)).length;
+  assert.equal(await pruneProcessedPaypalWebhookEvidence(new Date('2026-10-08T00:00:00Z')), beforePrune - 1);
+  const pruned = await fixture.db.select().from(paypalWebhookInbox);
+  assert(pruned.filter((event) => event.status === 'processed').every((event) =>
+    Object.keys(event.payload as object).length === 0), 'processed raw provider payloads are discarded');
+  assert.deepEqual(pruned.find((event) => event.status === 'needs_review')?.payload, { review: 'retain evidence' });
+  assert.equal((await webhook().send(JSON.stringify(webhookEvent))).status, 204);
+  assert.equal((await fixture.db.select().from(paypalWebhookInbox)).length, beforePrune,
+    'dedupe IDs survive payload pruning');
+  assert.equal(await pruneProcessedPaypalWebhookEvidence(new Date('2026-10-08T00:00:00Z')), 0);
 });

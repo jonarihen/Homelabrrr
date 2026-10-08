@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08 — PayPal webhook evidence retention
+
+- Processed PayPal webhook payloads are removed after 30 days, while event IDs and verified ledger records remain for duplicate protection and accounting. Events needing review retain their evidence.
+
 ## 2026-10-08 — PayPal capture retry readback
 
 - A member can retry confirmation after an uncertain one-off PayPal capture response. The portal reads the existing order and posts a verified completed capture once; it does not send a second capture request.

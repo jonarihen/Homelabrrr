@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, desc, lt, gt, or, isNull, lte, notInArray, sql, count } from 'drizzle-orm';
+import { and, eq, desc, lt, gt, or, isNull, lte, notInArray, inArray, sql, count } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { paypalConfigs, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
 import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
@@ -253,6 +253,22 @@ export async function processPaypalInbox(limit = 20) {
         .where(eq(paypalWebhookInbox.id, entry.id));
     }
   }
+  await pruneProcessedPaypalWebhookEvidence();
+}
+// Keep economic postings and inbox IDs for replay protection while discarding
+// old provider payloads, which can contain payer data. Review/pending events
+// retain their evidence until an operator has resolved them.
+export async function pruneProcessedPaypalWebhookEvidence(now = new Date(), limit = 50) {
+  const cutoff = new Date(now.getTime() - 30 * 86_400_000);
+  if (!Number.isFinite(cutoff.getTime())) throw new PayPalError('INVALID_TIME', 400);
+  const ids = await db.select({ id: paypalWebhookInbox.id }).from(paypalWebhookInbox)
+    .where(and(eq(paypalWebhookInbox.status, 'processed'), lt(paypalWebhookInbox.processed_at, cutoff),
+      sql`${paypalWebhookInbox.payload} <> '{}'::jsonb`))
+    .orderBy(paypalWebhookInbox.processed_at).limit(Math.max(1, Math.min(limit, 50)));
+  if (!ids.length) return 0;
+  await db.update(paypalWebhookInbox).set({ payload: {} })
+    .where(and(eq(paypalWebhookInbox.status, 'processed'), inArray(paypalWebhookInbox.id, ids.map((row) => row.id))));
+  return ids.length;
 }
 export function paypalInboxRetryDelayMs(attempt: number) {
   return Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.max(0, Math.min(attempt - 1, 10)));
