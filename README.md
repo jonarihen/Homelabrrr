@@ -1,5 +1,9 @@
 # Homelabrrr
 
+### ElOverblik meter import
+
+An administrator connects a Customer API refresh token and explicitly selects one meter in **Admin → Energy data**. The selected meter defaults to whole-household scope; its readings are never treated as server consumption. After selection or restart, the backend imports up to 13 months in resumable 30-day requests, then refreshes recent data every six hours. A manual resync is limited to once every five minutes. Only the selected meter is imported, and disconnecting stops future token use while preserving imported history. The token remains encrypted, and no real account is needed for tests.
+
 ### Hardware/iLO connections (initial foundation)
 
 In **Admin → PVE Hosts**, configure iLO separately for each physical Proxmox node. A PVE API endpoint may expose multiple nodes. Use an iLO account with Redfish read access for connection tests; monitoring can use a read-only account. The application stores the password encrypted and never returns it to the browser. Leave TLS verification on and add a private CA certificate when the management network uses an internal CA. Unverified TLS requires the server's explicit `ALLOW_INSECURE_UPSTREAM_TLS=true` break-glass setting.
