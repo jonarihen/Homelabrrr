@@ -58,7 +58,11 @@ export function resolveApplicablePrice(at: Date, contract: ContractPriceInput, t
     if (basis === 'spot_only_excluding_retail_additions') return incomplete(contract, basis, 'SPOT_BASIS_NOT_APPLICABLE');
     if (contract.fixedRate == null) return incomplete(contract, basis, 'FIXED_RATE_MISSING');
     const micros = parseDkkPerKwh(contract.fixedRate);
-    const end = contract.validTo?.toISOString() || new Date(at.getTime() + 24 * 3600_000).toISOString();
+    // Open-ended agreements need a stable, conservative horizon. A moving
+    // `at + 24h` end changes between the controller's first read and its
+    // guarded dispatch read, falsely invalidating every fixed-price decision.
+    const nextUtcDay = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate() + 1));
+    const end = contract.validTo?.toISOString() || nextUtcDay.toISOString();
     return { status: 'valid', reason: null, dkk_per_kwh: format(micros), currency: 'DKK', start_utc: contract.validFrom.toISOString(), end_utc: end,
       area: contract.area, contract_ref: contract.ref, basis, components: [{ component: 'fixed_all_in', dkk_per_kwh: format(micros), provenance: 'contract', vat_included: true }],
       contract_revision: String(contract.revision), source_revision: `fixed:${contract.revision}`, fetched_at: null, known_horizon: end };
