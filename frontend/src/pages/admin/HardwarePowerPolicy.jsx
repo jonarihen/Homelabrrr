@@ -7,6 +7,35 @@ const preset = () => [
   { days: 0b0111110, start: '16:00', end: '02:00', mode: 'high' },
   { days: 0b1000001, start: '12:00', end: '22:00', mode: 'high' },
 ];
+const modeLabel = (mode) => modes.find(([value]) => value === mode)?.[1] || 'No automatic change';
+const copenhagenTime = (value) => value ? new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Europe/Copenhagen', weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  timeZoneName: 'shortOffset',
+}).format(new Date(value)) : 'Not known';
+
+function PowerPreviewTimeline({ preview }) {
+  const [showAll, setShowAll] = useState(false);
+  const timeline = preview.sevenDayPreview;
+  const segments = timeline?.segments || [];
+  const visible = showAll ? segments : segments.slice(0, 48);
+  return <section className="mt-3 border border-gray-700 bg-gray-900/60 p-3" aria-label="Seven-day power mode preview">
+    <h3 className="uppercase tracking-wider text-orange-400">Saved policy · next seven days</h3>
+    <p className="mt-2 text-gray-300">At {copenhagenTime(preview.at)} · observed {preview.observedMode === 'unknown' ? 'Unknown' : modeLabel(preview.observedMode)} · selected {preview.selectedMode ? modeLabel(preview.selectedMode) : 'No automatic change'} · reason {preview.reason.replaceAll('_', ' ')}.</p>
+    <p className="mt-1 text-gray-400">Next schedule change: {copenhagenTime(timeline?.nextScheduleTransition)} · next known selected-mode change: {copenhagenTime(timeline?.nextKnownTransition)}.</p>
+    <p className="mt-1 text-amber-400">Future selections after published price coverage are unknown. This preview is read-only and uses the saved policy.</p>
+    <div className="mt-3 max-h-80 overflow-auto border border-gray-700">
+      <table className="w-full min-w-[760px] border-collapse text-left"><caption className="sr-only">Copenhagen time, baseline, selected mode, reason and applicable price for each policy interval</caption>
+        <thead className="sticky top-0 bg-gray-950 text-gray-400"><tr><th className="p-2">From</th><th className="p-2">Until</th><th className="p-2">Baseline</th><th className="p-2">Selected mode</th><th className="p-2">Reason</th><th className="p-2">Price</th></tr></thead>
+        <tbody>{visible.map((segment) => <tr key={segment.startUtc} className="border-t border-gray-800 align-top">
+          <td className="p-2">{copenhagenTime(segment.startUtc)}</td><td className="p-2">{copenhagenTime(segment.endUtc)}</td><td className="p-2">{modeLabel(segment.baseMode)}</td>
+          <td className={`p-2 ${segment.futurePriceUnknown ? 'text-amber-400' : 'text-gray-100'}`}>{segment.futurePriceUnknown ? 'Unknown after published prices' : modeLabel(segment.selectedMode)}</td>
+          <td className="p-2">{segment.reason.replaceAll('_', ' ')}</td><td className="p-2">{segment.priceDkkPerKwh == null ? 'Unavailable' : `${segment.priceDkkPerKwh} kr./kWh`}</td>
+        </tr>)}</tbody>
+      </table>
+    </div>
+    {segments.length > 48 && <button type="button" onClick={() => setShowAll((value) => !value)} className="mt-2 border border-gray-600 px-2 py-1 text-orange-400">{showAll ? 'Show first 48 intervals' : `Show all ${segments.length} intervals`}</button>}
+  </section>;
+}
 
 function ModeSelect({ value, onChange, omitHigh = false }) {
   return <select value={value} onChange={(event) => onChange(event.target.value)} className="border border-gray-700 bg-gray-900 px-2 py-1 text-gray-100">
@@ -99,7 +128,7 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
       </div>
     </div>
     <div className="mt-3 flex items-center gap-3"><label><input type="checkbox" checked={draft.automationEnabled} onChange={(event) => setDraft((current) => ({ ...current, automationEnabled: event.target.checked }))} /> Allow automatic changes</label><button disabled={busy} onClick={save} className="border border-orange-600 px-3 py-2 uppercase text-orange-400 disabled:opacity-50">Save policy</button><button disabled={busy || !record.policy.version} onClick={() => action(async () => { setPreview((await api.get(`/admin/power-control/${connection.id}/preview`)).data); })} className="border border-gray-600 px-3 py-2 uppercase disabled:opacity-50">Preview saved policy</button></div>
-    {preview && <div className="mt-3 border border-gray-700 bg-gray-900/60 p-3">At {new Date(preview.at).toLocaleString()} · observed {preview.observedMode} · baseline {preview.baseMode || 'none'} · selected {preview.selectedMode || 'none'} · reason {preview.reason.replaceAll('_', ' ')} · price {preview.priceDkkPerKwh == null ? 'unavailable' : `${preview.priceDkkPerKwh} kr./kWh`}{preview.priceValidUntil ? ` until ${new Date(preview.priceValidUntil).toLocaleString()}` : ''}. Future selections beyond published prices are unknown.</div>}
+    {preview && <PowerPreviewTimeline preview={preview} />}
     <div className="mt-4 border-t border-gray-700 pt-3"><h3 className="mb-2 uppercase text-gray-100">Manual temporary mode</h3><div className="flex flex-wrap items-center gap-2"><ModeSelect value={manualMode} onChange={setManualMode} /><label>Minutes<input type="number" min="1" max="1440" value={duration} onChange={(event) => setDuration(Number(event.target.value))} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label><button disabled={busy || !record.controlEnabled} onClick={() => mutateVersion('manual', { mode: manualMode, durationMinutes: duration })} className="border border-orange-600 px-2 py-1 text-orange-400 disabled:opacity-40">Apply now</button>{record.policy.manualMode && <><span>Override: {record.policy.manualMode} until {record.policy.manualExpiresAt ? new Date(record.policy.manualExpiresAt).toLocaleString() : 'cleared'}</span><button disabled={busy} onClick={() => action(async () => { await api.delete(`/admin/power-control/${connection.id}/manual`, { data: { version: record.policy.version } }); setNotice('Manual override cleared.'); })} className="border border-gray-600 px-2 py-1">Clear override</button></>}</div><p className="mt-2 text-amber-400">An explicit manual High selection can bypass the expensive-price cap. It never reboots a server or VM.</p></div>
   </section>;
 }

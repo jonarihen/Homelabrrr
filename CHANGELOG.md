@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08 — Seven-day power preview in administration
+
+- Hardware administrators can inspect upcoming Copenhagen schedule and published-price intervals, the selected mode and its reason, and the next known transition before enabling automatic control. Intervals beyond published price coverage are marked unknown.
+
 ## 2026-10-08 — Power policy transition preview
 
 - The saved hardware policy preview now includes seven days of schedule and published-price decisions, the next schedule boundary, and the next known selected-mode change. Future price-dependent selections beyond published coverage are explicitly unknown.
