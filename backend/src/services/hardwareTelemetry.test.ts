@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateInstantaneousWatts } from './hardwareTelemetry.ts';
+import { aggregationLookbackStart, validateInstantaneousWatts } from './hardwareTelemetry.ts';
+
+test('recomputation includes the full previous quarter-hour bucket', () => {
+  assert.equal(aggregationLookbackStart(new Date('2026-10-08T15:31:00Z')).toISOString(), '2026-10-08T15:15:00.000Z');
+  assert.equal(aggregationLookbackStart(new Date('2026-10-08T15:00:00Z')).toISOString(), '2026-10-08T14:45:00.000Z');
+});
 
 const now = new Date('2026-10-08T15:00:00Z');
 test('real zero and standby draw remain measurements', () => {

@@ -22,6 +22,11 @@ export function validateInstantaneousWatts(watts: unknown, observedAt: unknown, 
   return { watts, observedAt: date };
 }
 
+export function aggregationLookbackStart(observedAt: Date): Date {
+  const currentBucketStart = Math.floor(observedAt.getTime() / (15 * 60_000)) * (15 * 60_000);
+  return new Date(currentBucketStart - 15 * 60_000);
+}
+
 export async function pollHardwareConnection(id: number, now = () => new Date(), reader = discoverHardware) {
   const current = now();
   const lease = new Date(current.getTime() + LEASE_MS);
@@ -54,7 +59,10 @@ export async function pollHardwareConnection(id: number, now = () => new Date(),
         const [state] = await tx.select({ lease_until: hardwareTelemetryState.lease_until }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
         if (!fresh || fresh.config_version !== connection.config_version || state?.lease_until?.getTime() !== lease.getTime()) return;
         await tx.insert(hardwarePowerSamples).values({ hardware_id: id, node_ref: connection.node_ref, observed_at: measurement.observedAt, watts: String(measurement.watts), mode: sample.mode.value, origin, device_epoch: connection.system_uuid }).onConflictDoNothing();
-        const since = new Date(measurement.observedAt.getTime() - 20 * 60_000);
+        // Always include the full preceding bucket. A sliding 20-minute
+        // lookback would later recompute an older bucket without its first
+        // sample and overwrite a complete aggregate with partial energy.
+        const since = aggregationLookbackStart(measurement.observedAt);
         const recent = await tx.select().from(hardwarePowerSamples).where(and(eq(hardwarePowerSamples.hardware_id, id), gte(hardwarePowerSamples.observed_at, since), lte(hardwarePowerSamples.observed_at, measurement.observedAt))).orderBy(hardwarePowerSamples.observed_at);
         const intervals = integrateWattSamples(recent.map((row) => ({ hardwareId: id, observedAt: row.observed_at, watts: Number(row.watts), deviceEpoch: row.device_epoch })), { intervalMs: HARDWARE_POLL_INTERVAL_MS });
         for (const interval of intervals) {
