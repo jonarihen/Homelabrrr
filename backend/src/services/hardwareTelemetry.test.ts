@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { aggregationLookbackStart, validateInstantaneousWatts } from './hardwareTelemetry.ts';
+// The aggregation helpers are pure, but their module also imports the DB
+// collector. Give that unused pool a deliberately unreachable test URL.
+process.env.DATABASE_URL ||= 'postgres://unused:unused@127.0.0.1:1/unused';
+const { aggregationLookbackStart, validateInstantaneousWatts } = await import('./hardwareTelemetry.ts');
 
 test('recomputation includes the full previous quarter-hour bucket', () => {
   assert.equal(aggregationLookbackStart(new Date('2026-10-08T15:31:00Z')).toISOString(), '2026-10-08T15:15:00.000Z');
