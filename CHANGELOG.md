@@ -35,6 +35,11 @@
 
 Added an authenticated Energy & Budget page with server power, measured kWh and bounded history. Missing electricity pricing and contribution accounting appear as unknown until verified sources are integrated.
 
+## 2026-10-08 — Optional iLO hardware health
+
+- Hardware discovery and telemetry now capture bounded temperatures, fan readings, power-supply status and redundancy when supported on iLO 4 or iLO 5.
+- The Hardware panel labels stale, partial, unsupported and unavailable health without interpreting missing readings as zero. Raw vendor payloads and PSU serials are excluded.
+
 ## 2026-10-08 — Hardware identity and telemetry reliability
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
