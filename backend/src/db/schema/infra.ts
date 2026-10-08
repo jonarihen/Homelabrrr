@@ -1,6 +1,7 @@
 // Part of the Drizzle ORM PostgreSQL schema — conventions in docs/postgres-conventions.md.
 
-import { pgTable, integer, text, boolean, timestamp, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, integer, text, boolean, timestamp, index, uniqueIndex, jsonb } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { users } from './auth.ts';
 
 // Migration bookkeeping. `version` is supplied by the migration runner, so it
@@ -36,6 +37,37 @@ export const pveHosts = pgTable('pve_hosts', {
   ssh_secret: text('ssh_secret').default(''),
   ssh_host_key: text('ssh_host_key').default(''),
 });
+
+// A PVE API endpoint can expose several physical nodes. Archived connections
+// retain identity/history while active bindings remain unique per node/system.
+export const hardwareConnections = pgTable('hardware_connections', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  pve_host_id: integer('pve_host_id').notNull().references(() => pveHosts.id, { onDelete: 'restrict' }),
+  node_ref: text('node_ref').notNull(),
+  target_host: text('target_host').notNull(),
+  target_port: integer('target_port').notNull().default(443),
+  username: text('username').notNull(),
+  secret: text('secret').notNull(),
+  ca_certificate: text('ca_certificate'),
+  verify_tls: boolean('verify_tls').notNull().default(true),
+  collection_enabled: boolean('collection_enabled').notNull().default(false),
+  control_enabled: boolean('control_enabled').notNull().default(false),
+  lifecycle_state: text('lifecycle_state').notNull().default('active'),
+  config_version: integer('config_version').notNull().default(1),
+  system_uuid: text('system_uuid'),
+  model: text('model'),
+  generation: text('generation'),
+  firmware: text('firmware'),
+  capabilities: jsonb('capabilities'),
+  last_status: text('last_status').notNull().default('not_tested'),
+  last_test_at: timestamp('last_test_at', { withTimezone: true, mode: 'date' }),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('hardware_connections_active_node_unique').on(t.node_ref).where(sql`lifecycle_state = 'active'`),
+  uniqueIndex('hardware_connections_active_system_unique').on(t.system_uuid).where(sql`lifecycle_state = 'active' AND system_uuid IS NOT NULL`),
+  index('hardware_connections_host_idx').on(t.pve_host_id),
+]);
 
 export const firewalls = pgTable('firewalls', {
   id: integer('id').primaryKey().generatedByDefaultAsIdentity(),

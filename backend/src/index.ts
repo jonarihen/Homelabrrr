@@ -18,6 +18,7 @@ import { join } from 'path';
 
 import authRoutes from './routes/auth.ts';
 import adminRoutes from './routes/admin.ts';
+import hardwareRoutes from './routes/hardware.ts';
 import vmRoutes, { vncSessions } from './routes/vms.ts';
 import sshRoutes, { sshSessions } from './routes/ssh.ts';
 import sftpRoutes from './routes/sftp.ts';
@@ -170,6 +171,7 @@ app.use(enforceTwoFactorEnrollmentOnly);
 app.use('/api/auth',  authRoutes);
 app.use('/api/admin/operations', operationsRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/hardware-connections', hardwareRoutes);
 app.use('/api/vms',   vmRoutes);
 app.use('/api/ssh',   sshRoutes);
 app.use('/api/sftp',  sftpRoutes);

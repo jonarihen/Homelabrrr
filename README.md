@@ -1,5 +1,11 @@
 # Homelabrrr
 
+### Hardware/iLO connections (initial foundation)
+
+In **Admin → PVE Hosts**, configure iLO separately for each physical Proxmox node. A PVE API endpoint may expose multiple nodes. Use an iLO account with Redfish read access for connection tests; monitoring can use a read-only account. The application stores the password encrypted and never returns it to the browser. Leave TLS verification on and add a private CA certificate when the management network uses an internal CA. Unverified TLS requires the server's explicit `ALLOW_INSECURE_UPSTREAM_TLS=true` break-glass setting.
+
+The adapter traverses Redfish service-root links to the actual System, Chassis and Manager. It reads `Oem.Hp.PowerRegulatorMode` on iLO 4 and `Oem.Hpe.PowerRegulatorMode` on iLO 5, and normalizes Min/Dynamic/Max to low/dynamic/high. OS Control and unknown modes are display-only. Actual watts come only from chassis `PowerConsumedWatts` or `PowerControl[].PowerConsumedWatts`; absent values stay unavailable. Runtime write privilege remains unverified until an explicit controlled change is made. Saving or testing a connection does not change hardware. Collection and control are disabled by default. Decommissioning clears the credential, stops eligibility for future jobs, and retains the stable record for historical attribution. No live iLO verification was possible without owner credentials.
+
 > Self-service homelab portal for Proxmox and FortiGate
 
 [![Frontend](https://img.shields.io/badge/frontend-React%2018%20%2B%20Vite-61dafb?style=flat-square&logo=react&logoColor=white)](#stack)

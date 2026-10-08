@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-08 — Per-node iLO connection foundation
+
+- PVE Hosts now has a Hardware/iLO connection section for each physical node. Setup and connection tests read the HPE Redfish API without changing server settings.
+- iLO credentials are encrypted; TLS verification and collection/control remain enabled only by explicit operator configuration. Duplicate physical identities and stale test results are rejected.
+- Connection tests report detected generation, regulator mode, actual chassis watts when available, and honest read/write capability status. Fixture coverage does not constitute live hardware verification.
+
 ## 2026-10-03 — Reliability fixes for file transfers, backups, and dialogs
 
 - **SFTP uploads no longer truncate the destination before the transfer succeeds.** Uploads stream into a unique temporary file in the destination directory, then commit by rename after transfer and metadata checks. Symlink destinations are rejected; overwrites preserve the existing owner, group, and mode, and new files stay owner-only (`0600`)

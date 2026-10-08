@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import HardwareConnection from './HardwareConnection.jsx';
 
 export default function PVEHostsPage() {
   useDocumentTitle('PVE Hosts');
@@ -247,7 +248,8 @@ export default function PVEHostsPage() {
                             const cpuPct = n.cpu ? (n.cpu * 100).toFixed(1) : 0;
                             const m = n.maintenance;
                             return (
-                              <div key={n.node} className={`bg-gray-800/50 border rounded-xl px-4 py-3 flex items-center justify-between ${m ? 'border-yellow-500/30' : 'border-gray-700/30'}`}>
+                              <div key={n.node} className={`bg-gray-800/50 border rounded-xl px-4 py-3 ${m ? 'border-yellow-500/30' : 'border-gray-700/30'}`}>
+                              <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-3 min-w-0">
                                   <span
                                     className={`w-2 h-2 rounded-full shrink-0 ${m ? 'bg-yellow-500' : n.status === 'online' ? 'bg-green-400' : 'bg-red-500'}`}
@@ -298,6 +300,8 @@ export default function PVEHostsPage() {
                                     </button>
                                   )}
                                 </div>
+                              </div>
+                              <HardwareConnection nodeRef={n.nodeRef || `${h.id}~${n.node}`} />
                               </div>
                             );
                           })}

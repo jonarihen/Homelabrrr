@@ -17,6 +17,7 @@ const NODE_DEPENDENCIES = [
 ] as const;
 
 const HOST_ID_DEPENDENCIES = [
+  ['hardware connections', 'hardware_connections', 'pve_host_id'],
   ['storage visibility rules', 'storage_visibility', 'pve_host_id'],
   ['maintenance windows', 'node_maintenance', 'pve_host_id'],
   ['public IP assignments', 'public_ip_assignments', 'proxmox_host_id'],
