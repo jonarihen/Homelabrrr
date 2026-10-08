@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-08 — Private funding figures in Energy & Budget
+
+- The dashboard now separates verified live gross support, actual PayPal fees, fee credits, refunds, and known net receipts. It shows finalized monthly credit applied, owner-funded remainder, owner adjustments, and carried credit only when the allocation snapshot is current.
+- Monthly allocations refresh in a bounded background job and can be recalculated by an administrator. Contributor and merchant identifiers stay out of the shared dashboard response.
+
 ## 2026-10-08 — Electricity accounting corrections
 
 - Month-end forecasts include a known allocated monthly fixed fee once. When allocation is incomplete, the total forecast remains unavailable.

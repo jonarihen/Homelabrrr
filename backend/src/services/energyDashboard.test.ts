@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEnergyMonth, parseHistoryRange, safeHosts } from './energyDashboard.ts';
+// The dashboard imports DB-backed funding services; these pure helpers do not
+// connect, but client initialization still requires a configured URL.
+process.env.DATABASE_URL ||= 'postgres://postgres:postgres@127.0.0.1:5432/unused';
+const { parseEnergyMonth, parseHistoryRange, safeHosts } = await import('./energyDashboard.ts');
 
 test('Copenhagen month follows local clock at UTC day boundaries', () => {
   assert.equal(parseEnergyMonth(undefined, new Date('2026-10-31T23:30:00Z')), '2026-11');

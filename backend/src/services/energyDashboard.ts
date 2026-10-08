@@ -4,6 +4,7 @@ import { electricityContracts } from '../db/schema/index.ts';
 import { HARDWARE_POLL_INTERVAL_MS } from './hardwareTelemetry.ts';
 import { getApplicablePrice } from './electricityPricing.ts';
 import { previewMonthlyElectricity } from './monthlyElectricity.ts';
+import { monthlyEnergyFunding } from './energyFunding.ts';
 import { getSetting } from '../db/settings.ts';
 import { resolvePowerDecision, type ApplicablePowerPrice, type PowerPricePolicy, type WeeklyPowerSchedule, type WritablePowerMode } from './powerPolicy.ts';
 
@@ -159,10 +160,7 @@ export async function energySummary(month: string, now = new Date()) {
           { label: 'Allocated fixed fees', ore: calculation.allocatedFixedFeeOre }] };
     } catch { /* Incomplete or absent inputs stay explicitly unavailable. */ }
   }
-  return { ...measured, price, cost,
-    funding: { status: 'unavailable', grossOre: null, feeDebitsOre: null, feeCreditsOre: null,
-      refundDebitsOre: null, knownNetOre: null, eligibleNetOre: null, appliedOre: null,
-      ownerFundedOre: null, carryForwardOre: null, unresolvedOre: null, reconciledAt: null } };
+  return { ...measured, price, cost, funding: await monthlyEnergyFunding(month) };
 }
 
 export async function energyHistory(range: '24h' | '7d', now = new Date()) {
