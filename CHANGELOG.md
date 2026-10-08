@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08 — Day-ahead price source compatibility
+
+- The Energi Data Service request now sends Copenhagen local `start` and `end` values accepted by the live API, while stored price intervals continue to use unambiguous UTC timestamps across daylight-saving changes.
+
 ## 2026-10-08 — Private funding figures in Energy & Budget
 
 - The dashboard now separates verified live gross support, actual PayPal fees, fee credits, refunds, and known net receipts. It shows finalized monthly credit applied, owner-funded remainder, owner adjustments, and carried credit only when the allocation snapshot is current.
