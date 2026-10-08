@@ -29,6 +29,11 @@ function validOptionalSecrets(body: any): boolean {
 function parsedId(raw: string): number {
   const n = Number(raw); if (!Number.isSafeInteger(n) || n < 1) throw new Error('Invalid connection id'); return n;
 }
+function canonicalNode(raw: unknown) {
+  const node = decodeNodeRef(raw);
+  if (!node.hostId || !isValidNodeName(node.nodeName) || node.nodeRef !== `${node.hostId}~${node.nodeName}`) throw new Error('Canonical node reference required');
+  return node;
+}
 export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware) {
 const router = Router();
 router.use(requireAuth, requirePermission('can_manage_hosts'), requireInteractiveSession);
@@ -41,7 +46,7 @@ router.put('/:id/collection', async (req, res) => {
     const id = parsedId(req.params.id);
     if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be boolean' });
     const [row] = await db.update(hardwareConnections).set({ collection_enabled: req.body.enabled, config_version: sql`${hardwareConnections.config_version} + 1`, updated_at: new Date() })
-      .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)), ...(req.body.enabled ? [sql`${hardwareConnections.system_uuid} IS NOT NULL`] : []))).returning();
+      .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)), ...(req.body.enabled ? [sql`${hardwareConnections.system_uuid} IS NOT NULL AND ${hardwareConnections.last_status} = 'online' AND ${hardwareConnections.capabilities}->>'monitoring' = 'supported'`] : []))).returning();
     if (!row) return res.status(409).json({ error: 'Connection changed or has not passed a connection test' });
     await db.insert(hardwareTelemetryState).values({ hardware_id: id, next_poll_at: new Date() }).onConflictDoUpdate({ target: hardwareTelemetryState.hardware_id, set: { next_poll_at: new Date() } });
     await logAudit(req, req.body.enabled ? 'hardware_collection_enabled' : 'hardware_collection_disabled', String(id), `node=${row.node_ref}`);
@@ -118,6 +123,25 @@ router.put('/:id', async (req, res) => {
     await logAudit(req, 'hardware_connection_updated', String(id), `node=${row.node_ref}`);
     res.json(safeDto(row));
   } catch (err) { if (err instanceof Error && (err.message === 'Invalid iLO connection fields' || err.message === 'Invalid connection id')) return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
+});
+router.post('/:id/rebind', async (req, res) => {
+  try {
+    const id = parsedId(req.params.id);
+    const node = canonicalNode(req.body?.nodeRef);
+    const [hostRow] = await db.select({ id: pveHosts.id }).from(pveHosts).where(eq(pveHosts.id, node.hostId)).limit(1);
+    if (!hostRow) return res.status(404).json({ error: 'PVE host not found' });
+    const [row] = await db.update(hardwareConnections).set({ pve_host_id: node.hostId, node_ref: node.nodeRef,
+      collection_enabled: false, control_enabled: false, config_version: sql`${hardwareConnections.config_version} + 1`,
+      last_status: 'not_tested', updated_at: new Date() })
+      .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)))).returning();
+    if (!row) return res.status(409).json({ error: 'Connection was changed concurrently' });
+    await logAudit(req, 'hardware_connection_rebound', String(id), `node=${row.node_ref}; automatic control disabled`);
+    res.json(safeDto(row));
+  } catch (err) {
+    if (isUniqueViolation(err)) return res.status(409).json({ error: 'Node already has an active hardware connection' });
+    if (err instanceof Error && ['Invalid connection id', 'Canonical node reference required'].includes(err.message)) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: sanitizeError(err) });
+  }
 });
 router.post('/:id/test', async (req, res) => {
   try {
