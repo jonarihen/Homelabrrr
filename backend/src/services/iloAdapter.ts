@@ -164,6 +164,7 @@ export async function setRuntimeMode(
   target: 'low' | 'dynamic' | 'high',
   readTransport?: IloTransport,
   patchTransport?: RuntimePatchTransport,
+  preDispatchGuard?: () => Promise<boolean>,
 ): Promise<{ prior: HardwareMode; target: typeof target; outcome: 'already_set' | 'verified' | 'unknown' }> {
   if (!(target in RUNTIME_VALUES)) throw new IloError('invalid_target', 'Unsupported runtime power mode');
   const before = await discoverHardware(config, readTransport);
@@ -177,6 +178,9 @@ export async function setRuntimeMode(
     : property === 'Oem.Hpe.PowerRegulatorMode' ? 'Hpe' : null;
   if (!oem || !/^\/(?:redfish|rest)\/v1\/Systems\/[^/?#]+\/?$/.test(path)) {
     throw new IloError('missing_endpoint', 'Runtime Power Regulator target was not discovered');
+  }
+  if (preDispatchGuard && !await preDispatchGuard()) {
+    throw new IloError('invalid_target', 'Power policy changed before dispatch');
   }
   const patch = patchTransport ?? await createRuntimePatchTransport(config);
   try { await patch(path, oem, RUNTIME_VALUES[target]); }
