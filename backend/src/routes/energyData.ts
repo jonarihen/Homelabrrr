@@ -1,14 +1,15 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
 import { logAudit } from '../utils/audit.ts';
-import { energyDataStatus, saveRefreshToken, listAvailableMeters, selectMeter, disconnect, syncSelectedMeter } from '../services/eloverblik.ts';
+import { energyDataStatus, saveRefreshToken, listAvailableMeters, selectMeter, disconnect, manualSyncSelectedMeter } from '../services/eloverblik.ts';
 import { ElOverblikError } from '../services/eloverblikClient.ts';
 
 const router = Router();
 router.use(requireAuth, requireAdmin, requireInteractiveSession);
 function fail(res: any, err: unknown) {
   const code = err instanceof ElOverblikError ? err.code : 'INTERNAL';
-  res.status(code === 'INTERNAL' ? 500 : code === 'METER_UNAUTHORIZED' ? 403 : code === 'NOT_CONFIGURED' ? 409 : 400).json({ error: code });
+  if (code === 'RATE_LIMIT' && err instanceof ElOverblikError && err.retryAfterMs) res.setHeader('Retry-After', String(Math.ceil(err.retryAfterMs / 1000)));
+  res.status(code === 'INTERNAL' ? 500 : code === 'RATE_LIMIT' ? 429 : code === 'METER_UNAUTHORIZED' ? 403 : code === 'NOT_CONFIGURED' ? 409 : 400).json({ error: code });
 }
 router.get('/status', async (_req, res) => { try { res.json(await energyDataStatus()); } catch (err) { fail(res, err); } });
 router.get('/meters', async (_req, res) => { try { res.json({ meters: await listAvailableMeters() }); } catch (err) { fail(res, err); } });
@@ -29,7 +30,7 @@ router.post('/meter', requireRecentReauthentication, async (req, res) => {
 });
 router.post('/sync', async (req, res) => {
   try {
-    const result = await syncSelectedMeter();
+    const result = await manualSyncSelectedMeter();
     await logAudit(req, 'eloverblik.sync');
     res.json(result);
   } catch (err) { fail(res, err); }
