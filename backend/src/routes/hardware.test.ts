@@ -2,7 +2,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import request from 'supertest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { hardwareConnections, hardwarePowerSamples, pveHosts, users } from '../db/schema/index.ts';
 import type { HardwareDiscovery } from '../services/iloAdapter.ts';
@@ -25,6 +25,8 @@ function found(uuid: string): HardwareDiscovery {
 
 before(async () => {
   fixture = await createTestDatabase();
+  // The integration owner will generate migration 0011 after 0010 lands.
+  await fixture.db.execute(sql`ALTER TABLE hardware_power_samples ADD COLUMN IF NOT EXISTS health jsonb`);
   process.env.DATABASE_URL = fixture.url;
   process.env.SECRET_ENCRYPTION_KEY ||= '55'.repeat(32);
   ({ closeDb } = await import('../db/client.ts'));
@@ -167,7 +169,8 @@ test('unsupported power monitoring cannot be enabled even with stable identity',
 test('explicit rebind keeps hardware ID and historical node snapshot while disabling automation', async () => {
   const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-b`));
   const observedAt = new Date('2026-10-08T12:00:00Z');
-  await fixture.db.insert(hardwarePowerSamples).values({ hardware_id: row.id, node_ref: row.node_ref, observed_at: observedAt, watts: '250', mode: 'dynamic', origin: 'fixture', device_epoch: row.system_uuid });
+  await fixture.db.insert(hardwarePowerSamples).values({ hardware_id: row.id, node_ref: row.node_ref, observed_at: observedAt, watts: '250', mode: 'dynamic', origin: 'fixture', device_epoch: row.system_uuid,
+    health: { temperatures: [{ name: 'Inlet', celsius: 21, health: 'OK' }], fans: [], powerSupplies: [], powerRedundancy: null, limited: false } });
   await fixture.db.update(hardwareConnections).set({ collection_enabled: true, control_enabled: true }).where(eq(hardwareConnections.id, row.id));
   const stale = await request(app).post(`/${row.id}/rebind`).set('x-test-role', 'admin').send({ nodeRef: `${hostId}~pve-renamed`, configVersion: row.config_version + 1 });
   assert.equal(stale.status, 409);
@@ -180,6 +183,12 @@ test('explicit rebind keeps hardware ID and historical node snapshot while disab
   assert.equal(rebound.body.last_status, 'not_tested');
   const [sample] = await fixture.db.select().from(hardwarePowerSamples).where(eq(hardwarePowerSamples.hardware_id, row.id));
   assert.equal(sample.node_ref, `${hostId}~pve-b`);
+  const telemetry = await request(app).get(`/${row.id}/telemetry`).set('x-test-role', 'admin');
+  assert.equal(telemetry.status, 200);
+  assert.equal(telemetry.body.latest.stale, true);
+  assert.equal(telemetry.body.latest.health.temperatures[0].celsius, 21);
+  assert.equal(JSON.stringify(telemetry.body).includes('fixture-secret'), false);
+  assert.equal((await request(app).get(`/${row.id}/telemetry`).set('x-test-role', 'member')).status, 403);
   assert.equal((await request(app).get('/').set('x-test-role', 'admin')).body.some((connection: any) => connection.node_ref === `${hostId}~pve-renamed`), true);
 });
 

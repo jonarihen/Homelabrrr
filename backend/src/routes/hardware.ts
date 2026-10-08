@@ -86,7 +86,7 @@ router.get('/:id/telemetry', async (req, res) => {
     const latest = await latestHardwareSample(id);
     const ageSeconds = latest ? Math.max(0, Math.round((Date.now() - latest.observed_at.getTime()) / 1000)) : null;
     res.json({ hardwareId: id, nodeRef: connection.node_ref, collectionEnabled: connection.collection_enabled, lifecycleState: connection.lifecycle_state,
-      latest: latest && { watts: latest.watts, mode: latest.mode, observedAt: latest.observed_at, ageSeconds, stale: (ageSeconds ?? Infinity) > Math.ceil(3 * HARDWARE_POLL_INTERVAL_MS / 1000) },
+      latest: latest && { watts: latest.watts, mode: latest.mode, health: latest.health, observedAt: latest.observed_at, ageSeconds, stale: (ageSeconds ?? Infinity) > Math.ceil(3 * HARDWARE_POLL_INTERVAL_MS / 1000) },
       lastErrorCode: state?.last_error_code || null, lastAttemptAt: state?.last_attempt_at || null, points: points.rows, summary: summary.rows[0] || null });
   } catch (err) { if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
 });

@@ -54,7 +54,7 @@ export default function HardwareConnection({ nodeRef }) {
       {connection && <button disabled={busy} onClick={disconnect} className="text-red-400 hover:text-red-300 disabled:opacity-50">Decommission</button>}
     </div>
     {connection && <p className="mt-2 text-gray-500">Collection {connection.collection_enabled ? 'enabled' : 'disabled'} · Control disabled · Runtime write privilege unverified</p>}
-    {discovery && <div className="mt-2 text-gray-300">Mode {discovery.mode.value} · Actual input {discovery.sample.watts == null ? 'unavailable' : `${discovery.sample.watts} W`} · Monitoring {discovery.capabilities.monitoring} · Runtime mode {discovery.capabilities.runtimeMode}</div>}
+    {discovery && <div className="mt-2 text-gray-300">Mode {discovery.mode.value} · Actual input {discovery.sample.watts == null ? 'unavailable' : `${discovery.sample.watts} W`} · Monitoring {discovery.capabilities.monitoring} · Runtime mode {discovery.capabilities.runtimeMode} · Temperatures {discovery.capabilities.temperatures} · Fans {discovery.capabilities.fans} · Power supplies {discovery.capabilities.powerSupplies}</div>}
     {error && <p role="alert" className="mt-2 text-red-400">{error}</p>}
     {connection && <HardwareTelemetryView connection={connection} onConnectionChange={setConnection} />}
     {editing && <form onSubmit={save} className="mt-3 grid gap-2 sm:grid-cols-2">

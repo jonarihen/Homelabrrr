@@ -1,6 +1,6 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { hardwareConnections, hardwareEnergyIntervals, hardwarePowerSamples, pveHosts } from '../db/schema/index.ts';
 import type { HardwareDiscovery } from './iloAdapter.ts';
@@ -12,6 +12,8 @@ let poll: typeof import('./hardwareTelemetry.ts').pollHardwareConnection;
 
 before(async () => {
   fixture = await createTestDatabase();
+  // The integration owner will generate migration 0011 after 0010 lands.
+  await fixture.db.execute(sql`ALTER TABLE hardware_power_samples ADD COLUMN IF NOT EXISTS health jsonb`);
   process.env.DATABASE_URL = fixture.url;
   process.env.SECRET_ENCRYPTION_KEY ||= '55'.repeat(32);
   ({ closeDb } = await import('../db/client.ts'));
@@ -69,10 +71,23 @@ test('identity mismatch leaves measurements unchanged and records a failure', as
   assert.equal((await fixture.db.select().from(hardwarePowerSamples)).length, before);
 });
 
+test('collector persists only normalized optional health from the same observation', async () => {
+  const at = new Date('2026-10-08T16:00:00Z');
+  const sample = reading(at.toISOString(), 250);
+  sample.sample.health = { temperatures: [{ name: 'Inlet', celsius: 21, health: 'OK', secret: 'must-not-store' } as any],
+    fans: [{ name: 'Fan 1', value: 0, unit: 'percent', health: 'OK' }],
+    powerSupplies: [{ name: 'PSU 1', health: 'OK', state: 'Enabled' }], powerRedundancy: { health: 'OK', state: null }, limited: false };
+  assert.equal((await poll(hardwareId, () => at, async () => sample)).status, 'ok');
+  const [stored] = await fixture.db.select().from(hardwarePowerSamples).where(eq(hardwarePowerSamples.observed_at, at));
+  assert.equal((stored.health as any).temperatures[0].celsius, 21);
+  assert.equal((stored.health as any).fans[0].value, 0);
+  assert.equal(JSON.stringify(stored.health).includes('must-not-store'), false);
+});
+
 test('changed configuration disables collection without extending history', async () => {
   const [connection] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.id, hardwareId));
   await fixture.db.update(hardwareConnections).set({ collection_enabled: false, config_version: connection.config_version + 1 }).where(eq(hardwareConnections.id, hardwareId));
-  const at = new Date('2026-10-08T16:00:00Z');
+  const at = new Date('2026-10-08T17:00:00Z');
   const result = await poll(hardwareId, () => at, async () => { throw new Error('reader must not run'); });
   assert.equal(result.status, 'disabled');
   const remaining = await fixture.db.select().from(hardwarePowerSamples).where(and(eq(hardwarePowerSamples.hardware_id, hardwareId), eq(hardwarePowerSamples.observed_at, at)));
