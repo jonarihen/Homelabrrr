@@ -46,6 +46,9 @@ export default function Layout({ children }) {
           <NavLink to="/dashboard" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
             <Icon d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2z" /> My VMs
           </NavLink>
+          <NavLink to="/energy" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
+            <Icon d="M13.5 2.25L4.5 13.5h6l-1.5 8.25 10.5-12h-6l0-7.5z" /> Energy & Budget
+          </NavLink>
           {(user?.isAdmin || user?.canProvision || user?.canCreateVms) && (
             <NavLink to="/provision" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
               <Icon d="M12 4.5v15m7.5-7.5h-15" /> New VM
@@ -56,6 +59,9 @@ export default function Layout({ children }) {
           </NavLink>
           <NavLink to="/ssh-keys" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
             <Icon d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" /> SSH Keys
+          </NavLink>
+          <NavLink to="/support" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
+            <Icon d="M12 21s-8.25-4.5-8.25-10.125a4.5 4.5 0 018.25-2.4 4.5 4.5 0 018.25 2.4C20.25 16.5 12 21 12 21z" /> Support the Lab
           </NavLink>
           <NavLink to="/account" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
             <Icon d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" /> Account

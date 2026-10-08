@@ -52,6 +52,8 @@ import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
+import { cancelSubscriptionsBeforeUserDeletion } from '../services/paypal.ts';
+import { PayPalError } from '../services/paypalClient.ts';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -1334,6 +1336,13 @@ router.delete('/users/:id', pUsers, async (req, res) => {
   if (!await ensureCanManageTargetUser(req, res, req.params.id)) return;
   if (parseInt(req.params.id) === req.session.userId) {
     return res.status(400).json({ error: 'Cannot delete yourself' });
+  }
+  // Keep the member and financial mapping until every provider subscription
+  // has a confirmed terminal state. Checkout being disabled does not stop bills.
+  try { await cancelSubscriptionsBeforeUserDeletion(Number(req.params.id)); }
+  catch (err) {
+    if (err instanceof PayPalError) return res.status(err.status).json({ error: err.code });
+    return res.status(500).json({ error: sanitizeError(err) });
   }
   // Assignments cascade away with the user — capture them (and the username,
   // which won't exist anymore) so the owner tags get cleared from PVE.
