@@ -8,15 +8,27 @@ import { parseDkkPerKwh } from '../services/powerPolicy.ts';
 import { calculateLabCost, getApplicablePrice, syncPublishedSpotPrices } from '../services/electricityPricing.ts';
 import { previewMonthlyElectricity, finalizeMonthlyElectricity } from '../services/monthlyElectricity.ts';
 import { startOfLocalDateUtc } from '../services/energyAccounting.ts';
+import { createExtraLabLoad, listExtraLabLoads } from '../services/extraLabLoads.ts';
 
 const router = Router();
 router.use(requireAuth, requireAdmin, requireInteractiveSession);
 const rate = (value: unknown) => { if (typeof value !== 'string') throw new Error('INVALID_RATE'); parseDkkPerKwh(value); return value; };
 const instant = (value: unknown) => { const date = new Date(String(value)); if (!Number.isFinite(date.getTime())) throw new Error('INVALID_DATE'); return date; };
 const fail = (res: any, err: unknown) => {
-  const known = err instanceof Error && (/^(INVALID_|OVERLAPPING_|MISSING_|FINALIZED_)/.test(err.message) || ['Cannot finalize an open month', 'Incomplete calculation cannot be finalized', 'Recalculation reason required', 'Invalid billing month', 'Invalid statement input', 'Month has not started', 'Calculation inputs changed; preview again'].includes(err.message));
+  const known = err instanceof Error && (/^(INVALID_|OVERLAPPING_|MISSING_|FINALIZED_|EXTRA_LOAD_LIMIT)/.test(err.message) || ['Cannot finalize an open month', 'Incomplete calculation cannot be finalized', 'Recalculation reason required', 'Invalid billing month', 'Invalid statement input', 'Month has not started', 'Calculation inputs changed; preview again'].includes(err.message));
   return res.status(known ? 400 : 500).json({ error: known ? (err as Error).message : 'INTERNAL' });
 };
+
+router.get('/extra-loads', async (_req, res) => {
+  try { res.json(await listExtraLabLoads()); } catch (err) { fail(res, err); }
+});
+router.post('/extra-loads', requireRecentReauthentication, async (req, res) => {
+  try {
+    const created = await createExtraLabLoad(req.body);
+    await logAudit(req, 'electricity_extra_load_created', String(created.id), `source=${created.source_key}; validity=${created.valid_from.toISOString()}..${created.valid_to.toISOString()}`);
+    res.status(201).json(created);
+  } catch (err) { fail(res, err); }
+});
 
 router.get('/contracts', async (_req, res) => { res.json(await db.select().from(electricityContracts).orderBy(electricityContracts.valid_from)); });
 router.get('/contracts/:id/tariffs', async (req, res) => {

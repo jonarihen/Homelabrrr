@@ -128,3 +128,18 @@ export const electricityCostStatements = pgTable('electricity_cost_statements', 
   uniqueIndex('electricity_statement_revision').on(t.contract_id, t.period_start, t.period_end, t.revision),
   index('electricity_statement_period').on(t.contract_id, t.period_start),
 ]);
+
+// Optional incremental estimates (for example switch or UPS overhead).
+// Each row represents only energy outside the measured server input watts.
+export const electricityExtraLoads = pgTable('electricity_extra_loads', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  source_key: text('source_key').notNull(),
+  label: text('label').notNull(),
+  estimated_watts: numeric('estimated_watts', { precision: 12, scale: 3 }).notNull(),
+  valid_from: timestamp('valid_from', { withTimezone: true, mode: 'date' }).notNull(),
+  valid_to: timestamp('valid_to', { withTimezone: true, mode: 'date' }).notNull(),
+  excludes_server_energy: boolean('excludes_server_energy').notNull(),
+  provenance: text('provenance').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [index('electricity_extra_load_source').on(t.source_key, t.valid_from, t.valid_to),
+  index('electricity_extra_load_validity').on(t.valid_from, t.valid_to)]);

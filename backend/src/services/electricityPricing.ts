@@ -1,12 +1,13 @@
 import { and, eq, lte, gt, desc, lt } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { electricityContracts, electricityTariffs, electricitySpotPrices, hardwareEnergyIntervals } from '../db/schema/index.ts';
+import { electricityContracts, electricityTariffs, electricitySpotPrices, electricityExtraLoads, hardwareEnergyIntervals } from '../db/schema/index.ts';
 import { fetchDayAheadPrices, type DayAheadRow } from './dayAheadPrices.ts';
 import { resolveApplicablePrice, type ApplicablePrice, type ContractPriceInput, type TariffPriceInput } from './electricityPriceMath.ts';
 import { calculateIntervalCost } from './costMath.ts';
 import type { PriceBasis } from './powerPolicy.ts';
 import { startBackgroundWork } from './backgroundWork.ts';
 import { log } from '../utils/logger.ts';
+import { extraLoadInterval } from './extraLabLoads.ts';
 
 let spotRefresh: Promise<{ imported: number }> | null = null;
 let lastAttempt = 0;
@@ -90,6 +91,8 @@ export async function calculateLabCost(startUtc: Date, endUtc: Date, contractRef
   const [contract] = await db.select().from(electricityContracts).where(eq(electricityContracts.id, Number(contractRef))).limit(1);
   if (!contract) throw new Error('Contract not found');
   const energy = await db.select().from(hardwareEnergyIntervals).where(and(lte(hardwareEnergyIntervals.start_utc, endUtc), gt(hardwareEnergyIntervals.end_utc, startUtc)));
+  const extraLoads = await db.select().from(electricityExtraLoads).where(and(lt(electricityExtraLoads.valid_from, endUtc), gt(electricityExtraLoads.valid_to, startUtc))).limit(501);
+  if (extraLoads.length > 500) throw new Error('EXTRA_LOAD_LIMIT');
   const byHardware = new Map<number, typeof energy>();
   for (const interval of energy) { const items = byHardware.get(interval.hardware_id) || []; items.push(interval); byHardware.set(interval.hardware_id, items); }
   const tariffRows = await db.select().from(electricityTariffs).where(and(eq(electricityTariffs.contract_id, contract.id), lt(electricityTariffs.valid_from, endUtc), gt(electricityTariffs.valid_to, startUtc)));
@@ -104,5 +107,11 @@ export async function calculateLabCost(startUtc: Date, endUtc: Date, contractRef
     if (price.status === 'valid' && price.dkk_per_kwh) prices.push({ startUtc: from, endUtc: to, dkkPerKwh: price.dkk_per_kwh, status: 'valid' });
   }
   const totals = [...byHardware].map(([hardwareId, intervals]) => ({ hardwareId, result: calculateIntervalCost(intervals.map((row) => ({ startUtc: row.start_utc, endUtc: row.end_utc, kwh: row.kwh, coveredSeconds: row.covered_seconds, expectedSeconds: row.expected_seconds })), prices) }));
-  return { contractRef, startUtc, endUtc, method: 'uniform_energy_within_15_minute_bucket', totals: totals.map(({ hardwareId, result }) => ({ hardwareId, kwhPriced: result.kwhPriced, costOre: result.costOre.toString(), energyCoveredSeconds: result.energyCoveredSeconds, priceCoveredSeconds: result.priceCoveredSeconds, complete: result.complete })), complete: totals.length > 0 && totals.every(({ result }) => result.complete) };
+  const extraTotals = extraLoads.map((load) => ({ load, interval: extraLoadInterval(load, startUtc, endUtc) })).filter((entry) => entry.interval !== null)
+    .map(({ load, interval }) => ({ load, result: calculateIntervalCost([interval!], prices) }));
+  return { contractRef, startUtc, endUtc, method: 'uniform_energy_within_15_minute_bucket',
+    totals: totals.map(({ hardwareId, result }) => ({ hardwareId, kwhPriced: result.kwhPriced, costOre: result.costOre.toString(), energyCoveredSeconds: result.energyCoveredSeconds, priceCoveredSeconds: result.priceCoveredSeconds, complete: result.complete })),
+    extraLoadCosts: extraTotals.map(({ load, result }) => ({ loadId: load.id, sourceKey: load.source_key, label: load.label, quality: 'estimated_constant_watts',
+      kwhPriced: result.kwhPriced, costOre: result.costOre.toString(), energyCoveredSeconds: result.energyCoveredSeconds, priceCoveredSeconds: result.priceCoveredSeconds, complete: result.complete })),
+    complete: totals.length + extraTotals.length > 0 && [...totals, ...extraTotals].every(({ result }) => result.complete) };
 }
