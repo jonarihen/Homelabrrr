@@ -14,6 +14,7 @@ export type HardwareHealth = {
 export type IloConfig = { host: string; port: number; username: string; password: string; verifyTls: boolean; caCertificate?: string | null };
 export type IloTransport = (path: string) => Promise<Record<string, any>>;
 export type RuntimePatchTransport = (path: string, oem: 'Hp' | 'Hpe', value: 'Min' | 'Dynamic' | 'Max') => Promise<void>;
+export type IloNetworkDeps = { validateTarget?: typeof validateManagementTarget; request?: typeof https.request };
 export type HardwareDiscovery = {
   identity: { uuid: string | null; serial: string | null };
   model: string | null;
@@ -104,14 +105,15 @@ export async function validateManagementTarget(host: string, resolver = dns.look
   return addresses[0];
 }
 
-export async function createIloTransport(config: IloConfig): Promise<IloTransport> {
-  const address = await validateManagementTarget(config.host);
+export async function createIloTransport(config: IloConfig, deps: IloNetworkDeps = {}): Promise<IloTransport> {
+  const address = await (deps.validateTarget || validateManagementTarget)(config.host);
+  const request = deps.request || https.request;
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
   if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true');
   const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
   return (path) => new Promise((resolve, reject) => {
     if (!/^\/(?:redfish|rest)\/v1(?:\/|$)/.test(path) || path.includes('..') || path.includes('?') || path.includes('#')) return reject(new IloError('invalid_target', 'Invalid iLO resource path'));
-    const req = https.request({ hostname: config.host, port: config.port, path, method: 'GET', timeout: 5000, rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined, lookup: (_host, _options, callback) => callback(null, address, isIP(address)), headers: { Authorization: auth, Accept: 'application/json', 'OData-Version': '4.0' } }, (res) => {
+    const req = request({ hostname: config.host, port: config.port, path, method: 'GET', timeout: 5000, rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined, lookup: (_host, _options, callback) => callback(null, address, isIP(address)), headers: { Authorization: auth, Accept: 'application/json', 'OData-Version': '4.0' } }, (res) => {
       if (res.statusCode === 401 || res.statusCode === 403) { res.resume(); return reject(new IloError('authentication_failed', 'iLO authentication or read permission failed')); }
       if ((res.statusCode || 0) >= 300 && (res.statusCode || 0) < 400) { res.resume(); return reject(new IloError('invalid_target', 'iLO redirect refused')); }
       if (res.statusCode === 404) { res.resume(); return reject(new IloError('missing_endpoint', 'iLO resource unavailable')); }
@@ -199,8 +201,9 @@ const RUNTIME_VALUES = { low: 'Min', dynamic: 'Dynamic', high: 'Max' } as const;
 // must come from discovery's ComputerSystem link, and the JSON body contains
 // exactly one PowerRegulatorMode property. No reset, BIOS or watt-cap API is
 // available through this interface.
-export async function createRuntimePatchTransport(config: IloConfig): Promise<RuntimePatchTransport> {
-  const address = await validateManagementTarget(config.host);
+export async function createRuntimePatchTransport(config: IloConfig, deps: IloNetworkDeps = {}): Promise<RuntimePatchTransport> {
+  const address = await (deps.validateTarget || validateManagementTarget)(config.host);
+  const request = deps.request || https.request;
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
   if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true');
   const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
@@ -210,7 +213,7 @@ export async function createRuntimePatchTransport(config: IloConfig): Promise<Ru
       return reject(new IloError('invalid_target', 'Invalid runtime mode target'));
     }
     const body = JSON.stringify({ Oem: { [oem]: { PowerRegulatorMode: value } } });
-    const req = https.request({
+    const req = request({
       hostname: config.host, port: config.port, path, method: 'PATCH', timeout: 5000,
       rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined,
       lookup: (_host, _options, callback) => callback(null, address, isIP(address)),

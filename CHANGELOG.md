@@ -16,6 +16,10 @@
 ## 2026-10-08 — Server energy history
 
 - Energy & Budget now charts integrated server kWh alongside instantaneous watts for 24-hour and seven-day views, with coverage in an accessible interval table. Missing intervals leave visible gaps in both trend lines.
+## 2026-10-08 — iLO transport and energy history safeguards
+
+- Fixture tests now exercise bounded iLO GET/PATCH transport failures, legacy iLO 4 fallback, redirect refusal and credential-safe errors without contacting hardware.
+- Copenhagen daily energy rollups now use the correct 23-hour and 25-hour daylight-saving lengths. Retention keeps a complete local cutoff day so later runs cannot overwrite its total with partial data.
 
 ## 2026-10-08 — Day-ahead price source compatibility
 
