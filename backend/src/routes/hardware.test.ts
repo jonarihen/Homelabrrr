@@ -80,9 +80,16 @@ test('two physical nodes behind one PVE connection remain distinct and secrets s
 test('stale edits cannot overwrite a connection; edits preserve physical identity and disable automation', async () => {
   const [beforeRow] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-a`));
   await fixture.db.update(hardwareConnections).set({ system_uuid: 'fixture-uuid', collection_enabled: true, control_enabled: true }).where(eq(hardwareConnections.id, beforeRow.id));
-  const stale = await request(app).put(`/${beforeRow.id}`).set('x-test-role', 'admin').send({ host: 'new.example.test', username: 'monitor', configVersion: beforeRow.config_version + 1 });
+  const stale = await request(app).put(`/${beforeRow.id}`).set('x-test-role', 'admin').send({ host: 'new.example.test', username: 'monitor', password: 'fixture-secret', configVersion: beforeRow.config_version + 1 });
   assert.equal(stale.status, 409);
-  const accepted = await request(app).put(`/${beforeRow.id}`).set('x-test-role', 'admin').send({ host: 'new.example.test', username: 'monitor', configVersion: beforeRow.config_version });
+  const reusedSecret = await request(app).put(`/${beforeRow.id}`).set('x-test-role', 'admin').send({ host: 'new.example.test', username: 'monitor', configVersion: beforeRow.config_version });
+  assert.equal(reusedSecret.status, 400, 'a new target must not inherit the stored password');
+  assert.equal(reusedSecret.body.code, 'PASSWORD_REQUIRED');
+  for (const change of [{ port: 8443 }, { username: 'other' }, { caCertificate: '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----' }]) {
+    const res = await request(app).put(`/${beforeRow.id}`).set('x-test-role', 'admin').send({ host: beforeRow.target_host, username: 'monitor', configVersion: beforeRow.config_version, ...change });
+    assert.ok([400].includes(res.status), `${JSON.stringify(change)} without password must be refused`);
+  }
+  const accepted = await request(app).put(`/${beforeRow.id}`).set('x-test-role', 'admin').send({ host: beforeRow.target_host, port: beforeRow.target_port, username: beforeRow.username, configVersion: beforeRow.config_version });
   assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
   assert.equal(accepted.body.system_uuid, 'fixture-uuid');
   assert.equal(accepted.body.collection_enabled, false);
@@ -126,7 +133,7 @@ test('in-flight connection test cannot overwrite a credential edit', async () =>
   const testing = request(app).post(`/${row.id}/test`).set('x-test-role', 'admin');
   const pending = testing.then((response) => response);
   while (!release) await new Promise((resolve) => setTimeout(resolve, 1));
-  const edit = await request(app).put(`/${row.id}`).set('x-test-role', 'admin').send({ host: 'replacement.example.test', username: 'monitor', configVersion: row.config_version });
+  const edit = await request(app).put(`/${row.id}`).set('x-test-role', 'admin').send({ host: 'replacement.example.test', username: 'monitor', password: 'replacement-secret', configVersion: row.config_version });
   assert.equal(edit.status, 200);
   release(found('fresh-identity'));
   assert.equal((await pending).status, 409);

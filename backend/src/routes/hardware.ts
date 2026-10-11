@@ -146,10 +146,17 @@ router.put('/:id', async (req, res) => {
     const input = target(req.body);
     const verifyTls = req.body?.verifyTls !== false;
     if (!verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') return res.status(400).json({ error: 'Unverified TLS is disabled' });
+    // The stored password is write-only. Reusing it for a different address,
+    // account or trust anchor would let an editor point the next connection
+    // test at a server they control and receive it in the Basic auth header.
+    const nextCa = req.body.clearCaCertificate ? null : (req.body.caCertificate || existing.ca_certificate);
+    const targetChanged = input.host !== existing.target_host || input.port !== existing.target_port
+      || input.username !== existing.username || nextCa !== existing.ca_certificate || verifyTls !== existing.verify_tls;
+    if (targetChanged && !req.body.password) return res.status(400).json({ error: 'Re-enter the iLO password when changing the address, account or TLS trust', code: 'PASSWORD_REQUIRED' });
     // Keep the physical identity attached to historical samples. Credential or
     // address edits require a fresh test, and that test must prove it is still
     // the same machine before collection/control can resume.
-    const [row] = await db.update(hardwareConnections).set({ target_host: input.host, target_port: input.port, username: input.username, secret: req.body.password ? encryptSecret(String(req.body.password)) : existing.secret, ca_certificate: req.body.clearCaCertificate ? null : (req.body.caCertificate || existing.ca_certificate), verify_tls: verifyTls, collection_enabled: false, control_enabled: false, config_version: existing.config_version + 1, model: null, generation: null, firmware: null, capabilities: null, last_status: 'not_tested', updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)))).returning();
+    const [row] = await db.update(hardwareConnections).set({ target_host: input.host, target_port: input.port, username: input.username, secret: req.body.password ? encryptSecret(String(req.body.password)) : existing.secret, ca_certificate: nextCa, verify_tls: verifyTls, collection_enabled: false, control_enabled: false, config_version: existing.config_version + 1, model: null, generation: null, firmware: null, capabilities: null, last_status: 'not_tested', updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)))).returning();
     if (!row) return res.status(409).json({ error: 'Connection was changed concurrently' });
     await logAudit(req, 'hardware_connection_updated', String(id), `node=${row.node_ref}`);
     res.json(safeDto(row));
