@@ -93,3 +93,40 @@ test('changed configuration disables collection without extending history', asyn
   const remaining = await fixture.db.select().from(hardwarePowerSamples).where(and(eq(hardwarePowerSamples.hardware_id, hardwareId), eq(hardwarePowerSamples.observed_at, at)));
   assert.equal(remaining.length, 0);
 });
+
+test('unaligned 60 s samples across quarter-hour boundaries keep every bucket complete', async () => {
+  // Fresh physical series so earlier tests' samples cannot border this window.
+  const [host] = await fixture.db.select({ id: pveHosts.id }).from(pveHosts).limit(1);
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  const [hardware] = await fixture.db.insert(hardwareConnections).values({ pve_host_id: host.id, node_ref: `${host.id}~pve-unaligned`, target_host: 'ilo2.example.test', username: 'reader', secret: encryptSecret('fixture-secret'), system_uuid: 'unaligned-uuid', collection_enabled: true }).returning();
+  const start = Date.parse('2026-10-09T09:59:30Z');
+  // 09:59:30 .. 10:30:30 every 60 s: buckets 10:00 and 10:15 are fully covered.
+  for (let i = 0; i <= 31; i += 1) {
+    const at = new Date(start + i * 60_000);
+    // Move the poll lease forward so every tick can claim it.
+    await fixture.db.execute(sql`UPDATE hardware_telemetry_state SET next_poll_at = ${at}, lease_until = NULL WHERE hardware_id = ${hardware.id}`);
+    const result = await poll(hardware.id, () => at, async () => reading(at.toISOString(), 400, 'UNALIGNED-UUID'));
+    assert.equal(result.status, 'ok');
+  }
+  const rows = await fixture.db.select().from(hardwareEnergyIntervals).where(eq(hardwareEnergyIntervals.hardware_id, hardware.id)).orderBy(hardwareEnergyIntervals.start_utc);
+  const byStart = new Map(rows.map((row) => [row.start_utc.toISOString(), row]));
+  for (const bucket of ['2026-10-09T10:00:00.000Z', '2026-10-09T10:15:00.000Z']) {
+    const row = byStart.get(bucket);
+    assert.ok(row, `bucket ${bucket} exists`);
+    assert.equal(row.covered_seconds, 900, `bucket ${bucket} keeps its head segment`);
+    assert.equal(row.quality, 'integrated_complete');
+    assert.ok(Math.abs(Number(row.kwh) - 0.1) < 1e-9, `400 W for 15 min is 0.1 kWh, got ${row.kwh}`);
+  }
+  // Edge buckets hold exactly the covered tail/head: 30 s each.
+  assert.equal(byStart.get('2026-10-09T09:45:00.000Z')?.covered_seconds, 30);
+  assert.equal(byStart.get('2026-10-09T10:30:00.000Z')?.covered_seconds, 30);
+  const totalSeconds = rows.reduce((sum, row) => sum + row.covered_seconds, 0);
+  assert.equal(totalSeconds, 31 * 60, 'energy is conserved across bucket splits');
+
+  // A late sample inside the first complete bucket rebuilds it without losing its head.
+  const pollAt = new Date(start + 32 * 60_000);
+  await fixture.db.execute(sql`UPDATE hardware_telemetry_state SET next_poll_at = ${pollAt}, lease_until = NULL WHERE hardware_id = ${hardware.id}`);
+  assert.equal((await poll(hardware.id, () => pollAt, async () => reading('2026-10-09T10:31:00Z', 400, 'UNALIGNED-UUID'))).status, 'ok');
+  const [first] = await fixture.db.select().from(hardwareEnergyIntervals).where(and(eq(hardwareEnergyIntervals.hardware_id, hardware.id), eq(hardwareEnergyIntervals.start_utc, new Date('2026-10-09T10:00:00Z'))));
+  assert.equal(first.covered_seconds, 900);
+});
