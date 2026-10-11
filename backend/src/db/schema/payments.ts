@@ -175,3 +175,38 @@ export const paypalMonthAllocations = pgTable('paypal_month_allocations', {
   unresolved_count: integer('unresolved_count').notNull().default(0),
   created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
 }, (t) => [uniqueIndex('paypal_month_allocation_revision').on(t.month, t.revision), index('paypal_month_allocation_month').on(t.month)]);
+
+// Versioned configuration history. Secrets are never copied here; only
+// whether the secret changed. Every save/enable/disable appends one row.
+export const paypalConfigHistory = pgTable('paypal_config_history', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  environment: text('environment').notNull(),
+  config_version: integer('config_version').notNull(),
+  action: text('action').notNull(),
+  actor_user_id: integer('actor_user_id').references(() => users.id, { onDelete: 'set null' }),
+  client_id: text('client_id'),
+  merchant_id: text('merchant_id'),
+  webhook_id: text('webhook_id'),
+  monthly_plan_id: text('monthly_plan_id'),
+  monthly_amount_ore: integer('monthly_amount_ore'),
+  enabled: boolean('enabled').notNull(),
+  secret_changed: boolean('secret_changed').notNull().default(false),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [index('paypal_config_history_env').on(t.environment, t.created_at)]);
+
+// Provider resources created by an explicit admin setup action. The request
+// ID is persisted before the provider call so a retry after a lost response
+// reuses PayPal's idempotency instead of creating a duplicate. Scoped to the
+// environment and REST app (client ID).
+export const paypalSetupResources = pgTable('paypal_setup_resources', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  environment: text('environment').notNull(),
+  client_id: text('client_id').notNull(),
+  kind: text('kind').notNull(),
+  resource_key: text('resource_key').notNull(),
+  request_id: text('request_id').notNull(),
+  provider_id: text('provider_id'),
+  status: text('status').notNull().default('requested'),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [uniqueIndex('paypal_setup_resource_key').on(t.environment, t.client_id, t.kind, t.resource_key)]);

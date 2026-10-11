@@ -4,6 +4,7 @@ import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReau
 import { captureOneOff, createOneOff, createMonthly, cancelMonthly, adminPaypalSubscriptions, adminCancelMonthly, ownPaymentHistory, memberPaypalStatus, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual, processPaypalInbox } from '../services/paypal.ts';
 import { listPaypalReviewEvents, retryPaypalReviewEvent, dismissPaypalReviewEvent } from '../services/paypalReview.ts';
 import { paypalLedgerCsv, paypalReconciliationHealth } from '../services/paypalOperations.ts';
+import { paypalConfigHistoryList, provisionPaypalResource, testPaypalConnection } from '../services/paypalSetup.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
 import { latestPaypalAllocation, recalculatePaypalAllocations } from '../services/paypalAllocation.ts';
 import { PayPalError } from '../services/paypalClient.ts';
@@ -18,6 +19,7 @@ const memberLimiter = (limit: number) => rateLimit({ windowMs: 10 * 60_000, limi
 const checkoutLimiter = memberLimiter(10);
 const captureLimiter = memberLimiter(30);
 const cancelLimiter = memberLimiter(10);
+const setupLimiter = memberLimiter(20);
 function fail(res: any, err: unknown) { res.status(err instanceof PayPalError ? err.status : 500).json({ error: err instanceof PayPalError ? err.code : 'INTERNAL' }); }
 router.get('/status', async (_req, res) => { try { res.json(await memberPaypalStatus()); } catch (err) { fail(res, err); } });
 router.get('/mine', async (req, res) => { try { res.json(await ownPaymentHistory(req.session.userId!)); } catch (err) { fail(res, err); } });
@@ -90,14 +92,34 @@ router.post('/admin/review/:id/dismiss', requireAdmin, requireRecentReauthentica
   catch (err) { fail(res, err); }
 });
 router.get('/admin/config', requireAdmin, async (_req, res) => { try { res.json(await paypalSetupStatus()); } catch (err) { fail(res, err); } });
+router.get('/admin/config/history', requireAdmin, async (req, res) => {
+  try { res.json({ items: await paypalConfigHistoryList(req.query.environment ?? 'live') }); } catch (err) { fail(res, err); }
+});
+// Saves are compare-and-set: the form must send the version it was based on
+// (null for a first save), so a stale tab cannot overwrite newer settings.
 router.post('/admin/config', requireAdmin, requireRecentReauthentication, async (req, res) => {
-  try { await savePaypalConfiguration(req.body); await logAudit(req, 'paypal.config.save'); res.json(await paypalSetupStatus()); }
+  try {
+    if (!req.body || !('expectedVersion' in req.body)) return res.status(400).json({ error: 'EXPECTED_VERSION_REQUIRED' });
+    await savePaypalConfiguration(req.body, req.session.userId!); await logAudit(req, 'paypal.config.save', String(req.body.environment || ''));
+    res.json(await paypalSetupStatus()); }
   catch (err) { fail(res, err); }
 });
 router.post('/admin/enabled', requireAdmin, requireRecentReauthentication, async (req, res) => {
   try { if (req.body?.environment === 'live' && req.body?.enabled === true && req.body?.confirmLive !== true) return res.status(400).json({ error: 'LIVE_CONFIRMATION_REQUIRED' });
     if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'INVALID_REQUEST' });
-    await setPaypalEnabled(req.body.environment, req.body.enabled); await logAudit(req, 'paypal.checkout.toggle'); res.json(await paypalSetupStatus()); }
+    const expected = Number.isInteger(req.body?.expectedVersion) ? req.body.expectedVersion : undefined;
+    await setPaypalEnabled(req.body.environment, req.body.enabled, req.session.userId!, expected);
+    await logAudit(req, 'paypal.checkout.toggle', `${String(req.body.environment || '')}:${req.body.enabled ? 'on' : 'off'}`); res.json(await paypalSetupStatus()); }
+  catch (err) { fail(res, err); }
+});
+// Read-only: obtains a token and reads the webhook/plan back. Never charges.
+router.post('/admin/test-connection', requireAdmin, setupLimiter, async (req, res) => {
+  try { res.json(await testPaypalConnection(req.body?.environment)); } catch (err) { fail(res, err); }
+});
+// Explicit, idempotent provider setup (product, plan, webhook registration).
+router.post('/admin/setup/:kind', requireAdmin, requireRecentReauthentication, setupLimiter, async (req, res) => {
+  try { const result = await provisionPaypalResource(req.body?.environment, req.params.kind, { amount: req.body?.amount });
+    await logAudit(req, 'paypal.setup.provision', `${String(req.body?.environment || '')}:${String(req.params.kind)}`); res.json(result); }
   catch (err) { fail(res, err); }
 });
 export default router;

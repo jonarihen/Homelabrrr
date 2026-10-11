@@ -296,3 +296,68 @@ test('gap 7: subscription transactions paginate and split windows when no next l
   const paged = await paypal.listAllSubscriptionTransactions(config, 'SUBGOOD', new Date('2026-09-01T00:00:00Z'), new Date('2026-09-30T00:00:00Z'));
   assert.deepEqual(paged.map((item) => item.id), ['PN1', 'PN2']);
 });
+
+test('gap 8: config saves are compare-and-set, keep the write-only secret and append history', async () => {
+  const { paypalConfigs, paypalConfigHistory } = await import('../db/schema/index.ts');
+  const [before] = await fixture.db.select().from(paypalConfigs);
+  const base = { environment: 'sandbox', clientId: 'CLIENT123', merchantId: MERCHANT, webhookId: 'WEBHOOK123' };
+  await assert.rejects(paypal.savePaypalConfiguration({ ...base, expectedVersion: before.config_version - 1 }), /CONFIG_VERSION_CONFLICT/);
+  await paypal.savePaypalConfiguration({ ...base, expectedVersion: before.config_version }, 1);
+  const [after] = await fixture.db.select().from(paypalConfigs);
+  assert.equal(after.config_version, before.config_version + 1);
+  assert.equal(after.client_secret, before.client_secret, 'omitting the secret keeps the stored ciphertext');
+  await assert.rejects(paypal.savePaypalConfiguration({ ...base, clientId: 'NEWCLIENT123', expectedVersion: after.config_version }), /INVALID_CONFIG/,
+    'a new client ID requires its own secret');
+  await assert.rejects(paypal.setPaypalEnabled('sandbox', true, 1, after.config_version - 1), /CONFIG_VERSION_CONFLICT/);
+  await paypal.setPaypalEnabled('sandbox', true, 1, after.config_version);
+  const history = await fixture.db.select().from(paypalConfigHistory);
+  assert.deepEqual(history.slice(-2).map((row) => [row.action, row.secret_changed, row.actor_user_id]), [['save', false, 1], ['enable', false, 1]]);
+  assert.ok(history.every((row) => !Object.values(row).includes('FIXTURESECRET')), 'history never stores the secret');
+  // Concurrent saves from the same version: exactly one wins.
+  const [current] = await fixture.db.select().from(paypalConfigs);
+  const results = await Promise.allSettled([1, 2].map(() => paypal.savePaypalConfiguration({ ...base, expectedVersion: current.config_version })));
+  assert.deepEqual(results.map((item) => item.status).sort(), ['fulfilled', 'rejected']);
+});
+
+test('gap 8: test-connection is read-only and setup provisioning is idempotent across lost responses', async () => {
+  process.env.PORTAL_BASE_URL = 'https://portal.example';
+  const setup = await import('./paypalSetup.ts');
+  const hookUrl = 'https://portal.example/api/payments/paypal/webhook/sandbox';
+  routes['GET /v1/notifications/webhooks'] = () => ({ webhooks: [] });
+  routes['GET /v1/notifications/webhooks/WEBHOOK123'] = () => ({ id: 'WEBHOOK123', url: hookUrl,
+    event_types: setup.PAYPAL_WEBHOOK_EVENT_TYPES.map((name) => ({ name })) });
+  const tested = await setup.testPaypalConnection('sandbox');
+  assert.equal(tested.ok, true, JSON.stringify(tested.checks));
+  assert.ok(calls.every((call) => call.method === 'GET' || call.path === '/v1/oauth2/token'), 'connection test performs no mutation');
+  routes['GET /v1/notifications/webhooks/WEBHOOK123'] = () => ({ id: 'WEBHOOK123', url: 'https://elsewhere.example/hook', event_types: [{ name: '*' }] });
+  assert.deepEqual((await setup.testPaypalConnection('sandbox')).checks.find((item) => item.name === 'webhook'), { name: 'webhook', ok: false, code: 'WEBHOOK_URL_MISMATCH' });
+
+  const productRequests: string[] = [];
+  let loseResponse = true;
+  routes['POST /v1/catalogs/products'] = () => {
+    productRequests.push(calls.at(-1)!.requestId!);
+    if (loseResponse) { loseResponse = false; return new Response('{}', { status: 502 }); }
+    return { id: 'PROD-123' };
+  };
+  await assert.rejects(setup.provisionPaypalResource('sandbox', 'product'));
+  const product = await setup.provisionPaypalResource('sandbox', 'product');
+  assert.equal(product.providerId, 'PROD-123');
+  assert.equal(productRequests.length, 2);
+  assert.equal(productRequests[0], productRequests[1], 'the retry reuses the persisted PayPal-Request-Id');
+  assert.equal((await setup.provisionPaypalResource('sandbox', 'product')).created, false);
+  assert.equal(productRequests.length, 2, 'an existing product is never recreated');
+
+  let planBody: any = null;
+  routes['POST /v1/billing/plans'] = (_url, body) => { planBody = body; return { id: 'PLAN-50', status: 'ACTIVE', ...body }; };
+  const plan = await setup.provisionPaypalResource('sandbox', 'plan', { amount: '50.00' });
+  assert.equal(plan.providerId, 'PLAN-50');
+  assert.equal(planBody.payment_preferences.auto_bill_outstanding, false);
+  assert.equal(planBody.billing_cycles.length, 1);
+  assert.equal(planBody.billing_cycles[0].pricing_scheme.fixed_price.currency_code, 'DKK');
+  await assert.rejects(setup.provisionPaypalResource('sandbox', 'plan', { amount: '0.01' }), /AMOUNT_OUT_OF_RANGE/);
+
+  routes['GET /v1/notifications/webhooks'] = () => ({ webhooks: [{ id: 'EXISTINGHOOK', url: hookUrl }] });
+  routes['POST /v1/notifications/webhooks'] = () => assert.fail('an existing registration for the URL is reused');
+  assert.equal((await setup.provisionPaypalResource('sandbox', 'webhook')).providerId, 'EXISTINGHOOK');
+  await assert.rejects(setup.provisionPaypalResource('sandbox', 'anything'), /INVALID_SETUP_KIND/);
+});

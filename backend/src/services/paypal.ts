@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq, desc, lt, gt, or, isNull, lte, notInArray, inArray, sql, count } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { paypalConfigs, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
+import { paypalConfigs, paypalConfigHistory, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
 import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
 import { log } from '../utils/logger.ts';
 import { incrementMetric } from '../utils/metricRegistry.ts';
@@ -45,43 +45,81 @@ export function paypalApprovalUrl(value: unknown, env: PayPalEnvironment) {
 export async function paypalSetupStatus() {
   const rows = await db.select().from(paypalConfigs);
   return rows.map((row) => ({ environment: row.environment, configured: Boolean(row.client_id && row.client_secret && row.merchant_id && row.webhook_id),
-    enabled: row.enabled, merchantId: row.merchant_id, clientId: row.client_id, webhookId: row.webhook_id,
+    enabled: row.enabled, merchantId: row.merchant_id, clientId: row.client_id, webhookId: row.webhook_id, secretStored: Boolean(row.client_secret),
     monthlyPlanId: row.monthly_plan_id, monthlyAmountOre: row.monthly_amount_ore, configVersion: row.config_version }));
 }
-export async function savePaypalConfiguration(input: any) {
+export function validateMonthlyPlan(plan: any, amountOre: number) {
+  const cycle = plan?.billing_cycles?.filter((item: any) => item.tenure_type === 'REGULAR');
+  if (plan?.status !== 'ACTIVE' || !Array.isArray(cycle) || cycle.length !== 1 || plan.billing_cycles.length !== 1 ||
+      cycle[0].frequency?.interval_unit !== 'MONTH' || cycle[0].frequency?.interval_count !== 1 ||
+      cycle[0].pricing_scheme?.fixed_price?.currency_code !== 'DKK' ||
+      cycle[0].pricing_scheme?.fixed_price?.value !== oreToDkk(amountOre) ||
+      plan.payment_preferences?.auto_bill_outstanding !== false || plan.payment_preferences?.setup_fee)
+    throw new PayPalError('UNSAFE_MONTHLY_PLAN', 409);
+}
+type ConfigRow = typeof paypalConfigs.$inferSelect;
+function historyRow(row: ConfigRow, action: string, actorId: number | null, secretChanged = false) {
+  return { environment: row.environment, config_version: row.config_version, action, actor_user_id: actorId, client_id: row.client_id,
+    merchant_id: row.merchant_id, webhook_id: row.webhook_id, monthly_plan_id: row.monthly_plan_id, monthly_amount_ore: row.monthly_amount_ore,
+    enabled: row.enabled, secret_changed: secretChanged };
+}
+/** Credentials for setup actions, which may run before a webhook ID exists. */
+export async function paypalSetupCredentials(value: unknown) {
+  const env = environment(value);
+  const [row] = await db.select().from(paypalConfigs).where(eq(paypalConfigs.environment, env)).limit(1);
+  if (!row?.client_id || !row.client_secret || !row.merchant_id) throw new PayPalError('NOT_CONFIGURED', 409);
+  return { row, config: credentials(row as Awaited<ReturnType<typeof configured>>) };
+}
+/**
+ * Versioned, compare-and-set configuration save. `expectedVersion` (when
+ * given) must match the stored version, so a stale form or an old request
+ * cannot overwrite a newer configuration. The secret is write-only: omitting
+ * it keeps the stored one, but only while the client ID is unchanged.
+ * Saving always disables checkout until it is explicitly re-enabled.
+ */
+export async function savePaypalConfiguration(input: any, actorId: number | null = null) {
   const env = environment(input.environment);
   const clientId = String(input.clientId || ''); const secret = String(input.clientSecret || '');
-  const merchant = String(input.merchantId || ''); const webhook = String(input.webhookId || '');
-  const plan = input.monthlyPlanId == null ? null : String(input.monthlyPlanId);
+  const merchant = String(input.merchantId || ''); const webhook = input.webhookId ? String(input.webhookId) : null;
+  const plan = input.monthlyPlanId == null || input.monthlyPlanId === '' ? null : String(input.monthlyPlanId);
   const monthlyOre = input.monthlyAmount == null || input.monthlyAmount === '' ? null : parseDkkOre(input.monthlyAmount);
-  if (!/^[A-Za-z0-9_-]{8,256}$/.test(clientId) || !secret || secret.length > 1024 ||
-      !/^[A-Za-z0-9_-]{8,128}$/.test(merchant) || !/^[A-Za-z0-9_-]{8,128}$/.test(webhook) ||
-      (plan !== null && !/^[A-Za-z0-9_-]{8,128}$/.test(plan)) || Boolean(plan) !== Boolean(monthlyOre)) throw new PayPalError('INVALID_CONFIG', 400);
-  const [old] = await db.select().from(paypalConfigs).where(eq(paypalConfigs.environment, env)).limit(1);
-  if (old?.merchant_id && old.merchant_id !== merchant) {
-    const [active] = await db.select({ id: paypalSubscriptions.id }).from(paypalSubscriptions)
-      .where(and(eq(paypalSubscriptions.environment, env), eq(paypalSubscriptions.merchant_id, old.merchant_id), notInArray(paypalSubscriptions.status, ['CANCELLED', 'EXPIRED']))).limit(1);
-    if (active) throw new PayPalError('ACTIVE_SUBSCRIPTIONS', 409);
-  }
-  await db.insert(paypalConfigs).values({ environment: env, client_id: clientId, client_secret: encryptSecret(secret), merchant_id: merchant,
-    webhook_id: webhook, monthly_plan_id: plan, monthly_amount_ore: monthlyOre, enabled: false, config_version: 1 })
-    .onConflictDoUpdate({ target: paypalConfigs.environment, set: { client_id: clientId, client_secret: encryptSecret(secret), merchant_id: merchant,
-      webhook_id: webhook, monthly_plan_id: plan, monthly_amount_ore: monthlyOre, enabled: false, config_version: (old?.config_version ?? 0) + 1, updated_at: new Date() } });
+  const expected = input.expectedVersion === undefined ? undefined : input.expectedVersion;
+  if (!/^[A-Za-z0-9_-]{8,256}$/.test(clientId) || secret.length > 1024 ||
+      !/^[A-Za-z0-9_-]{8,128}$/.test(merchant) || (webhook !== null && !/^[A-Za-z0-9_-]{8,128}$/.test(webhook)) ||
+      (plan !== null && !/^[A-Za-z0-9_-]{8,128}$/.test(plan)) || Boolean(plan) !== Boolean(monthlyOre) ||
+      (expected !== undefined && expected !== null && !Number.isInteger(expected))) throw new PayPalError('INVALID_CONFIG', 400);
+  await db.transaction(async (tx) => {
+    const [old] = await tx.select().from(paypalConfigs).where(eq(paypalConfigs.environment, env)).for('update');
+    if (expected !== undefined && (old ? expected !== old.config_version : expected !== null && expected !== 0))
+      throw new PayPalError('CONFIG_VERSION_CONFLICT', 409);
+    if (!secret && (!old?.client_secret || old.client_id !== clientId)) throw new PayPalError('INVALID_CONFIG', 400);
+    if (old?.merchant_id && old.merchant_id !== merchant) {
+      const [active] = await tx.select({ id: paypalSubscriptions.id }).from(paypalSubscriptions)
+        .where(and(eq(paypalSubscriptions.environment, env), eq(paypalSubscriptions.merchant_id, old.merchant_id), notInArray(paypalSubscriptions.status, ['CANCELLED', 'EXPIRED']))).limit(1);
+      if (active) throw new PayPalError('ACTIVE_SUBSCRIPTIONS', 409);
+    }
+    const values = { client_id: clientId, client_secret: secret ? encryptSecret(secret) : old!.client_secret, merchant_id: merchant,
+      webhook_id: webhook, monthly_plan_id: plan, monthly_amount_ore: monthlyOre, enabled: false,
+      config_version: (old?.config_version ?? 0) + 1, updated_at: new Date() };
+    let saved: ConfigRow | undefined;
+    if (old) [saved] = await tx.update(paypalConfigs).set(values)
+      .where(and(eq(paypalConfigs.environment, env), eq(paypalConfigs.config_version, old.config_version))).returning();
+    else [saved] = await tx.insert(paypalConfigs).values({ environment: env, ...values }).onConflictDoNothing().returning();
+    if (!saved) throw new PayPalError('CONFIG_VERSION_CONFLICT', 409);
+    await tx.insert(paypalConfigHistory).values(historyRow(saved, 'save', actorId, Boolean(secret)));
+  });
   paypalClient.invalidate();
 }
-export async function setPaypalEnabled(value: unknown, enabled: boolean) {
+export async function setPaypalEnabled(value: unknown, enabled: boolean, actorId: number | null = null, expectedVersion?: number) {
   const row = await configured(value);
-  if (enabled && row.monthly_plan_id) {
-    const plan = await paypalClient.getPlan(credentials(row), row.monthly_plan_id);
-    const cycle = plan.billing_cycles?.filter((item: any) => item.tenure_type === 'REGULAR');
-    if (plan.status !== 'ACTIVE' || !Array.isArray(cycle) || cycle.length !== 1 || plan.billing_cycles.length !== 1 ||
-        cycle[0].frequency?.interval_unit !== 'MONTH' || cycle[0].frequency?.interval_count !== 1 ||
-        cycle[0].pricing_scheme?.fixed_price?.currency_code !== 'DKK' ||
-        cycle[0].pricing_scheme?.fixed_price?.value !== oreToDkk(row.monthly_amount_ore!) ||
-        plan.payment_preferences?.auto_bill_outstanding !== false || plan.payment_preferences?.setup_fee)
-      throw new PayPalError('UNSAFE_MONTHLY_PLAN', 409);
-  }
-  await db.update(paypalConfigs).set({ enabled, config_version: row.config_version + 1, updated_at: new Date() }).where(eq(paypalConfigs.environment, row.environment));
+  if (expectedVersion !== undefined && expectedVersion !== row.config_version) throw new PayPalError('CONFIG_VERSION_CONFLICT', 409);
+  if (enabled && row.monthly_plan_id) validateMonthlyPlan(await paypalClient.getPlan(credentials(row), row.monthly_plan_id), row.monthly_amount_ore!);
+  await db.transaction(async (tx) => {
+    const [saved] = await tx.update(paypalConfigs).set({ enabled, config_version: row.config_version + 1, updated_at: new Date() })
+      .where(and(eq(paypalConfigs.environment, row.environment), eq(paypalConfigs.config_version, row.config_version))).returning();
+    if (!saved) throw new PayPalError('CONFIG_VERSION_CONFLICT', 409);
+    await tx.insert(paypalConfigHistory).values(historyRow(saved, enabled ? 'enable' : 'disable', actorId));
+  });
   paypalClient.invalidate();
 }
 // Durable per-member checkout limit: counting and inserting happen under a

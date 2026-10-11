@@ -136,6 +136,23 @@ export class PayPalClient {
     return this.request(config, 'POST', '/v1/billing/subscriptions', { plan_id: planId, custom_id: customId,
       application_context: { return_url: returnUrl, cancel_url: cancelUrl, user_action: 'SUBSCRIBE_NOW' } }, requestId);
   }
+  // Explicit admin setup actions only; never called at startup.
+  async createProduct(config: PayPalCredentials, requestId: string) {
+    return this.request(config, 'POST', '/v1/catalogs/products', { name: 'Homelab voluntary support', type: 'SERVICE',
+      description: 'Optional voluntary support for a private homelab. Grants no access or entitlement.' }, requestId);
+  }
+  async createMonthlyPlan(config: PayPalCredentials, productId: string, amount: string, requestId: string) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(productId) || !/^\d{1,6}\.\d{2}$/.test(amount)) throw new PayPalError('INVALID_ID', 400);
+    return this.request(config, 'POST', '/v1/billing/plans', { product_id: productId, name: `Voluntary monthly support ${amount} DKK`,
+      status: 'ACTIVE', billing_cycles: [{ frequency: { interval_unit: 'MONTH', interval_count: 1 }, tenure_type: 'REGULAR', sequence: 1,
+        total_cycles: 0, pricing_scheme: { fixed_price: { currency_code: 'DKK', value: amount } } }],
+      payment_preferences: { auto_bill_outstanding: false, setup_fee_failure_action: 'CANCEL', payment_failure_threshold: 1 } }, requestId);
+  }
+  async listWebhooks(config: PayPalCredentials) { return this.request(config, 'GET', '/v1/notifications/webhooks'); }
+  async getWebhook(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v1/notifications/webhooks', id)); }
+  async createWebhook(config: PayPalCredentials, url: string, eventTypes: string[]) {
+    return this.request(config, 'POST', '/v1/notifications/webhooks', { url, event_types: eventTypes.map((name) => ({ name })) });
+  }
   async getPlan(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v1/billing/plans', id)); }
   async getSubscription(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v1/billing/subscriptions', id)); }
   async cancelSubscription(config: PayPalCredentials, id: string, requestId: string) {

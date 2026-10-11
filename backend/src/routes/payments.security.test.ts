@@ -292,7 +292,7 @@ test('review queue and resync routes are admin-only and reauth-gated where destr
 });
 
 test('webhook ingress is rate limited without revealing anything', async () => {
-  let limited = null;
+  let limited: any = null;
   for (let index = 0; index < 60 && !limited; index++) {
     const response = await request(app).post('/api/payments/paypal/webhook/sandbox').set(webhookHeaders).send('{not json');
     if (response.status === 429) limited = response;
