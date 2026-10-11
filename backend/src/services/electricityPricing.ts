@@ -90,7 +90,9 @@ export async function calculateLabCost(startUtc: Date, endUtc: Date, contractRef
   if (!/^\d+$/.test(contractRef)) throw new Error('Invalid contract reference');
   const [contract] = await db.select().from(electricityContracts).where(eq(electricityContracts.id, Number(contractRef))).limit(1);
   if (!contract) throw new Error('Contract not found');
-  const energy = await db.select().from(hardwareEnergyIntervals).where(and(lte(hardwareEnergyIntervals.start_utc, endUtc), gt(hardwareEnergyIntervals.end_utc, startUtc)));
+  // Half-open period: an interval starting exactly at endUtc belongs to the
+  // next period and must not make this one permanently incomplete.
+  const energy = await db.select().from(hardwareEnergyIntervals).where(and(lt(hardwareEnergyIntervals.start_utc, endUtc), gt(hardwareEnergyIntervals.end_utc, startUtc)));
   const extraLoads = await db.select().from(electricityExtraLoads).where(and(lt(electricityExtraLoads.valid_from, endUtc), gt(electricityExtraLoads.valid_to, startUtc))).limit(501);
   if (extraLoads.length > 500) throw new Error('EXTRA_LOAD_LIMIT');
   const byHardware = new Map<number, typeof energy>();
