@@ -13,6 +13,12 @@
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
 - Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+## 2026-10-08 — Private PayPal support controls and budget allocation
+
+- Members can review their own verified PayPal postings and subscriptions, start an optional PayPal-hosted one-off or monthly approval when live checkout is enabled, and request subscription cancellation. Approval redirects alone never count as receipts.
+- Administrators can configure separate sandbox and live merchant credentials, keep checkout disabled by default, inspect verified live ledger totals, reconcile with PayPal, and calculate append-only monthly allocations of net support to finalized lab electricity costs.
+- Late refunds revise subsequent credit balances. Unknown provider fees or incomplete costs remain explicitly unresolved; negative balances are owner-funded adjustments, never contributor debts. No live PayPal transaction has been performed.
+
 ## 2026-10-08 — Power mode policy foundation
 
 - Hardware administrators can save a Copenhagen weekly Power Regulator schedule, configure price cap and boost thresholds, pause automation, and request a temporary manual mode. All automatic hardware changes start disabled; live control requires a separate capability test, recent reauthentication, and explicit enablement.
@@ -1869,3 +1875,13 @@ Proxmox-frontend/
 ## 2026-10-08 — ElOverblik electricity meter foundation
 
 Added a private administrator setup flow for ElOverblik Customer API credentials and meter selection, with encrypted tokens, normalized consumption intervals, versioned charge snapshots and disabled-by-default syncing. Household meter data remains separate from server power data.
+## 2026-10-08 — Private PayPal support foundation
+
+Added disabled-by-default PayPal sandbox/live configuration, server-side one-off order handling, fixed-plan monthly approval and cancellation, verified webhook intake, and a deduplicated posting foundation. Live checkout remains off pending full reconciliation and accounting integration.
+
+## 2026-10-08 — PayPal receipt reconciliation
+
+Added bounded subscription transaction reconciliation, exact reported fee posting, and verified capture-refund accounting. Unresolved adjustments are held from finalized support totals for administrator review.
+The reconciliation pass also imports missed app-scoped PayPal webhook events through a bounded authenticated lookup, including one-off refund notifications.
+Member deletion now waits for confirmed cancellation of linked monthly subscriptions; unknown cancellation outcomes retain the account and retry through reconciliation.
+Targeted Transaction Search readback can now post linked refund and reversal adjustments with provider-reported fee credits. Pending or ambiguous adjustments retry with bounded backoff, then require review.

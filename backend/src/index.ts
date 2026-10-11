@@ -41,6 +41,9 @@ import electricityPricingRoutes from './routes/electricityPricing.ts';
 import { getApplicablePrice, startElectricityPriceSync, stopElectricityPriceSync } from './services/electricityPricing.ts';
 import type { ApplicablePowerPrice } from './services/powerPolicy.ts';
 import { startElOverblikScheduler, stopElOverblikScheduler } from './services/eloverblik.ts';
+import paymentsWebhookRoutes from './routes/paymentsWebhook.ts';
+import paymentsRoutes from './routes/payments.ts';
+import { startPaypalInboxWorker, stopPaypalInboxWorker, startPaypalReconciliation, stopPaypalReconciliation } from './services/paypal.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.ts';
 import { decryptSecret, encryptSecret } from './utils/secrets.ts';
@@ -99,6 +102,8 @@ app.get('/api/health/ready', async (_req, res) => {
   const status = await readiness();
   res.status(status.ok ? 200 : 503).json(status);
 });
+// The sole unauthenticated provider ingress receives original bytes before JSON/CSRF/session middleware.
+app.use('/api/payments/paypal/webhook', paymentsWebhookRoutes);
 app.use(express.json({ limit: '1mb' }));
 if (ALLOWED_ORIGIN) {
   app.use(cors({
@@ -177,6 +182,7 @@ app.use(auditMutations);
 app.use(enforceTwoFactorEnrollmentOnly);
 
 app.use('/api/auth',  authRoutes);
+app.use('/api/payments', paymentsRoutes);
 app.use('/api/admin/operations', operationsRoutes);
 app.use('/api/admin/energy-data', energyDataRoutes);
 app.use('/api/admin/electricity-pricing', electricityPricingRoutes);
@@ -714,6 +720,8 @@ startPowerControlWorker(async (at, policy) => {
   if (!price || price.status !== 'valid' || !price.dkk_per_kwh || !price.start_utc || !price.end_utc) return null;
   return price as ApplicablePowerPrice;
 });
+startPaypalInboxWorker();
+startPaypalReconciliation();
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -760,6 +768,8 @@ async function shutdown(signal) {
   stopElectricityPriceSync();
   stopHardwareTelemetry();
   stopPowerControlWorker();
+  stopPaypalInboxWorker();
+  stopPaypalReconciliation();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {
