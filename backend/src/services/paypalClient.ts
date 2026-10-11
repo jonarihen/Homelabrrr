@@ -111,11 +111,47 @@ export class PayPalClient {
     const path = pathWithId('/v1/billing/subscriptions', id, '/transactions');
     return this.request(config, 'GET', `${path}?start_time=${encodeURIComponent(from.toISOString())}&end_time=${encodeURIComponent(to.toISOString())}`);
   }
+  /**
+   * Follow a provider HATEOAS `next` link without turning it into a generic
+   * fetch: the link must stay on this environment's fixed API origin and the
+   * expected path, and may carry only allow-listed query parameters, which are
+   * re-encoded rather than passed through.
+   */
+  async followNext(config: PayPalCredentials, href: unknown, expectedPath: string, allowedParams: string[]) {
+    let url: URL;
+    try { url = new URL(String(href)); } catch { throw new PayPalError('NEXT_LINK_INVALID', 409); }
+    if (url.origin !== ORIGINS[config.environment] || url.username || url.password || url.hash || url.pathname !== expectedPath)
+      throw new PayPalError('NEXT_LINK_INVALID', 409);
+    const params = new URLSearchParams();
+    for (const [key, value] of url.searchParams) {
+      if (!allowedParams.includes(key) || value.length > 512 || params.has(key)) throw new PayPalError('NEXT_LINK_INVALID', 409);
+      params.set(key, value);
+    }
+    const query = params.toString();
+    return this.request(config, 'GET', `${expectedPath}${query ? `?${query}` : ''}`);
+  }
   async getCapture(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v2/payments/captures', id)); }
   async createSubscription(config: PayPalCredentials, planId: string, customId: string, requestId: string, returnUrl: string, cancelUrl: string) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(planId)) throw new PayPalError('INVALID_ID', 400);
     return this.request(config, 'POST', '/v1/billing/subscriptions', { plan_id: planId, custom_id: customId,
       application_context: { return_url: returnUrl, cancel_url: cancelUrl, user_action: 'SUBSCRIBE_NOW' } }, requestId);
+  }
+  // Explicit admin setup actions only; never called at startup.
+  async createProduct(config: PayPalCredentials, requestId: string) {
+    return this.request(config, 'POST', '/v1/catalogs/products', { name: 'Homelab voluntary support', type: 'SERVICE',
+      description: 'Optional voluntary support for a private homelab. Grants no access or entitlement.' }, requestId);
+  }
+  async createMonthlyPlan(config: PayPalCredentials, productId: string, amount: string, requestId: string) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(productId) || !/^\d{1,6}\.\d{2}$/.test(amount)) throw new PayPalError('INVALID_ID', 400);
+    return this.request(config, 'POST', '/v1/billing/plans', { product_id: productId, name: `Voluntary monthly support ${amount} DKK`,
+      status: 'ACTIVE', billing_cycles: [{ frequency: { interval_unit: 'MONTH', interval_count: 1 }, tenure_type: 'REGULAR', sequence: 1,
+        total_cycles: 0, pricing_scheme: { fixed_price: { currency_code: 'DKK', value: amount } } }],
+      payment_preferences: { auto_bill_outstanding: false, setup_fee_failure_action: 'CANCEL', payment_failure_threshold: 1 } }, requestId);
+  }
+  async listWebhooks(config: PayPalCredentials) { return this.request(config, 'GET', '/v1/notifications/webhooks'); }
+  async getWebhook(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v1/notifications/webhooks', id)); }
+  async createWebhook(config: PayPalCredentials, url: string, eventTypes: string[]) {
+    return this.request(config, 'POST', '/v1/notifications/webhooks', { url, event_types: eventTypes.map((name) => ({ name })) });
   }
   async getPlan(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v1/billing/plans', id)); }
   async getSubscription(config: PayPalCredentials, id: string) { return this.request(config, 'GET', pathWithId('/v1/billing/subscriptions', id)); }

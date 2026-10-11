@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
+import PayPalOperationsPanel from './PayPalOperationsPanel.jsx';
+import PayPalSetupPanel from './PayPalSetupPanel.jsx';
 
 const monthNow = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit' }).format(new Date());
 const money = (ore) => typeof ore === 'number' ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(ore / 100) : 'Unknown';
@@ -49,13 +51,15 @@ export default function PayPalPage() {
   };
   const save = (event) => {
     event.preventDefault();
-    const payload = { environment, ...form, monthlyPlanId: form.monthlyPlanId || null, monthlyAmount: form.monthlyAmount || null };
+    const payload = { environment, ...form, webhookId: form.webhookId || null, monthlyPlanId: form.monthlyPlanId || null,
+      monthlyAmount: form.monthlyAmount || null, expectedVersion: current?.configVersion ?? null };
     act('save', () => api.post('/payments/admin/config', payload)).then((saved) => { if (saved) setForm({ clientId: '', clientSecret: '', merchantId: '', webhookId: '', monthlyPlanId: '', monthlyAmount: '' }); });
   };
   const toggle = () => {
     const enabling = !current?.enabled;
     if (enabling && !window.confirm(`Enable ${environment.toUpperCase()} PayPal checkout? This permits real charges if LIVE is selected.`)) return;
-    act('toggle', () => api.post('/payments/admin/enabled', { environment, enabled: enabling, confirmLive: environment === 'live' && enabling }));
+    act('toggle', () => api.post('/payments/admin/enabled', { environment, enabled: enabling, confirmLive: environment === 'live' && enabling,
+      expectedVersion: current?.configVersion }));
   };
   return <div className="p-6 lg:p-8 max-w-6xl space-y-6">
     <RecentReauthDialog open={!!reauth} busy={reauthBusy} error={reauthError} onCancel={() => setReauth(null)} onConfirm={confirmReauth} />
@@ -71,13 +75,13 @@ export default function PayPalPage() {
         <p className="text-xs text-gray-500 mt-1">Merchant {current?.merchantId || '—'} · Webhook {current?.webhookId || '—'}</p>
         <form onSubmit={save} className="mt-5 space-y-3">
           {[['clientId', 'Client ID'], ['clientSecret', 'Client secret'], ['merchantId', 'Merchant ID'], ['webhookId', 'Webhook ID'], ['monthlyPlanId', 'Monthly plan ID (optional)'], ['monthlyAmount', 'Monthly amount in DKK (optional)']].map(([field, label]) => <label key={field} className="block text-xs text-gray-400">{label}<input value={form[field]} onChange={(event) => setForm((old) => ({ ...old, [field]: event.target.value }))} type={field === 'clientSecret' ? 'password' : 'text'} autoComplete="off" className="block w-full mt-1 bg-gray-950 border border-gray-700 px-3 py-2 text-white" /></label>)}
-          <p className="text-xs text-gray-500">Saving replaces this environment’s configuration and disables checkout until explicitly enabled again. Enter every field, including the secret.</p>
+          <p className="text-xs text-gray-500">Saving creates a new configuration version and disables checkout until explicitly enabled again. Leave the secret blank to keep the stored one (only while the client ID is unchanged). A save based on an outdated version is refused.</p>
           <div className="flex flex-wrap gap-2"><button disabled={!!busy} className="border border-orange-600 px-4 py-2 text-xs text-orange-200 disabled:opacity-40">Save configuration</button>
             <button type="button" disabled={!!busy || !current?.configured} onClick={toggle} className="border border-gray-700 px-4 py-2 text-xs text-gray-200 disabled:opacity-40">{current?.enabled ? 'Disable checkout' : 'Enable checkout'}</button></div>
         </form>
       </section>
       <div className="space-y-4"><section className={card}><h2 className="aaris-display text-lg text-gray-100">Verified live ledger</h2>
-        {summary ? <dl className="grid grid-cols-2 gap-3 mt-4 text-sm">{[['Gross', money(summary.grossOre)], ['Fees', money(summary.feeDebitsOre + summary.feeCreditsOre)], ['Refunds / reversals', money(summary.refundDebitsOre)], ['Known net', money(summary.knownNetOre)], ['Unresolved transactions', summary.unresolvedTransactions], ['Review events', summary.reviewEvents]].map(([name, value]) => <div key={name}><dt className="text-xs text-gray-500">{name}</dt><dd className="text-white">{value}</dd></div>)}</dl> : <p className="text-gray-500 mt-4">Loading…</p>}
+        {summary ? <dl className="grid grid-cols-2 gap-3 mt-4 text-sm">{[['Gross', money(summary.grossOre)], ['Fees', money(summary.feeDebitsOre + summary.feeCreditsOre)], ['Refunds / reversals', money(summary.refundDebitsOre)], ['Known net', money(summary.knownNetOre)], ['Unresolved transactions', summary.unresolvedTransactions], ['Review events', summary.reviewEvents], ['Pending · not counted', `${summary.pendingCount ?? 0} · ${money(summary.pendingOre)}`], ['Disputed · not deducted', `${summary.disputeCount ?? 0} · ${money(summary.disputedOre)}`]].map(([name, value]) => <div key={name}><dt className="text-xs text-gray-500">{name}</dt><dd className="text-white">{value}</dd></div>)}</dl> : <p className="text-gray-500 mt-4">Loading…</p>}
         <p className="text-xs text-gray-500 mt-3">Unknown fees and review items are excluded from confirmed net totals.</p>
         <button type="button" disabled={!!busy || !current?.configured} onClick={() => act('reconcile', () => api.post('/payments/admin/reconcile', { environment }))} className="mt-3 border border-gray-700 px-4 py-2 text-xs text-gray-200 disabled:opacity-40">Reconcile {environment}</button>
       </section>
@@ -88,5 +92,7 @@ export default function PayPalPage() {
         <button type="button" disabled={!!busy || !month} onClick={() => act('allocate', () => api.post('/payments/admin/allocate', { month }))} className="mt-4 border border-gray-700 px-4 py-2 text-xs text-gray-200 disabled:opacity-40">Recalculate through month</button>
       </section></div>
     </div>
+    <PayPalSetupPanel environment={environment} act={act} busy={busy} configVersion={current?.configVersion} onUseId={(field, value) => setForm((old) => ({ ...old, [field]: value }))} />
+    <PayPalOperationsPanel environment={environment} act={act} busy={busy} />
   </div>;
 }

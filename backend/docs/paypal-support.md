@@ -33,3 +33,38 @@ Member deletion now requests cancellation of every linked nonterminal subscripti
 ## Verification boundary
 
 `src/routes/payments.integration.test.ts` runs against a throwaway PostgreSQL database with all migrations applied and a fixed-origin PayPal HTTP fixture. It covers member/admin authorization, disabled checkout, hosted approval without a receipt, approved order capture, verified and rejected webhook delivery, duplicate-event replay, actual capture and subscription fees, refund postings, an unresolved fee, and subscription cancellation readback. No request reaches PayPal. A real PayPal sandbox account still needs checkout, subscription, webhook, settlement fee, refund and reconciliation verification before live checkout is enabled.
+
+## Operator runbook (hardening update, 2026-10-11)
+
+PayPal behaviour referenced here was rechecked against the official Orders v2, Payments v2, Subscriptions v1, Webhooks and Transaction Search references on 2026-10-11. No real sandbox or live account was used; every automated test runs against an injected HTTP fixture.
+
+### Account and setup
+1. Use a verified PayPal **Business** account whose receiving preferences accept DKK. A private account may not be eligible. Create a REST app per environment with Checkout and Subscriptions, plus the Transaction Search reporting scope needed for sale refund/reversal lookups.
+2. In `/admin/paypal`, save the client ID, secret and receiving merchant ID. The secret is write-only. Leave it blank to keep the stored secret, which works only while the client ID is unchanged. Every save, enable and disable creates a new config version with a history row that holds no secret. A save from an outdated form (stale `expectedVersion`) is refused with `CONFIG_VERSION_CONFLICT`.
+3. **Register webhook** creates the registration for `https://<portal>/api/payments/paypal/webhook/<environment>` with the required events, or reuses an existing registration for that URL. **Create product** and **Create monthly plan** are idempotent per environment and REST app. The `PayPal-Request-Id` is stored before each call, so retrying after a lost response returns the same resource instead of a duplicate. Created IDs must still be saved or offered explicitly.
+4. **Test connection** is read-only. It gets a token, reads the webhook back (URL and events), and validates the configured plan. It never charges anyone.
+5. Enable sandbox first. Live enablement needs recent reauthentication and explicit live confirmation.
+
+### Reverse proxy
+Only `POST /api/payments/paypal/webhook/<environment>` must be reachable by PayPal, over HTTPS. Keep the rest of the portal, iLO and Proxmox private (for example, allow-list that one path at the edge). Forward `X-Forwarded-Proto` so the backend can refuse plain HTTP. The route keeps raw bytes for signature verification and bypasses only session/CSRF. Per-client requests are limited (`PAYPAL_WEBHOOK_RATE_LIMIT_PER_MINUTE`, default 120). A 429 or 5xx makes PayPal redeliver, and an event is acknowledged only after it is verified with `SUCCESS` and durably stored.
+
+### Monthly plans and failure behaviour
+Plans created here use one regular monthly DKK cycle, no setup fee or trial, `auto_bill_outstanding: false` (a missed payment is never collected later) and `payment_failure_threshold: 1`, so PayPal suspends the subscription after one failed payment instead of retrying into debt. Admins can offer several validated plans, one per amount. Members choose only among offered amounts, and the plan ID is resolved and re-validated server-side. A member with a live subscription cannot start a second one. Changing the amount cancels the current subscription and waits for PayPal to confirm, and only then offers a new approval. Retiring a plan stops new approvals but does not cancel existing billing. Disabling checkout does not cancel subscriptions either.
+
+### Reconciliation
+The interval is `PAYPAL_RECONCILE_INTERVAL_MINUTES` (default 360, range 15–1440). A startup pass runs about two minutes after boot. Each pass:
+- recovers missed webhook events. Validated `next` pages are followed (at most 20 per window), and the event cursor advances as soon as that step succeeds;
+- reads back uncertain one-off captures, including `capturing` intents orphaned by a crash (after 10 minutes). Only an order PayPal still reports as `APPROVED` with no capture is captured again, with the persisted request ID, at most 5 times;
+- reconciles subscriptions. Each one is isolated with its own exponential backoff, so one broken mapping cannot abort the pass. Transaction listing follows pages and splits windows when needed;
+- retries missing fee/net detail and refund coverage for `net_unresolved` rows. Nothing is estimated.
+
+A partial run is shown as `partial` with a failed-item count. Logs and metrics (`paypal_reconcile_failures`, `paypal_webhook_events`) carry only fixed labels: no IDs, amounts or payer data.
+
+### Refunds, holds and currencies
+A capture reported as `PARTIALLY_REFUNDED`, `REFUNDED` or `REVERSED`, or a sale reported as partially/fully refunded, keeps an adjustment placeholder unresolved. That blocks finalized net until every refund is recorded. Capture refunds are listed from the order readback. Sale refunds arrive by verified event, and a partial sale refund also waits until missed-event recovery has passed the time the refund was first seen. Pending captures/sales, denials and disputes are tracked separately: they are shown but never subtracted, because only an actual refund or reversal posting reduces net. Non-DKK settlement amounts are stored verbatim and never summed into DKK.
+
+### Review queue and manual transfers
+`needs_review` events block finalized net. **Retry** sends an event back through verified processing. **Dismiss** requires reauthentication and a note, records the event as not lab income and posts nothing. Members can report a bank transfer, but the report never posts. An admin confirms it with evidence, which posts one live DKK receipt (merchant scope `manual`). References matching an imported PayPal transaction are refused, a nearby same-amount PayPal receipt from the same member requires an explicit override, and a correction appends a reversal. Ledger CSV export requires reauthentication, is audited, and escapes formula-like cells.
+
+### Simulator limits
+PayPal's webhook simulator sends events that cannot pass `verify-webhook-signature`, so they are rejected by design. Never weaken verification to make them pass. Use real sandbox payments to exercise callbacks. Before enabling live checkout, verify in sandbox: one-off checkout, a monthly subscription through at least one installment, webhook delivery, actual fees, a partial and a full refund, cancellation from PayPal's side, and a reconciliation pass after a simulated outage.
