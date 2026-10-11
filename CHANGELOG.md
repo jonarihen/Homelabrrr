@@ -13,6 +13,11 @@
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
 - Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+## 2026-10-08 — Power mode policy foundation
+
+- Hardware administrators can save a Copenhagen weekly Power Regulator schedule, configure price cap and boost thresholds, pause automation, and request a temporary manual mode. All automatic hardware changes start disabled; live control requires a separate capability test, recent reauthentication, and explicit enablement.
+- One per-node controller resolves manual, schedule, and price decisions, claims work before dispatch, rechecks policy and price state, and verifies the resulting iLO mode. It only writes the three supported runtime Power Regulator values; it never requests a reboot, BIOS setting, watt cap, or VM action.
+- The price worker currently falls back to the configured schedule until the electricity price provider is integrated. These controls have only been exercised against tests and fixtures, not a live server.
 
 ## 2026-10-08 — Server power telemetry and history
 

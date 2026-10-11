@@ -45,6 +45,20 @@ test('weekday preset owns overnight windows by start day', () => {
   assert.equal(scheduledModeAt(schedule, at('2026-10-18T20:00:00Z')), 'low');
 });
 
+test('Copenhagen spring gap and repeated autumn hour follow wall-clock schedule', () => {
+  const schedule = weekdayPreset();
+  schedule.windows = [{ days: 1, start: '01:30', end: '04:00', mode: 'high' }];
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T00:29:00Z')), 'low');
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T00:30:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T01:30:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T01:31:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-03-29T02:00:00Z')), 'low');
+  schedule.windows = [{ days: 1, start: '02:00', end: '03:00', mode: 'high' }];
+  assert.equal(scheduledModeAt(schedule, at('2026-10-25T00:30:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-10-25T01:30:00Z')), 'high');
+  assert.equal(scheduledModeAt(schedule, at('2026-10-25T02:00:00Z')), 'low');
+});
+
 test('window overlap includes overnight Sunday to Monday', () => {
   const schedule = weekdayPreset();
   schedule.windows = [
@@ -118,8 +132,33 @@ test('mismatched basis and incomplete prices cannot trigger High', () => {
   assert.equal(resolvePowerDecision(x).reason, 'price_unavailable_fallback');
 });
 
+test('15-minute price interval ends exclusively and clears a prior cheap latch', () => {
+  const x = input(at('2026-10-12T16:14:59Z'));
+  x.price!.start_utc = '2026-10-12T16:00:00Z';
+  x.price!.end_utc = '2026-10-12T16:15:00Z';
+  x.price!.dkk_per_kwh = '0.75';
+  const cheap = resolvePowerDecision(x);
+  assert.equal(cheap.reason, 'price_low');
+  x.previousLatch = cheap.latch;
+  x.now = at('2026-10-12T16:15:00Z');
+  const expired = resolvePowerDecision(x);
+  assert.equal(expired.reason, 'price_unavailable_fallback');
+  assert.equal(expired.latch.cheap, false);
+});
+
 test('overlapping release bands are invalid', () => {
   const invalid = structuredClone(policy);
   invalid.cheap.threshold = '2.95';
   assert.throws(() => validatePricePolicy(invalid), /overlap/);
+});
+
+test('one enabled price rule does not parse the disabled rule blank threshold', () => {
+  const x = input();
+  x.pricePolicy.cheap = { enabled: false, threshold: '', hysteresis: '' };
+  x.price!.dkk_per_kwh = '3.50';
+  assert.equal(resolvePowerDecision(x).reason, 'price_high');
+  x.pricePolicy.expensive = { enabled: false, threshold: '', hysteresis: '', capMode: 'dynamic' };
+  x.pricePolicy.cheap = { enabled: true, threshold: '1.00', hysteresis: '0.10' };
+  x.price!.dkk_per_kwh = '0.50';
+  assert.equal(resolvePowerDecision(x).reason, 'price_low');
 });

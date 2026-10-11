@@ -20,6 +20,8 @@ import authRoutes from './routes/auth.ts';
 import adminRoutes from './routes/admin.ts';
 import hardwareRoutes from './routes/hardware.ts';
 import { startHardwareTelemetry, stopHardwareTelemetry, runHardwareTelemetryRetention } from './services/hardwareTelemetry.ts';
+import powerControlRoutes from './routes/powerControl.ts';
+import { startPowerControlWorker, stopPowerControlWorker } from './services/powerControlWorker.ts';
 import vmRoutes, { vncSessions } from './routes/vms.ts';
 import sshRoutes, { sshSessions } from './routes/ssh.ts';
 import sftpRoutes from './routes/sftp.ts';
@@ -176,6 +178,7 @@ app.use('/api/admin/operations', operationsRoutes);
 app.use('/api/admin/energy-data', energyDataRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin/hardware-connections', hardwareRoutes);
+app.use('/api/admin/power-control', powerControlRoutes);
 app.use('/api/vms',   vmRoutes);
 app.use('/api/ssh',   sshRoutes);
 app.use('/api/sftp',  sftpRoutes);
@@ -701,6 +704,10 @@ const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
 startScheduler();
 startElOverblikScheduler();
 startHardwareTelemetry();
+// Until a complete retail/spot price is configured, price rules use the
+// documented weekly/default fallback. The pricing service replaces this
+// callback when #237 is integrated; it never fetches on a browser read.
+startPowerControlWorker(async () => null);
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -745,6 +752,7 @@ async function shutdown(signal) {
   stopScheduler();
   stopElOverblikScheduler();
   stopHardwareTelemetry();
+  stopPowerControlWorker();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {

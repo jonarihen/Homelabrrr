@@ -126,6 +126,11 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'node health poll interval for unreachable/recovered notifications; 0 disables it',
   },
   {
+    name: 'HARDWARE_POLL_INTERVAL_MS',
+    defaultValue: '60000',
+    effect: 'iLO telemetry collection interval for explicitly enabled physical nodes (minimum 30000)',
+  },
+  {
     name: 'LEASE_CHECK_INTERVAL_MS',
     defaultValue: '900000',
     effect: 'how often expired VM leases are swept (floored at 60000)',
