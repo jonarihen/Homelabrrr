@@ -3,9 +3,12 @@ import { and, eq, desc, lt, gt, or, isNull, lte, notInArray, inArray, sql, count
 import { db } from '../db/client.ts';
 import { paypalConfigs, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
 import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
+import { log } from '../utils/logger.ts';
+import { incrementMetric } from '../utils/metricRegistry.ts';
 import { PayPalError, paypalClient, type PayPalEnvironment, type PayPalCredentials } from './paypalClient.ts';
 import { normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund, normalizeReportedAdjustment, oreToDkk, parseDkkOre } from './paypalMoney.ts';
 import { postReceipt, postCaptureRefund, postProviderAdjustment } from './paypalLedger.ts';
+import { isAdjustedSaleStatus, linkedCaptureId, settleCaptureAdjustments, settleSaleAdjustments } from './paypalCoverage.ts';
 
 function environment(value: unknown): PayPalEnvironment {
   if (value !== 'sandbox' && value !== 'live') throw new PayPalError('INVALID_ENVIRONMENT', 400);
@@ -99,6 +102,7 @@ export async function captureOneOff(userId: number, intentId: string) {
   const [intent] = await db.select().from(paypalIntents).where(and(eq(paypalIntents.id, intentId), eq(paypalIntents.user_id, userId))).limit(1);
   if (!intent || intent.kind !== 'one_off' || !intent.provider_id) throw new PayPalError('INTENT_NOT_FOUND', 404);
   if (intent.status === 'verified') return { status: 'verified' };
+  if (intent.status === 'capture_failed' || intent.status === 'expired') return { status: 'failed' };
   const row = await configured(intent.environment);
   if (row.merchant_id !== intent.merchant_id || row.config_version !== intent.config_version) throw new PayPalError('CONFIG_CHANGED', 409);
   const config = credentials(row);
@@ -133,12 +137,18 @@ export async function captureOneOff(userId: number, intentId: string) {
 }
 export async function ingestOneOffCapture(config: PayPalCredentials, intent: typeof paypalIntents.$inferSelect, captureId: string, verification: string) {
   const detail = await paypalClient.getCapture(config, captureId);
+  const result = await postOneOffCaptureDetail(intent, detail, verification);
+  // A capture already reported as refunded/reversed must not stand as plain
+  // income: record its adjustments (or keep it unresolved) before finalizing.
+  const adjustment = await settleCaptureAdjustments(config, intent, detail, verification);
+  const status = result.status === 'posted' && adjustment.status !== 'unresolved' ? 'verified' : 'net_unresolved';
+  await db.update(paypalIntents).set({ status, updated_at: new Date() }).where(eq(paypalIntents.id, intent.id));
+  return { status };
+}
+async function postOneOffCaptureDetail(intent: typeof paypalIntents.$inferSelect, detail: any, verification: string) {
   const normalized = normalizeCompletedCapture(detail, { orderId: intent.provider_id!, merchantId: intent.merchant_id, amountOre: intent.amount_ore });
-  const result = await postReceipt({ environment: intent.environment, merchantId: intent.merchant_id, intentId: intent.id, userId: intent.user_id },
+  return postReceipt({ environment: intent.environment, merchantId: intent.merchant_id, intentId: intent.id, userId: intent.user_id },
     'capture', normalized, verification);
-  await db.update(paypalIntents).set({ status: result.status === 'posted' ? 'verified' : 'net_unresolved', updated_at: new Date() })
-    .where(eq(paypalIntents.id, intent.id));
-  return { status: result.status === 'posted' ? 'verified' : 'net_unresolved' };
 }
 export async function storeVerifiedWebhook(value: unknown, headers: Record<string, string | string[] | undefined>, raw: Buffer) {
   const row = await configured(value);
@@ -391,15 +401,6 @@ function limitedTime(value: unknown): Date {
   if (!Number.isFinite(date.getTime())) throw new PayPalError('MALFORMED');
   return date;
 }
-function linkedCaptureId(refund: any, env: string): string {
-  const link = Array.isArray(refund.links) ? refund.links.find((entry: any) => entry.rel === 'up' && entry.method === 'GET') : null;
-  let url: URL;
-  try { url = new URL(link?.href); } catch { throw new PayPalError('REFUND_LINK_MISSING', 409); }
-  const expected = env === 'sandbox' ? ['api-m.sandbox.paypal.com', 'api.sandbox.paypal.com'] : ['api-m.paypal.com', 'api.paypal.com'];
-  const match = /^\/v2\/payments\/captures\/([A-Za-z0-9_-]{1,128})$/.exec(url.pathname);
-  if (url.protocol !== 'https:' || !expected.includes(url.host) || url.search || url.hash || !match) throw new PayPalError('REFUND_LINK_INVALID', 409);
-  return match[1];
-}
 export async function ingestCaptureRefund(config: PayPalCredentials, refundId: string, verification: string) {
   const refund = await paypalClient.getRefund(config, refundId);
   const normalized = normalizeCaptureRefund(refund);
@@ -410,27 +411,38 @@ export async function ingestCaptureRefund(config: PayPalCredentials, refundId: s
   const [intent] = await db.select().from(paypalIntents).where(and(eq(paypalIntents.environment, config.environment),
     eq(paypalIntents.provider_id, orderId))).limit(1);
   if (!intent || intent.kind !== 'one_off' || intent.merchant_id !== capture?.payee?.merchant_id) throw new PayPalError('UNLINKED_REFUND', 409);
-  await ingestOneOffCapture(config, intent, captureId, verification);
-  return postCaptureRefund({ environment: intent.environment, merchantId: intent.merchant_id, intentId: intent.id, userId: intent.user_id },
+  // Refund-before-capture: the original receipt is posted from provider state
+  // first, so the refund always links to an existing economic transaction.
+  await postOneOffCaptureDetail(intent, capture, verification);
+  const result = await postCaptureRefund({ environment: intent.environment, merchantId: intent.merchant_id, intentId: intent.id, userId: intent.user_id },
     captureId, normalized, verification);
+  await settleCaptureAdjustments(config, intent, capture, verification);
+  return result;
 }
 
 export async function ingestReportedAdjustment(config: PayPalCredentials, adjustmentId: string, eventType: string, eventAt: Date, verification: string) {
   const kind = eventType.endsWith('.REFUNDED') ? 'refund' : 'reversal';
   const from = new Date(eventAt.getTime() - 2 * 86_400_000);
   const to = new Date(eventAt.getTime() + 2 * 86_400_000);
-  const result = await paypalClient.findReportedTransaction(config, adjustmentId, from, to);
-  if (!Array.isArray(result.transaction_details) || result.transaction_details.length !== 1 || Number(result.total_pages || 1) > 1)
+  const report = await paypalClient.findReportedTransaction(config, adjustmentId, from, to);
+  if (!Array.isArray(report.transaction_details) || report.transaction_details.length !== 1 || Number(report.total_pages || 1) > 1)
     throw new PayPalError('ADJUSTMENT_NOT_READY', 409);
-  const normalized = normalizeReportedAdjustment(result.transaction_details[0], adjustmentId, kind);
+  const normalized = normalizeReportedAdjustment(report.transaction_details[0], adjustmentId, kind);
   const originalKind = eventType.startsWith('PAYMENT.SALE.') ? 'sale' : 'capture';
   const [original] = await db.select().from(paypalTransactions).where(and(eq(paypalTransactions.environment, config.environment),
     eq(paypalTransactions.provider_transaction_id, normalized.originalTransactionId),
     eq(paypalTransactions.provider_kind, originalKind))).limit(1);
   if (!original || !original.intent_id || original.merchant_id !== (await configured(config.environment)).merchant_id)
     throw new PayPalError('UNLINKED_ADJUSTMENT', 409);
-  return postProviderAdjustment({ environment: original.environment, merchantId: original.merchant_id,
-    intentId: original.intent_id, userId: original.user_id }, normalized.originalTransactionId, originalKind, kind, normalized, verification);
+  const scope = { environment: original.environment, merchantId: original.merchant_id, intentId: original.intent_id, userId: original.user_id };
+  const result = await postProviderAdjustment(scope, normalized.originalTransactionId, originalKind, kind, normalized, verification);
+  // A newly recorded adjustment may complete an outstanding coverage placeholder.
+  if (originalKind === 'sale') await settleSaleAdjustments(scope, original.provider_transaction_id, null, original.gross_ore ?? 0, original.effective_at);
+  else {
+    const [intent] = await db.select().from(paypalIntents).where(eq(paypalIntents.id, original.intent_id)).limit(1);
+    if (intent?.provider_id) await settleCaptureAdjustments(config, intent, await paypalClient.getCapture(config, original.provider_transaction_id), verification);
+  }
+  return result;
 }
 
 export async function reconcileSubscription(subscription: typeof paypalSubscriptions.$inferSelect, from: Date, to: Date, expectedSaleId?: string) {
@@ -448,104 +460,243 @@ export async function reconcileSubscription(subscription: typeof paypalSubscript
     const normalized = normalizeSubscriptionTransaction(item, { amountOre: subscription.amount_ore });
     if (normalized) await postReceipt({ environment: subscription.environment, merchantId: subscription.merchant_id,
       intentId: subscription.intent_id, userId: subscription.user_id }, 'sale', normalized, 'subscription_transactions');
-    if (['PARTIALLY_REFUNDED', 'REFUNDED'].includes(item.status) && typeof item.id === 'string') {
-      await db.insert(paypalTransactions).values({ environment: subscription.environment, merchant_id: subscription.merchant_id,
-        provider_transaction_id: `adjustment:${item.id}`, provider_kind: 'sale_adjustment', original_transaction_id: item.id,
-        intent_id: subscription.intent_id, user_id: subscription.user_id, status: 'net_unresolved', currency: 'DKK' })
-        .onConflictDoNothing();
-      if (item.status === 'REFUNDED') {
-        const [total] = await db.select({ amount: sql<number>`coalesce(sum(-${paypalPostings.amount_ore}), 0)::int` })
-          .from(paypalPostings).where(and(eq(paypalPostings.environment, subscription.environment),
-            eq(paypalPostings.merchant_id, subscription.merchant_id), eq(paypalPostings.original_transaction_id, item.id),
-            sql`${paypalPostings.posting_kind} IN ('refund', 'reversal')`));
-        if (total.amount >= subscription.amount_ore) await db.update(paypalTransactions).set({ status: 'posted', observed_at: new Date() })
-          .where(and(eq(paypalTransactions.environment, subscription.environment), eq(paypalTransactions.merchant_id, subscription.merchant_id),
-            eq(paypalTransactions.provider_transaction_id, `adjustment:${item.id}`)));
-      }
-      continue;
-    }
+    if (normalized && isAdjustedSaleStatus(item.status)) await settleSaleAdjustments({ environment: subscription.environment,
+      merchantId: subscription.merchant_id, intentId: subscription.intent_id, userId: subscription.user_id },
+    normalized.transactionId, item.status, normalized.grossOre, normalized.effectiveAt);
   }
   const nextBilling = detail.billing_info?.next_billing_time ? limitedTime(detail.billing_info.next_billing_time) : null;
   const statuses = ['APPROVAL_PENDING', 'APPROVED', 'ACTIVE', 'SUSPENDED', 'CANCELLED', 'EXPIRED'];
   const providerStatus = statuses.includes(detail.status) ? detail.status : 'UNKNOWN';
   await db.update(paypalSubscriptions).set({ status: subscription.cancellation_requested_at && !isTerminalSubscriptionStatus(providerStatus) ?
     'CANCELLATION_REQUESTED' : providerStatus,
-    next_billing_at: nextBilling, reconciled_through_at: to, updated_at: new Date(),
+    next_billing_at: nextBilling, updated_at: new Date(),
+    // Never move the cursor backwards when a narrow webhook/enrichment window is checked.
+    reconciled_through_at: sql`greatest(coalesce(${paypalSubscriptions.reconciled_through_at}, ${to}), ${to})`,
     cancelled_at: detail.status === 'CANCELLED' && detail.status_update_time ? limitedTime(detail.status_update_time) : subscription.cancelled_at })
     .where(eq(paypalSubscriptions.id, subscription.id));
   return { checked: page.transactions.length };
 }
 
 const reconciliationRunning = new Map<string, Promise<unknown>>();
+const CAPTURE_RETRY_LIMIT = 5;
+const STALE_CAPTURING_MS = 10 * 60_000;
+const COMPLETED_CAPTURE_STATUSES = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REVERSED'];
+export function paypalItemBackoffMs(failures: number) {
+  return Math.min(24 * 60 * 60_000, 15 * 60_000 * 2 ** Math.max(0, Math.min(failures - 1, 8)));
+}
+function failureCode(err: unknown) { return err instanceof PayPalError ? err.code : 'RECONCILIATION_FAILED'; }
+// Metric labels and log fields carry only fixed vocabularies: never provider
+// IDs, amounts, payer data or free-form provider text.
+function reportReconcileFailure(environment: string, item: string, err: unknown) {
+  const code = failureCode(err);
+  log('warn', 'paypal_reconcile_item_failed', { environment, item, code: /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'OTHER' });
+  incrementMetric('paypal_reconcile_failures', `environment="${environment}",item="${item}"`);
+}
+
+/**
+ * Uncertain one-off captures: `capture_unknown`, or `capturing` left behind by
+ * a crash. Always read the order back first. Only an order that PayPal still
+ * reports APPROVED with no capture is captured again, reusing the persisted
+ * PayPal-Request-Id; an order can only be captured once, so a retry can never
+ * create a second payment.
+ */
+export async function reconcileUncertainCapture(config: PayPalCredentials, intent: typeof paypalIntents.$inferSelect) {
+  if (!intent.provider_id || intent.kind !== 'one_off') return { status: 'skipped' };
+  const order = await paypalClient.getOrder(config, intent.provider_id);
+  const unit = Array.isArray(order?.purchase_units) && order.purchase_units.length === 1 ? order.purchase_units[0] : null;
+  if (order?.id !== intent.provider_id || unit?.custom_id !== intent.id || unit?.payee?.merchant_id !== intent.merchant_id ||
+      unit?.amount?.currency_code !== 'DKK' || unit?.amount?.value !== oreToDkk(intent.amount_ore)) throw new PayPalError('ORDER_MISMATCH', 409);
+  const captures = Array.isArray(unit?.payments?.captures) ? unit.payments.captures.slice(0, 5) : [];
+  const done = captures.find((item: any) => typeof item?.id === 'string' && COMPLETED_CAPTURE_STATUSES.includes(item.status));
+  if (done) return ingestOneOffCapture(config, intent, done.id, 'reconciliation');
+  const touch = (status: string) => db.update(paypalIntents).set({ status, updated_at: new Date() })
+    .where(and(eq(paypalIntents.id, intent.id), eq(paypalIntents.status, intent.status)));
+  if (captures.some((item: any) => item?.status === 'DECLINED' || item?.status === 'FAILED')) { await touch('capture_failed'); return { status: 'capture_failed' }; }
+  if (captures.length) { await touch('capture_unknown'); return { status: 'pending_verification' }; }
+  if (order.status === 'VOIDED') { await touch('expired'); return { status: 'expired' }; }
+  if (order.status !== 'APPROVED' || !intent.capture_request_id || intent.capture_attempts >= CAPTURE_RETRY_LIMIT) {
+    await touch('capture_unknown'); return { status: 'pending_verification' };
+  }
+  const claim = await db.update(paypalIntents).set({ status: 'capturing', capture_attempts: intent.capture_attempts + 1, updated_at: new Date() })
+    .where(and(eq(paypalIntents.id, intent.id), eq(paypalIntents.status, intent.status), eq(paypalIntents.capture_attempts, intent.capture_attempts)));
+  if (claim.rowCount !== 1) return { status: 'pending_verification' };
+  let result: any;
+  try { result = await paypalClient.captureOrder(config, intent.provider_id, intent.capture_request_id); }
+  catch (err) {
+    await db.update(paypalIntents).set({ status: 'capture_unknown', updated_at: new Date() }).where(eq(paypalIntents.id, intent.id));
+    throw err;
+  }
+  const capture = result?.purchase_units?.[0]?.payments?.captures?.[0];
+  if (capture?.status === 'COMPLETED' && typeof capture.id === 'string')
+    return ingestOneOffCapture(config, { ...intent, status: 'capturing' }, capture.id, 'reconciliation');
+  await db.update(paypalIntents).set({ status: 'capture_unknown', updated_at: new Date() }).where(eq(paypalIntents.id, intent.id));
+  return { status: 'pending_verification' };
+}
+
+/** Retry missing fee/net detail and adjustment coverage for one unresolved row. */
+export async function enrichUnresolvedTransaction(config: PayPalCredentials, row: typeof paypalTransactions.$inferSelect) {
+  if (!row.intent_id) throw new PayPalError('UNLINKED_TRANSACTION', 409);
+  const [intent] = await db.select().from(paypalIntents).where(eq(paypalIntents.id, row.intent_id)).limit(1);
+  if (!intent || intent.environment !== row.environment || intent.merchant_id !== row.merchant_id) throw new PayPalError('UNLINKED_TRANSACTION', 409);
+  if (row.provider_kind === 'capture') return ingestOneOffCapture(config, intent, row.provider_transaction_id, 'reconciliation');
+  if (row.provider_kind === 'capture_adjustment') return ingestOneOffCapture(config, intent, row.original_transaction_id!, 'reconciliation');
+  if (row.provider_kind === 'sale' || row.provider_kind === 'sale_adjustment') {
+    const [sub] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.intent_id, intent.id),
+      eq(paypalSubscriptions.environment, row.environment), eq(paypalSubscriptions.merchant_id, row.merchant_id))).limit(1);
+    if (!sub) throw new PayPalError('UNLINKED_SALE', 409);
+    const saleId = row.provider_kind === 'sale' ? row.provider_transaction_id : row.original_transaction_id!;
+    let center = row.effective_at;
+    if (!center) {
+      const [sale] = await db.select({ effective_at: paypalTransactions.effective_at }).from(paypalTransactions)
+        .where(and(eq(paypalTransactions.environment, row.environment), eq(paypalTransactions.merchant_id, row.merchant_id),
+          eq(paypalTransactions.provider_transaction_id, saleId))).limit(1);
+      center = sale?.effective_at ?? null;
+    }
+    if (!center) throw new PayPalError('SALE_TIME_UNKNOWN', 409);
+    return reconcileSubscription(sub, new Date(center.getTime() - 2 * 86_400_000), new Date(center.getTime() + 86_400_000), saleId);
+  }
+  if (row.provider_kind === 'refund' || row.provider_kind === 'reversal') {
+    const [original] = await db.select({ provider_kind: paypalTransactions.provider_kind }).from(paypalTransactions)
+      .where(and(eq(paypalTransactions.environment, row.environment), eq(paypalTransactions.merchant_id, row.merchant_id),
+        eq(paypalTransactions.provider_transaction_id, row.original_transaction_id || ''))).limit(1);
+    if (!original) throw new PayPalError('ORIGINAL_RECEIPT_MISSING', 409);
+    if (original.provider_kind === 'capture' && row.provider_kind === 'refund') return ingestCaptureRefund(config, row.provider_transaction_id, 'reconciliation');
+    const eventType = `PAYMENT.${original.provider_kind === 'sale' ? 'SALE' : 'CAPTURE'}.${row.provider_kind === 'refund' ? 'REFUNDED' : 'REVERSED'}`;
+    return ingestReportedAdjustment(config, row.provider_transaction_id, eventType, row.effective_at ?? row.observed_at, 'reconciliation');
+  }
+  throw new PayPalError('UNKNOWN_TRANSACTION_KIND', 409);
+}
+
 export async function reconcilePaypal(value: unknown, now = new Date()) {
   const selectedEnvironment = environment(value);
   const active = reconciliationRunning.get(selectedEnvironment);
   if (active) return active;
   const work = (async () => {
-    const env = environment(value);
+    const env = selectedEnvironment;
     const row = await configured(env);
     const current = row.config_version;
+    const config = credentials(row);
     const [prior] = await db.select().from(paypalReconciliation).where(eq(paypalReconciliation.environment, env)).limit(1);
     await db.insert(paypalReconciliation).values({ environment: env, status: 'running', last_run_at: now })
       .onConflictDoUpdate({ target: paypalReconciliation.environment, set: { status: 'running', last_run_at: now } });
     let checked = 0;
-    try {
+    const failures: string[] = [];
+    // Returns null on success, otherwise the failure code (already reported).
+    const isolate = async (item: string, fn: () => Promise<unknown>): Promise<string | null> => {
+      try { await fn(); return null; }
+      catch (err) { const code = failureCode(err); failures.push(code); reportReconcileFailure(env, item, err); return code; }
+    };
+
+    // 1. Missed-event recovery owns its cursor: it advances as soon as the
+    // event window is persisted, regardless of later item failures.
+    await isolate('events', async () => {
       const recovered = await recoverPaypalEvents(row, now, prior?.cursor_at ?? null);
       checked += recovered.stored;
-      const unresolved = await db.select().from(paypalIntents).where(and(eq(paypalIntents.environment, env),
-        eq(paypalIntents.merchant_id, row.merchant_id!), eq(paypalIntents.status, 'capture_unknown'))).limit(10);
-      for (const intent of unresolved) {
-        if (!intent.provider_id) continue;
-        const order = await paypalClient.getOrder(credentials(row), intent.provider_id);
-        const captures = order.purchase_units?.[0]?.payments?.captures;
-        if (!Array.isArray(captures)) continue;
-        for (const capture of captures.slice(0, 2)) if (capture.status === 'COMPLETED') {
-          await ingestOneOffCapture(credentials(row), intent, capture.id, 'reconciliation'); checked++;
-        }
-      }
-      const subscriptions = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.environment, env),
-        eq(paypalSubscriptions.merchant_id, row.merchant_id!), or(
-          notInArray(paypalSubscriptions.status, ['CANCELLED', 'EXPIRED']),
-          gt(paypalSubscriptions.updated_at, new Date(now.getTime() - 90 * 86_400_000)))))
-        .orderBy(sql`CASE WHEN ${paypalSubscriptions.cancellation_requested_at} IS NOT NULL AND ${paypalSubscriptions.status} = 'CANCELLATION_REQUESTED' THEN 0 ELSE 1 END`,
-          paypalSubscriptions.reconciled_through_at).limit(10);
-      let cancellationUnconfirmed = false;
-      for (const sub of subscriptions) {
-        if (sub.status === 'CANCELLATION_REQUESTED') {
-          try {
-            const cancellation = await cancelSubscriptionRecord(sub);
-            if (cancellation.status !== 'cancelled') cancellationUnconfirmed = true;
-          } catch { cancellationUnconfirmed = true; }
-        }
-        const from = sub.reconciled_through_at ? new Date(sub.reconciled_through_at.getTime() - 7 * 86_400_000) :
-          new Date(Math.max(0, now.getTime() - 30 * 86_400_000));
-        const to = new Date(Math.min(now.getTime(), from.getTime() + 30 * 86_400_000));
-        if (to <= from) continue;
-        await reconcileSubscription(sub, from, to);
-        checked++;
-      }
-      if (cancellationUnconfirmed) throw new PayPalError('SUBSCRIPTION_CANCELLATION_UNCONFIRMED', 409);
-      const after = await configured(env);
-      if (after.config_version !== current || after.merchant_id !== row.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
-      await db.update(paypalReconciliation).set({ status: 'ok', cursor_at: recovered.through, error_code: null }).where(eq(paypalReconciliation.environment, env));
-      return { status: 'ok', checked };
-    } catch (err) {
-      await db.update(paypalReconciliation).set({ status: 'partial', error_code: err instanceof PayPalError ? err.code : 'RECONCILIATION_FAILED' })
-        .where(eq(paypalReconciliation.environment, env));
-      throw err;
+      await db.update(paypalReconciliation).set({ cursor_at: recovered.through }).where(eq(paypalReconciliation.environment, env));
+    });
+
+    // 2. Uncertain one-off captures, including crash-orphaned `capturing`.
+    const uncertain = await db.select().from(paypalIntents).where(and(eq(paypalIntents.environment, env),
+      eq(paypalIntents.merchant_id, row.merchant_id!), eq(paypalIntents.kind, 'one_off'),
+      or(eq(paypalIntents.status, 'capture_unknown'),
+        and(eq(paypalIntents.status, 'capturing'), lt(paypalIntents.updated_at, new Date(now.getTime() - STALE_CAPTURING_MS))))))
+      .orderBy(paypalIntents.updated_at).limit(10);
+    for (const intent of uncertain) {
+      if (await isolate('capture', () => reconcileUncertainCapture(config, intent)) === null) checked++;
+      else await db.update(paypalIntents).set({ updated_at: new Date() }).where(eq(paypalIntents.id, intent.id));
     }
+
+    // 3. Subscriptions, each isolated with its own backoff so one broken
+    // mapping cannot abort the pass or monopolize the oldest-first ordering.
+    const subscriptions = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.environment, env),
+      eq(paypalSubscriptions.merchant_id, row.merchant_id!),
+      or(notInArray(paypalSubscriptions.status, ['CANCELLED', 'EXPIRED']),
+        gt(sql`coalesce(${paypalSubscriptions.cancelled_at}, ${paypalSubscriptions.updated_at})`, new Date(now.getTime() - 90 * 86_400_000))),
+      or(isNull(paypalSubscriptions.reconcile_next_at), lte(paypalSubscriptions.reconcile_next_at, now))))
+      .orderBy(sql`CASE WHEN ${paypalSubscriptions.status} = 'CANCELLATION_REQUESTED' THEN 0 ELSE 1 END`,
+        sql`${paypalSubscriptions.reconciled_through_at} ASC NULLS FIRST`).limit(10);
+    for (const sub of subscriptions) {
+      if (sub.status === 'CANCELLATION_REQUESTED') {
+        await isolate('cancellation', async () => {
+          const cancellation = await cancelSubscriptionRecord(sub);
+          if (cancellation.status !== 'cancelled') throw new PayPalError('SUBSCRIPTION_CANCELLATION_UNCONFIRMED', 409);
+        });
+      }
+      const [fresh] = await db.select().from(paypalSubscriptions).where(eq(paypalSubscriptions.id, sub.id)).limit(1);
+      const target = fresh || sub;
+      const from = target.reconciled_through_at ? new Date(target.reconciled_through_at.getTime() - 7 * 86_400_000) :
+        new Date(Math.max(0, now.getTime() - 30 * 86_400_000));
+      const to = new Date(Math.min(now.getTime(), from.getTime() + 30 * 86_400_000));
+      if (to <= from) continue;
+      const code = await isolate('subscription', () => reconcileSubscription(target, from, to));
+      if (code === null) { checked++; await db.update(paypalSubscriptions).set({ reconcile_failures: 0, reconcile_next_at: null, reconcile_error_code: null })
+        .where(eq(paypalSubscriptions.id, sub.id)); }
+      else {
+        const count = (target.reconcile_failures ?? 0) + 1;
+        await db.update(paypalSubscriptions).set({ reconcile_failures: count, reconcile_error_code: code,
+          reconcile_next_at: new Date(now.getTime() + paypalItemBackoffMs(count)) }).where(eq(paypalSubscriptions.id, sub.id));
+      }
+    }
+
+    // 4. Missing fee/net and adjustment coverage. Unknown stays unknown until
+    // the provider reports it; nothing is estimated.
+    const unresolved = await db.select().from(paypalTransactions).where(and(eq(paypalTransactions.environment, env),
+      eq(paypalTransactions.merchant_id, row.merchant_id!), eq(paypalTransactions.status, 'net_unresolved'),
+      or(isNull(paypalTransactions.next_retry_at), lte(paypalTransactions.next_retry_at, now))))
+      .orderBy(paypalTransactions.observed_at).limit(20);
+    for (const item of unresolved) {
+      const code = await isolate('enrichment', () => enrichUnresolvedTransaction(config, item));
+      if (code === null) checked++;
+      const [after] = await db.select({ status: paypalTransactions.status }).from(paypalTransactions).where(eq(paypalTransactions.id, item.id)).limit(1);
+      if (after?.status === 'net_unresolved') {
+        const count = item.retry_count + 1;
+        await db.update(paypalTransactions).set({ retry_count: count, last_error_code: code,
+          next_retry_at: new Date(now.getTime() + paypalItemBackoffMs(count)) }).where(eq(paypalTransactions.id, item.id));
+      }
+    }
+
+    const after = await configured(env);
+    if (after.config_version !== current || after.merchant_id !== row.merchant_id) failures.unshift('CONFIG_CHANGED');
+    const ok = failures.length === 0;
+    await db.update(paypalReconciliation).set({ status: ok ? 'ok' : 'partial', error_code: ok ? null : failures[0],
+      failed_items: failures.length, last_success_at: ok ? now : prior?.last_success_at ?? null,
+      consecutive_failures: ok ? 0 : (prior?.consecutive_failures ?? 0) + 1 }).where(eq(paypalReconciliation.environment, env));
+    return { status: ok ? 'ok' : 'partial', checked, failed: failures.length };
   })();
   reconciliationRunning.set(selectedEnvironment, work);
   try { return await work; } finally { if (reconciliationRunning.get(selectedEnvironment) === work) reconciliationRunning.delete(selectedEnvironment); }
 }
 
 let reconciliationTimer: NodeJS.Timeout | null = null;
+let reconciliationStartTimer: NodeJS.Timeout | null = null;
+export function paypalReconcileIntervalMs(value = process.env.PAYPAL_RECONCILE_INTERVAL_MINUTES) {
+  const minutes = value === undefined || value === '' ? 360 : Number(value);
+  if (!Number.isInteger(minutes) || minutes < 15 || minutes > 1440) return 360 * 60_000;
+  return minutes * 60_000;
+}
+async function scheduledReconciliation() {
+  const setups = await paypalSetupStatus();
+  for (const setup of setups) {
+    if (!setup.configured) continue;
+    try {
+      const result = await reconcilePaypal(setup.environment) as { status: string; failed: number };
+      if (result.status !== 'ok') log('warn', 'paypal_reconcile_partial', { environment: setup.environment, failed: result.failed });
+    } catch (err) { reportReconcileFailure(setup.environment, 'pass', err); }
+  }
+}
 export function startPaypalReconciliation() {
   if (reconciliationTimer) return;
-  reconciliationTimer = setInterval(() => { void Promise.allSettled([reconcilePaypal('sandbox'), reconcilePaypal('live')]); }, 6 * 60 * 60_000);
-  reconciliationTimer.unref();
+  const run = () => { void scheduledReconciliation().catch((err) => reportReconcileFailure('all', 'pass', err)); };
+  // A startup pass (after boot settles) catches anything missed while down.
+  reconciliationStartTimer = setTimeout(() => { reconciliationStartTimer = null; run(); }, 2 * 60_000);
+  reconciliationTimer = setInterval(run, paypalReconcileIntervalMs());
+  reconciliationStartTimer.unref(); reconciliationTimer.unref();
 }
-export function stopPaypalReconciliation() { if (reconciliationTimer) clearInterval(reconciliationTimer); reconciliationTimer = null; }
+export function stopPaypalReconciliation() {
+  if (reconciliationTimer) clearInterval(reconciliationTimer);
+  if (reconciliationStartTimer) clearTimeout(reconciliationStartTimer);
+  reconciliationTimer = null; reconciliationStartTimer = null;
+}
 
 export async function verifiedContributionSnapshot(value: unknown = 'live') {
   const env = environment(value);

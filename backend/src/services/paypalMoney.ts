@@ -40,7 +40,9 @@ export function normalizeReportedAdjustment(detail: any, expectedId: string, kin
     effectiveAt };
 }
 export function normalizeCompletedCapture(capture: any, expected: { orderId: string; merchantId: string; amountOre: number }) {
-  if (!capture || !['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(capture.status) || typeof capture.id !== 'string' ||
+  // Refunded/reversed captures still represent received gross; the caller must
+  // settle their adjustments before the receipt counts as resolved net.
+  if (!capture || !['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REVERSED'].includes(capture.status) || typeof capture.id !== 'string' ||
     capture.payee?.merchant_id !== expected.merchantId ||
     capture.supplementary_data?.related_ids?.order_id !== expected.orderId ||
     providerOre(capture.amount) !== expected.amountOre) throw new PayPalError('CAPTURE_MISMATCH', 409);

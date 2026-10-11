@@ -28,6 +28,9 @@ export const paypalIntents = pgTable('paypal_intents', {
   provider_id: text('provider_id'),
   create_request_id: text('create_request_id').notNull(),
   capture_request_id: text('capture_request_id'),
+  // Reconciliation-only capture retries for an approved order whose capture
+  // outcome was lost; each retry reuses capture_request_id.
+  capture_attempts: integer('capture_attempts').notNull().default(0),
   config_version: integer('config_version').notNull(),
   created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
@@ -51,6 +54,11 @@ export const paypalSubscriptions = pgTable('paypal_subscriptions', {
   cancelled_at: timestamp('cancelled_at', { withTimezone: true, mode: 'date' }),
   reconciled_through_at: timestamp('reconciled_through_at', { withTimezone: true, mode: 'date' }),
   next_billing_at: timestamp('next_billing_at', { withTimezone: true, mode: 'date' }),
+  // Per-subscription reconciliation backoff so one failing mapping cannot
+  // abort the pass or starve other subscriptions.
+  reconcile_failures: integer('reconcile_failures').notNull().default(0),
+  reconcile_next_at: timestamp('reconcile_next_at', { withTimezone: true, mode: 'date' }),
+  reconcile_error_code: text('reconcile_error_code'),
   updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
 }, (t) => [index('paypal_subscription_user').on(t.user_id), index('paypal_subscription_status').on(t.status)]);
 
@@ -71,6 +79,12 @@ export const paypalWebhookInbox = pgTable('paypal_webhook_inbox', {
   attempt_count: integer('attempt_count').notNull().default(0),
   processed_at: timestamp('processed_at', { withTimezone: true, mode: 'date' }),
   error_code: text('error_code'),
+  // Operator resolution of quarantined (needs_review) events: retried or
+  // dismissed with a mandatory note. Dismissed events never post money.
+  resolved_at: timestamp('resolved_at', { withTimezone: true, mode: 'date' }),
+  resolved_by: integer('resolved_by').references(() => users.id, { onDelete: 'set null' }),
+  resolution: text('resolution'),
+  resolution_note: text('resolution_note'),
 }, (t) => [index('paypal_webhook_pending').on(t.status, t.received_at)]);
 
 // Append-only economic postings: +gross, -fee, -refund, +fee credit. Posting
@@ -102,6 +116,11 @@ export const paypalReconciliation = pgTable('paypal_reconciliation', {
   cursor_at: timestamp('cursor_at', { withTimezone: true, mode: 'date' }),
   status: text('status').notNull().default('idle'),
   error_code: text('error_code'),
+  // cursor_at is the webhook-event recovery cursor; it advances as soon as
+  // event recovery succeeds, independent of subscription/enrichment failures.
+  last_success_at: timestamp('last_success_at', { withTimezone: true, mode: 'date' }),
+  consecutive_failures: integer('consecutive_failures').notNull().default(0),
+  failed_items: integer('failed_items').notNull().default(0),
 });
 
 
@@ -123,6 +142,12 @@ export const paypalTransactions = pgTable('paypal_transactions', {
   net_ore: integer('net_ore'),
   effective_at: timestamp('effective_at', { withTimezone: true, mode: 'date' }),
   observed_at: timestamp('observed_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  // Last provider status seen for adjustment placeholders (e.g. PARTIALLY_REFUNDED).
+  provider_status: text('provider_status'),
+  // Enrichment retry state for net_unresolved rows.
+  retry_count: integer('retry_count').notNull().default(0),
+  next_retry_at: timestamp('next_retry_at', { withTimezone: true, mode: 'date' }),
+  last_error_code: text('last_error_code'),
 }, (t) => [
   uniqueIndex('paypal_transaction_identity').on(t.environment, t.merchant_id, t.provider_transaction_id),
   index('paypal_transaction_unresolved').on(t.status, t.observed_at),
