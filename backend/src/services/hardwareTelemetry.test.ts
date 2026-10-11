@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-// The aggregation helpers are pure, but their module also imports the DB
-// collector. Give that unused pool a deliberately unreachable test URL.
+// Pure helpers do not connect, but importing the collector initializes the DB client.
 process.env.DATABASE_URL ||= 'postgres://unused:unused@127.0.0.1:1/unused';
 const { aggregationLookbackStart, aggregationLookaheadEnd, validateInstantaneousWatts } = await import('./hardwareTelemetry.ts');
 
