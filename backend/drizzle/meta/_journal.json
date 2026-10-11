@@ -127,6 +127,13 @@
       "when": 1791735788150,
       "tag": "0017_paypal_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791745438466,
+      "tag": "0018_provision_assignment_resources",
+      "breakpoints": true
     }
   ]
 }

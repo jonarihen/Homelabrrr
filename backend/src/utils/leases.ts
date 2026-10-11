@@ -81,7 +81,7 @@ export async function createLeaseForVm(node: unknown, vmid: unknown, { createdBy
   return withVmPolicyWrite(node, parsed, (tx, currentNode) => createLeaseRow(tx, currentNode, parsed, { createdBy, leaseDays }), actor);
 }
 
-async function createLeaseRow(database: DbOrTx, node: unknown, parsed: number, { createdBy = '', leaseDays }: { createdBy?: string; leaseDays?: unknown } = {}) {
+export async function createLeaseRow(database: DbOrTx, node: unknown, parsed: number, { createdBy = '', leaseDays }: { createdBy?: string; leaseDays?: unknown } = {}) {
   const existing = await getLeaseRow(node, parsed, database);
   if (existing) return existing;
 
