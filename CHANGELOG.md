@@ -1,5 +1,70 @@
 # Changelog
 
+## 2026-10-11 — Power & Energy: iLO power modes, electricity costs and private PayPal support
+
+A private, optional Power & Energy area: measure what the lab's physical servers draw, steer their HPE Power Regulator mode by schedule and electricity price, see what that costs, and let invited members chip in. Everything starts disabled. Operators: see `backend/docs/power-energy-runbook.md` for the rollout order.
+
+### Hardware & telemetry
+- Each physical Proxmox node can get its own HPE iLO 4/5 connection under PVE Hosts → Hardware. Setup and connection tests only read the Redfish API, never change server settings, and report generation, firmware, regulator mode, chassis watts, trust problems and privilege problems.
+- iLO passwords are encrypted and never sent back to the browser. TLS verification stays on, with support for a private CA. Edits and node rebinds keep the server's physical identity and require a fresh test, and a different server needs a new connection.
+- Opt-in power telemetry records input watts and regulator mode about once a minute without an open browser. Readings are integrated into 15-minute energy buckets and Copenhagen-local daily totals that handle daylight-saving changes. Missing readings stay as gaps and are never counted as zero.
+- iLO reads have hard deadlines. Repeated credential rejections pause collection to avoid locking the account, and failed connection tests are remembered.
+- Optional temperature, fan and power-supply health is collected where the iLO supports it.
+- The Hardware panel charts power over time, with gaps and markers where the regulator mode changed.
+- Retention of server energy data is configurable. Decommissioned iLO connections no longer block deleting a PVE host.
+
+### Power modes & price rules
+- A weekly Copenhagen schedule sets Low, Dynamic or High per window. The preset is High on Mon–Fri 16:00–02:00 and Sat–Sun 12:00–22:00 and Low otherwise, and daylight-saving gaps and repeated hours are handled.
+- Optional price rules in DKK/kWh cap the mode when power is expensive and boost it when power is cheap, with hysteresis and a minimum interval between automatic upshifts. Missing prices fall back to the schedule.
+- Manual overrides run for a fixed number of minutes (three hours by default), until the next schedule boundary, or until cleared.
+- Automation can be paused per node or for all nodes at once. A mode changed outside the portal puts the node on hold. The hold lifts at the next weekly boundary, or on Resume, which adopts a fresh reading.
+- A seven-day preview shows upcoming decisions and their reasons. An "if enabled" preview shows the same before you turn control on.
+- Only the runtime Power Regulator setting is ever written: never a reboot, BIOS setting, power cap or VM action. Hosts that are off or booting are never touched.
+- Live control needs a capability test, recent reauthentication and explicit enablement. Every mode change is claimed, recorded before it is sent and verified by reading it back.
+- Failed or unverified changes back off and are re-read before any retry, with one notification per failure streak. An interrupted action no longer blocks later edits.
+- An operation history records each change with the revisions, price and thresholds behind it.
+
+### Electricity data & costs
+- An ElOverblik Customer API import covers one explicitly selected meter, which defaults to whole-household scope and is never counted as server use. It backfills 13 months, refreshes every six hours, and records skipped ranges.
+- The import honours `Retry-After` and backs off on errors. It pauses with one notification when the token or meter needs attention, restarts its backfill when you change meters, and supports period resyncs and an explicit history purge.
+- You can record dated spot or fixed all-in contracts, tariffs, VAT treatment and fixed monthly charges. Nothing is prefilled.
+- Contracts can be ended or superseded with an audited reason. A month that spans contracts is priced per contract, with fixed fees pro rata.
+- Energi Data Service day-ahead prices are cached per area, and gaps from outages are backfilled.
+- Tariff observation history is kept, including when a tariff returns to an earlier version.
+- Optional extra-load estimates cover switch or UPS overhead outside the measured server power. Monthly previews keep server cost, fixed-fee share, household bills and forecasts separate.
+- Completed months finalize as immutable, revisioned statements. A month with incomplete data finalizes only with an explicit acknowledgement, and closed months always show their finalized figures.
+- Bills can be voided or revised, record partial payments, and show an estimated lab share.
+- Energy history is kept for five years.
+
+### Private support (PayPal)
+- Members can optionally support the lab with PayPal-hosted one-off payments or monthly subscriptions at offered amounts, change or cancel their own subscription, and review their own verified payments. Support never changes access or quotas.
+- Sandbox and live are configured separately, and checkout starts disabled. Setup is versioned, with idempotent product, plan and webhook creation and a read-only connection test.
+- Payments count only after a verified webhook or provider readback, using PayPal's actual fees. Unknown fees, pending payments, denials and disputes are never estimated or subtracted.
+- Refunds and partial refunds are covered before income is finalized. Non-DKK amounts are kept as separate records.
+- Reconciliation is isolated per subscription and recovers missed webhooks. Checkout, capture and webhook traffic are rate-limited.
+- Admins get reconciliation health, a subscription list with cancellation, a review queue (retry, or dismiss with reauthentication) and a formula-safe CSV export.
+- A manual bank-transfer fallback needs admin confirmation with evidence and protects against duplicating a PayPal payment.
+- Monthly allocation credits net support against finalized electricity cost. A refund that leaves a month negative stays visible in that month as an owner-funded adjustment. Only positive credit carries forward, so later contributions never repay a loss.
+
+### Energy & Budget dashboard
+- The new Energy & Budget page for signed-in members shows current server power, integrated kWh and coverage, 24-hour and 7-day history, and per-server status under generated aliases.
+- The page also shows the current price with its validity, the calculated cost (live estimate or finalized statement) and aggregate funding figures.
+- Values without a verified source are shown as unknown. Hardware addresses, meter IDs, household readings and contributor identities never reach the page.
+- Funding progress is measured against the finalized lab cost, or a clearly labeled estimate for the current month, and never shows a misleading 100%.
+- Each part of the page loads on its own, so one failing source no longer blanks the whole page. Figures come from one consistent set of revisions, or the page says they don't.
+- Cost breakdown with component status, a separate forecast and provenance. Credit carried in is kept apart from new receipts; pending and disputed payments are shown but not counted.
+- Plain-language mode reasons, weekly baseline, next known change and a 24-hour schedule/price preview; periods after the last published price are marked unknown.
+- Monthly history, mode-change markers on the power chart and a member CSV export.
+- Retired servers keep their past energy, and server aliases no longer shift.
+- Optional sharing of the monthly household invoice or paid total, off by default.
+- Admin panel with setup links, source and payment health, and a reauthenticated export of budget records; a new admin screen records payments on, voids and revises household bills.
+- Payment pages are never cached.
+
+### Safety & defaults
+- Every integration stays off until configured. iLO, ElOverblik and PayPal secrets are encrypted at rest and included in key rotation.
+- The only public endpoint is the signature-verified PayPal webhook.
+- Everything was verified only with fixtures, fakes and disposable databases, never against a live iLO, ElOverblik account or PayPal account. The runbook's live verification checklist lists what the owner must confirm first.
+
 ## 2026-10-03 — Reliability fixes for file transfers, backups, and dialogs
 
 - **SFTP uploads no longer truncate the destination before the transfer succeeds.** Uploads stream into a unique temporary file in the destination directory, then commit by rename after transfer and metadata checks. Symlink destinations are rejected; overwrites preserve the existing owner, group, and mode, and new files stay owner-only (`0600`)

@@ -71,6 +71,17 @@ async function pveHostDependenciesTx(database: DbOrTx, hostId: number | string) 
     if (c) dependencies.push({ label, table, count: c });
   }
 
+  // Only an *active* iLO binding blocks deletion. Decommissioned connections
+  // are archival (credential already wiped, no jobs) and are detached by the
+  // FK's ON DELETE SET NULL, keeping their identity and energy history.
+  if (await tableExists(database, 'hardware_connections')) {
+    const c = await countWhere(
+      database,
+      sql`SELECT COUNT(*) AS count FROM hardware_connections WHERE pve_host_id = ${parsedId} AND lifecycle_state = 'active'`,
+    );
+    if (c) dependencies.push({ label: 'active hardware connections', table: 'hardware_connections', count: c });
+  }
+
   return { hostId: parsedId, total: dependencies.reduce((sum, item) => sum + item.count, 0), dependencies };
 }
 
