@@ -5,6 +5,7 @@ import request from 'supertest';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
 import { hardwareConnections, hardwarePowerPolicies, pveHosts } from '../db/schema/index.ts';
 import { weekdayPreset, type PowerPricePolicy } from '../services/powerPolicy.ts';
+import { eq } from 'drizzle-orm';
 
 process.env.SECRET_ENCRYPTION_KEY = '55'.repeat(32);
 const fixture = await createTestDatabase();
@@ -86,4 +87,25 @@ test('saved-policy preview returns seven-day boundaries without enabling control
   assert.equal(response.body.sevenDayPreview.segments[1].baseMode, 'high');
   assert.equal(response.body.sevenDayPreview.segments[1].selectedMode, null);
   assert.equal(response.body.nextKnownTransition, null);
+});
+
+test('invalid manual duration is rejected before changing a policy or contacting iLO', async () => {
+  const [host] = await fixture.db.insert(pveHosts).values({ name: 'manual', host: 'pve-manual.test', token_id: 'test', token_secret: 'encrypted' }).returning();
+  const [hardware] = await fixture.db.insert(hardwareConnections).values({ pve_host_id: host.id,
+    node_ref: `${host.id}~node`, target_host: 'ilo-manual.test', username: 'reader', secret: 'encrypted', control_enabled: true,
+  }).returning();
+  const schedule = weekdayPreset();
+  const pricePolicy: PowerPricePolicy = { enabled: false, basis: 'variable_retail_including_vat', contractRef: '', area: '', version: 1,
+    expensive: { enabled: false, threshold: '', hysteresis: '', capMode: 'dynamic' },
+    cheap: { enabled: false, threshold: '', hysteresis: '' } };
+  await fixture.db.insert(hardwarePowerPolicies).values({ hardware_id: hardware.id, schedule, price_policy: pricePolicy });
+  const response = await request(app).post(`/api/admin/power-control/${hardware.id}/manual`)
+    .set('x-test-role', 'admin').set('x-test-reauth', 'yes')
+    .send({ version: 1, mode: 'high', durationKind: 'next_schedule_boundary' });
+  assert.equal(response.status, 400);
+  assert.match(response.body.error, /Enable a weekly schedule/);
+  const [unchanged] = await fixture.db.select().from(hardwarePowerPolicies)
+    .where(eq(hardwarePowerPolicies.hardware_id, hardware.id)).limit(1);
+  assert.equal(unchanged.version, 1);
+  assert.equal(unchanged.manual_mode, null);
 });

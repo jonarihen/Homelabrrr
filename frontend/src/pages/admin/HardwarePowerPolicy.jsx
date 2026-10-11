@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
+import { manualPowerDurationRequest } from '../../utils/manualPowerDuration.js';
 
 const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const modes = [['low', 'Static Low Power'], ['dynamic', 'Dynamic / Balanced'], ['high', 'Static High Performance']];
@@ -50,6 +51,7 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [manualMode, setManualMode] = useState('low');
+  const [durationKind, setDurationKind] = useState('minutes');
   const [duration, setDuration] = useState(180);
   const [preview, setPreview] = useState(null);
   const refresh = useCallback(async () => {
@@ -129,6 +131,26 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
     </div>
     <div className="mt-3 flex items-center gap-3"><label><input type="checkbox" checked={draft.automationEnabled} onChange={(event) => setDraft((current) => ({ ...current, automationEnabled: event.target.checked }))} /> Allow automatic changes</label><button disabled={busy} onClick={save} className="border border-orange-600 px-3 py-2 uppercase text-orange-400 disabled:opacity-50">Save policy</button><button disabled={busy || !record.policy.version} onClick={() => action(async () => { setPreview((await api.get(`/admin/power-control/${connection.id}/preview`)).data); })} className="border border-gray-600 px-3 py-2 uppercase disabled:opacity-50">Preview saved policy</button></div>
     {preview && <PowerPreviewTimeline preview={preview} />}
-    <div className="mt-4 border-t border-gray-700 pt-3"><h3 className="mb-2 uppercase text-gray-100">Manual temporary mode</h3><div className="flex flex-wrap items-center gap-2"><ModeSelect value={manualMode} onChange={setManualMode} /><label>Minutes<input type="number" min="1" max="1440" value={duration} onChange={(event) => setDuration(Number(event.target.value))} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label><button disabled={busy || !record.controlEnabled} onClick={() => mutateVersion('manual', { mode: manualMode, durationMinutes: duration })} className="border border-orange-600 px-2 py-1 text-orange-400 disabled:opacity-40">Apply now</button>{record.policy.manualMode && <><span>Override: {record.policy.manualMode} until {record.policy.manualExpiresAt ? new Date(record.policy.manualExpiresAt).toLocaleString() : 'cleared'}</span><button disabled={busy} onClick={() => action(async () => { await api.delete(`/admin/power-control/${connection.id}/manual`, { data: { version: record.policy.version } }); setNotice('Manual override cleared.'); })} className="border border-gray-600 px-2 py-1">Clear override</button></>}</div><p className="mt-2 text-amber-400">An explicit manual High selection can bypass the expensive-price cap. It never reboots a server or VM.</p></div>
+    <div className="mt-4 border-t border-gray-700 pt-3">
+      <h3 className="mb-2 uppercase text-gray-100">Manual mode override</h3>
+      <div className="flex flex-wrap items-center gap-2">
+        <ModeSelect value={manualMode} onChange={setManualMode} />
+        <label>Duration
+          <select aria-label="Override duration" value={durationKind} onChange={(event) => setDurationKind(event.target.value)} className="ml-2 border border-gray-700 bg-gray-900 px-2 py-1">
+            <option value="minutes">Fixed minutes</option>
+            <option value="next_schedule_boundary" disabled={!record.policy.schedule.enabled}>Until next weekly boundary</option>
+            <option value="until_cleared">Until I clear it</option>
+          </select>
+        </label>
+        {durationKind === 'minutes' && <label>Minutes<input type="number" min="1" max="1440" value={duration} onChange={(event) => setDuration(Number(event.target.value))} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label>}
+        <button disabled={busy || !record.controlEnabled || (durationKind === 'next_schedule_boundary' && !record.policy.schedule.enabled)} onClick={() => mutateVersion('manual', manualPowerDurationRequest(manualMode, durationKind, duration))} className="border border-orange-600 px-2 py-1 text-orange-400 disabled:opacity-40">Apply now</button>
+        {record.policy.manualMode && <>
+          <span>Override: {record.policy.manualMode} until {record.policy.manualExpiresAt ? new Date(record.policy.manualExpiresAt).toLocaleString() : 'cleared manually'}</span>
+          <button disabled={busy} onClick={() => action(async () => { await api.delete(`/admin/power-control/${connection.id}/manual`, { data: { version: record.policy.version } }); setNotice('Manual override cleared.'); })} className="border border-gray-600 px-2 py-1">Clear override</button>
+        </>}
+      </div>
+      {!record.policy.schedule.enabled && <p className="mt-2 text-gray-500">Save an enabled weekly schedule to use its next boundary.</p>}
+      <p className="mt-2 text-amber-400">An explicit manual High selection can bypass the expensive-price cap. It never reboots a server or VM.</p>
+    </div>
   </section>;
 }
