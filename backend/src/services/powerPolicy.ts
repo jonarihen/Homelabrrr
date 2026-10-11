@@ -77,13 +77,19 @@ export interface PowerDecision {
   actualMode: ObservedPowerMode;
   reason: 'disabled' | 'paused' | 'drift_hold' | 'unsafe_actual_mode' | 'unsupported_mode'
     | 'no_automation' | 'manual' | 'schedule' | 'default' | 'price_high' | 'price_low'
-    | 'price_unavailable_fallback';
+    | 'price_unavailable_fallback' | 'policy_invalid';
   priceStatus: 'disabled' | 'valid' | 'unavailable';
   validUntil: Date | null;
   latch: PriceLatch;
+  // Set when stored schedule/price data fails validation. The resolver then
+  // restricts (never boosts) and the controller persists the error.
+  policyError?: string | null;
 }
 
 const MODE_ORDER: Record<WritablePowerMode, number> = { low: 0, dynamic: 1, high: 2 };
+export function isWritablePowerMode(value: unknown): value is WritablePowerMode {
+  return value === 'low' || value === 'dynamic' || value === 'high';
+}
 const RATE_PATTERN = /^-?(?:0|[1-9]\d*)(?:[.,]\d{1,6})?$/;
 
 // Signed millionths of DKK/kWh. This keeps comparisons exact without floating point thresholds.
@@ -96,6 +102,20 @@ export function parseDkkPerKwh(value: string): bigint {
   const [whole, fraction = ''] = (negative ? normalized.slice(1) : normalized).split('.');
   const micros = BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0') || '0');
   return negative ? -micros : micros;
+}
+
+function formatMicros(micros: bigint): string {
+  const negative = micros < 0n;
+  const absolute = negative ? -micros : micros;
+  const whole = absolute / 1_000_000n;
+  const fraction = (absolute % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return `${negative && absolute !== 0n ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
+}
+
+// Canonical stored form of an operator-entered rate: Danish comma accepted on
+// input, stored as an exact dot decimal without trailing zeros ("1,250" → "1.25").
+export function normalizeDkkPerKwh(value: string): string {
+  return formatMicros(parseDkkPerKwh(value));
 }
 
 export function weekdayPreset(): WeeklyPowerSchedule {
@@ -126,13 +146,16 @@ function occupiedMinutes(window: PowerWindow): Set<number> {
 }
 
 export function validatePowerSchedule(schedule: WeeklyPowerSchedule): void {
-  if (!isValidTimezone(schedule.timezone)) throw new Error('Invalid schedule timezone');
-  if (!(schedule.defaultMode in MODE_ORDER)) throw new Error('Invalid default mode');
+  if (!schedule || typeof schedule !== 'object' || typeof schedule.enabled !== 'boolean'
+    || !Array.isArray(schedule.windows) || schedule.windows.length > 50) throw new Error('Invalid power schedule');
+  if (typeof schedule.timezone !== 'string' || !isValidTimezone(schedule.timezone)) throw new Error('Invalid schedule timezone');
+  if (!isWritablePowerMode(schedule.defaultMode)) throw new Error('Invalid default mode');
   const occupied = new Set<number>();
   for (const window of schedule.windows) {
+    if (!window || typeof window !== 'object' || typeof window.start !== 'string' || typeof window.end !== 'string') throw new Error('Invalid power window');
     if (!Number.isInteger(window.days) || window.days < 1 || window.days > 127
       || !isValidTime(window.start) || !isValidTime(window.end) || window.start === window.end
-      || !(window.mode in MODE_ORDER)) throw new Error('Invalid power window');
+      || !isWritablePowerMode(window.mode)) throw new Error('Invalid power window');
     for (const minute of occupiedMinutes(window)) {
       if (occupied.has(minute)) throw new Error('Overlapping power windows');
       occupied.add(minute);
@@ -218,11 +241,17 @@ export function scheduleBoundaryInstants(schedule: WeeklyPowerSchedule, from: Da
 }
 
 export function validatePricePolicy(policy: PowerPricePolicy): void {
+  if (!policy || typeof policy !== 'object' || typeof policy.enabled !== 'boolean'
+    || !policy.expensive || typeof policy.expensive !== 'object' || typeof policy.expensive.enabled !== 'boolean'
+    || !policy.cheap || typeof policy.cheap !== 'object' || typeof policy.cheap.enabled !== 'boolean') {
+    throw new Error('Invalid price policy');
+  }
+  if (typeof policy.contractRef !== 'string' || typeof policy.area !== 'string') throw new Error('Invalid price contract reference');
   if (!['variable_retail_including_vat', 'spot_only_excluding_retail_additions'].includes(policy.basis)) {
     throw new Error('Invalid price basis');
   }
   if (policy.enabled && (!policy.contractRef || !policy.area)) throw new Error('Price contract and area required');
-  if (policy.priceOnlyDefault && !(policy.priceOnlyDefault in MODE_ORDER)) throw new Error('Invalid price-only default');
+  if (policy.priceOnlyDefault && !isWritablePowerMode(policy.priceOnlyDefault)) throw new Error('Invalid price-only default');
   if (policy.minAutomaticUpshiftMinutes !== undefined
     && (!Number.isInteger(policy.minAutomaticUpshiftMinutes) || policy.minAutomaticUpshiftMinutes < 0
       || policy.minAutomaticUpshiftMinutes > 1440)) throw new Error('Invalid minimum automatic upshift interval');
@@ -253,35 +282,67 @@ function validPrice(input: PowerDecisionInput): boolean {
   }
 }
 
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message.slice(0, 200) : 'Invalid power policy';
+}
+
 export function resolvePowerDecision(input: PowerDecisionInput): PowerDecision {
-  validatePowerSchedule(input.schedule);
-  validatePricePolicy(input.pricePolicy);
   const policy = input.pricePolicy;
+  let scheduleError: string | null = null;
+  let priceError: string | null = null;
+  try { validatePowerSchedule(input.schedule); } catch (err) { scheduleError = errorText(err); }
+  try { validatePricePolicy(policy); } catch (err) { priceError = errorText(err); }
   const priceRevision = input.price ? `${input.price.contract_revision}/${input.price.source_revision}` : '';
-  const latch: PriceLatch = { expensive: false, cheap: false, policyVersion: policy.version, priceRevision };
-  const baseMode = input.schedule.enabled ? scheduledModeAt(input.schedule, input.now)
-    : policy.enabled ? policy.priceOnlyDefault ?? null : null;
+  const fresh: PriceLatch = { expensive: false, cheap: false, policyVersion: policy?.version ?? 0, priceRevision };
+  // Early returns (pause, drift hold, manual override, unsafe hardware) do not
+  // evaluate prices, so they must not erase a still-relevant hysteresis latch.
+  // Only a latch from the same price-policy version survives.
+  const previous = input.previousLatch;
+  const carried: PriceLatch = previous && previous.policyVersion === fresh.policyVersion ? { ...previous } : fresh;
+  const policyError = scheduleError ?? priceError;
+  let baseMode: WritablePowerMode | null = null;
+  if (!scheduleError) {
+    baseMode = input.schedule.enabled ? scheduledModeAt(input.schedule, input.now)
+      : policy?.enabled && !priceError ? policy.priceOnlyDefault ?? null : null;
+  }
   const result = (reason: PowerDecision['reason'], target: WritablePowerMode | null,
-    priceStatus: PowerDecision['priceStatus'] = 'disabled', validUntil: Date | null = null): PowerDecision => ({
+    priceStatus: PowerDecision['priceStatus'] = 'disabled', validUntil: Date | null = null,
+    latch: PriceLatch = carried): PowerDecision => ({
     target, baseMode, actualMode: input.actualMode, reason, priceStatus, validUntil, latch,
+    ...(policyError ? { policyError } : {}),
   });
 
   if (!input.controlEnabled) return result('disabled', null);
   if (input.actualMode === 'os_control' || input.actualMode === 'unknown') return result('unsafe_actual_mode', null);
 
   const override = input.manualOverride;
-  if (input.manualAction && override && (!override.expiresAt || override.expiresAt.getTime() > input.now.getTime())) {
+  const overrideActive = Boolean(override && (!override.expiresAt || override.expiresAt.getTime() > input.now.getTime()));
+  if (input.manualAction && override && overrideActive) {
     return input.supportedModes.includes(override.mode) ? result('manual', override.mode)
       : result('unsupported_mode', null);
   }
   if (input.automationPaused) return result('paused', null);
   if (input.driftHold) return result('drift_hold', null);
-  if (override && (!override.expiresAt || override.expiresAt.getTime() > input.now.getTime())) {
+  if (override && overrideActive) {
     return input.supportedModes.includes(override.mode) ? result('manual', override.mode)
       : result('unsupported_mode', null);
   }
+  if (scheduleError) return result('policy_invalid', null);
+  if (priceError) {
+    // Corrupt price data: prefer restriction. No boost; an enabled cap mode
+    // still limits the baseline, and nothing may move above the actual mode.
+    if (!baseMode) return result('policy_invalid', null, 'unavailable', null, fresh);
+    let target = baseMode;
+    const cap = policy?.expensive?.capMode;
+    if (policy?.expensive?.enabled && (cap === 'low' || cap === 'dynamic') && MODE_ORDER[target] > MODE_ORDER[cap]) target = cap;
+    const actualRank = MODE_ORDER[input.actualMode as WritablePowerMode];
+    if (actualRank !== undefined && MODE_ORDER[target] > actualRank) return result('policy_invalid', null, 'unavailable', null, fresh);
+    return input.supportedModes.includes(target) ? result('policy_invalid', target, 'unavailable', null, fresh)
+      : result('unsupported_mode', null, 'unavailable', null, fresh);
+  }
   if (!baseMode) return result('no_automation', null);
 
+  const latch: PriceLatch = { ...fresh };
   let target = baseMode;
   let reason: PowerDecision['reason'] = input.schedule.enabled ? 'schedule' : 'default';
   let priceStatus: PowerDecision['priceStatus'] = 'disabled';
@@ -312,6 +373,6 @@ export function resolvePowerDecision(input: PowerDecisionInput): PowerDecision {
       }
     }
   }
-  return input.supportedModes.includes(target) ? result(reason, target, priceStatus, validUntil)
-    : result('unsupported_mode', null, priceStatus, validUntil);
+  return input.supportedModes.includes(target) ? result(reason, target, priceStatus, validUntil, latch)
+    : result('unsupported_mode', null, priceStatus, validUntil, latch);
 }
