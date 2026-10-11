@@ -12,6 +12,10 @@ function nano(value: string): bigint {
   const [whole, fraction = ''] = value.split('.');
   return BigInt(whole) * SCALE + BigInt(fraction.padEnd(9, '0') || '0');
 }
+function parseShareMillionths(value: string): bigint {
+  const [whole, fraction = ''] = value.split('.');
+  return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0').slice(0, 6) || '0');
+}
 function formatted(value: bigint): string { return `${value / SCALE}.${String(value % SCALE).padStart(9, '0')}`; }
 function bounds(month: string) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('Invalid billing month');
@@ -146,7 +150,16 @@ export async function previewMonthlyElectricity(month: string, contractRef: stri
     labKwh: formatted(labKwh), labCoveredSeconds: labCoverage, expectedSeconds, household: comparison,
     fixedMonthlyFeeOre: chain.length === 1 ? contract.fixed_monthly_ore : chain.reduce((sum, row) => sum + (row.fixed_monthly_ore || 0), 0), allocatedFixedFeeOre: fee.allocatedOre.toString(), fixedFeeStatus: fee.status, fixedFeeMethod: fee.method,
     calculatedLabCostOre: (variableCostOre + (closed && fee.status === 'known' ? fee.allocatedOre : 0n)).toString(),
-    actualBills: bills.map((bill) => ({ id: bill.id, kind: bill.kind, amountOre: bill.amount_ore, status: bill.status, paidOre: bill.paid_ore, paidAt: bill.paid_at })),
+    // Actual invoices stay separate from calculated cost. The lab share of an
+    // invoice is only an estimate (household energy proportion) and only for
+    // a settlement bill covering exactly this month.
+    actualBills: bills.filter((bill) => bill.status !== 'void').map((bill) => {
+      const share = comparison.status === 'comparable' && comparison.labShare && bill.kind === 'settlement'
+        && bill.period_start.getTime() === start.getTime() && bill.period_end.getTime() === end.getTime() ? parseShareMillionths(comparison.labShare) : null;
+      return { id: bill.id, kind: bill.kind, revision: bill.revision, amountOre: bill.amount_ore, status: bill.status, paidOre: bill.paid_ore, paidAt: bill.paid_at,
+        estimatedLabShareOre: share === null ? null : ((BigInt(bill.amount_ore) * share + 500_000n) / 1_000_000n).toString(),
+        estimatedLabShareMethod: share === null ? null : 'household_energy_proportion_estimate' };
+    }),
     forecast: forecast && { ...forecast, actualCostOre: forecast.actualCostOre.toString(), forecastTotalOre: forecast.forecastTotalOre?.toString() || null,
       futureCostOre: forecast.futureCostOre?.toString() || null, estimatedExtraFutureOre: extraFuture?.complete ? extraFuture.costOre.toString() : null,
       estimatedExtraLoadCount: extraFuture?.loadCount || 0 },

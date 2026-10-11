@@ -134,3 +134,37 @@ test('incomplete months finalize only with an explicit partial-coverage acknowle
   const statements = await fixture.db.select().from(electricityCostStatements).where(eq(electricityCostStatements.contract_id, acknowledged.body.contract_id));
   assert(statements.some((row) => row.id === acknowledged.body.id));
 });
+
+test('bills support partial payment, void and revision without double counting', async () => {
+  const [contract] = await fixture.db.select().from(electricityContracts).where(eq(electricityContracts.label, 'Supplier B'));
+  const bill = { contractId: contract.id, periodStart: '2026-07-31T22:00:00Z', periodEnd: '2026-08-31T22:00:00Z', amountOre: 50_000, kind: 'settlement' };
+  const created = await admin(request(app).post(`${base}/bills`)).send(bill);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.status, 'due', 'entering a bill does not mark it paid');
+  assert.equal((await admin(request(app).post(`${base}/bills`)).send(bill)).body.error, 'OVERLAPPING_BILL');
+  const advance = await admin(request(app).post(`${base}/bills`)).send({ ...bill, kind: 'advance', amountOre: 40_000 });
+  assert.equal(advance.status, 201, 'an advance is tracked separately from the settlement');
+
+  const partial = await admin(request(app).post(`${base}/bills/${created.body.id}/paid`)).send({ paidOre: 20_000, paidAt: '2026-09-10T10:00:00Z' });
+  assert.equal(partial.body.status, 'partially_paid');
+  assert.equal((await admin(request(app).post(`${base}/bills/${created.body.id}/paid`)).send({ paidOre: 10_000, paidAt: '2026-09-11T10:00:00Z' })).body.error, 'INVALID_PAYMENT', 'cumulative paid amount only grows');
+
+  const revised = await admin(request(app).post(`${base}/bills/${created.body.id}/revise`)).send({ ...bill, amountOre: 45_000, reason: 'credit note' });
+  assert.equal(revised.status, 201, JSON.stringify(revised.body));
+  assert.equal(revised.body.revision, 2);
+  assert.equal(revised.body.previous_id, created.body.id);
+  assert.equal(revised.body.paid_ore, 20_000, 'recorded payments carry over');
+  assert.equal(revised.body.status, 'partially_paid');
+  const old = (await request(app).get(`${base}/bills`).set('x-test-role', 'admin')).body.find((row: any) => row.id === created.body.id);
+  assert.equal(old.status, 'void');
+  assert.match(old.void_reason, /credit note/);
+  const paid = await admin(request(app).post(`${base}/bills/${revised.body.id}/paid`)).send({ paidOre: 45_000, paidAt: '2026-09-12T10:00:00Z' });
+  assert.equal(paid.body.status, 'paid');
+
+  const voided = await admin(request(app).post(`${base}/bills/${advance.body.id}/void`)).send({ reason: 'entered twice' });
+  assert.equal(voided.body.status, 'void');
+  assert.equal((await admin(request(app).post(`${base}/bills`)).send({ ...bill, kind: 'advance', amountOre: 40_000 })).status, 201, 'a voided bill no longer blocks its period');
+  const preview = await previewMonthlyElectricity('2026-08', String(contract.id), new Date('2026-09-15T00:00:00Z'));
+  assert.deepEqual(preview.actualBills.map((row) => [row.kind, row.amountOre, row.status]).sort(), [['advance', 40_000, 'due'], ['settlement', 45_000, 'paid']]);
+  assert(preview.actualBills.every((row) => row.estimatedLabShareOre === null), 'no lab share without comparable household coverage');
+});

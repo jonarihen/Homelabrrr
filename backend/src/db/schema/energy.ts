@@ -138,6 +138,11 @@ export const electricityBills = pgTable('electricity_bills', {
   kind: text('kind').notNull().default('settlement'),
   finalized: boolean('finalized').notNull().default(false),
   revision: integer('revision').notNull().default(1),
+  // A bill is never edited in place: a correction voids it (with reason) and
+  // appends a new revision pointing back to it. status: due | partially_paid | paid | void.
+  previous_id: integer('previous_id'),
+  voided_at: timestamp('voided_at', { withTimezone: true, mode: 'date' }),
+  void_reason: text('void_reason'),
 }, (t) => [index('electricity_bill_period').on(t.contract_id, t.period_start, t.period_end)]);
 
 // Immutable calculation revisions. A finalized statement is never edited in

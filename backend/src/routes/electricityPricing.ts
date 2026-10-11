@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { and, eq, lt, gt, or, isNull, sql, desc } from 'drizzle-orm';
+import { and, eq, lt, gt, or, isNull, sql, desc, ne, inArray } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { electricityContracts, electricityTariffs, electricityBills, electricityCostStatements } from '../db/schema/index.ts';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
@@ -180,34 +180,85 @@ router.get('/current', async (req, res) => {
   res.json(await getApplicablePrice(new Date(), ref, basis));
 });
 router.post('/sync', async (req, res) => { try { const result = await syncPublishedSpotPrices(); await logAudit(req, 'electricity_spot_sync'); res.json(result); } catch (err) { fail(res, err); } });
+function parseBillBody(b: any) {
+  const contractId = Number(b.contractId); const from = instant(b.periodStart); const to = instant(b.periodEnd);
+  const ore = Number(b.amountOre);
+  if (!Number.isSafeInteger(contractId) || contractId < 1 || to <= from || !Number.isSafeInteger(ore) || ore < 0 || !['advance', 'settlement'].includes(b.kind)) throw new Error('INVALID_BILL');
+  if (b.billedKwh != null && (!/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(String(b.billedKwh)) || String(b.billedKwh).length > 24)) throw new Error('INVALID_BILLED_KWH');
+  return { contract_id: contractId, period_start: from, period_end: to, amount_ore: ore, billed_kwh: b.billedKwh == null ? null : String(b.billedKwh), kind: b.kind as string,
+    reference: b.reference ? String(b.reference).slice(0, 256) : null, note: b.note ? String(b.note).slice(0, 2000) : null };
+}
+type BillValues = ReturnType<typeof parseBillBody>;
+// Advance and settlement bills are tracked separately; within one kind a
+// non-void bill may not overlap another, so an invoice cannot count twice.
+async function assertNoOverlappingBill(tx: Tx, values: BillValues, ignoreId: number | null = null) {
+  const overlap = await tx.select({ id: electricityBills.id }).from(electricityBills).where(and(eq(electricityBills.contract_id, values.contract_id), eq(electricityBills.kind, values.kind),
+    ne(electricityBills.status, 'void'), lt(electricityBills.period_start, values.period_end), gt(electricityBills.period_end, values.period_start),
+    ...(ignoreId ? [ne(electricityBills.id, ignoreId)] : []))).limit(1);
+  if (overlap.length) throw new Error('OVERLAPPING_BILL');
+}
 router.post('/bills', requireRecentReauthentication, async (req, res) => {
   try {
-    const b = req.body || {}; const contractId = Number(b.contractId); const from = instant(b.periodStart); const to = instant(b.periodEnd);
-    const ore = Number(b.amountOre);
-    if (!Number.isSafeInteger(contractId) || contractId < 1 || to <= from || !Number.isSafeInteger(ore) || ore < 0 || !['advance', 'settlement'].includes(b.kind)) throw new Error('INVALID_BILL');
-    if (b.billedKwh != null && (!/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(String(b.billedKwh)) || String(b.billedKwh).length > 24)) throw new Error('INVALID_BILLED_KWH');
+    const values = parseBillBody(req.body || {});
     const result = await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(237003)`);
-      const overlap = await tx.select({ id: electricityBills.id }).from(electricityBills).where(and(eq(electricityBills.contract_id, contractId), eq(electricityBills.kind, b.kind), lt(electricityBills.period_start, to), gt(electricityBills.period_end, from))).limit(1);
-      if (overlap.length) throw new Error('OVERLAPPING_BILL');
-      const [created] = await tx.insert(electricityBills).values({ contract_id: contractId, period_start: from, period_end: to, amount_ore: ore, billed_kwh: b.billedKwh == null ? null : String(b.billedKwh), kind: b.kind, status: 'due', reference: b.reference ? String(b.reference).slice(0, 256) : null, note: b.note ? String(b.note).slice(0, 2000) : null }).returning();
+      await assertNoOverlappingBill(tx, values);
+      const [created] = await tx.insert(electricityBills).values({ ...values, status: 'due' }).returning();
       return created;
     });
-    await logAudit(req, 'electricity_bill_created', String(result.id), `contract=${contractId}; kind=${result.kind}`);
+    await logAudit(req, 'electricity_bill_created', String(result.id), `contract=${result.contract_id}; kind=${result.kind}`);
     res.status(201).json(result);
   } catch (err) { fail(res, err); }
 });
-router.get('/bills', async (_req, res) => { res.json(await db.select().from(electricityBills).orderBy(electricityBills.period_start).limit(120)); });
+router.get('/bills', async (_req, res) => { res.json(await db.select().from(electricityBills).orderBy(electricityBills.period_start, electricityBills.revision).limit(240)); });
+// paidOre is the cumulative amount actually paid so far; it may only grow.
+// Less than the invoiced amount records a partial payment, never "paid".
 router.post('/bills/:id/paid', requireRecentReauthentication, async (req, res) => {
   try {
     const id = Number(req.params.id); const paidOre = Number(req.body?.paidOre); const paidAt = instant(req.body?.paidAt);
-    if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(paidOre) || paidOre < 0) throw new Error('INVALID_PAYMENT');
-    const [due] = await db.select({ amount_ore: electricityBills.amount_ore }).from(electricityBills).where(and(eq(electricityBills.id, id), eq(electricityBills.status, 'due'))).limit(1);
-    if (!due || paidOre < due.amount_ore) throw new Error('INVALID_PAYMENT');
-    const [bill] = await db.update(electricityBills).set({ status: 'paid', paid_at: paidAt, paid_ore: paidOre }).where(and(eq(electricityBills.id, id), eq(electricityBills.status, 'due'))).returning();
+    if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(paidOre) || paidOre <= 0) throw new Error('INVALID_PAYMENT');
+    const [due] = await db.select().from(electricityBills).where(and(eq(electricityBills.id, id), inArray(electricityBills.status, ['due', 'partially_paid']))).limit(1);
+    if (!due) return res.status(409).json({ error: 'BILL_NOT_DUE' });
+    if (paidOre <= (due.paid_ore ?? 0)) throw new Error('INVALID_PAYMENT');
+    const status = paidOre >= due.amount_ore ? 'paid' : 'partially_paid';
+    const [bill] = await db.update(electricityBills).set({ status, paid_at: paidAt, paid_ore: paidOre })
+      .where(and(eq(electricityBills.id, id), eq(electricityBills.status, due.status), due.paid_ore == null ? isNull(electricityBills.paid_ore) : eq(electricityBills.paid_ore, due.paid_ore))).returning();
     if (!bill) return res.status(409).json({ error: 'BILL_NOT_DUE' });
-    await logAudit(req, 'electricity_bill_paid', String(id), `amount_ore=${paidOre}`);
+    await logAudit(req, 'electricity_bill_paid', String(id), `paid_ore=${paidOre}; status=${status}`);
     res.json(bill);
+  } catch (err) { fail(res, err); }
+});
+router.post('/bills/:id/void', requireRecentReauthentication, async (req, res) => {
+  try {
+    const id = Number(req.params.id); const reason = endReason(req.body?.reason);
+    if (!Number.isSafeInteger(id) || id < 1) throw new Error('INVALID_BILL');
+    const [bill] = await db.update(electricityBills).set({ status: 'void', voided_at: new Date(), void_reason: reason })
+      .where(and(eq(electricityBills.id, id), ne(electricityBills.status, 'void'))).returning();
+    if (!bill) return res.status(404).json({ error: 'BILL_NOT_FOUND' });
+    await logAudit(req, 'electricity_bill_voided', String(id), `reason=${reason}`);
+    res.json(bill);
+  } catch (err) { fail(res, err); }
+});
+// Correct a bill: the old row is voided and a new revision appended; recorded
+// payments carry over to the corrected invoice.
+router.post('/bills/:id/revise', requireRecentReauthentication, async (req, res) => {
+  try {
+    const id = Number(req.params.id); const reason = endReason(req.body?.reason);
+    if (!Number.isSafeInteger(id) || id < 1) throw new Error('INVALID_BILL');
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(237003)`);
+      const [old] = await tx.select().from(electricityBills).where(and(eq(electricityBills.id, id), ne(electricityBills.status, 'void'))).for('update').limit(1);
+      if (!old) throw new Error('INVALID_BILL');
+      const values = parseBillBody({ contractId: old.contract_id, kind: old.kind, ...req.body });
+      await assertNoOverlappingBill(tx, values, id);
+      await tx.update(electricityBills).set({ status: 'void', voided_at: new Date(), void_reason: `revised: ${reason}` }).where(eq(electricityBills.id, id));
+      const paid = old.paid_ore ?? null;
+      const [created] = await tx.insert(electricityBills).values({ ...values, revision: old.revision + 1, previous_id: old.id, paid_ore: paid, paid_at: old.paid_at,
+        status: paid == null ? 'due' : paid >= values.amount_ore ? 'paid' : 'partially_paid' }).returning();
+      return created;
+    });
+    await logAudit(req, 'electricity_bill_revised', String(result.id), `prior=${id}; revision=${result.revision}; reason=${reason}`);
+    res.status(201).json(result);
   } catch (err) { fail(res, err); }
 });
 router.get('/cost', async (req, res) => { try { res.json(await calculateLabCost(instant(req.query.from), instant(req.query.to), String(req.query.contractRef || ''))); } catch (err) { fail(res, err); } });
