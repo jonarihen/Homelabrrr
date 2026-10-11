@@ -2,7 +2,7 @@ import { and, eq, gte, lte, desc, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { hardwareConnections, hardwarePowerSamples, hardwareEnergyIntervals, hardwareTelemetryState } from '../db/schema/index.ts';
 import { decryptSecret } from '../utils/secrets.ts';
-import { discoverHardware, IloError, physicalSystemIdentity } from './iloAdapter.ts';
+import { discoverHardware, IloError, physicalSystemIdentity, type HardwareHealth } from './iloAdapter.ts';
 import { integrateWattSamples } from './energyIntervals.ts';
 import { startBackgroundWork } from './backgroundWork.ts';
 import { log } from '../utils/logger.ts';
@@ -30,6 +30,23 @@ export function aggregationLookbackStart(observedAt: Date): Date {
 export function aggregationLookaheadEnd(observedAt: Date): Date {
   const currentBucketStart = Math.floor(observedAt.getTime() / (15 * 60_000)) * (15 * 60_000);
   return new Date(currentBucketStart + 30 * 60_000);
+}
+
+// Keep vendor payloads out of the database even if a future reader accidentally
+// returns extra fields. A malformed optional snapshot never discards good watts.
+export function healthForStorage(input: HardwareHealth | undefined): HardwareHealth | null {
+  if (!input || !Array.isArray(input.temperatures) || !Array.isArray(input.fans) || !Array.isArray(input.powerSupplies)) return null;
+  const name = (value: unknown) => typeof value === 'string' ? value.slice(0, 64) : '';
+  const status = (value: unknown) => typeof value === 'string' && value.length <= 32 ? value : null;
+  const number = (value: unknown, min: number, max: number) => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : null;
+  return {
+    temperatures: input.temperatures.slice(0, 64).map((item) => ({ name: name(item?.name), celsius: number(item?.celsius, -40, 125), health: status(item?.health) })),
+    fans: input.fans.slice(0, 32).map((item) => { const unit = item?.unit === 'percent' || item?.unit === 'rpm' ? item.unit : null;
+      return { name: name(item?.name), value: unit ? number(item?.value, 0, unit === 'percent' ? 100 : 50_000) : null, unit, health: status(item?.health) }; }),
+    powerSupplies: input.powerSupplies.slice(0, 16).map((item) => ({ name: name(item?.name), health: status(item?.health), state: status(item?.state) })),
+    powerRedundancy: input.powerRedundancy ? { health: status(input.powerRedundancy.health), state: status(input.powerRedundancy.state) } : null,
+    limited: Boolean(input.limited) || input.temperatures.length > 64 || input.fans.length > 32 || input.powerSupplies.length > 16,
+  };
 }
 
 export async function pollHardwareConnection(id: number, now = () => new Date(), reader = discoverHardware) {
@@ -63,7 +80,7 @@ export async function pollHardwareConnection(id: number, now = () => new Date(),
         const [fresh] = await tx.select({ config_version: hardwareConnections.config_version }).from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.collection_enabled, true))).limit(1);
         const [state] = await tx.select({ lease_until: hardwareTelemetryState.lease_until }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
         if (!fresh || fresh.config_version !== connection.config_version || state?.lease_until?.getTime() !== lease.getTime()) return;
-        await tx.insert(hardwarePowerSamples).values({ hardware_id: id, node_ref: connection.node_ref, observed_at: measurement.observedAt, watts: String(measurement.watts), mode: sample.mode.value, origin, device_epoch: connection.system_uuid }).onConflictDoNothing();
+        await tx.insert(hardwarePowerSamples).values({ hardware_id: id, node_ref: connection.node_ref, observed_at: measurement.observedAt, watts: String(measurement.watts), mode: sample.mode.value, origin, device_epoch: connection.system_uuid, health: healthForStorage(sample.sample.health) }).onConflictDoNothing();
         // Always include the full preceding bucket. A sliding 20-minute
         // lookback would later recompute an older bucket without its first
         // sample and overwrite a complete aggregate with partial energy.

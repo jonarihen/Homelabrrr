@@ -4,6 +4,11 @@
 
 - An enabled ElOverblik meter begins syncing shortly after selection or restart. The initial 13-month history advances in bounded 30-day chunks about one minute apart; the normal refresh runs every six hours.
 - Manual resyncs have a durable five-minute cooldown and return `Retry-After` when limited. Configuration changes invalidate in-flight imports, and failures retry without repeatedly downloading all history.
+## 2026-10-08 — Optional iLO hardware health
+
+- Hardware discovery and telemetry now capture bounded temperatures, fan readings, power-supply status and redundancy when supported on iLO 4 or iLO 5.
+- The Hardware panel labels stale, partial, unsupported and unavailable health without interpreting missing readings as zero. Raw vendor payloads and PSU serials are excluded.
+
 ## 2026-10-08 — Hardware identity and telemetry reliability
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
