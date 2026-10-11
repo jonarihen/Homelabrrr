@@ -99,6 +99,12 @@ export async function withVmMigrationLock<T>(vmid: number, action: (database: Db
 export async function withMigrationSafeSchedule<T>(schedule: typeof vmSchedules.$inferSelect, action: (tx: DbOrTx) => Promise<T>) {
   return withVmMigrationLock(schedule.vmid, async (database) => {
     if (await vmMigrationPending(database, schedule.vmid)) return;
+    try {
+      await assertVmPolicyLocation(database, schedule.node, schedule.vmid);
+    } catch (err) {
+      if ((err as { statusCode?: number }).statusCode === 409) return;
+      throw err;
+    }
     const [current] = await database.select().from(vmSchedules).where(eq(vmSchedules.id, schedule.id));
     if (!current || !current.enabled || current.node !== schedule.node || current.vmid !== schedule.vmid
       || current.stop_time !== schedule.stop_time || current.start_time !== schedule.start_time
