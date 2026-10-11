@@ -14,6 +14,9 @@ import { logAudit } from '../utils/audit.ts';
 
 const router = Router();
 router.use(requireAuth, requireInteractiveSession);
+// Every payments read is private (own history, aggregate status, admin
+// ledger): never cacheable by the browser or an intermediary.
+router.use((_req, res, next) => { res.setHeader('Cache-Control', 'private, no-store'); next(); });
 // Per-member limits on provider-calling endpoints (checkout creation is also
 // limited durably in the service). Keyed by the authenticated member.
 const memberLimiter = (limit: number) => rateLimit({ windowMs: 10 * 60_000, limit, standardHeaders: true, legacyHeaders: false,
@@ -87,7 +90,7 @@ router.get('/admin/export.csv', requireAdmin, requireRecentReauthentication, asy
     const body = await paypalLedgerCsv(environment);
     await logAudit(req, 'paypal.ledger.export', environment);
     res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="paypal-ledger-${environment}.csv"`,
-      'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }).send(body);
+      'X-Content-Type-Options': 'nosniff' }).send(body);
   } catch (err) { fail(res, err); }
 });
 const manualId = (value: unknown) => { const id = Number(value); if (!Number.isSafeInteger(id) || id <= 0) throw new PayPalError('INVALID_ID', 400); return id; };

@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { and, desc, eq, isNull, sql, lt, gt } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import {
-  hardwareConnections, hardwarePowerOperations, hardwarePowerPolicies, electricityContracts, electricitySpotPrices, electricityTariffs,
+  hardwareConnections, hardwarePowerOperations, hardwarePowerPolicies,
 } from '../db/schema/index.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
@@ -16,6 +16,7 @@ import { sanitizeError } from '../utils/sanitize.ts';
 import { PowerController } from '../services/powerController.ts';
 import { PowerControlStore } from '../services/powerControlStore.ts';
 import { buildPowerPreview } from '../services/powerPreview.ts';
+import { pricePolicyBoundaries } from '../services/powerPriceBoundaries.ts';
 import { resolveManualExpiry } from '../services/manualPowerOverride.ts';
 import { controllerDecisionInput, observedMode, storedManualOverride, supportedModesFrom, type DecisionState } from '../services/powerDecisionContext.ts';
 import { IloError, readRuntimeState, type RuntimeState } from '../services/iloAdapter.ts';
@@ -166,30 +167,7 @@ export function createPowerControlRouter(deps: PowerControlRouterDeps = {}) {
     } catch { return null; }
   };
 
-  async function sourceBoundaries(pricePolicy: PowerPricePolicy, at: Date, previewEnd: Date): Promise<Date[]> {
-    const boundaries: Date[] = [];
-    if (!pricePolicy?.enabled || !/^\d+$/.test(pricePolicy.contractRef)) return boundaries;
-    const [contract] = await db.select().from(electricityContracts)
-      .where(eq(electricityContracts.id, Number(pricePolicy.contractRef))).limit(1);
-    if (!contract || contract.area !== pricePolicy.area) return boundaries;
-    boundaries.push(contract.valid_from);
-    if (contract.valid_to) boundaries.push(contract.valid_to);
-    const tariffs = await db.select({ start: electricityTariffs.valid_from, end: electricityTariffs.valid_to })
-      .from(electricityTariffs).where(and(eq(electricityTariffs.contract_id, contract.id),
-        lt(electricityTariffs.valid_from, previewEnd), gt(electricityTariffs.valid_to, at)));
-    for (const tariff of tariffs) boundaries.push(tariff.start, tariff.end);
-    if (contract.kind === 'spot') {
-      const spots = await db.select({ start: electricitySpotPrices.start_utc, end: electricitySpotPrices.end_utc })
-        .from(electricitySpotPrices).where(and(eq(electricitySpotPrices.area, contract.area),
-          lt(electricitySpotPrices.start_utc, previewEnd), gt(electricitySpotPrices.end_utc, at)));
-      for (const spot of spots) boundaries.push(spot.start, spot.end);
-    } else {
-      for (let time = at.getTime() - at.getTime() % 86_400_000 + 86_400_000; time < previewEnd.getTime(); time += 86_400_000) {
-        boundaries.push(new Date(time));
-      }
-    }
-    return boundaries;
-  }
+  const sourceBoundaries = pricePolicyBoundaries;
 
   // Preview uses exactly the worker's resolver input (automatic, not manual).
   // `ifEnabled` shows what the policy would select if control and automation

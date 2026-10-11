@@ -33,3 +33,35 @@ test('time-based energy trend leaves gaps rather than connecting missing coverag
   assert.equal((path.match(/M/g) || []).length, 2);
   assert.equal((path.match(/L/g) || []).length, 1);
 });
+
+import { basisLabel, costStatusLabel, decisionText, fundingStatusLabel, markerPositions, progressView, reasonText } from './energyView.js';
+
+test('decision text explains the resolved mode and reason in plain words', () => {
+  assert.equal(decisionText({ mode: 'dynamic', reason: 'price_high', validUntil: '2026-10-08T12:15:00Z' }), 'Dynamic: price exceeds the expensive-price limit until 14:15');
+  assert.equal(decisionText({ mode: 'high', reason: 'price_low' }), 'High: cheap-price boost');
+  assert.equal(decisionText({ mode: 'low', reason: 'schedule', validUntil: '2026-10-08T12:15:00Z' }), 'Low: weekly schedule');
+  assert.equal(decisionText({ mode: null, reason: 'paused' }), 'No mode selected: automation paused');
+  assert.equal(reasonText('drift_hold'), 'held after an external change');
+  assert.equal(reasonText('something_new'), 'something new');
+});
+test('basis and status labels are readable and never blank', () => {
+  assert.match(basisLabel('variable_retail_including_vat'), /VAT/);
+  assert.match(basisLabel('spot_only_excluding_retail_additions'), /Spot price only/);
+  assert.equal(basisLabel(null), 'Price basis not configured');
+  assert.equal(costStatusLabel('finalized_partial'), 'Finalized, partial coverage');
+  assert.equal(fundingStatusLabel('recalculation_pending'), 'Recalculation pending');
+  assert.equal(costStatusLabel(undefined), 'Unavailable');
+});
+test('progress uses only the server percentage and rejects impossible values', () => {
+  assert.equal(progressView(null), null);
+  assert.equal(progressView({ percent: null, basis: 'finalized_lab_cost' }), null);
+  assert.equal(progressView({ percent: Number.NaN }), null);
+  assert.equal(progressView({ percent: 140 }), null);
+  assert.deepEqual(progressView({ percent: 9.6, basis: 'finalized_lab_cost' }), { percent: 9.6, basis: 'finalized lab cost', estimate: false });
+  assert.equal(progressView({ percent: 20, basis: 'current_estimate' }).estimate, true);
+});
+test('mode markers stay inside the chart range', () => {
+  const markers = markerPositions([{ at: '2026-10-08T11:00:00Z' }, { at: '2026-10-07T00:00:00Z' }, { at: 'bad' }], '2026-10-08T10:00:00Z', '2026-10-08T12:00:00Z');
+  assert.equal(markers.length, 1);
+  assert.equal(markers[0].x, 300);
+});

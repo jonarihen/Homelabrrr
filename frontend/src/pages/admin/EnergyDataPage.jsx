@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import api from '../../api.js';
 import ElectricityPricingPanel from './ElectricityPricingPanel.jsx';
 import ExtraLabLoadsPanel from './ExtraLabLoadsPanel.jsx';
+import ElectricityBillsPanel from './ElectricityBillsPanel.jsx';
 
 export default function EnergyDataPage() {
   const [status, setStatus] = useState(null);
@@ -68,6 +69,7 @@ export default function EnergyDataPage() {
       <div className="flex flex-wrap gap-3"><button disabled={busy || !status.enabled} onClick={() => action('sync')} className="rounded border border-slate-600 px-4 py-2 disabled:opacity-50">Sync now</button><button disabled={busy} onClick={() => action('disconnect')} className="rounded border border-red-700 px-4 py-2 disabled:opacity-50">Disconnect and keep history</button><button disabled={busy} onClick={() => { if (window.confirm('Disconnect and permanently delete all imported meter intervals and charge snapshots? Finalized cost statements are kept.')) action('disconnect', { purgeHistory: true }); }} className="rounded border border-red-700 px-4 py-2 text-red-300 disabled:opacity-50">Disconnect and purge history</button></div>
     </section>}
     <ElectricityPricingPanel />
+    <ElectricityBillsPanel />
     <ExtraLabLoadsPanel />
   </main>;
 }
