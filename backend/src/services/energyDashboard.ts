@@ -154,9 +154,12 @@ export async function energySummary(month: string, now = new Date()) {
   if (costContracts.length === 1) {
     try {
       const calculation = await previewMonthlyElectricity(month, String(costContracts[0].id), now);
+      const serverVariableOre = calculation.serverCosts.reduce((sum, item) => sum + BigInt(item.costOre), 0n).toString();
+      const extraVariableOre = calculation.extraLoadCosts.reduce((sum, item) => sum + BigInt(item.costOre), 0n).toString();
       cost = { status: calculation.variableCostComplete && calculation.labCoveredSeconds === calculation.expectedSeconds && calculation.fixedFeeStatus === 'known' ? 'calculated' : 'partial',
         actualOre: calculation.calculatedLabCostOre, forecastOre: calculation.forecast?.forecastTotalOre ?? null,
-        components: [{ label: 'Measured server variable cost', ore: calculation.variableCostOre },
+        components: [{ label: 'Measured server variable cost', ore: serverVariableOre },
+          { label: 'Estimated extra load variable cost', ore: extraVariableOre },
           { label: 'Allocated fixed fees', ore: calculation.allocatedFixedFeeOre }] };
     } catch { /* Incomplete or absent inputs stay explicitly unavailable. */ }
   }

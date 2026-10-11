@@ -85,6 +85,13 @@
       "when": 1791476309848,
       "tag": "0011_hardware_health",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1791476770097,
+      "tag": "0012_extra_lab_loads",
+      "breakpoints": true
     }
   ]
 }

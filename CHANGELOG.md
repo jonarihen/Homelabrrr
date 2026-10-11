@@ -37,6 +37,10 @@
 
 - The saved hardware policy preview now includes seven days of schedule and published-price decisions, the next schedule boundary, and the next known selected-mode change. Future price-dependent selections beyond published coverage are explicitly unknown.
 - Weekly power windows resolve Copenhagen daylight-saving gaps and repeated hours to stable UTC boundaries, including custom windows during the repeated autumn hour.
+## 2026-10-08 — Optional extra lab load estimates
+
+- Administrators can add dated, constant-watt estimates for switch or UPS overhead outside measured server input power. The default remains no extra loads; inclusive household or upstream measurements are rejected, and overlapping revisions of one source are blocked.
+- Monthly previews separate measured server kWh from estimated extra kWh and price both under the same contract intervals. Scheduled future estimates join the forecast through published prices and an explicit later scenario. Finalized prior statements remain revisioned and unchanged until explicitly recalculated.
 
 ## 2026-10-08 — Server energy history
 

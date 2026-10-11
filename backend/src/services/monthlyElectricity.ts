@@ -1,9 +1,10 @@
 import { and, eq, gte, lte, lt, gt, desc, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { db, type DbOrTx } from '../db/client.ts';
-import { electricityContracts, electricityTariffs, electricitySpotPrices, electricityBills, electricityCostStatements, eloverblikConnections, eloverblikIntervals, hardwareConnections, hardwareEnergyIntervals, hardwareEnergyDays } from '../db/schema/index.ts';
+import { electricityContracts, electricityTariffs, electricitySpotPrices, electricityBills, electricityCostStatements, electricityExtraLoads, eloverblikConnections, eloverblikIntervals, hardwareConnections, hardwareEnergyIntervals, hardwareEnergyDays } from '../db/schema/index.ts';
 import { calculateLabCost, getApplicablePrice } from './electricityPricing.ts';
 import { allocateFixedFee, compareHouseholdEnergy, forecastMonthlyCost, includeMonthlyFixedFee, startOfLocalDateUtc, type DailyEvidence } from './energyAccounting.ts';
+import { extraLoadInterval, forecastExtraLoadCost } from './extraLabLoads.ts';
 
 const SCALE = 1_000_000_000n;
 function nano(value: string): bigint {
@@ -24,11 +25,13 @@ async function sourceFingerprint(database: DbOrTx, contractId: number, start: Da
   const tariffs = await database.select().from(electricityTariffs).where(and(eq(electricityTariffs.contract_id, contractId), lt(electricityTariffs.valid_from, end), gt(electricityTariffs.valid_to, start))).orderBy(electricityTariffs.id);
   const spots = await database.select().from(electricitySpotPrices).where(and(eq(electricitySpotPrices.area, contract.area), lt(electricitySpotPrices.start_utc, end), gt(electricitySpotPrices.end_utc, start))).orderBy(electricitySpotPrices.start_utc);
   const energy = await database.select().from(hardwareEnergyIntervals).where(and(gte(hardwareEnergyIntervals.start_utc, start), lte(hardwareEnergyIntervals.end_utc, end))).orderBy(hardwareEnergyIntervals.hardware_id, hardwareEnergyIntervals.start_utc);
+  const extraLoads = await database.select().from(electricityExtraLoads).where(and(lt(electricityExtraLoads.valid_from, end), gt(electricityExtraLoads.valid_to, start))).orderBy(electricityExtraLoads.id).limit(501);
+  if (extraLoads.length > 500) throw new Error('EXTRA_LOAD_LIMIT');
   const monitored = await database.select({ id: hardwareConnections.id, collection_enabled: hardwareConnections.collection_enabled, lifecycle_state: hardwareConnections.lifecycle_state }).from(hardwareConnections).where(eq(hardwareConnections.lifecycle_state, 'active')).orderBy(hardwareConnections.id);
   const [meter] = await database.select({ meter: eloverblikConnections.selected_meter_id, scope: eloverblikConnections.meter_scope, version: eloverblikConnections.config_version }).from(eloverblikConnections).where(eq(eloverblikConnections.id, 1)).limit(1);
   const meterIntervals = meter?.meter ? await database.select().from(eloverblikIntervals).where(and(eq(eloverblikIntervals.meter_id, meter.meter), gte(eloverblikIntervals.interval_start, start), lte(eloverblikIntervals.interval_end, end))).orderBy(eloverblikIntervals.id) : [];
   const bills = await database.select().from(electricityBills).where(and(eq(electricityBills.contract_id, contractId), lt(electricityBills.period_start, end), gt(electricityBills.period_end, start))).orderBy(electricityBills.id);
-  return createHash('sha256').update(JSON.stringify({ contract, tariffs, spots, energy, monitored, meter, meterIntervals, bills })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ contract, tariffs, spots, energy, extraLoads, monitored, meter, meterIntervals, bills })).digest('hex');
 }
 
 export async function previewMonthlyElectricity(month: string, contractRef: string, asOf = new Date(), scenarioDkkPerKwh: string | null = null) {
@@ -39,11 +42,15 @@ export async function previewMonthlyElectricity(month: string, contractRef: stri
   const [contract] = await db.select().from(electricityContracts).where(eq(electricityContracts.id, Number(contractRef))).limit(1);
   if (!contract) throw new Error('Contract not found');
   const cost = await calculateLabCost(start, elapsedEnd, contractRef);
-  const variableCostOre = cost.totals.reduce((sum, item) => sum + BigInt(item.costOre), 0n);
+  const variableCostOre = [...cost.totals, ...cost.extraLoadCosts].reduce((sum, item) => sum + BigInt(item.costOre), 0n);
   const [meter] = await db.select({ selected_meter_id: eloverblikConnections.selected_meter_id, meter_scope: eloverblikConnections.meter_scope }).from(eloverblikConnections).where(eq(eloverblikConnections.id, 1)).limit(1);
   const rawLab = await db.select().from(hardwareEnergyIntervals).where(and(gte(hardwareEnergyIntervals.start_utc, start), lte(hardwareEnergyIntervals.end_utc, elapsedEnd)));
+  const extraLoads = await db.select().from(electricityExtraLoads).where(and(lt(electricityExtraLoads.valid_from, end), gt(electricityExtraLoads.valid_to, start))).limit(501);
+  if (extraLoads.length > 500) throw new Error('EXTRA_LOAD_LIMIT');
   const monitored = await db.select({ id: hardwareConnections.id }).from(hardwareConnections).where(and(eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.collection_enabled, true)));
-  const labKwh = rawLab.reduce((sum, row) => sum + nano(row.kwh), 0n);
+  const serverKwh = rawLab.reduce((sum, row) => sum + nano(row.kwh), 0n);
+  const extraKwh = extraLoads.reduce((sum, load) => sum + nano(extraLoadInterval(load, start, elapsedEnd)?.kwh || '0'), 0n);
+  const labKwh = serverKwh + extraKwh;
   const labCoverageByHardware = new Map<number, number>();
   for (const row of rawLab) labCoverageByHardware.set(row.hardware_id, (labCoverageByHardware.get(row.hardware_id) || 0) + row.covered_seconds);
   const labCoverage = monitored.length && monitored.some((row) => !labCoverageByHardware.has(row.id)) ? 0 : labCoverageByHardware.size ? Math.min(...labCoverageByHardware.values()) : 0;
@@ -89,18 +96,27 @@ export async function previewMonthlyElectricity(month: string, contractRef: stri
       }
     }
   }
-  const forecast = asOf < end ? includeMonthlyFixedFee(
-    forecastMonthlyCost({ now: asOf, month, actualCostOre: variableCostOre, dailyEvidence: evidence, scenarioDkkPerKwh, knownFuturePrices }),
-    fee.allocatedOre, fee.status) : null;
+  const baseForecast = asOf < end ? forecastMonthlyCost({ now: asOf, month, actualCostOre: variableCostOre,
+    dailyEvidence: evidence, scenarioDkkPerKwh, knownFuturePrices }) : null;
+  const extraFuture = asOf < end ? forecastExtraLoadCost(extraLoads, asOf, end, knownFuturePrices, scenarioDkkPerKwh) : null;
+  const withExtra = baseForecast && extraFuture ? baseForecast.forecastTotalOre !== null && extraFuture.complete ? {
+    ...baseForecast, forecastTotalOre: baseForecast.forecastTotalOre + extraFuture.costOre,
+    futureCostOre: baseForecast.futureCostOre! + extraFuture.costOre,
+  } : { ...baseForecast, status: baseForecast.status === 'insufficient_data' || extraFuture.complete ? baseForecast.status : 'missing_price_scenario' as const,
+    forecastTotalOre: null, futureCostOre: null } : null;
+  const forecast = withExtra ? includeMonthlyFixedFee(withExtra, fee.allocatedOre, fee.status) : null;
   const closed = asOf >= end;
   const fingerprint = await sourceFingerprint(db, contract.id, start, elapsedEnd);
   return { month, contractRef, periodStart: start.toISOString(), periodEnd: end.toISOString(), observedThrough: elapsedEnd.toISOString(), closed,
-    methodVersion: 'electricity_month_v1', contractRevision: contract.revision, sourceFingerprint: fingerprint, variableCostOre: variableCostOre.toString(), serverCosts: cost.totals,
-    variableCostComplete: cost.complete, labKwh: formatted(labKwh), labCoveredSeconds: labCoverage, expectedSeconds, household: comparison,
+    methodVersion: 'electricity_month_v2_extra_loads', contractRevision: contract.revision, sourceFingerprint: fingerprint, variableCostOre: variableCostOre.toString(), serverCosts: cost.totals,
+    extraLoadCosts: cost.extraLoadCosts, variableCostComplete: cost.complete, serverKwh: formatted(serverKwh), estimatedExtraKwh: formatted(extraKwh),
+    labKwh: formatted(labKwh), labCoveredSeconds: labCoverage, expectedSeconds, household: comparison,
     fixedMonthlyFeeOre: contract.fixed_monthly_ore, allocatedFixedFeeOre: fee.allocatedOre.toString(), fixedFeeStatus: fee.status, fixedFeeMethod: fee.method,
     calculatedLabCostOre: (variableCostOre + (closed && fee.status === 'known' ? fee.allocatedOre : 0n)).toString(),
     actualBills: bills.map((bill) => ({ id: bill.id, kind: bill.kind, amountOre: bill.amount_ore, status: bill.status, paidOre: bill.paid_ore, paidAt: bill.paid_at })),
-    forecast: forecast && { ...forecast, actualCostOre: forecast.actualCostOre.toString(), forecastTotalOre: forecast.forecastTotalOre?.toString() || null, futureCostOre: forecast.futureCostOre?.toString() || null },
+    forecast: forecast && { ...forecast, actualCostOre: forecast.actualCostOre.toString(), forecastTotalOre: forecast.forecastTotalOre?.toString() || null,
+      futureCostOre: forecast.futureCostOre?.toString() || null, estimatedExtraFutureOre: extraFuture?.complete ? extraFuture.costOre.toString() : null,
+      estimatedExtraLoadCount: extraFuture?.loadCount || 0 },
   };
 }
 
