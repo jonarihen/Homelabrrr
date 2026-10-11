@@ -28,16 +28,18 @@ export default function PayPalOperationsPanel({ environment, act, busy }) {
   const [health, setHealth] = useState(null);
   const [review, setReview] = useState({ items: [], nextOffset: null });
   const [subscriptions, setSubscriptions] = useState({ items: [], nextOffset: null });
+  const [manual, setManual] = useState({ items: [] });
   const [loadError, setLoadError] = useState('');
   const load = useCallback(async () => {
     setLoadError('');
     try {
-      const [h, r, s] = await Promise.all([
+      const [h, r, s, m] = await Promise.all([
         api.get('/payments/admin/health', { params: { environment } }),
         api.get('/payments/admin/review', { params: { environment } }),
         api.get('/payments/admin/subscriptions', { params: { environment } }),
+        api.get('/payments/admin/manual', { params: { status: 'all' } }),
       ]);
-      setHealth(h.data); setReview(r.data); setSubscriptions(s.data);
+      setHealth(h.data); setReview(r.data); setSubscriptions(s.data); setManual(m.data);
     } catch { setLoadError('Could not load reconciliation details.'); }
   }, [environment]);
   useEffect(() => { load(); }, [load]);
@@ -50,6 +52,14 @@ export default function PayPalOperationsPanel({ environment, act, busy }) {
   const cancel = (item) => {
     if (!window.confirm('Request cancellation at PayPal? A payment already in flight may still complete.')) return;
     run(`cancel-${item.id}`, () => api.post(`/payments/admin/subscriptions/${encodeURIComponent(item.id)}/cancel`, { environment }));
+  };
+  const decideManual = (item, action) => {
+    const field = action === 'confirm' ? 'evidence' : 'reason';
+    const label = action === 'confirm' ? 'Evidence (statement line, bank reference) for this transfer:' : `Reason to ${action} this entry:`;
+    const value = window.prompt(label);
+    if (!value || value.trim().length < 3) return;
+    const acknowledgeSimilar = action === 'confirm' && window.confirm('Only press OK if you already checked this is not the same money as an imported PayPal payment. Cancel keeps the duplicate check.');
+    run(`manual-${action}-${item.id}`, () => api.post(`/payments/admin/manual/${item.id}/${action}`, { [field]: value, acknowledgeSimilar }));
   };
   const metrics = health ? [
     ['Reconciliation', health.status], ['Last run', when(health.lastRunAt)], ['Last full success', when(health.lastSuccessAt)],
@@ -80,6 +90,19 @@ export default function PayPalOperationsPanel({ environment, act, busy }) {
             <button type="button" disabled={!!busy} className={button}
               onClick={() => run(`retry-${item.id}`, () => api.post(`/payments/admin/review/${encodeURIComponent(item.id)}/retry`, { environment }))}>Retry</button>
             <button type="button" disabled={!!busy} className={`${button} border-red-800 text-red-200`} onClick={() => dismiss(item)}>Dismiss</button>
+          </div></li>)}</ul>}
+    </section>
+    <section className={card}>
+      <h2 className="aaris-display text-lg text-gray-100">Manual bank transfers · live</h2>
+      <p className="text-xs text-gray-500 mt-1">Member reports are not counted until confirmed with evidence. References matching an imported PayPal payment are refused; corrections append a reversal.</p>
+      {manual.items.length === 0 ? <p className="text-sm text-gray-500 mt-3">No manual entries.</p> :
+        <ul className="mt-3 divide-y divide-gray-800">{manual.items.map((item) => <li key={item.id} className="py-3 flex flex-wrap items-center justify-between gap-3 text-sm">
+          <div><p className="text-gray-200">{money(item.amountOre)} · <span className="font-mono">{item.status}</span> · ref <span className="font-mono">{item.reference}</span></p>
+            <p className="text-xs text-gray-500">Member #{item.userId ?? '—'} · received {when(item.receivedAt)}{item.memberNote ? ` · note: ${item.memberNote}` : ''}</p></div>
+          <div className="flex gap-2">
+            {item.status === 'reported' && <><button type="button" disabled={!!busy} className={button} onClick={() => decideManual(item, 'confirm')}>Confirm</button>
+              <button type="button" disabled={!!busy} className={button} onClick={() => decideManual(item, 'reject')}>Reject</button></>}
+            {item.status === 'confirmed' && <button type="button" disabled={!!busy} className={button} onClick={() => decideManual(item, 'reverse')}>Reverse</button>}
           </div></li>)}</ul>}
     </section>
     <section className={card}>

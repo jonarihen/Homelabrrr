@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { pgTable, integer, text, boolean, timestamp, jsonb, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { users } from './auth.ts';
 import { electricityCostStatements } from './energy.ts';
@@ -210,3 +211,30 @@ export const paypalSetupResources = pgTable('paypal_setup_resources', {
   created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
 }, (t) => [uniqueIndex('paypal_setup_resource_key').on(t.environment, t.client_id, t.kind, t.resource_key)]);
+
+// Optional manual fallback for bank transfers. A member report is evidence
+// only and never posts. An administrator confirmation (with an evidence
+// reference) posts one append-only live DKK receipt; the normalized bank
+// reference is unique among non-rejected entries, and references matching an
+// imported PayPal transaction are refused.
+export const manualContributions = pgTable('manual_contributions', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  user_id: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+  amount_ore: integer('amount_ore').notNull(),
+  currency: text('currency').notNull().default('DKK'),
+  reference: text('reference').notNull(),
+  reference_key: text('reference_key').notNull(),
+  received_at: timestamp('received_at', { withTimezone: true, mode: 'date' }).notNull(),
+  status: text('status').notNull().default('reported'),
+  member_note: text('member_note'),
+  evidence: text('evidence'),
+  reported_by: integer('reported_by').references(() => users.id, { onDelete: 'set null' }),
+  reported_at: timestamp('reported_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  decided_by: integer('decided_by').references(() => users.id, { onDelete: 'set null' }),
+  decided_at: timestamp('decided_at', { withTimezone: true, mode: 'date' }),
+  reversed_at: timestamp('reversed_at', { withTimezone: true, mode: 'date' }),
+}, (t) => [
+  uniqueIndex('manual_contribution_reference').on(t.reference_key).where(sql`${t.status} <> 'rejected'`),
+  index('manual_contribution_user').on(t.user_id, t.reported_at),
+  index('manual_contribution_status').on(t.status, t.reported_at),
+]);

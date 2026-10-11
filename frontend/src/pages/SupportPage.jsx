@@ -17,6 +17,7 @@ export default function SupportPage() {
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [transfer, setTransfer] = useState({ amount: '', reference: '', receivedOn: '' });
   const refresh = useCallback(async () => {
     const [{ data: nextStatus }, { data: nextHistory }] = await Promise.all([api.get('/payments/status'), api.get('/payments/mine')]);
     setStatus(nextStatus); setHistory(nextHistory);
@@ -48,6 +49,14 @@ export default function SupportPage() {
       sessionStorage.setItem('paypalPendingIntent', data.intentId);
       window.location.assign(data.approvalUrl);
     } catch (err) { setError(err.response?.data?.error || 'Could not open PayPal checkout.'); setBusy(''); }
+  };
+  const reportTransfer = async (event) => {
+    event.preventDefault();
+    setBusy('manual'); setError(''); setNotice('');
+    try { await api.post('/payments/manual-reports', transfer); setTransfer({ amount: '', reference: '', receivedOn: '' });
+      setNotice('Transfer reported. It counts only after the owner confirms it against the bank statement.'); await refresh(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not report the transfer.'); }
+    finally { setBusy(''); }
   };
   const cancel = async (subscription) => {
     if (!window.confirm('Cancel this monthly contribution? PayPal may still process a payment already due.')) return;
@@ -85,6 +94,18 @@ export default function SupportPage() {
           <div><p className="text-white">{money(item.amountOre)} monthly · {item.status}</p><p className="text-xs text-gray-500">{item.environment === 'sandbox' ? 'Sandbox test · ' : ''}Next billing {date(item.nextBillingAt)}</p></div>
           {!['CANCELLED', 'EXPIRED'].includes(item.status) && <button type="button" disabled={!!busy} onClick={() => cancel(item)} className="border border-gray-700 px-3 py-2 text-xs text-gray-300 disabled:opacity-40">Cancel subscription</button>}
         </div>)}</div>}
+    </section>
+    <section className={card}><h2 className="aaris-display text-lg text-gray-100">Paid by bank transfer?</h2>
+      <p className="text-xs text-gray-500 mt-2">Report it here so the owner can match it against the bank statement. A report is not counted until confirmed.</p>
+      <form onSubmit={reportTransfer} className="mt-4 grid sm:grid-cols-4 gap-3 text-xs text-gray-400">
+        <label>Amount · DKK<input value={transfer.amount} inputMode="decimal" onChange={(event) => setTransfer((old) => ({ ...old, amount: event.target.value }))} className="mt-1 w-full border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+        <label>Bank reference<input value={transfer.reference} onChange={(event) => setTransfer((old) => ({ ...old, reference: event.target.value }))} className="mt-1 w-full border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+        <label>Date sent<input type="date" value={transfer.receivedOn} onChange={(event) => setTransfer((old) => ({ ...old, receivedOn: event.target.value }))} className="mt-1 w-full border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+        <button disabled={!!busy || !transfer.amount || !transfer.reference || !transfer.receivedOn} className="self-end border border-gray-700 px-4 py-2 font-mono uppercase text-gray-200 disabled:opacity-40">Report transfer</button>
+      </form>
+      {(history.manualReports || []).length > 0 && <ul className="mt-4 divide-y divide-gray-800 text-sm">{history.manualReports.map((item) => <li key={item.id} className="py-2 flex justify-between gap-3">
+        <span className="text-gray-300">{money(item.amountOre)} · ref <span className="font-mono">{item.reference}</span> · {date(item.receivedAt)}</span>
+        <span className="font-mono text-xs text-gray-400">{item.status === 'reported' ? 'awaiting confirmation' : item.status}</span></li>)}</ul>}
     </section>
     <section className={card}><h2 className="aaris-display text-lg text-gray-100">Your contribution history</h2>
       <p className="text-xs text-gray-500 mt-2">Only verified postings count toward the lab budget. Refunds and actual PayPal fees reduce net support.</p>

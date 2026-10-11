@@ -5,6 +5,8 @@ import { captureOneOff, createOneOff, createMonthly, cancelMonthly, adminPaypalS
 import { listPaypalReviewEvents, retryPaypalReviewEvent, dismissPaypalReviewEvent } from '../services/paypalReview.ts';
 import { paypalLedgerCsv, paypalReconciliationHealth } from '../services/paypalOperations.ts';
 import { paypalConfigHistoryList, provisionPaypalResource, testPaypalConnection } from '../services/paypalSetup.ts';
+import { confirmManualContribution, listManualContributions, ownManualContributions, recordManualContribution, rejectManualContribution,
+  reportManualContribution, reverseManualContribution } from '../services/manualContributions.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
 import { latestPaypalAllocation, recalculatePaypalAllocations } from '../services/paypalAllocation.ts';
 import { PayPalError } from '../services/paypalClient.ts';
@@ -22,7 +24,16 @@ const cancelLimiter = memberLimiter(10);
 const setupLimiter = memberLimiter(20);
 function fail(res: any, err: unknown) { res.status(err instanceof PayPalError ? err.status : 500).json({ error: err instanceof PayPalError ? err.code : 'INTERNAL' }); }
 router.get('/status', async (_req, res) => { try { res.json(await memberPaypalStatus()); } catch (err) { fail(res, err); } });
-router.get('/mine', async (req, res) => { try { res.json(await ownPaymentHistory(req.session.userId!)); } catch (err) { fail(res, err); } });
+router.get('/mine', async (req, res) => {
+  try { const [history, manualReports] = await Promise.all([ownPaymentHistory(req.session.userId!), ownManualContributions(req.session.userId!)]);
+    res.json({ ...history, manualReports }); }
+  catch (err) { fail(res, err); }
+});
+// A member's own bank-transfer report: evidence only, never posted until an
+// administrator confirms it.
+router.post('/manual-reports', cancelLimiter, async (req, res) => {
+  try { res.status(201).json(await reportManualContribution(req.session.userId!, req.body)); } catch (err) { fail(res, err); }
+});
 router.post('/one-off', checkoutLimiter, async (req, res) => {
   try { res.status(201).json(await createOneOff(req.session.userId!, req.body?.amount, req.body?.environment ?? 'sandbox')); }
   catch (err) { fail(res, err); }
@@ -72,6 +83,30 @@ router.get('/admin/export.csv', requireAdmin, requireRecentReauthentication, asy
     res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="paypal-ledger-${environment}.csv"`,
       'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }).send(body);
   } catch (err) { fail(res, err); }
+});
+const manualId = (value: unknown) => { const id = Number(value); if (!Number.isSafeInteger(id) || id <= 0) throw new PayPalError('INVALID_ID', 400); return id; };
+router.get('/admin/manual', requireAdmin, async (req, res) => {
+  try { res.json(await listManualContributions(req.query.status ?? 'reported', Number(req.query.offset ?? 0))); } catch (err) { fail(res, err); }
+});
+router.post('/admin/manual', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try { const result = await recordManualContribution(req.session.userId!, req.body);
+    await logAudit(req, 'paypal.manual.record', `manual:${result.id}`); res.status(201).json(result); }
+  catch (err) { fail(res, err); }
+});
+router.post('/admin/manual/:id/confirm', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try { const id = manualId(req.params.id); const result = await confirmManualContribution(req.session.userId!, id, req.body);
+    await logAudit(req, 'paypal.manual.confirm', `manual:${id}`); res.json(result); }
+  catch (err) { fail(res, err); }
+});
+router.post('/admin/manual/:id/reject', requireAdmin, async (req, res) => {
+  try { const id = manualId(req.params.id); const result = await rejectManualContribution(req.session.userId!, id, req.body);
+    await logAudit(req, 'paypal.manual.reject', `manual:${id}`); res.json(result); }
+  catch (err) { fail(res, err); }
+});
+router.post('/admin/manual/:id/reverse', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try { const id = manualId(req.params.id); const result = await reverseManualContribution(req.session.userId!, id, req.body);
+    await logAudit(req, 'paypal.manual.reverse', `manual:${id}`); res.json(result); }
+  catch (err) { fail(res, err); }
 });
 router.get('/admin/review', requireAdmin, async (req, res) => {
   try { res.json(await listPaypalReviewEvents(req.query.environment ?? 'live', Number(req.query.offset ?? 0), req.query.status ?? 'needs_review')); }
