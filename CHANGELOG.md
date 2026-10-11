@@ -18,6 +18,10 @@
 - Members can review their own verified PayPal postings and subscriptions, start an optional PayPal-hosted one-off or monthly approval when live checkout is enabled, and request subscription cancellation. Approval redirects alone never count as receipts.
 - Administrators can configure separate sandbox and live merchant credentials, keep checkout disabled by default, inspect verified live ledger totals, reconcile with PayPal, and calculate append-only monthly allocations of net support to finalized lab electricity costs.
 - Late refunds revise subsequent credit balances. Unknown provider fees or incomplete costs remain explicitly unresolved; negative balances are owner-funded adjustments, never contributor debts. No live PayPal transaction has been performed.
+## 2026-10-08 — Electricity accounting corrections
+
+- Month-end forecasts include a known allocated monthly fixed fee once. When allocation is incomplete, the total forecast remains unavailable.
+- Historical Energy & Budget cost uses a contract covering the requested month; the displayed current price continues to use the current contract. Partial server coverage stays marked partial.
 
 ## 2026-10-08 — Power mode policy foundation
 

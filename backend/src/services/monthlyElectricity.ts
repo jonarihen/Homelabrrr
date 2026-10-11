@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { db, type DbOrTx } from '../db/client.ts';
 import { electricityContracts, electricityTariffs, electricitySpotPrices, electricityBills, electricityCostStatements, eloverblikConnections, eloverblikIntervals, hardwareConnections, hardwareEnergyIntervals, hardwareEnergyDays } from '../db/schema/index.ts';
 import { calculateLabCost, getApplicablePrice } from './electricityPricing.ts';
-import { allocateFixedFee, compareHouseholdEnergy, forecastMonthlyCost, startOfLocalDateUtc, type DailyEvidence } from './energyAccounting.ts';
+import { allocateFixedFee, compareHouseholdEnergy, forecastMonthlyCost, includeMonthlyFixedFee, startOfLocalDateUtc, type DailyEvidence } from './energyAccounting.ts';
 
 const SCALE = 1_000_000_000n;
 function nano(value: string): bigint {
@@ -89,7 +89,9 @@ export async function previewMonthlyElectricity(month: string, contractRef: stri
       }
     }
   }
-  const forecast = asOf < end ? forecastMonthlyCost({ now: asOf, month, actualCostOre: variableCostOre, dailyEvidence: evidence, scenarioDkkPerKwh, knownFuturePrices }) : null;
+  const forecast = asOf < end ? includeMonthlyFixedFee(
+    forecastMonthlyCost({ now: asOf, month, actualCostOre: variableCostOre, dailyEvidence: evidence, scenarioDkkPerKwh, knownFuturePrices }),
+    fee.allocatedOre, fee.status) : null;
   const closed = asOf >= end;
   const fingerprint = await sourceFingerprint(db, contract.id, start, elapsedEnd);
   return { month, contractRef, periodStart: start.toISOString(), periodEnd: end.toISOString(), observedThrough: elapsedEnd.toISOString(), closed,

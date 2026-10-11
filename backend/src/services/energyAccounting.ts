@@ -52,7 +52,7 @@ export interface ForecastInput {
   knownFuturePrices?: Array<{ startUtc: Date; endUtc: Date; dkkPerKwh: string; status: 'valid' }>;
 }
 export interface MonthlyForecast {
-  status: 'insufficient_data' | 'missing_price_scenario' | 'scenario';
+  status: 'insufficient_data' | 'missing_price_scenario' | 'fixed_fee_incomplete' | 'scenario';
   actualCostOre: bigint;
   forecastTotalOre: bigint | null;
   futureCostOre: bigint | null;
@@ -61,6 +61,13 @@ export interface MonthlyForecast {
   method: 'weekday_weekend_28d_v1';
   priceBasis: 'scenario' | 'published_and_scenario' | 'published' | 'unknown';
   knownPriceSeconds: number;
+}
+// Fixed monthly charges are allocated once to the whole month. They must not
+// be prorated through the elapsed-day estimate or silently omitted from it.
+export function includeMonthlyFixedFee(forecast: MonthlyForecast, allocatedOre: bigint, feeStatus: 'known' | 'incomplete'): MonthlyForecast {
+  if (allocatedOre < 0n) throw new Error('Invalid fixed fee');
+  if (feeStatus === 'incomplete' && forecast.forecastTotalOre !== null) return { ...forecast, status: 'fixed_fee_incomplete', forecastTotalOre: null };
+  return { ...forecast, forecastTotalOre: forecast.forecastTotalOre === null ? null : forecast.forecastTotalOre + allocatedOre };
 }
 function calendarDate(date: Date): string {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
