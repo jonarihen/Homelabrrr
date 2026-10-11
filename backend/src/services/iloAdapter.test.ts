@@ -89,6 +89,21 @@ test('management target allows private networks and rejects metadata/loopback', 
   }
 });
 
+test('management target rejects DNS answers that point at loopback, metadata or mixed sets', async () => {
+  const resolvesTo = (...addresses: string[]) => async () => addresses.map((address) => ({ address })) as any;
+  for (const answers of [['127.0.0.1'], ['169.254.169.254'], ['10.0.0.5', '127.0.0.1'], ['192.168.1.10', '169.254.169.254'],
+    ['::ffff:7f00:1'], ['fe80::1'], ['ff02::1'], ['224.0.0.1'], ['10.0.0.5', '::1']]) {
+    await assert.rejects(validateManagementTarget('ilo.example.test', resolvesTo(...answers)),
+      (err: unknown) => err instanceof IloError && err.code === 'invalid_target', answers.join(','));
+  }
+  await assert.rejects(validateManagementTarget('ilo.example.test', resolvesTo()), (err: unknown) => err instanceof IloError && err.code === 'invalid_target');
+  // The first validated answer is pinned for the connection (no re-resolution).
+  assert.equal(await validateManagementTarget('ilo.example.test', resolvesTo('10.0.0.5', 'fd12::5')), '10.0.0.5');
+  for (const literal of ['::ffff:7f00:1', '::ffff:127.0.0.1', '224.0.0.1', 'ff02::1', '0.0.0.0', 'localhost']) {
+    await assert.rejects(validateManagementTarget(literal), (err: unknown) => err instanceof IloError && err.code === 'invalid_target', literal);
+  }
+});
+
 test('physical identity normalizes vendor formatting and never invents an identity', () => {
   assert.equal(physicalSystemIdentity({ uuid: '  ABCD-1234  ', serial: 'fallback' }), 'abcd-1234');
   assert.equal(physicalSystemIdentity({ uuid: null, serial: '  SGH123  ' }), 'serial:sgh123');

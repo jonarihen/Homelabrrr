@@ -1,6 +1,7 @@
 import https from 'node:https';
 import dns from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { isProhibitedManagementAddress } from '../utils/urlGuard.ts';
 
 export type HardwareMode = 'low' | 'dynamic' | 'high' | 'os_control' | 'unknown';
 export type OptionalCapability = 'supported' | 'unsupported' | 'unavailable';
@@ -92,23 +93,13 @@ export class IloError extends Error {
   }
 }
 
-function safeAddress(address: string): boolean {
-  const a = address.toLowerCase();
-  if (isIP(a) === 4) {
-    const p = a.split('.').map(Number);
-    return p[0] !== 0 && p[0] !== 127 && !(p[0] === 169 && p[1] === 254) && !(p[0] === 100 && p[1] === 100) && p[0] < 224;
-  }
-  if (isIP(a) === 6) return a !== '::' && a !== '::1' && !/^fe[89ab]/.test(a) && !a.startsWith('::ffff:127.') && !a.startsWith('::ffff:169.254.');
-  return false;
-}
-
 export async function validateManagementTarget(host: string, resolver = dns.lookup): Promise<string> {
   const clean = String(host || '').trim();
   if (!clean || clean.length > 253 || (isIP(clean) !== 6 && /[\/:?#@\s]/.test(clean)) || clean.toLowerCase() === 'localhost') throw new IloError('invalid_target', 'Invalid management host');
   let addresses: string[];
   try { addresses = isIP(clean) ? [clean] : (await resolver(clean, { all: true, verbatim: true }) as { address: string }[]).map((x) => x.address); }
   catch { throw new IloError('unreachable', 'Management host could not be resolved'); }
-  if (!addresses.length || addresses.some((a) => !safeAddress(a))) throw new IloError('invalid_target', 'Management target resolves to a prohibited address');
+  if (!addresses.length || addresses.some(isProhibitedManagementAddress)) throw new IloError('invalid_target', 'Management target resolves to a prohibited address');
   return addresses[0];
 }
 
