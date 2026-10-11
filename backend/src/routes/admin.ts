@@ -53,6 +53,8 @@ import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle
 import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
 import { assertUserCanBeDeleted } from '../services/provisionOwnership.ts';
+import { cancelSubscriptionsBeforeUserDeletion } from '../services/paypal.ts';
+import { PayPalError } from '../services/paypalClient.ts';
 
 const router = Router();
 // All admin routes require at least authentication
@@ -1336,6 +1338,13 @@ router.delete('/users/:id', pUsers, async (req, res) => {
   if (parseInt(req.params.id) === req.session.userId) {
     return res.status(400).json({ error: 'Cannot delete yourself' });
   }
+  // Keep the member and financial mapping until every provider subscription
+  // has a confirmed terminal state. Checkout being disabled does not stop bills.
+  try { await cancelSubscriptionsBeforeUserDeletion(Number(req.params.id)); }
+  catch (err) {
+    if (err instanceof PayPalError) return res.status(err.status).json({ error: err.code });
+    return res.status(500).json({ error: sanitizeError(err) });
+  }
   // Assignments cascade away with the user — capture them (and the username,
   // which won't exist anymore) so the owner tags get cleared from PVE.
   let deleted;
@@ -1973,7 +1982,7 @@ router.put('/leases/:node/:vmid', requireAdmin, async (req, res) => {
   const { node, vmid } = req.params;
   const { exempt, leaseDays, extendDays } = req.body || {};
   try {
-    const lease = await updateLease(node, vmid, { exempt, leaseDays, extendDays, createdBy: req.session.username });
+    const lease = await updateLease(node, vmid, { exempt, leaseDays, extendDays, createdBy: req.session.username, actor: { userId: req.session.userId } });
     if (!lease) return res.status(400).json({ error: 'Could not update lease' });
     const detail = [
       exempt !== undefined ? `exempt=${exempt ? 1 : 0}` : null,
@@ -1983,19 +1992,19 @@ router.put('/leases/:node/:vmid', requireAdmin, async (req, res) => {
     await logAudit(req, 'lease_adjust', `${node}/${vmid}`, detail);
     res.json({ ok: true, lease: await computeLeaseView(lease) });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
 router.post('/leases/:node/:vmid/renew', requireAdmin, async (req, res) => {
   const { node, vmid } = req.params;
   try {
-    const lease = await renewLease(node, vmid, { createdBy: req.session.username });
+    const lease = await renewLease(node, vmid, { createdBy: req.session.username, actor: { userId: req.session.userId } });
     if (!lease) return res.status(404).json({ error: 'This VM has no lease to renew' });
     await logAudit(req, 'lease_renew', `${node}/${vmid}`, `admin renewal #${lease.renewal_count}`);
     res.json({ ok: true, lease: await computeLeaseView(lease) });
   } catch (err) {
-    res.status(500).json({ error: sanitizeError(err.message) });
+    sendError(res, err);
   }
 });
 
@@ -2011,7 +2020,7 @@ router.post('/leases/sweep', requireAdmin, async (req, res) => {
 
 router.post('/leases/backfill', requireAdmin, async (req, res) => {
   try {
-    const created = await backfillLeases({ createdBy: req.session.username });
+    const created = await backfillLeases({ createdBy: req.session.username, actor: { userId: req.session.userId } });
     await logAudit(req, 'lease_backfill', 'all', `created=${created}`);
     res.json({ ok: true, created });
   } catch (err) {

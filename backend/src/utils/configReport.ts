@@ -126,6 +126,46 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'node health poll interval for unreachable/recovered notifications; 0 disables it',
   },
   {
+    name: 'PAYPAL_RECONCILE_INTERVAL_MINUTES',
+    defaultValue: '360',
+    effect: 'PayPal reconciliation interval in minutes (15-1440; invalid values fall back to 360); a startup pass also runs after boot',
+  },
+  {
+    name: 'PAYPAL_WEBHOOK_RATE_LIMIT_PER_MINUTE',
+    defaultValue: '120',
+    effect: 'per-client request limit on the PayPal webhook ingress; PayPal redelivers throttled events',
+  },
+  {
+    name: 'PAYPAL_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE',
+    defaultValue: '600',
+    effect: 'overall request limit on the PayPal webhook ingress across all clients, protecting the PayPal API quota from distributed floods',
+  },
+  {
+    name: 'HARDWARE_POLL_INTERVAL_MS',
+    defaultValue: '60000',
+    effect: 'iLO telemetry collection interval for explicitly enabled physical nodes (minimum 30000)',
+  },
+  {
+    name: 'HARDWARE_RAW_RETENTION_DAYS',
+    defaultValue: '30',
+    effect: 'days raw iLO watt samples are kept (minimum 2)',
+  },
+  {
+    name: 'HARDWARE_INTERVAL_RETENTION_DAYS',
+    defaultValue: '730',
+    effect: 'days 15-minute server energy buckets are kept after their daily rollup (minimum 400)',
+  },
+  {
+    name: 'HARDWARE_DAY_RETENTION_DAYS',
+    defaultValue: '1826',
+    effect: 'days daily server energy totals are kept (never less than the bucket retention)',
+  },
+  {
+    name: 'ENERGY_HISTORY_RETENTION_DAYS',
+    defaultValue: '1830',
+    effect: 'days imported ElOverblik meter intervals and cached spot prices are kept',
+  },
+  {
     name: 'LEASE_CHECK_INTERVAL_MS',
     defaultValue: '900000',
     effect: 'how often expired VM leases are swept (floored at 60000)',

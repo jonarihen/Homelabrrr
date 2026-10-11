@@ -16,6 +16,7 @@ import { boundedInteger, validateObject } from '../utils/validation.ts';
 import { recordProvisionOwnership } from '../services/provisionOwnership.ts';
 import { syncVmTagsSafe } from '../utils/vmTags.ts';
 import { notifyDeployment } from '../services/deploymentNotification.ts';
+import { finalizeMigrationFailure, finalizeMigrationSuccess } from './migrate.ts';
 
 const router = Router();
 const canOperate = requirePermission('can_manage_hosts');
@@ -154,6 +155,7 @@ router.post('/provision/:id/reconcile', requireRecentReauthentication, async (re
 router.post('/migration/:id/reconcile', requireRecentReauthentication, async (req, res) => {
   const [row] = await db.select().from(vmMigrations).where(eq(vmMigrations.id, Number(req.params.id))).limit(1);
   if (!row) return res.status(404).json({ error: 'Migration operation not found' });
+  if (row.status !== 'needs_review') return res.status(409).json({ error: 'Only migrations awaiting review can be reconciled' });
   if (!row.upid) return res.status(400).json({ error: 'This operation has no upstream task identifier to reconcile' });
   try {
     const task = await getTaskStatus(row.source_node, row.upid);
@@ -163,7 +165,9 @@ router.post('/migration/:id/reconcile', requireRecentReauthentication, async (re
     // finished_at is only stamped on the error transition; otherwise left unchanged.
     const set: any = { status, status_detail: classified.detail, upstream_status: upstreamStatus, upstream_checked_at: new Date() };
     if (status === 'error') set.finished_at = new Date();
-    await db.update(vmMigrations).set(set).where(eq(vmMigrations.id, row.id));
+    const claimed = await db.update(vmMigrations).set(set)
+      .where(and(eq(vmMigrations.id, row.id), eq(vmMigrations.status, 'needs_review')));
+    if (claimed.rowCount !== 1) return res.status(409).json({ error: 'Migration was resolved while reconciliation was in flight; reload its current state' });
     await logAudit(req, 'migration_operation_reconciled', String(row.id), `status=${status}; upid=${row.upid}`);
     res.json({ ...row, status, status_detail: classified.detail, upstream_status: upstreamStatus, upstream: { status: task.status, exitstatus: task.exitstatus } });
   } catch (err) { sendError(res, err); }
@@ -178,9 +182,14 @@ router.post('/migration/:id/resolve', requireRecentReauthentication, async (req,
   const detail = status === 'ok'
     ? 'Manually verified by an administrator after upstream reconciliation.'
     : 'Marked failed by an administrator after upstream reconciliation.';
-  await db.update(vmMigrations).set({ status, status_detail: detail, finished_at: new Date() }).where(eq(vmMigrations.id, row.id));
-  await logAudit(req, 'migration_operation_resolved', String(row.id), `from=${row.status}; to=${status}`);
-  res.json({ ok: true, status, detail });
+  try {
+    const resolved = status === 'ok'
+      ? await finalizeMigrationSuccess(db, row.id, detail, { expectedStatus: 'needs_review' })
+      : await finalizeMigrationFailure(db, row.id, detail);
+    if (!resolved) return res.status(409).json({ error: 'Only interrupted migrations awaiting review can be resolved manually' });
+    await logAudit(req, 'migration_operation_resolved', String(row.id), `from=${row.status}; to=${status}`);
+    res.json({ ok: true, status, detail });
+  } catch (err) { sendError(res, err); }
 });
 
 router.post('/provision/:id/resolve', requireRecentReauthentication, async (req, res) => {

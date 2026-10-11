@@ -15,6 +15,11 @@ const POLICIES = [
   { table: 'vm_migrations', timestamp: 'finished_at', days: () => envDays('JOB_RETENTION_DAYS', 90), where: "status IN ('ok','error','failed','timeout')" },
   { table: 'backup_tasks', timestamp: 'created_at', days: () => envDays('JOB_RETENTION_DAYS', 90), where: "status NOT IN ('running','queued')" },
   { table: 'workflow_runs', timestamp: 'created_at', days: () => envDays('JOB_RETENTION_DAYS', 90), where: "status NOT IN ('running','queued')" },
+  // Imported meter intervals and cached spot prices are re-derivable inputs;
+  // finalized statements keep their own immutable calculation snapshot. The
+  // default keeps five years, matching Danish bookkeeping retention.
+  { table: 'eloverblik_intervals', timestamp: 'interval_end', days: () => envDays('ENERGY_HISTORY_RETENTION_DAYS', 1830), where: '1 = 1' },
+  { table: 'electricity_spot_prices', timestamp: 'end_utc', days: () => envDays('ENERGY_HISTORY_RETENTION_DAYS', 1830), where: '1 = 1' },
 ];
 
 async function tableExists(name: string) {
@@ -96,6 +101,7 @@ export async function databaseMaintenanceStatus() {
     retentionDays: {
       audit: envDays('AUDIT_RETENTION_DAYS', 365),
       jobs: envDays('JOB_RETENTION_DAYS', 90),
+      energyHistory: envDays('ENERGY_HISTORY_RETENTION_DAYS', 1830),
     },
     tables,
     // settings.value stays text (conventions rule M7 exception) — keep parsing it.

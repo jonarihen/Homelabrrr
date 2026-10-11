@@ -30,7 +30,7 @@ test('assignment resource migration backfills only matching latest owned provisi
       { user_id: other.id, node: '1~pve', vmid: 101 },
       { user_id: owner.id, node: '1~pve', vmid: 102 },
     ]);
-    const migration = await readFile(new URL('../../drizzle/0004_provision_assignment_resources.sql', import.meta.url), 'utf8');
+    const migration = await readFile(new URL('../../drizzle/0018_provision_assignment_resources.sql', import.meta.url), 'utf8');
     await testDb.pool.query(migration.slice(migration.indexOf('UPDATE')));
     const rows = await testDb.db.select().from(vmAssignments).orderBy(vmAssignments.vmid);
     assert.deepEqual(rows[0].resource_allocation, { cores: 2, memoryMb: 2048, diskGb: 80 });

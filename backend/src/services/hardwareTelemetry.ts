@@ -1,0 +1,268 @@
+import { and, eq, gt, gte, lt, desc, sql } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { hardwareConnections, hardwarePowerSamples, hardwareEnergyIntervals, hardwareTelemetryState } from '../db/schema/index.ts';
+import { decryptSecret } from '../utils/secrets.ts';
+import { discoverHardware, IloError, physicalSystemIdentity, type HardwareHealth } from './iloAdapter.ts';
+import { integrateWattSamples } from './energyIntervals.ts';
+import { startBackgroundWork } from './backgroundWork.ts';
+import { log } from '../utils/logger.ts';
+import { logAuditEntry } from '../utils/audit.ts';
+import { incrementMetric } from '../utils/metricRegistry.ts';
+
+const parsedInterval = Number(process.env.HARDWARE_POLL_INTERVAL_MS || 60_000);
+export const HARDWARE_POLL_INTERVAL_MS = Number.isInteger(parsedInterval) && parsedInterval >= 30_000 ? parsedInterval : 60_000;
+const LEASE_MS = 120_000;
+// Rejected credentials back off for at least this long, and collection
+// disables itself after this many consecutive rejections (iLO lockout risk).
+export const AUTH_FAILURE_MIN_BACKOFF_MS = 15 * 60_000;
+export const AUTH_FAILURE_DISABLE_THRESHOLD = 3;
+
+// Counters exported through /metrics as homelabrrr_hardware_telemetry_*_total.
+// Labels are a fixed vocabulary (result/error code), never hosts or IDs.
+function countPoll(result: string, code?: string) {
+  incrementMetric('hardware_telemetry_polls', code ? `result="${result}",code="${code}"` : `result="${result}"`);
+}
+let timer: ReturnType<typeof setInterval> | null = null;
+let initialTimer: ReturnType<typeof setTimeout> | null = null;
+let sweepRunning = false;
+
+export function validateInstantaneousWatts(watts: unknown, observedAt: unknown, now = new Date()): { watts: number; observedAt: Date } {
+  const date = new Date(String(observedAt));
+  if (typeof watts !== 'number' || !Number.isFinite(watts) || watts < 0 || watts > 100_000 || !Number.isFinite(date.getTime()) || date.getTime() > now.getTime() + 5000 || date.getTime() < now.getTime() - 120_000) {
+    throw new Error('INVALID_HARDWARE_SAMPLE');
+  }
+  return { watts, observedAt: date };
+}
+
+// Keep vendor payloads out of the database even if a future reader accidentally
+// returns extra fields. A malformed optional snapshot never discards good watts.
+export function healthForStorage(input: HardwareHealth | undefined): HardwareHealth | null {
+  if (!input || !Array.isArray(input.temperatures) || !Array.isArray(input.fans) || !Array.isArray(input.powerSupplies)) return null;
+  const name = (value: unknown) => typeof value === 'string' ? value.slice(0, 64) : '';
+  const status = (value: unknown) => typeof value === 'string' && value.length <= 32 ? value : null;
+  const number = (value: unknown, min: number, max: number) => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : null;
+  return {
+    temperatures: input.temperatures.slice(0, 64).map((item) => ({ name: name(item?.name), celsius: number(item?.celsius, -40, 125), health: status(item?.health) })),
+    fans: input.fans.slice(0, 32).map((item) => { const unit = item?.unit === 'percent' || item?.unit === 'rpm' ? item.unit : null;
+      return { name: name(item?.name), value: unit ? number(item?.value, 0, unit === 'percent' ? 100 : 50_000) : null, unit, health: status(item?.health) }; }),
+    powerSupplies: input.powerSupplies.slice(0, 16).map((item) => ({ name: name(item?.name), health: status(item?.health), state: status(item?.state) })),
+    powerRedundancy: input.powerRedundancy ? { health: status(input.powerRedundancy.health), state: status(input.powerRedundancy.state) } : null,
+    limited: Boolean(input.limited) || input.temperatures.length > 64 || input.fans.length > 32 || input.powerSupplies.length > 16,
+  };
+}
+
+const BUCKET_MS = 15 * 60_000;
+const floorBucket = (ms: number) => Math.floor(ms / BUCKET_MS) * BUCKET_MS;
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// Recompute exactly the quarter-hour buckets whose energy can change when a
+// sample lands at `observedAt`: the trapezoid segments touching it end at its
+// stored neighbours. Each affected bucket is rebuilt from every sample inside
+// it plus the nearest sample on either side, so the segment that crosses a
+// bucket boundary is never dropped (the old fixed lookback excluded the
+// segment crossing `since` and overwrote a complete bucket with partial energy).
+// Only buckets inside [affectedStart, affectedEnd) are upserted; neighbouring
+// buckets seen only through the edge samples are left untouched.
+export function affectedBucketRange(observedAt: Date, previous: Date | null, next: Date | null): { start: Date; end: Date } {
+  const first = previous ? Math.min(previous.getTime(), observedAt.getTime()) : observedAt.getTime();
+  const last = next ? Math.max(next.getTime(), observedAt.getTime()) : observedAt.getTime();
+  return { start: new Date(floorBucket(first)), end: new Date(floorBucket(last) + BUCKET_MS) };
+}
+
+async function recomputeAffectedBuckets(tx: Tx, id: number, observedAt: Date, updatedAt: Date) {
+  const [previous] = await tx.select({ observed_at: hardwarePowerSamples.observed_at }).from(hardwarePowerSamples)
+    .where(and(eq(hardwarePowerSamples.hardware_id, id), lt(hardwarePowerSamples.observed_at, observedAt))).orderBy(desc(hardwarePowerSamples.observed_at)).limit(1);
+  const [next] = await tx.select({ observed_at: hardwarePowerSamples.observed_at }).from(hardwarePowerSamples)
+    .where(and(eq(hardwarePowerSamples.hardware_id, id), gt(hardwarePowerSamples.observed_at, observedAt))).orderBy(hardwarePowerSamples.observed_at).limit(1);
+  // A neighbour beyond the bridgeable gap cannot share a segment with this sample.
+  const maxGapMs = HARDWARE_POLL_INTERVAL_MS * 3;
+  const range = affectedBucketRange(observedAt,
+    previous && observedAt.getTime() - previous.observed_at.getTime() <= maxGapMs ? previous.observed_at : null,
+    next && next.observed_at.getTime() - observedAt.getTime() <= maxGapMs ? next.observed_at : null);
+  const [head] = await tx.select().from(hardwarePowerSamples)
+    .where(and(eq(hardwarePowerSamples.hardware_id, id), lt(hardwarePowerSamples.observed_at, range.start))).orderBy(desc(hardwarePowerSamples.observed_at)).limit(1);
+  const inside = await tx.select().from(hardwarePowerSamples)
+    .where(and(eq(hardwarePowerSamples.hardware_id, id), gte(hardwarePowerSamples.observed_at, range.start), lt(hardwarePowerSamples.observed_at, range.end))).orderBy(hardwarePowerSamples.observed_at);
+  const [tail] = await tx.select().from(hardwarePowerSamples)
+    .where(and(eq(hardwarePowerSamples.hardware_id, id), gte(hardwarePowerSamples.observed_at, range.end))).orderBy(hardwarePowerSamples.observed_at).limit(1);
+  const rows = [...(head ? [head] : []), ...inside, ...(tail ? [tail] : [])];
+  const intervals = integrateWattSamples(rows.map((row) => ({ hardwareId: id, observedAt: row.observed_at, watts: Number(row.watts), deviceEpoch: row.device_epoch })), { intervalMs: HARDWARE_POLL_INTERVAL_MS })
+    .filter((interval) => interval.startUtc.getTime() >= range.start.getTime() && interval.startUtc.getTime() < range.end.getTime());
+  for (const interval of intervals) {
+    await tx.insert(hardwareEnergyIntervals).values({ hardware_id: id, start_utc: interval.startUtc, end_utc: interval.endUtc, kwh: interval.kwh, covered_seconds: Math.round(interval.coveredSeconds), expected_seconds: interval.expectedSeconds, quality: interval.quality, method_version: interval.methodVersion })
+      .onConflictDoUpdate({ target: [hardwareEnergyIntervals.hardware_id, hardwareEnergyIntervals.start_utc], set: { kwh: interval.kwh, covered_seconds: Math.round(interval.coveredSeconds), quality: interval.quality, method_version: interval.methodVersion, updated_at: updatedAt } });
+  }
+}
+
+export async function pollHardwareConnection(id: number, now = () => new Date(), reader = discoverHardware) {
+  const current = now();
+  const lease = new Date(current.getTime() + LEASE_MS);
+  const claimed = await db.execute(sql`
+    INSERT INTO hardware_telemetry_state (hardware_id, lease_until, next_poll_at, last_attempt_at)
+    VALUES (${id}, ${lease}, ${lease}, ${current})
+    ON CONFLICT (hardware_id) DO UPDATE SET lease_until = EXCLUDED.lease_until,
+      next_poll_at = EXCLUDED.next_poll_at, last_attempt_at = EXCLUDED.last_attempt_at
+    WHERE (hardware_telemetry_state.lease_until IS NULL OR hardware_telemetry_state.lease_until <= ${current})
+      AND hardware_telemetry_state.next_poll_at <= ${current}
+    RETURNING hardware_id
+  `);
+  if (!claimed.rows.length) { countPoll('skipped'); return { status: 'skipped' as const }; }
+  return startBackgroundWork(async () => {
+    const [connection] = await db.select().from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.collection_enabled, true))).limit(1);
+    if (!connection || !connection.system_uuid) {
+      await db.update(hardwareTelemetryState).set({ lease_until: null }).where(and(eq(hardwareTelemetryState.hardware_id, id), eq(hardwareTelemetryState.lease_until, lease)));
+      countPoll('disabled');
+      return { status: 'disabled' as const };
+    }
+    try {
+      const sample = await reader({ host: connection.target_host, port: connection.target_port, username: connection.username, password: decryptSecret(connection.secret), verifyTls: connection.verify_tls, caCertificate: connection.ca_certificate });
+      // A changed physical identity must never silently extend the old energy series.
+      const identity = physicalSystemIdentity(sample.identity);
+      if (identity !== connection.system_uuid.trim().toLowerCase()) throw new Error('HARDWARE_IDENTITY_CHANGED');
+      const measurement = validateInstantaneousWatts(sample.sample.watts, sample.sample.observedAt, now());
+      if (!sample.sample.origin || sample.sample.unit !== 'W') throw new Error('INVALID_HARDWARE_SAMPLE');
+      const origin = sample.sample.origin;
+      const written = await db.transaction(async (tx) => {
+        const [fresh] = await tx.select({ config_version: hardwareConnections.config_version }).from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.collection_enabled, true))).limit(1);
+        const [state] = await tx.select({ lease_until: hardwareTelemetryState.lease_until }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
+        // Decommissioned/edited/disabled while the iLO read was in flight, or
+        // our lease expired and another worker took over: drop this reading.
+        if (!fresh || fresh.config_version !== connection.config_version || state?.lease_until?.getTime() !== lease.getTime()) return false;
+        await tx.insert(hardwarePowerSamples).values({ hardware_id: id, node_ref: connection.node_ref, observed_at: measurement.observedAt, watts: String(measurement.watts), mode: sample.mode.value, origin, device_epoch: connection.system_uuid, health: healthForStorage(sample.sample.health) }).onConflictDoNothing();
+        await recomputeAffectedBuckets(tx, id, measurement.observedAt, now());
+        await tx.update(hardwareTelemetryState).set({ lease_until: null, next_poll_at: new Date(now().getTime() + HARDWARE_POLL_INTERVAL_MS), failure_count: 0, auth_failure_count: 0, last_error_code: null, last_success_at: measurement.observedAt }).where(eq(hardwareTelemetryState.hardware_id, id));
+        return true;
+      });
+      if (!written) {
+        // Release only our own lease; a successor's lease stays untouched.
+        await db.update(hardwareTelemetryState).set({ lease_until: null }).where(and(eq(hardwareTelemetryState.hardware_id, id), eq(hardwareTelemetryState.lease_until, lease)));
+        countPoll('stale');
+        return { status: 'stale' as const };
+      }
+      countPoll('ok');
+      return { status: 'ok' as const };
+    } catch (err) {
+      const [state] = await db.select({ failure_count: hardwareTelemetryState.failure_count, auth_failure_count: hardwareTelemetryState.auth_failure_count }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
+      const failures = Math.min(6, (state?.failure_count || 0) + 1);
+      const code = err instanceof IloError ? err.code : err instanceof Error && /^(INVALID_HARDWARE_SAMPLE|HARDWARE_IDENTITY_CHANGED)$/.test(err.message) ? err.message : 'COLLECTION_FAILED';
+      const authFailure = code === 'authentication_failed';
+      // Only rejected credentials count towards lockout; other failures leave
+      // the streak untouched and a success resets it.
+      const authFailures = authFailure ? (state?.auth_failure_count || 0) + 1 : (state?.auth_failure_count || 0);
+      const backoff = Math.min(30 * 60_000, HARDWARE_POLL_INTERVAL_MS * 2 ** failures);
+      const next = new Date(now().getTime() + (authFailure ? Math.max(AUTH_FAILURE_MIN_BACKOFF_MS, backoff) : backoff) + Math.floor(Math.random() * 5000));
+      const updated = await db.update(hardwareTelemetryState).set({ lease_until: null, next_poll_at: next, failure_count: failures, auth_failure_count: authFailures, last_error_code: code }).where(and(eq(hardwareTelemetryState.hardware_id, id), eq(hardwareTelemetryState.lease_until, lease)));
+      log('warn', 'hardware_telemetry_poll_failed', { hardwareId: id, code });
+      countPoll('failed', code);
+      if (authFailure && authFailures >= AUTH_FAILURE_DISABLE_THRESHOLD && (updated.rowCount || 0) > 0) {
+        // Guarded by the version this poll read: an admin edit (new password)
+        // made in the meantime is never undone by a stale failure.
+        const [disabled] = await db.update(hardwareConnections).set({ collection_enabled: false, last_status: 'authentication_failed', config_version: sql`${hardwareConnections.config_version} + 1`, updated_at: now() })
+          .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.config_version, connection.config_version), eq(hardwareConnections.collection_enabled, true))).returning({ node_ref: hardwareConnections.node_ref });
+        if (disabled) {
+          incrementMetric('hardware_telemetry_auto_disabled', 'reason="authentication_failed"');
+          log('warn', 'hardware_collection_auto_disabled', { hardwareId: id, code, consecutiveAuthFailures: authFailures });
+          await logAuditEntry({ action: 'hardware_collection_auto_disabled', target: String(id), detail: `node=${disabled.node_ref}; consecutive authentication failures=${authFailures}`, outcome: 'failure' })
+            .catch((auditErr) => log('warn', 'hardware_audit_failed', { hardwareId: id, error: auditErr }));
+        }
+        return { status: 'failed' as const, code, disabled: true };
+      }
+      return { status: 'failed' as const, code };
+    }
+  }, { kind: 'hardware-telemetry', hardwareId: id });
+}
+
+// At most two nodes are polled at once; each poll is bounded by the
+// discovery deadline, and one node's failure never stops the others.
+export async function sweepHardwareTelemetry(reader = discoverHardware, now = () => new Date()) {
+  if (sweepRunning) return;
+  sweepRunning = true;
+  try {
+    const rows = await db.select({ id: hardwareConnections.id }).from(hardwareConnections).where(and(eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.collection_enabled, true)));
+    for (let i = 0; i < rows.length; i += 2) {
+      const results = await Promise.allSettled(rows.slice(i, i + 2).map((row) => pollHardwareConnection(row.id, now, reader)));
+      for (const [index, result] of results.entries()) {
+        if (result.status === 'rejected') {
+          countPoll('error');
+          log('warn', 'hardware_telemetry_poll_rejected', { hardwareId: rows[i + index].id, error: result.reason });
+        }
+      }
+    }
+    incrementMetric('hardware_telemetry_sweeps');
+  } finally { sweepRunning = false; }
+}
+export function hardwareTelemetryRunning(): boolean {
+  return timer !== null;
+}
+export function startHardwareTelemetry() {
+  if (timer) return;
+  initialTimer = setTimeout(() => { void sweepHardwareTelemetry().catch((err) => log('warn', 'hardware_telemetry_sweep_failed', { error: err })); }, 10_000);
+  timer = setInterval(() => { void sweepHardwareTelemetry().catch((err) => log('warn', 'hardware_telemetry_sweep_failed', { error: err })); }, HARDWARE_POLL_INTERVAL_MS);
+  initialTimer.unref(); timer.unref();
+}
+export function stopHardwareTelemetry() {
+  if (initialTimer) clearTimeout(initialTimer);
+  if (timer) clearInterval(timer);
+  initialTimer = null; timer = null;
+}
+
+export async function latestHardwareSample(id: number) {
+  const [sample] = await db.select().from(hardwarePowerSamples).where(eq(hardwarePowerSamples.hardware_id, id)).orderBy(desc(hardwarePowerSamples.observed_at)).limit(1);
+  return sample || null;
+}
+
+// Recompute completed Copenhagen days from 15-minute buckets before pruning.
+// Daily rows preserve coverage and DST-aware expected duration for five years.
+export type HardwareRetention = { rawDays: number; intervalDays: number; dayDays: number };
+export const HARDWARE_RETENTION_DEFAULTS: HardwareRetention = { rawDays: 30, intervalDays: 730, dayDays: 1826 };
+
+// Env-configurable retention with floors that protect accounting: 15-minute
+// buckets feed monthly cost statements, so they are kept at least ~13 months,
+// and daily totals never age out before the buckets they summarize (otherwise
+// every run would re-create them from the remaining buckets).
+export function hardwareRetentionConfig(env: Record<string, string | undefined> = process.env): HardwareRetention {
+  const days = (value: string | undefined, fallback: number, min: number) => {
+    if (value == null || value.trim() === '') return fallback;
+    const n = Number(value);
+    return Number.isInteger(n) && n >= min && n <= 36_500 ? n : fallback;
+  };
+  const rawDays = days(env.HARDWARE_RAW_RETENTION_DAYS, HARDWARE_RETENTION_DEFAULTS.rawDays, 2);
+  const intervalDays = days(env.HARDWARE_INTERVAL_RETENTION_DAYS, HARDWARE_RETENTION_DEFAULTS.intervalDays, 400);
+  const dayDays = Math.max(intervalDays, days(env.HARDWARE_DAY_RETENTION_DAYS, HARDWARE_RETENTION_DEFAULTS.dayDays, 400));
+  return { rawDays, intervalDays, dayDays };
+}
+
+export async function runHardwareTelemetryRetention(now = new Date(), retention: HardwareRetention = hardwareRetentionConfig()) {
+  const rawCutoff = new Date(now.getTime() - retention.rawDays * 86400_000);
+  const intervalCutoff = new Date(now.getTime() - retention.intervalDays * 86400_000);
+  const dayCutoff = new Date(now.getTime() - retention.dayDays * 86400_000);
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`
+      INSERT INTO hardware_energy_days (hardware_id, local_date, kwh, covered_seconds, expected_seconds, quality, method_version)
+      WITH local_intervals AS (
+        SELECT hardware_id, (start_utc AT TIME ZONE 'Europe/Copenhagen')::date AS local_date, kwh, covered_seconds
+        FROM hardware_energy_intervals
+        WHERE start_utc < (date_trunc('day', ${now}::timestamptz AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen')
+      )
+      SELECT hardware_id, local_date, sum(kwh), sum(covered_seconds),
+        extract(epoch FROM (((local_date + 1)::timestamp AT TIME ZONE 'Europe/Copenhagen') - (local_date::timestamp AT TIME ZONE 'Europe/Copenhagen')))::integer,
+        CASE WHEN sum(covered_seconds) = extract(epoch FROM (((local_date + 1)::timestamp AT TIME ZONE 'Europe/Copenhagen') - (local_date::timestamp AT TIME ZONE 'Europe/Copenhagen')))::integer
+          THEN 'integrated_complete' ELSE 'integrated_partial' END,
+        'trapezoid_v1'
+      FROM local_intervals GROUP BY hardware_id, local_date
+      ON CONFLICT (hardware_id, local_date) DO UPDATE SET kwh = EXCLUDED.kwh,
+        covered_seconds = EXCLUDED.covered_seconds, expected_seconds = EXCLUDED.expected_seconds,
+        quality = EXCLUDED.quality, method_version = EXCLUDED.method_version
+    `);
+    const raw = await tx.execute(sql`DELETE FROM hardware_power_samples WHERE observed_at < ${rawCutoff}`);
+    // Retain the entire local cutoff day. Deleting just its early buckets
+    // would make the next rollup overwrite a complete daily row with a
+    // partial total after the first retention run.
+    const intervals = await tx.execute(sql`DELETE FROM hardware_energy_intervals WHERE start_utc <
+      (date_trunc('day', ${intervalCutoff}::timestamptz AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen')
+      AND EXISTS (SELECT 1 FROM hardware_energy_days WHERE hardware_energy_days.hardware_id = hardware_energy_intervals.hardware_id
+        AND hardware_energy_days.local_date = (hardware_energy_intervals.start_utc AT TIME ZONE 'Europe/Copenhagen')::date)`);
+    const days = await tx.execute(sql`DELETE FROM hardware_energy_days WHERE local_date < (${dayCutoff}::timestamptz AT TIME ZONE 'Europe/Copenhagen')::date`);
+    return { rawDeleted: raw.rowCount || 0, intervalsDeleted: intervals.rowCount || 0, daysDeleted: days.rowCount || 0 };
+  });
+}

@@ -4,7 +4,7 @@ import { db, type DbOrTx } from '../db/client.ts';
 import { provisionedVms, users, vmAssignments } from '../db/schema/index.ts';
 import { getAllVMs, getTaskStatus, getProvisionVMConfig } from '../proxmox.ts';
 import { assertUserQuota } from '../utils/quota.ts';
-import { createLeaseForVm } from '../utils/leases.ts';
+import { createLeaseRow } from '../utils/leases.ts';
 import { httpError } from '../utils/httpError.ts';
 import { nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { provisionAllocation, type ProvisionAllocation } from '../utils/provisionIntent.ts';
@@ -130,7 +130,7 @@ export async function recordProvisionOwnership(id: number, verifiedRecovery = fa
           await tx.update(vmAssignments).set({ resource_allocation }).where(eq(vmAssignments.id, assignments[0].id));
         }
       }
-      await createLeaseForVm(row.node, row.vmid, { createdBy: allocation.createdBy }, tx);
+      await createLeaseRow(tx, row.node, row.vmid, { createdBy: allocation.createdBy });
       const steps = structuredClone(row.steps) as any[];
       const stored = steps.find(step => step.key === 'reserve').allocation;
       stored.state = 'owned';
