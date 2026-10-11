@@ -1,113 +1,61 @@
 # Changelog
 
-## 2026-10-08 — Resumable meter backfill
+## 2026-10-11 — Power & Energy: iLO power modes, electricity costs and private PayPal support
 
-- An enabled ElOverblik meter begins syncing shortly after selection or restart. The initial 13-month history advances in bounded 30-day chunks about one minute apart; the normal refresh runs every six hours.
-- Manual resyncs have a durable five-minute cooldown and return `Retry-After` when limited. Configuration changes invalidate in-flight imports, and failures retry without repeatedly downloading all history.
+A private, optional Power & Energy area: measure what the lab's physical servers draw, steer their HPE Power Regulator mode by schedule and electricity price, see what that costs, and let invited members chip in. Everything starts disabled. Operators: see `backend/docs/power-energy-runbook.md` for the rollout order.
 
-## 2026-10-08 — Optional iLO hardware health
+### Hardware & telemetry
+- Each physical Proxmox node can get its own HPE iLO 4/5 connection under PVE Hosts → Hardware. Setup and connection tests only read the Redfish API, never change server settings, and report generation, firmware, regulator mode, chassis watts, trust problems and privilege problems.
+- iLO passwords are encrypted and never sent back to the browser. TLS verification stays on, with support for a private CA. Edits and node rebinds keep the server's physical identity and require a fresh test, and a different server needs a new connection.
+- Opt-in power telemetry records input watts and regulator mode about once a minute without an open browser. Readings are integrated into 15-minute energy buckets and Copenhagen-local daily totals that handle daylight-saving changes. Missing readings stay as gaps and are never counted as zero.
+- iLO reads have hard deadlines. Repeated credential rejections pause collection to avoid locking the account, and failed connection tests are remembered.
+- Optional temperature, fan and power-supply health is collected where the iLO supports it.
+- The Hardware panel charts power over time, with gaps and markers where the regulator mode changed.
+- Retention of server energy data is configurable. Decommissioned iLO connections no longer block deleting a PVE host.
 
-- Hardware discovery and telemetry now capture bounded temperatures, fan readings, power-supply status and redundancy when supported on iLO 4 or iLO 5.
-- The Hardware panel labels stale, partial, unsupported and unavailable health without interpreting missing readings as zero. Raw vendor payloads and PSU serials are excluded.
+### Power modes & price rules
+- A weekly Copenhagen schedule sets Low, Dynamic or High per window. The preset is High on Mon–Fri 16:00–02:00 and Sat–Sun 12:00–22:00 and Low otherwise, and daylight-saving gaps and repeated hours are handled.
+- Optional price rules in DKK/kWh cap the mode when power is expensive and boost it when power is cheap, with hysteresis and a minimum interval between automatic upshifts. Missing prices fall back to the schedule.
+- Manual overrides run for a fixed number of minutes (three hours by default), until the next schedule boundary, or until cleared.
+- Automation can be paused per node or for all nodes at once. A mode changed outside the portal puts the node on hold. The hold lifts at the next weekly boundary, or on Resume, which adopts a fresh reading.
+- A seven-day preview shows upcoming decisions and their reasons. An "if enabled" preview shows the same before you turn control on.
+- Only the runtime Power Regulator setting is ever written: never a reboot, BIOS setting, power cap or VM action. Hosts that are off or booting are never touched.
+- Live control needs a capability test, recent reauthentication and explicit enablement. Every mode change is claimed, recorded before it is sent and verified by reading it back.
+- Failed or unverified changes back off and are re-read before any retry, with one notification per failure streak. An interrupted action no longer blocks later edits.
+- An operation history records each change with the revisions, price and thresholds behind it.
 
-## 2026-10-08 — Hardware identity and telemetry reliability
+### Electricity data & costs
+- An ElOverblik Customer API import covers one explicitly selected meter, which defaults to whole-household scope and is never counted as server use. It backfills 13 months, refreshes every six hours, and records skipped ranges.
+- The import honours `Retry-After` and backs off on errors. It pauses with one notification when the token or meter needs attention, restarts its backfill when you change meters, and supports period resyncs and an explicit history purge.
+- You can record dated spot or fixed all-in contracts, tariffs, VAT treatment and fixed monthly charges. Nothing is prefilled.
+- Contracts can be ended or superseded with an audited reason. A month that spans contracts is priced per contract, with fixed fees pro rata.
+- Energi Data Service day-ahead prices are cached per area, and gaps from outages are backfilled.
+- Tariff observation history is kept, including when a tariff returns to an earlier version.
+- Optional extra-load estimates cover switch or UPS overhead outside the measured server power. Monthly previews keep server cost, fixed-fee share, household bills and forecasts separate.
+- Completed months finalize as immutable, revisioned statements. A month with incomplete data finalizes only with an explicit acknowledgement, and closed months always show their finalized figures.
+- Bills can be voided or revised, record partial payments, and show an estimated lab share.
+- Energy history is kept for five years.
 
-- Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
-- Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+### Private support (PayPal)
+- Members can optionally support the lab with PayPal-hosted one-off payments or monthly subscriptions at offered amounts, change or cancel their own subscription, and review their own verified payments. Support never changes access or quotas.
+- Sandbox and live are configured separately, and checkout starts disabled. Setup is versioned, with idempotent product, plan and webhook creation and a read-only connection test.
+- Payments count only after a verified webhook or provider readback, using PayPal's actual fees. Unknown fees, pending payments, denials and disputes are never estimated or subtracted.
+- Refunds and partial refunds are covered before income is finalized. Non-DKK amounts are kept as separate records.
+- Reconciliation is isolated per subscription and recovers missed webhooks. Checkout, capture and webhook traffic are rate-limited.
+- Admins get reconciliation health, a subscription list with cancellation, a review queue (retry, or dismiss with reauthentication) and a formula-safe CSV export.
+- A manual bank-transfer fallback needs admin confirmation with evidence and protects against duplicating a PayPal payment.
+- Monthly allocation credits net support against finalized electricity cost. A refund that leaves a month negative stays visible in that month as an owner-funded adjustment. Only positive credit carries forward, so later contributions never repay a loss.
 
-## 2026-10-08 — Admin PayPal subscription management
+### Energy & Budget dashboard
+<!-- Integration owner: extend this group with the final #239 dashboard notes. -->
+- The new Energy & Budget page for signed-in members shows current server power, integrated kWh and coverage, 24-hour and 7-day history, and per-server status under generated aliases.
+- The page also shows the current price with its validity, the calculated cost (live estimate or finalized statement) and aggregate funding figures.
+- Values without a verified source are shown as unknown. Hardware addresses, meter IDs, household readings and contributor identities never reach the page.
 
-- Administrators can inspect linked subscriptions by environment and request provider-verified cancellation with recent reauthentication. Member access to this management route is denied.
-
-## 2026-10-08 — PayPal webhook evidence retention
-
-- Processed PayPal webhook payloads are removed after 30 days, while event IDs and verified ledger records remain for duplicate protection and accounting. Events needing review retain their evidence.
-- PayPal approval links must match the configured sandbox or live host before the portal sends a member to checkout.
-
-## 2026-10-08 — PayPal capture retry readback
-
-- A member can retry confirmation after an uncertain one-off PayPal capture response. The portal reads the existing order and posts a verified completed capture once; it does not send a second capture request.
-
-## 2026-10-08 — Manual power override durations
-
-- Hardware administrators can choose fixed minutes, the next saved weekly schedule boundary, or an explicit until-cleared iLO mode override. Fixed duration defaults to three hours. The next-boundary option follows Copenhagen daylight-saving transitions and requires an enabled schedule.
-
-## 2026-10-08 — Seven-day power preview in administration
-
-- Hardware administrators can inspect upcoming Copenhagen schedule and published-price intervals, the selected mode and its reason, and the next known transition before enabling automatic control. Intervals beyond published price coverage are marked unknown.
-
-## 2026-10-08 — Power policy transition preview
-
-- The saved hardware policy preview now includes seven days of schedule and published-price decisions, the next schedule boundary, and the next known selected-mode change. Future price-dependent selections beyond published coverage are explicitly unknown.
-- Weekly power windows resolve Copenhagen daylight-saving gaps and repeated hours to stable UTC boundaries, including custom windows during the repeated autumn hour.
-
-## 2026-10-08 — Optional extra lab load estimates
-
-- Administrators can add dated, constant-watt estimates for switch or UPS overhead outside measured server input power. The default remains no extra loads; inclusive household or upstream measurements are rejected, and overlapping revisions of one source are blocked.
-- Monthly previews separate measured server kWh from estimated extra kWh and price both under the same contract intervals. Scheduled future estimates join the forecast through published prices and an explicit later scenario. Finalized prior statements remain revisioned and unchanged until explicitly recalculated.
-
-## 2026-10-08 — Private energy dashboard verification
-
-- Calculated lab costs and forecasts now display when the backend returns exact decimal-string øre amounts; unsafe or malformed amounts stay unknown.
-- Missing electricity-price validity is labeled unavailable. Dashboard browser and API tests cover signed-out access, member-only aggregate data, stale hardware, missing price and history, and hidden contributor and infrastructure identifiers.
-
-## 2026-10-08 — Server energy history
-
-- Energy & Budget now charts integrated server kWh alongside instantaneous watts for 24-hour and seven-day views, with coverage in an accessible interval table. Missing intervals leave visible gaps in both trend lines.
-
-## 2026-10-08 — iLO transport and energy history safeguards
-
-- Fixture tests now exercise bounded iLO GET/PATCH transport failures, legacy iLO 4 fallback, redirect refusal and credential-safe errors without contacting hardware.
-- Copenhagen daily energy rollups now use the correct 23-hour and 25-hour daylight-saving lengths. Retention keeps a complete local cutoff day so later runs cannot overwrite its total with partial data.
-
-## 2026-10-08 — Day-ahead price source compatibility
-
-- The Energi Data Service request now sends Copenhagen local `start` and `end` values accepted by the live API, while stored price intervals continue to use unambiguous UTC timestamps across daylight-saving changes.
-
-## 2026-10-08 — Private funding figures in Energy & Budget
-
-- The dashboard now separates verified live gross support, actual PayPal fees, fee credits, refunds, and known net receipts. It shows finalized monthly credit applied, owner-funded remainder, owner adjustments, and carried credit only when the allocation snapshot is current.
-- Monthly allocations refresh in a bounded background job and can be recalculated by an administrator. Contributor and merchant identifiers stay out of the shared dashboard response.
-
-## 2026-10-08 — Electricity accounting corrections
-
-- Month-end forecasts include a known allocated monthly fixed fee once. When allocation is incomplete, the total forecast remains unavailable.
-- Historical Energy & Budget cost uses a contract covering the requested month; the displayed current price continues to use the current contract. Partial server coverage stays marked partial.
-
-## 2026-10-08 — Private PayPal support controls and budget allocation
-
-- Members can review their own verified PayPal postings and subscriptions, start an optional PayPal-hosted one-off or monthly approval when live checkout is enabled, and request subscription cancellation. Approval redirects alone never count as receipts.
-- Administrators can configure separate sandbox and live merchant credentials, keep checkout disabled by default, inspect verified live ledger totals, reconcile with PayPal, and calculate append-only monthly allocations of net support to finalized lab electricity costs.
-- Late refunds revise subsequent credit balances. Unknown provider fees or incomplete costs remain explicitly unresolved; negative balances are owner-funded adjustments, never contributor debts. No live PayPal transaction has been performed.
-
-## 2026-10-08 — Power mode policy foundation
-
-- Hardware administrators can save a Copenhagen weekly Power Regulator schedule, configure price cap and boost thresholds, pause automation, and request a temporary manual mode. All automatic hardware changes start disabled; live control requires a separate capability test, recent reauthentication, and explicit enablement.
-- One per-node controller resolves manual, schedule, and price decisions, claims work before dispatch, rechecks policy and price state, and verifies the resulting iLO mode. It only writes the three supported runtime Power Regulator values; it never requests a reboot, BIOS setting, watt cap, or VM action.
-- The price worker currently falls back to the configured schedule until the electricity price provider is integrated. These controls have only been exercised against tests and fixtures, not a live server.
-
-## 2026-10-08 — Configured electricity price foundation
-
-- Administrators can record dated spot or fixed all-in electricity terms, applicable variable tariffs, VAT treatment, and actual household bills. Missing terms keep the retail price incomplete; wholesale spot is labeled separately.
-- Published DayAheadPrices can be cached for DK1 or DK2 in 15-minute UTC intervals. The current-price service supplies the same exact basis and revisions to previews and price-aware power policy, without accessing meter consumption or changing hardware.
-- Lab cost calculations join measured server kWh to applicable price intervals. These are calculated operating expenses, separate from actual invoices or payments. No supplier rates or owner tariff facts are prefilled.
-- Monthly previews compare server energy with the household meter only when scope and coverage match, apply fixed fees by an explicit policy, and forecast with weekday/weekend evidence plus a labeled future price scenario. Closed months can be finalized as immutable revisioned statements.
-
-## 2026-10-08 — Private energy dashboard foundation
-
-Added an authenticated Energy & Budget page with server power, measured kWh and bounded history. Missing electricity pricing and contribution accounting appear as unknown until verified sources are integrated.
-
-## 2026-10-08 — Server power telemetry and history
-
-- iLO collection can now be enabled per tested physical node. The backend records actual input watts and regulator mode without an open browser; collection never writes a hardware setting.
-- The Hardware view shows current watts, observation age, a 24-hour power graph, and today/month integrated kWh with measured coverage. Failed reads remain stale or unknown instead of becoming zero.
-- Samples integrate into 15-minute UTC energy buckets; older data rolls into Copenhagen-local daily summaries with coverage and daylight-saving-aware day length. Collection starts disabled.
-
-## 2026-10-08 — Per-node iLO connection foundation
-
-- PVE Hosts now has a Hardware/iLO connection section for each physical node. Setup and connection tests read the HPE Redfish API without changing server settings.
-- iLO credentials are encrypted; TLS verification and collection/control remain enabled only by explicit operator configuration. Duplicate physical identities and stale test results are rejected.
-- Connection tests report detected generation, regulator mode, actual chassis watts when available, and honest read/write capability status. Fixture coverage does not constitute live hardware verification.
+### Safety & defaults
+- Every integration stays off until configured. iLO, ElOverblik and PayPal secrets are encrypted at rest and included in key rotation.
+- The only public endpoint is the signature-verified PayPal webhook.
+- Everything was verified only with fixtures, fakes and disposable databases, never against a live iLO, ElOverblik account or PayPal account. The runbook's live verification checklist lists what the owner must confirm first.
 
 ## 2026-10-03 — Reliability fixes for file transfers, backups, and dialogs
 
@@ -1937,17 +1885,3 @@ Proxmox-frontend/
 - `makeRequest` does NOT send body on DELETE requests (`if (body && method !== 'DELETE')`)
 - Download proxy uses `https.request()` not `fetch()` for TLS agent support
 - Express routes use `/*` wildcard for Proxmox volids that contain slashes
-
-## 2026-10-08 — ElOverblik electricity meter foundation
-
-Added a private administrator setup flow for ElOverblik Customer API credentials and meter selection, with encrypted tokens, normalized consumption intervals, versioned charge snapshots and disabled-by-default syncing. Household meter data remains separate from server power data.
-## 2026-10-08 — Private PayPal support foundation
-
-Added disabled-by-default PayPal sandbox/live configuration, server-side one-off order handling, fixed-plan monthly approval and cancellation, verified webhook intake, and a deduplicated posting foundation. Live checkout remains off pending full reconciliation and accounting integration.
-
-## 2026-10-08 — PayPal receipt reconciliation
-
-Added bounded subscription transaction reconciliation, exact reported fee posting, and verified capture-refund accounting. Unresolved adjustments are held from finalized support totals for administrator review.
-The reconciliation pass also imports missed app-scoped PayPal webhook events through a bounded authenticated lookup, including one-off refund notifications.
-Member deletion now waits for confirmed cancellation of linked monthly subscriptions; unknown cancellation outcomes retain the account and retry through reconciliation.
-Targeted Transaction Search readback can now post linked refund and reversal adjustments with provider-reported fee credits. Pending or ambiguous adjustments retry with bounded backoff, then require review.
