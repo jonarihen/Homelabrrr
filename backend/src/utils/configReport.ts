@@ -161,6 +161,11 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'days daily server energy totals are kept (never less than the bucket retention)',
   },
   {
+    name: 'ENERGY_HISTORY_RETENTION_DAYS',
+    defaultValue: '1830',
+    effect: 'days imported ElOverblik meter intervals and cached spot prices are kept',
+  },
+  {
     name: 'LEASE_CHECK_INTERVAL_MS',
     defaultValue: '900000',
     effect: 'how often expired VM leases are swept (floored at 60000)',

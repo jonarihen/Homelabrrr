@@ -447,6 +447,7 @@ Example values live in [`.env.example`](.env.example).
 | `HARDWARE_RAW_RETENTION_DAYS` | Days raw iLO watt samples are kept (default `30`; minimum `2`) |
 | `HARDWARE_INTERVAL_RETENTION_DAYS` | Days 15-minute server energy buckets are kept after their daily rollup (default `730`; minimum `400`, because buckets feed monthly cost statements) |
 | `HARDWARE_DAY_RETENTION_DAYS` | Days Copenhagen-local daily server energy totals are kept (default `1826`; never shorter than the bucket retention) |
+| `ENERGY_HISTORY_RETENTION_DAYS` | Days imported ElOverblik meter intervals and cached spot prices are kept (default `1830`) |
 | `NODE_HEALTH_POLL_MS` | Interval for the background Proxmox health monitor that emits node unreachable/recovered notifications (default `60000`; `0` disables it) |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |

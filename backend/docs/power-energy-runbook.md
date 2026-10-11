@@ -196,11 +196,10 @@ PayPal support is optional and voluntary. It never changes access, quotas or pri
 | Raw iLO watt samples | 30 days (min 2) | `HARDWARE_RAW_RETENTION_DAYS` |
 | 15-minute server energy buckets | 730 days (min 400) | `HARDWARE_INTERVAL_RETENTION_DAYS` |
 | Daily server energy totals | 1826 days (never shorter than buckets) | `HARDWARE_DAY_RETENTION_DAYS` |
-| ElOverblik intervals and cached spot prices | 1830 days | `ENERGY_HISTORY_RETENTION_DAYS` (see note) |
+| ElOverblik intervals and cached spot prices | 1830 days | `ENERGY_HISTORY_RETENTION_DAYS` |
 | Processed PayPal webhook payloads | 30 days, then emptied (IDs and ledger kept) | none |
 | Finalized cost statements, ledger, allocations | kept | none |
 
-> Note: the backend honours `ENERGY_HISTORY_RETENTION_DAYS`, but `docker-compose.yml` does not currently pass it through, and it is not in the startup config report. Under Docker Compose the 1830-day default applies unless you add it to the backend's `environment:` block.
 
 ## 12. Disable and rollback, per feature
 
