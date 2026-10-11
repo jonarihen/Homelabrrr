@@ -34,6 +34,19 @@ function canonicalNode(raw: unknown) {
   if (!node.hostId || !isValidNodeName(node.nodeName) || node.nodeRef !== `${node.hostId}~${node.nodeName}`) throw new Error('Canonical node reference required');
   return node;
 }
+// Collapses transport error codes into the connection states shown to the
+// operator. A read-only account (no 403 on reads) is valid for monitoring.
+export function testStatusFor(code: IloError['code']): string {
+  switch (code) {
+    case 'authentication_failed': return 'authentication_failed';
+    case 'insufficient_privilege': return 'insufficient_privilege';
+    case 'tls_failed': return 'tls_failed';
+    case 'unreachable': case 'timeout': return 'unreachable';
+    case 'invalid_target': return 'invalid_target';
+    case 'missing_endpoint': case 'malformed_response': case 'oversized_response': return 'unsupported';
+    default: return 'unreachable';
+  }
+}
 export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware) {
 const router = Router();
 router.use(requireAuth, requirePermission('can_manage_hosts'), requireInteractiveSession);
@@ -145,10 +158,12 @@ router.post('/:id/rebind', async (req, res) => {
   }
 });
 router.post('/:id/test', async (req, res) => {
+  let tested: { id: number; config_version: number; node_ref: string } | null = null;
   try {
     const id = parsedId(req.params.id);
     const [row] = await db.select().from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
     if (!row) return res.status(404).json({ error: 'Connection not found' });
+    tested = row;
     const discovery = await hardwareReader({ host: row.target_host, port: row.target_port, username: row.username, password: decryptSecret(row.secret), verifyTls: row.verify_tls, caCertificate: row.ca_certificate });
     const systemUuid = physicalSystemIdentity(discovery.identity);
     if (row.system_uuid && row.system_uuid.trim().toLowerCase() !== systemUuid) {
@@ -169,7 +184,18 @@ router.post('/:id/test', async (req, res) => {
   } catch (err) {
     if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message });
     if (isUniqueViolation(err)) return res.status(409).json({ error: 'This physical system is already bound to another node' });
-    if (err instanceof IloError) return res.status(err.code === 'authentication_failed' ? 403 : 502).json({ status: err.code, error: `iLO connection test failed (${err.code})` });
+    if (err instanceof IloError) {
+      const status = testStatusFor(err.code);
+      // Persist the failure so the Hardware view shows it after a reload, but
+      // only for the configuration that was tested: an edit made while the
+      // request was in flight keeps its own not_tested state.
+      if (tested) {
+        await db.update(hardwareConnections).set({ last_status: status, last_test_at: new Date(), updated_at: new Date() })
+          .where(and(eq(hardwareConnections.id, tested.id), eq(hardwareConnections.config_version, tested.config_version), eq(hardwareConnections.lifecycle_state, 'active')));
+        await logAudit(req, 'hardware_connection_tested', String(tested.id), `node=${tested.node_ref}; status=${status}`, 'failure');
+      }
+      return res.status(status === 'authentication_failed' || status === 'insufficient_privilege' ? 403 : 502).json({ status, error: `iLO connection test failed (${status})` });
+    }
     res.status(500).json({ error: sanitizeError(err) });
   }
 });

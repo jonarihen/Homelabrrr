@@ -4,7 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq, sql } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { hardwareConnections, hardwarePowerSamples, pveHosts, users } from '../db/schema/index.ts';
+import { auditLog, hardwareConnections, hardwarePowerSamples, pveHosts, users } from '../db/schema/index.ts';
 import type { HardwareDiscovery } from '../services/iloAdapter.ts';
 import { IloError } from '../services/iloAdapter.ts';
 
@@ -137,13 +137,37 @@ test('in-flight connection test cannot overwrite a credential edit', async () =>
 
 test('authentication and TLS failures expose categories without leaking credentials', async () => {
   const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-b`));
-  for (const [code, status] of [['authentication_failed', 403], ['tls_failed', 502]] as const) {
+  for (const [code, status, persisted] of [['authentication_failed', 403, 'authentication_failed'], ['insufficient_privilege', 403, 'insufficient_privilege'],
+    ['tls_failed', 502, 'tls_failed'], ['timeout', 502, 'unreachable'], ['missing_endpoint', 502, 'unsupported']] as const) {
     discovery = async () => { throw new IloError(code, `${code} while testing fixture-secret`); };
     const result = await request(app).post(`/${row.id}/test`).set('x-test-role', 'admin');
     assert.equal(result.status, status);
-    assert.equal(result.body.status, code);
+    assert.equal(result.body.status, persisted);
     assert.equal(JSON.stringify(result.body).includes('fixture-secret'), false);
+    const [saved] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.id, row.id));
+    assert.equal(saved.last_status, persisted, 'failed result survives a reload');
+    assert.ok(saved.last_test_at instanceof Date);
+    assert.equal(saved.config_version, row.config_version, 'a failed test is not a configuration change');
   }
+  const audits = await fixture.db.select().from(auditLog).where(eq(auditLog.target, String(row.id)));
+  assert.equal(audits.some((entry) => entry.outcome === 'failure' && entry.detail.includes('status=tls_failed')), true);
+  assert.equal(audits.some((entry) => entry.detail.includes('fixture-secret')), false);
+});
+
+test('a failed test that races an edit does not overwrite the edited connection status', async () => {
+  const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-b`));
+  let fail: (err: Error) => void = () => {};
+  let started = false;
+  discovery = () => new Promise((_resolve, reject) => { fail = reject; started = true; });
+  const pending = request(app).post(`/${row.id}/test`).set('x-test-role', 'admin').then((response) => response);
+  while (!started) await new Promise((resolve) => setTimeout(resolve, 1));
+  const edit = await request(app).put(`/${row.id}`).set('x-test-role', 'admin').send({ host: row.target_host, username: 'monitor', configVersion: row.config_version });
+  assert.equal(edit.status, 200);
+  fail(new IloError('authentication_failed', 'old password'));
+  assert.equal((await pending).status, 403);
+  const [saved] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.id, row.id));
+  assert.equal(saved.last_status, 'not_tested');
+  assert.equal(saved.config_version, row.config_version + 1);
 });
 
 test('missing stable identity cannot enable telemetry', async () => {
