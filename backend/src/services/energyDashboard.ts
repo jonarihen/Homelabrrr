@@ -1,9 +1,9 @@
-import { and, eq, gt, lte, sql } from 'drizzle-orm';
+import { and, eq, gt, lt, lte, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { electricityContracts } from '../db/schema/index.ts';
 import { HARDWARE_POLL_INTERVAL_MS } from './hardwareTelemetry.ts';
 import { getApplicablePrice } from './electricityPricing.ts';
-import { previewMonthlyElectricity } from './monthlyElectricity.ts';
+import { latestFinalizedStatement, previewMonthlyElectricity } from './monthlyElectricity.ts';
 import { monthlyEnergyFunding } from './energyFunding.ts';
 import { getSetting } from '../db/settings.ts';
 import { resolvePowerDecision, type ApplicablePowerPrice, type PowerPricePolicy, type WeeklyPowerSchedule } from './powerPolicy.ts';
@@ -133,7 +133,7 @@ export async function energySummary(month: string, now = new Date()) {
   const currentContractRef = contract?.id ?? openEnded?.id;
   let price: { status: string; orePerKwh: number | null; basis: string | null; validUntil: string | null } =
     { status: 'unavailable', orePerKwh: null, basis: null, validUntil: null };
-  let cost: { status: string; actualOre: string | null; forecastOre: string | null; components: Array<{ label: string; ore: string }> } =
+  let cost: { status: string; actualOre: string | null; forecastOre: string | null; statementRevision?: number; finalizedAt?: Date; components: Array<{ label: string; ore: string }> } =
     { status: 'unavailable', actualOre: null, forecastOre: null, components: [] };
   if (currentContractRef) {
     const applicable = await getApplicablePrice(now, String(currentContractRef));
@@ -142,19 +142,25 @@ export async function energySummary(month: string, now = new Date()) {
         basis: applicable.basis, validUntil: applicable.end_utc };
     } else if (applicable) price = { ...price, status: 'incomplete', basis: applicable.basis };
   }
-  // A historical month must be priced under the contract that covered that
-  // month, even after it is deactivated. Require one contract to span the full
-  // period so a mid-month switch cannot produce a deceptively complete total.
+  // A historical month is priced under the active contract(s) that covered it,
+  // including contracts that were end-dated or superseded since. Withdrawn
+  // (deactivated) contracts are excluded. A closed month with a finalized
+  // statement is read from that immutable statement, never recalculated live.
   const costContracts = await db.select({ id: electricityContracts.id }).from(electricityContracts)
-    .where(and(lte(electricityContracts.valid_from, measured.period.startAt),
-      sql`(${electricityContracts.valid_to} IS NULL OR ${electricityContracts.valid_to} >= ${measured.period.endAt})`)).limit(2);
+    .where(and(eq(electricityContracts.active, true), lt(electricityContracts.valid_from, measured.period.endAt),
+      sql`(${electricityContracts.valid_to} IS NULL OR ${electricityContracts.valid_to} > ${measured.period.startAt})`))
+    .orderBy(electricityContracts.valid_from, electricityContracts.id).limit(1);
   if (costContracts.length === 1) {
     try {
-      const calculation = await previewMonthlyElectricity(month, String(costContracts[0].id), now);
+      const statement = now >= measured.period.endAt ? await latestFinalizedStatement(String(costContracts[0].id), month) : null;
+      const calculation = (statement?.calculation as Awaited<ReturnType<typeof previewMonthlyElectricity>> & { partialAcknowledged?: boolean } | undefined)
+        ?? await previewMonthlyElectricity(month, String(costContracts[0].id), now);
       const serverVariableOre = calculation.serverCosts.reduce((sum, item) => sum + BigInt(item.costOre), 0n).toString();
-      const extraVariableOre = calculation.extraLoadCosts.reduce((sum, item) => sum + BigInt(item.costOre), 0n).toString();
-      cost = { status: calculation.variableCostComplete && calculation.labCoveredSeconds === calculation.expectedSeconds && calculation.fixedFeeStatus === 'known' ? 'calculated' : 'partial',
-        actualOre: calculation.calculatedLabCostOre, forecastOre: calculation.forecast?.forecastTotalOre ?? null,
+      const extraVariableOre = (calculation.extraLoadCosts || []).reduce((sum, item) => sum + BigInt(item.costOre), 0n).toString();
+      const complete = calculation.variableCostComplete && calculation.labCoveredSeconds === calculation.expectedSeconds && calculation.fixedFeeStatus === 'known';
+      cost = { status: statement ? complete && !calculation.partialAcknowledged ? 'finalized' : 'finalized_partial' : complete ? 'calculated' : 'partial',
+        actualOre: calculation.calculatedLabCostOre, forecastOre: statement ? null : calculation.forecast?.forecastTotalOre ?? null,
+        ...(statement ? { statementRevision: statement.revision, finalizedAt: statement.created_at } : {}),
         components: [{ label: 'Measured server variable cost', ore: serverVariableOre },
           { label: 'Estimated extra load variable cost', ore: extraVariableOre },
           { label: 'Allocated fixed fees', ore: calculation.allocatedFixedFeeOre }] };

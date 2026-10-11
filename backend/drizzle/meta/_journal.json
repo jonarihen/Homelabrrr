@@ -113,6 +113,13 @@
       "when": 1791735330709,
       "tag": "0015_power_control_safety",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1791735472909,
+      "tag": "0016_energy_succession_sync_bills",
+      "breakpoints": true
     }
   ]
 }

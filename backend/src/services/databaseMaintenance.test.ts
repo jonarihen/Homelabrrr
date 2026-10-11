@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, provisionedVms } from '../db/schema/index.ts';
+import { users, provisionedVms, eloverblikIntervals, electricitySpotPrices } from '../db/schema/index.ts';
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
 
@@ -39,6 +39,16 @@ test('maintenance deletes bounded terminal history while preserving recent and a
     const remaining = await t.db.select({ name: provisionedVms.name }).from(provisionedVms);
     const names = remaining.map((r) => r.name).sort();
     assert.deepEqual(names, ['active', 'recent']);
+
+    // Energy history keeps five years by default.
+    const interval = (days: number) => ({ meter_id: '571313180000000001', series_key: 'A04:KWH:A01', business_type: 'A04', aggregation: 'Actual', resolution: 'PT1H',
+      interval_start: daysAgo(days), interval_end: new Date(daysAgo(days).getTime() + 3_600_000), energy_kwh: '0.100000' });
+    await t.db.insert(eloverblikIntervals).values([interval(1900), interval(1000)]);
+    await t.db.insert(electricitySpotPrices).values([1900, 10].map((days) => ({ area: 'DK2', start_utc: daysAgo(days), end_utc: new Date(daysAgo(days).getTime() + 900_000),
+      dkk_per_kwh: '0.500000', source_revision: 'fixture', fetched_at: daysAgo(days) })));
+    const energy = await runDatabaseMaintenance({ batchSize: 10 });
+    assert.equal(energy.deleted.eloverblik_intervals, 1);
+    assert.equal(energy.deleted.electricity_spot_prices, 1);
 
     // A third pass has nothing terminal left to delete.
     const third = await runDatabaseMaintenance({ batchSize: 1 });

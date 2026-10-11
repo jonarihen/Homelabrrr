@@ -13,6 +13,18 @@ export const eloverblikConnections = pgTable('eloverblik_connections', {
   last_success_at: timestamp('last_success_at', { withTimezone: true, mode: 'date' }),
   latest_interval_end: timestamp('latest_interval_end', { withTimezone: true, mode: 'date' }),
   last_error_code: text('last_error_code'),
+  // Durable retry state so backoff and upstream Retry-After survive restarts.
+  consecutive_failures: integer('consecutive_failures').notNull().default(0),
+  next_attempt_at: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
+  retry_after_until: timestamp('retry_after_until', { withTimezone: true, mode: 'date' }),
+  // A backfill chunk that keeps failing is skipped (recorded as a gap) after
+  // a bounded number of attempts instead of stalling the backfill forever.
+  failing_chunk_start: timestamp('failing_chunk_start', { withTimezone: true, mode: 'date' }),
+  chunk_failures: integer('chunk_failures').notNull().default(0),
+  skipped_ranges: jsonb('skipped_ranges').notNull().default([]),
+  // Reconnect-required / meter-unauthorized: polling stops until the owner acts.
+  attention_code: text('attention_code'),
+  attention_since: timestamp('attention_since', { withTimezone: true, mode: 'date' }),
 });
 
 // Each provider series and interval is unique; only A04/A64 consumption in kWh
@@ -46,6 +58,20 @@ export const eloverblikChargeSnapshots = pgTable('eloverblik_charge_snapshots', 
   index('eloverblik_charge_recent').on(t.meter_id, t.observed_at),
 ]);
 
+// When each distinct charge snapshot was seen. A snapshot that returns after
+// a different one (A -> B -> A) gets a new observation row, so the sequence of
+// observed charge versions is preserved. Observation times are when the
+// source reported the content, not tariff effective dates.
+export const eloverblikChargeObservations = pgTable('eloverblik_charge_observations', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  meter_id: text('meter_id').notNull(),
+  snapshot_id: integer('snapshot_id').notNull().references(() => eloverblikChargeSnapshots.id, { onDelete: 'cascade' }),
+  first_observed_at: timestamp('first_observed_at', { withTimezone: true, mode: 'date' }).notNull(),
+  last_observed_at: timestamp('last_observed_at', { withTimezone: true, mode: 'date' }).notNull(),
+}, (t) => [
+  index('eloverblik_charge_observation_recent').on(t.meter_id, t.first_observed_at),
+]);
+
 // Pricing is independent of delayed meter consumption. Contract and charge
 // revisions are effective-dated; changing one never rewrites a finalized bill.
 export const electricityContracts = pgTable('electricity_contracts', {
@@ -65,6 +91,9 @@ export const electricityContracts = pgTable('electricity_contracts', {
   revision: integer('revision').notNull().default(1),
   active: boolean('active').notNull().default(false),
   provenance: text('provenance').notNull(),
+  // Set when the contract was end-dated or superseded (audit-logged too).
+  end_reason: text('end_reason'),
+  superseded_by_id: integer('superseded_by_id'),
   created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
 }, (t) => [index('electricity_contract_validity').on(t.active, t.valid_from, t.valid_to)]);
 
@@ -109,6 +138,11 @@ export const electricityBills = pgTable('electricity_bills', {
   kind: text('kind').notNull().default('settlement'),
   finalized: boolean('finalized').notNull().default(false),
   revision: integer('revision').notNull().default(1),
+  // A bill is never edited in place: a correction voids it (with reason) and
+  // appends a new revision pointing back to it. status: due | partially_paid | paid | void.
+  previous_id: integer('previous_id'),
+  voided_at: timestamp('voided_at', { withTimezone: true, mode: 'date' }),
+  void_reason: text('void_reason'),
 }, (t) => [index('electricity_bill_period').on(t.contract_id, t.period_start, t.period_end)]);
 
 // Immutable calculation revisions. A finalized statement is never edited in
