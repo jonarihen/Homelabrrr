@@ -1,4 +1,4 @@
-import { and, eq, lte, gt, desc, lt, inArray } from 'drizzle-orm';
+import { and, eq, lte, gt, desc, lt, inArray, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import { electricityContracts, electricityTariffs, electricitySpotPrices, electricityExtraLoads, hardwareEnergyIntervals } from '../db/schema/index.ts';
 import { fetchDayAheadPrices, type DayAheadRow } from './dayAheadPrices.ts';
@@ -9,7 +9,7 @@ import { startBackgroundWork } from './backgroundWork.ts';
 import { log } from '../utils/logger.ts';
 import { extraLoadInterval } from './extraLabLoads.ts';
 
-let spotRefresh: Promise<{ imported: number }> | null = null;
+let spotRefresh: Promise<{ imported: number; backfilledDays: number }> | null = null;
 let lastAttempt = 0;
 let retryAfter = 0;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
@@ -39,34 +39,79 @@ export async function getApplicablePrice(atUtc: Date, selection: string | { cont
   }, basis);
 }
 
+const SPOT_BACKFILL_DAYS = 35;
+const SPOT_BACKFILL_FETCHES_PER_RUN = 3;
+const QUARTERS_PER_UTC_DAY = 96;
+
+async function storeSpotRows(rows: DayAheadRow[], now: Date): Promise<number> {
+  if (!rows.length) return 0;
+  await db.insert(electricitySpotPrices).values(rows.map((row) => ({ area: row.area, start_utc: row.startUtc, end_utc: row.endUtc, dkk_per_kwh: row.dkkPerKwh, source_revision: row.sourceRevision, fetched_at: now })))
+    .onConflictDoUpdate({ target: [electricitySpotPrices.area, electricitySpotPrices.start_utc],
+      set: { end_utc: sql`excluded.end_utc`, dkk_per_kwh: sql`excluded.dkk_per_kwh`, source_revision: sql`excluded.source_revision`, fetched_at: sql`excluded.fetched_at` } });
+  return rows.length;
+}
+
+// Recent UTC days (newest first) with fewer than 96 cached quarter-hours, e.g.
+// after a provider or network outage. Bounded to the last 35 days and to days
+// on or after the earliest active spot contract for that area.
+export async function missingSpotDays(area: string, now: Date, earliest: Date): Promise<Date[]> {
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const from = Math.max(today - SPOT_BACKFILL_DAYS * 86_400_000, Date.UTC(earliest.getUTCFullYear(), earliest.getUTCMonth(), earliest.getUTCDate()));
+  if (from >= today) return [];
+  const result = await db.execute(sql`
+    SELECT (date_trunc('day', ${electricitySpotPrices.start_utc} AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS day, count(*)::int AS quarters
+    FROM ${electricitySpotPrices} WHERE ${electricitySpotPrices.area} = ${area} AND ${electricitySpotPrices.start_utc} >= ${new Date(from)} AND ${electricitySpotPrices.start_utc} < ${new Date(today)}
+    GROUP BY 1`);
+  const counts = new Map((result.rows as Array<{ day: Date | string; quarters: number }>).map((row) => [new Date(row.day).getTime(), row.quarters]));
+  const missing: Date[] = [];
+  for (let day = today - 86_400_000; day >= from; day -= 86_400_000) if ((counts.get(day) ?? 0) < QUARTERS_PER_UTC_DAY) missing.push(new Date(day));
+  return missing;
+}
+
 // The scheduler may call this every hour. A six-hour gate prevents repeated
 // unchanged fetches; 429 Retry-After is respected. Cached valid intervals remain
-// usable through provider outages. Only this function contacts Energi Data Service.
-export async function syncPublishedSpotPrices(now = new Date(), fetcher = fetchDayAheadPrices): Promise<{ imported: number }> {
+// usable through provider outages, and a bounded number of recent outage gaps
+// are re-fetched per run. Only this function contacts Energi Data Service.
+export async function syncPublishedSpotPrices(now = new Date(), fetcher = fetchDayAheadPrices): Promise<{ imported: number; backfilledDays: number }> {
   if (spotRefresh) return spotRefresh;
-  if (now.getTime() < Math.max(lastAttempt + 6 * 3600_000, retryAfter)) return { imported: 0 };
+  if (now.getTime() < Math.max(lastAttempt + 6 * 3600_000, retryAfter)) return { imported: 0, backfilledDays: 0 };
   const work = startBackgroundWork(async () => {
-    const contracts = await db.select({ area: electricityContracts.area }).from(electricityContracts)
+    const contracts = await db.select({ area: electricityContracts.area, valid_from: electricityContracts.valid_from }).from(electricityContracts)
       .where(and(eq(electricityContracts.active, true), eq(electricityContracts.kind, 'spot')));
     const areas = [...new Set(contracts.map((row) => row.area))].filter((area): area is 'DK1' | 'DK2' => area === 'DK1' || area === 'DK2');
-    if (!areas.length) return { imported: 0 };
+    if (!areas.length) return { imported: 0, backfilledDays: 0 };
     lastAttempt = now.getTime();
     let imported = 0;
+    let backfilledDays = 0;
+    let fetches = 0;
+    const limited = (err: unknown) => {
+      if (err && typeof err === 'object' && 'retryAfterMs' in err && typeof err.retryAfterMs === 'number') { retryAfter = Math.max(retryAfter, now.getTime() + err.retryAfterMs); return true; }
+      return false;
+    };
     for (const area of areas) {
       try {
-        const rows: DayAheadRow[] = await fetcher(area, now);
-        for (const row of rows) {
-          await db.insert(electricitySpotPrices).values({ area: row.area, start_utc: row.startUtc, end_utc: row.endUtc, dkk_per_kwh: row.dkkPerKwh, source_revision: row.sourceRevision, fetched_at: now })
-            .onConflictDoUpdate({ target: [electricitySpotPrices.area, electricitySpotPrices.start_utc], set: { end_utc: row.endUtc, dkk_per_kwh: row.dkkPerKwh, source_revision: row.sourceRevision, fetched_at: now } });
-          imported++;
-        }
+        imported += await storeSpotRows(await fetcher(area, now), now);
       } catch (err) {
-        if (err && typeof err === 'object' && 'retryAfterMs' in err && typeof err.retryAfterMs === 'number') retryAfter = Math.max(retryAfter, now.getTime() + err.retryAfterMs);
+        if (limited(err)) break;
         // Keep the other configured area independent. Current cached prices stay valid.
+        continue;
+      }
+      const earliest = new Date(Math.min(...contracts.filter((row) => row.area === area).map((row) => row.valid_from.getTime())));
+      for (const day of await missingSpotDays(area, now, earliest)) {
+        if (fetches >= SPOT_BACKFILL_FETCHES_PER_RUN) break;
+        fetches++;
+        try {
+          // One request (noon +/- 24 h) covers the whole UTC day.
+          const added = await storeSpotRows(await fetcher(area, new Date(day.getTime() + 12 * 3600_000)), now);
+          imported += added;
+          if (added) backfilledDays++;
+        } catch (err) {
+          if (limited(err)) break;
+        }
       }
     }
-    return { imported };
-  }, { kind: 'electricity-price-sync' }) as unknown as Promise<{ imported: number }>;
+    return { imported, backfilledDays };
+  }, { kind: 'electricity-price-sync' }) as unknown as Promise<{ imported: number; backfilledDays: number }>;
   spotRefresh = work;
   try { return await work; } finally { if (spotRefresh === work) spotRefresh = null; }
 }
