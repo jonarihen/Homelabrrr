@@ -31,9 +31,9 @@ import WebsitesPage from './pages/WebsitesPage.jsx';
 import AdminWebsitesPage from './pages/admin/WebsitesPage.jsx';
 import OperationsPage from './pages/admin/OperationsPage.jsx';
 import EnergyDataPage from './pages/admin/EnergyDataPage.jsx';
+import EnergyBudgetPage from './pages/EnergyBudgetPage.jsx';
 import SupportPage from './pages/SupportPage.jsx';
 import PayPalPage from './pages/admin/PayPalPage.jsx';
-import EnergyBudgetPage from './pages/EnergyBudgetPage.jsx';
 import { adminRoutePermissions, makeCan } from './utils/navSections.js';
 
 function PrivateRoute({ children, allow2faBypass }) {
@@ -120,8 +120,8 @@ const router = createBrowserRouter(createRoutesFromElements(
 
     <Route path="/welcome" element={<PrivateRoute><WelcomePage /></PrivateRoute>} />
     <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
-    <Route path="/support" element={<PrivateRoute><SupportPage /></PrivateRoute>} />
     <Route path="/energy" element={<PrivateRoute><EnergyBudgetPage /></PrivateRoute>} />
+    <Route path="/support" element={<PrivateRoute><SupportPage /></PrivateRoute>} />
 
     <Route path="/vm/:node/:vmid" element={<PrivateRoute><VMPage /></PrivateRoute>} />
     <Route path="/vnc/:node/:vmid" element={<PrivateRoute><VNCPage /></PrivateRoute>} />

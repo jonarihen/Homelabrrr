@@ -3,6 +3,31 @@ import { and, desc, eq, lt, lte, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { electricityCostStatements, paypalMonthAllocations, paypalPostings, paypalTransactions, paypalWebhookInbox } from '../db/schema/index.ts';
 import { startOfLocalDateUtc } from './energyAccounting.ts';
+import { log } from '../utils/logger.ts';
+
+let allocationStartTimer: ReturnType<typeof setTimeout> | null = null;
+let allocationTimer: ReturnType<typeof setInterval> | null = null;
+let allocationRunning = false;
+
+async function updateCurrentAllocations() {
+  if (allocationRunning) return;
+  allocationRunning = true;
+  try { await recalculatePaypalAllocations(allocationMonth(new Date())); }
+  catch (err) { log('warn', 'paypal_allocation_failed', { error: err }); }
+  finally { allocationRunning = false; }
+}
+
+export function startPaypalAllocationWorker() {
+  if (allocationStartTimer || allocationTimer) return;
+  allocationStartTimer = setTimeout(() => { allocationStartTimer = null; void updateCurrentAllocations(); }, 90_000);
+  allocationTimer = setInterval(() => { void updateCurrentAllocations(); }, 6 * 60 * 60_000);
+  allocationStartTimer.unref?.(); allocationTimer.unref?.();
+}
+export function stopPaypalAllocationWorker() {
+  if (allocationStartTimer) clearTimeout(allocationStartTimer);
+  if (allocationTimer) clearInterval(allocationTimer);
+  allocationStartTimer = null; allocationTimer = null;
+}
 
 export function allocationMonth(date: Date): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit' }).format(date);

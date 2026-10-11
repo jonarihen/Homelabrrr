@@ -13,6 +13,16 @@
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
 - Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+## 2026-10-08 — Private funding figures in Energy & Budget
+
+- The dashboard now separates verified live gross support, actual PayPal fees, fee credits, refunds, and known net receipts. It shows finalized monthly credit applied, owner-funded remainder, owner adjustments, and carried credit only when the allocation snapshot is current.
+- Monthly allocations refresh in a bounded background job and can be recalculated by an administrator. Contributor and merchant identifiers stay out of the shared dashboard response.
+
+## 2026-10-08 — Electricity accounting corrections
+
+- Month-end forecasts include a known allocated monthly fixed fee once. When allocation is incomplete, the total forecast remains unavailable.
+- Historical Energy & Budget cost uses a contract covering the requested month; the displayed current price continues to use the current contract. Partial server coverage stays marked partial.
+
 ## 2026-10-08 — Private PayPal support controls and budget allocation
 
 - Members can review their own verified PayPal postings and subscriptions, start an optional PayPal-hosted one-off or monthly approval when live checkout is enabled, and request subscription cancellation. Approval redirects alone never count as receipts.

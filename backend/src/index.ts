@@ -45,6 +45,7 @@ import { startElOverblikScheduler, stopElOverblikScheduler } from './services/el
 import paymentsWebhookRoutes from './routes/paymentsWebhook.ts';
 import paymentsRoutes from './routes/payments.ts';
 import { startPaypalInboxWorker, stopPaypalInboxWorker, startPaypalReconciliation, stopPaypalReconciliation } from './services/paypal.ts';
+import { startPaypalAllocationWorker, stopPaypalAllocationWorker } from './services/paypalAllocation.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.ts';
 import { decryptSecret, encryptSecret } from './utils/secrets.ts';
@@ -724,6 +725,7 @@ startPowerControlWorker(async (at, policy) => {
 });
 startPaypalInboxWorker();
 startPaypalReconciliation();
+startPaypalAllocationWorker();
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -772,6 +774,7 @@ async function shutdown(signal) {
   stopPowerControlWorker();
   stopPaypalInboxWorker();
   stopPaypalReconciliation();
+  stopPaypalAllocationWorker();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {
