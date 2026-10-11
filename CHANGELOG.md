@@ -25,6 +25,10 @@
 ## 2026-10-08 — PayPal capture retry readback
 
 - A member can retry confirmation after an uncertain one-off PayPal capture response. The portal reads the existing order and posts a verified completed capture once; it does not send a second capture request.
+## 2026-10-08 — Power policy transition preview
+
+- The saved hardware policy preview now includes seven days of schedule and published-price decisions, the next schedule boundary, and the next known selected-mode change. Future price-dependent selections beyond published coverage are explicitly unknown.
+- Weekly power windows resolve Copenhagen daylight-saving gaps and repeated hours to stable UTC boundaries, including custom windows during the repeated autumn hour.
 
 ## 2026-10-08 — Server energy history
 

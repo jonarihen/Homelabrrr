@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql, lt, gt } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { hardwareConnections, hardwarePowerPolicies } from '../db/schema/index.ts';
+import { hardwareConnections, hardwarePowerPolicies, electricityContracts, electricitySpotPrices, electricityTariffs } from '../db/schema/index.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
 import { resolvePowerDecision, validatePowerSchedule, validatePricePolicy, weekdayPreset, type ApplicablePowerPrice, type PowerPricePolicy, type WeeklyPowerSchedule, type WritablePowerMode } from '../services/powerPolicy.ts';
@@ -10,6 +10,7 @@ import { logAudit, logAuditTx } from '../utils/audit.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { PowerController } from '../services/powerController.ts';
 import { PowerControlStore } from '../services/powerControlStore.ts';
+import { buildPowerPreview } from '../services/powerPreview.ts';
 
 const router = Router();
 router.use(requireAuth, requireAdmin, requireInteractiveSession);
@@ -82,10 +83,48 @@ router.get('/:id/preview', async (req, res) => {
       manualOverride: manualActive ? { mode: row.policy.manual_mode as WritablePowerMode, expiresAt: row.policy.manual_expires_at } : null,
       manualAction: Boolean(manualActive),
     });
+    const previewEnd = new Date(at.getTime() + 7 * 86_400_000);
+    const sourceBoundaries: Date[] = [];
+    if (row.policy.price_policy.enabled && /^\d+$/.test(row.policy.price_policy.contractRef)) {
+      const [contract] = await db.select().from(electricityContracts)
+        .where(eq(electricityContracts.id, Number(row.policy.price_policy.contractRef))).limit(1);
+      if (contract && contract.area === row.policy.price_policy.area) {
+        sourceBoundaries.push(contract.valid_from);
+        if (contract.valid_to) sourceBoundaries.push(contract.valid_to);
+        const tariffs = await db.select({ start: electricityTariffs.valid_from, end: electricityTariffs.valid_to })
+          .from(electricityTariffs).where(and(eq(electricityTariffs.contract_id, contract.id),
+            lt(electricityTariffs.valid_from, previewEnd), gt(electricityTariffs.valid_to, at)));
+        for (const tariff of tariffs) sourceBoundaries.push(tariff.start, tariff.end);
+        if (contract.kind === 'spot') {
+          const spots = await db.select({ start: electricitySpotPrices.start_utc, end: electricitySpotPrices.end_utc })
+            .from(electricitySpotPrices).where(and(eq(electricitySpotPrices.area, contract.area),
+              lt(electricitySpotPrices.start_utc, previewEnd), gt(electricitySpotPrices.end_utc, at)));
+          for (const spot of spots) sourceBoundaries.push(spot.start, spot.end);
+        } else {
+          for (let time = at.getTime() - at.getTime() % 86_400_000 + 86_400_000; time < previewEnd.getTime(); time += 86_400_000) {
+            sourceBoundaries.push(new Date(time));
+          }
+        }
+      }
+    }
+    const previewKnownAt = new Date();
+    const timeline = await buildPowerPreview({ now: at, actualMode, supportedModes,
+      controlEnabled: row.connection.control_enabled && row.policy.automation_enabled,
+      automationPaused: row.policy.paused || await getSetting('power_automation_paused') === 'true',
+      driftHold: row.policy.drift_hold, schedule: row.policy.schedule, pricePolicy: row.policy.price_policy,
+      previousLatch: row.policy.latch,
+      manualOverride: row.policy.manual_mode ? { mode: row.policy.manual_mode as WritablePowerMode, expiresAt: row.policy.manual_expires_at } : null,
+    }, sourceBoundaries, async (when) => {
+      if (!row.policy?.price_policy.enabled) return null;
+      const value = await getApplicablePrice(when, row.policy.price_policy);
+      return value?.status === 'valid' && value.dkk_per_kwh && value.start_utc && value.end_utc
+        ? value as ApplicablePowerPrice : null;
+    }, 7, previewKnownAt);
     res.json({ at, observedMode: actualMode, policyVersion: row.policy.version,
-      baseMode: decision.baseMode, selectedMode: decision.target, reason: decision.reason,
+      baseMode: decision.baseMode, selectedMode: timeline.segments[0]?.futurePriceUnknown ? null : decision.target, reason: decision.reason,
       priceStatus: decision.priceStatus, priceDkkPerKwh: price?.dkk_per_kwh ?? null,
-      priceValidUntil: decision.validUntil, futureBeyondPublishedPrice: row.policy.price_policy.enabled && at > new Date() && decision.priceStatus !== 'valid' });
+      priceValidUntil: decision.validUntil, futureBeyondPublishedPrice: row.policy.price_policy.enabled && at > new Date() && decision.priceStatus !== 'valid',
+      sevenDayPreview: timeline, nextKnownTransition: timeline.nextKnownTransition, nextScheduleTransition: timeline.nextScheduleTransition });
   } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
 });
 
