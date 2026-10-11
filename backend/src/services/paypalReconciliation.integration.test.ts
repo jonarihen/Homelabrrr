@@ -402,3 +402,21 @@ test('gap 9: members pick only server-offered monthly amounts; changes cancel fi
   const status = await paypal.listMonthlyPlans('sandbox');
   assert.equal(status.filter((item) => item.active).length, 2);
 });
+
+test('gap 13: a foreign-currency installment is recorded but never posted into DKK totals', async () => {
+  const { paypalSubscriptions: subs } = await import('../db/schema/index.ts');
+  const [good] = await fixture.db.select().from(subs).where(eq(subs.id, 'SUBGOOD'));
+  routes['GET /v1/billing/subscriptions/SUBGOOD'] = () => ({ id: 'SUBGOOD', plan_id: 'PLAN12345', custom_id: 'sub-intent-good', status: 'ACTIVE' });
+  routes['GET /v1/billing/subscriptions/SUBGOOD/transactions'] = () => ({ total_pages: 1, transactions: [{ id: 'SALEEUR1', status: 'COMPLETED',
+    time: '2026-09-15T00:00:00Z', amount_with_breakdown: { gross_amount: { currency_code: 'EUR', value: '6.70' } } }] });
+  const before = await paypal.verifiedContributionSnapshot('sandbox');
+  await paypal.reconcileSubscription(good, new Date('2026-09-01T00:00:00Z'), new Date('2026-09-30T00:00:00Z'));
+  const [row] = await fixture.db.select().from(paypalTransactions).where(eq(paypalTransactions.provider_transaction_id, 'SALEEUR1'));
+  assert.equal(row.status, 'currency_unconfirmed');
+  assert.equal(row.currency, 'EUR');
+  assert.deepEqual(row.foreign_amounts, { gross_amount: { currency_code: 'EUR', value: '6.70' } });
+  const after = await paypal.verifiedContributionSnapshot('sandbox');
+  assert.equal(after.grossOre, before.grossOre);
+  assert.equal(after.foreignCurrencyTransactions, before.foreignCurrencyTransactions + 1);
+  assert.equal(after.eligibleNetOre === null, before.eligibleNetOre === null, 'foreign evidence does not change DKK finalization');
+});

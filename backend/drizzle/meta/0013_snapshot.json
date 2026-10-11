@@ -1,5 +1,5 @@
 {
-  "id": "4244d7ff-31e9-4a1c-84b6-21e2aeee6b86",
+  "id": "ed62915d-80d8-4d41-92f4-7bb1e4ffc39f",
   "prevId": "ed012772-c1fb-4654-8ffe-bcceadd2abb9",
   "version": "7",
   "dialect": "postgresql",
@@ -9732,6 +9732,12 @@
         "provider_status": {
           "name": "provider_status",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "foreign_amounts": {
+          "name": "foreign_amounts",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },

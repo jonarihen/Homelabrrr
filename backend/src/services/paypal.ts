@@ -8,7 +8,7 @@ import { isUniqueViolation } from '../db/errors.ts';
 import { incrementMetric } from '../utils/metricRegistry.ts';
 import { PayPalError, paypalClient, type PayPalEnvironment, type PayPalCredentials } from './paypalClient.ts';
 import { normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund, normalizeReportedAdjustment, oreToDkk, parseDkkOre } from './paypalMoney.ts';
-import { postReceipt, postCaptureRefund, postProviderAdjustment } from './paypalLedger.ts';
+import { postReceipt, postCaptureRefund, postProviderAdjustment, recordForeignReceipt } from './paypalLedger.ts';
 import { PAYMENT_STATE_EVENTS, closePendingState, openPaymentStateTotals, recordPaymentStateEvent } from './paypalPaymentStates.ts';
 import { isAdjustedSaleStatus, linkedCaptureId, settleCaptureAdjustments, settleSaleAdjustments } from './paypalCoverage.ts';
 
@@ -654,9 +654,14 @@ export async function reconcileSubscription(subscription: typeof paypalSubscript
   if (expectedSaleId && !transactions.some((item: any) => item?.id === expectedSaleId)) throw new PayPalError('SALE_NOT_FOUND', 409);
   for (const item of transactions) {
     const normalized = normalizeSubscriptionTransaction(item, { amountOre: subscription.amount_ore });
-    if (normalized) await postReceipt({ environment: subscription.environment, merchantId: subscription.merchant_id,
-      intentId: subscription.intent_id, userId: subscription.user_id }, 'sale', normalized, 'subscription_transactions');
-    if (normalized && isAdjustedSaleStatus(item.status)) await settleSaleAdjustments({ environment: subscription.environment,
+    if (normalized?.foreign && normalized.grossOre === null) {
+      await recordForeignReceipt({ environment: subscription.environment, merchantId: subscription.merchant_id, intentId: subscription.intent_id,
+        userId: subscription.user_id }, 'sale', normalized.transactionId, normalized.foreign, normalized.effectiveAt);
+      continue;
+    }
+    if (normalized && normalized.grossOre !== null) await postReceipt({ environment: subscription.environment, merchantId: subscription.merchant_id,
+      intentId: subscription.intent_id, userId: subscription.user_id }, 'sale', { ...normalized, grossOre: normalized.grossOre }, 'subscription_transactions');
+    if (normalized && normalized.grossOre !== null && isAdjustedSaleStatus(item.status)) await settleSaleAdjustments({ environment: subscription.environment,
       merchantId: subscription.merchant_id, intentId: subscription.intent_id, userId: subscription.user_id },
     normalized.transactionId, item.status, normalized.grossOre, normalized.effectiveAt);
   }
@@ -906,6 +911,8 @@ export async function verifiedContributionSnapshot(value: unknown = 'live') {
   }).from(paypalPostings).where(eq(paypalPostings.environment, env));
   const [{ unresolved }] = await db.select({ unresolved: count() }).from(paypalTransactions)
     .where(and(eq(paypalTransactions.environment, env), eq(paypalTransactions.status, 'net_unresolved')));
+  const [{ foreign }] = await db.select({ foreign: count() }).from(paypalTransactions)
+    .where(and(eq(paypalTransactions.environment, env), eq(paypalTransactions.status, 'currency_unconfirmed')));
   const [{ review }] = await db.select({ review: count() }).from(paypalWebhookInbox)
     .where(and(eq(paypalWebhookInbox.environment, env), eq(paypalWebhookInbox.status, 'needs_review')));
   const knownNetOre = totals.grossOre + totals.feeDebitsOre + totals.refundDebitsOre + totals.feeCreditsOre;
@@ -915,7 +922,7 @@ export async function verifiedContributionSnapshot(value: unknown = 'live') {
   return { environment: env, grossOre: totals.grossOre, feeDebitsOre: totals.feeDebitsOre,
     refundDebitsOre: totals.refundDebitsOre, feeCreditsOre: totals.feeCreditsOre, knownNetOre,
     eligibleNetOre: unresolved || review ? null : Math.max(0, knownNetOre), unresolvedTransactions: unresolved,
-    reviewEvents: review, ledgerRevision: totals.revision, paypalAccountBalanceKnown: false, ...held };
+    reviewEvents: review, ledgerRevision: totals.revision, paypalAccountBalanceKnown: false, foreignCurrencyTransactions: foreign, ...held };
 }
 export async function reconcilePaypalManual(value: unknown, now = new Date()) {
   const env = environment(value);

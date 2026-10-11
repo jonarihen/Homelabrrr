@@ -4,7 +4,8 @@ import { paypalPostings, paypalTransactions } from '../db/schema/index.ts';
 import { PayPalError } from './paypalClient.ts';
 
 type Scope = { environment: string; merchantId: string; intentId: string; userId: number | null };
-type Receipt = { transactionId: string; grossOre: number; feeOre: number | null; netOre: number | null; effectiveAt: Date };
+type Foreign = Record<string, { currency_code: string; value: string }> | null | undefined;
+type Receipt = { transactionId: string; grossOre: number; feeOre: number | null; netOre: number | null; effectiveAt: Date; foreign?: Foreign };
 type Refund = { transactionId: string; grossOre: number; feeCreditOre: number | null; netDebitOre: number | null; effectiveAt: Date };
 
 export async function postReceipt(scope: Scope, kind: 'capture' | 'sale', receipt: Receipt, verification: string) {
@@ -14,7 +15,7 @@ export async function postReceipt(scope: Scope, kind: 'capture' | 'sale', receip
     const record = { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: receipt.transactionId,
       provider_kind: kind, intent_id: scope.intentId, user_id: scope.userId, status: 'net_unresolved',
       currency: 'DKK', gross_ore: receipt.grossOre, fee_ore: receipt.feeOre, net_ore: receipt.netOre, effective_at: receipt.effectiveAt,
-      observed_at: new Date() };
+      foreign_amounts: receipt.foreign ?? null, observed_at: new Date() };
     await tx.insert(paypalTransactions).values(record).onConflictDoNothing();
     const [prior] = await tx.select().from(paypalTransactions).where(and(
       eq(paypalTransactions.environment, scope.environment), eq(paypalTransactions.merchant_id, scope.merchantId),
@@ -28,7 +29,10 @@ export async function postReceipt(scope: Scope, kind: 'capture' | 'sale', receip
     }
     if (complete) await tx.update(paypalTransactions).set({ status: 'posted', fee_ore: receipt.feeOre,
       net_ore: receipt.netOre, observed_at: record.observed_at }).where(eq(paypalTransactions.id, prior.id));
-    if (!complete) return 'net_unresolved';
+    if (!complete) {
+      if (receipt.foreign) await tx.update(paypalTransactions).set({ foreign_amounts: receipt.foreign }).where(eq(paypalTransactions.id, prior.id));
+      return 'net_unresolved';
+    }
     await tx.insert(paypalPostings).values([
       { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: receipt.transactionId,
         posting_kind: 'gross', source_id: receipt.transactionId, intent_id: scope.intentId, user_id: scope.userId,
@@ -93,4 +97,18 @@ export async function postProviderAdjustment(scope: Scope, originalId: string, o
     return 'posted';
   });
   return { status: outcome };
+}
+
+/**
+ * A provider transaction reported only in a non-DKK currency. It is kept as
+ * a record with its original amounts, never posted, and does not count as DKK
+ * support until an operator confirms settlement (`currency_unconfirmed`).
+ */
+export async function recordForeignReceipt(scope: Scope, kind: 'capture' | 'sale', transactionId: string, foreign: NonNullable<Foreign>,
+  effectiveAt: Date) {
+  const currency = foreign.gross_amount?.currency_code ?? Object.values(foreign)[0]?.currency_code ?? 'XXX';
+  await db.insert(paypalTransactions).values({ environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: transactionId,
+    provider_kind: kind, intent_id: scope.intentId, user_id: scope.userId, status: 'currency_unconfirmed', currency: currency.slice(0, 7),
+    foreign_amounts: foreign, effective_at: effectiveAt }).onConflictDoNothing();
+  return { status: 'currency_unconfirmed' as const };
 }

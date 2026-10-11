@@ -145,6 +145,9 @@ export const paypalTransactions = pgTable('paypal_transactions', {
   observed_at: timestamp('observed_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   // Last provider status seen for adjustment placeholders (e.g. PARTIALLY_REFUNDED).
   provider_status: text('provider_status'),
+  // Provider-reported non-DKK amounts (currency + decimal string), kept as
+  // evidence and never summed into DKK until settlement is confirmed.
+  foreign_amounts: jsonb('foreign_amounts'),
   // Enrichment retry state for net_unresolved rows.
   retry_count: integer('retry_count').notNull().default(0),
   next_retry_at: timestamp('next_retry_at', { withTimezone: true, mode: 'date' }),

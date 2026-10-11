@@ -80,6 +80,7 @@ ALTER TABLE "paypal_subscriptions" ADD COLUMN "reconcile_failures" integer DEFAU
 ALTER TABLE "paypal_subscriptions" ADD COLUMN "reconcile_next_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "paypal_subscriptions" ADD COLUMN "reconcile_error_code" text;--> statement-breakpoint
 ALTER TABLE "paypal_transactions" ADD COLUMN "provider_status" text;--> statement-breakpoint
+ALTER TABLE "paypal_transactions" ADD COLUMN "foreign_amounts" jsonb;--> statement-breakpoint
 ALTER TABLE "paypal_transactions" ADD COLUMN "retry_count" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
 ALTER TABLE "paypal_transactions" ADD COLUMN "next_retry_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "paypal_transactions" ADD COLUMN "last_error_code" text;--> statement-breakpoint

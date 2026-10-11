@@ -60,3 +60,20 @@ test('reporting adjustment requires a linked, successful negative DKK transactio
     transaction_amount: { currency_code: 'USD', value: '-20.00' } } }, 'RF123', 'refund'), /ADJUSTMENT_AMOUNT_UNKNOWN/);
   assert.equal(normalizeReportedAdjustment({ transaction_info: { ...detail.transaction_info, fee_amount: undefined } }, 'RF123', 'refund').netDebitOre, null);
 });
+
+test('foreign-currency settlement is preserved as evidence and never becomes DKK net', async () => {
+  const { foreignAmounts } = await import('./paypalMoney.ts');
+  const settled = capture({ seller_receivable_breakdown: { gross_amount: { currency_code: 'DKK', value: '100.00' },
+    paypal_fee: { currency_code: 'DKK', value: '4.00' }, net_amount: { currency_code: 'DKK', value: '96.00' },
+    receivable_amount: { currency_code: 'EUR', value: '12.85' },
+    exchange_rate: { source_currency: 'DKK', target_currency: 'EUR', value: '0.1338' } } });
+  const normalized = normalizeCompletedCapture(settled, expected) as any;
+  assert.equal(normalized.feeOre, null, 'net in DKK is unknown until settlement is confirmed');
+  assert.deepEqual(normalized.foreign.receivable_amount, { currency_code: 'EUR', value: '12.85' });
+  assert.equal(normalized.foreign.exchange_rate.value, '0.1338');
+  const sale = normalizeSubscriptionTransaction({ id: 'SALEEUR', status: 'COMPLETED', time: '2026-10-08T12:00:00Z',
+    amount_with_breakdown: { gross_amount: { currency_code: 'EUR', value: '6.70' }, fee_amount: { currency_code: 'EUR', value: '0.40' } } }, { amountOre: 5000 }) as any;
+  assert.equal(sale.grossOre, null);
+  assert.equal(sale.foreign.gross_amount.currency_code, 'EUR');
+  assert.equal(foreignAmounts({ x: { currency_code: 'EUR', value: '=1+1' } }, ['x']), null, 'only validated decimal strings are kept');
+});

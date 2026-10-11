@@ -21,6 +21,23 @@ export function providerSignedOre(amount: any): number | null {
   const ore = sign * (Number(whole) * 100 + Number(fraction.padEnd(2, '0')));
   return Number.isSafeInteger(ore) ? ore : null;
 }
+// Non-DKK amounts are preserved verbatim (validated ISO code + decimal string)
+// so they remain auditable without ever being converted or summed into DKK.
+export function foreignAmounts(source: any, fields: string[]): Record<string, { currency_code: string; value: string }> | null {
+  const out: Record<string, { currency_code: string; value: string }> = {};
+  for (const field of fields) {
+    const amount = source?.[field];
+    if (!amount || typeof amount !== 'object') continue;
+    if (typeof amount.currency_code === 'string' && /^[A-Z]{3}$/.test(amount.currency_code) && amount.currency_code !== 'DKK' &&
+        typeof amount.value === 'string' && /^-?\d{1,15}(?:\.\d{1,8})?$/.test(amount.value)) out[field] = { currency_code: amount.currency_code, value: amount.value };
+  }
+  if (source?.exchange_rate && typeof source.exchange_rate === 'object') {
+    const rate = source.exchange_rate;
+    if (typeof rate.value === 'string' && /^\d{1,10}(?:\.\d{1,12})?$/.test(rate.value) && /^[A-Z]{3}$/.test(rate.source_currency || '') &&
+        /^[A-Z]{3}$/.test(rate.target_currency || '')) out.exchange_rate = { currency_code: `${rate.source_currency}/${rate.target_currency}`, value: rate.value };
+  }
+  return Object.keys(out).length ? out : null;
+}
 export function normalizeReportedAdjustment(detail: any, expectedId: string, kind: 'refund' | 'reversal') {
   const info = detail?.transaction_info;
   const codes = kind === 'refund' ? ['T1107'] : ['T1100', 'T1118'];
@@ -54,6 +71,9 @@ export function normalizeCompletedCapture(capture: any, expected: { orderId: str
   if (fee !== null && net !== null && gross !== null && gross - fee !== net) throw new PayPalError('BREAKDOWN_MISMATCH', 409);
   const effectiveAt = new Date(capture.create_time || capture.update_time);
   if (!Number.isFinite(effectiveAt.getTime())) throw new PayPalError('MALFORMED');
+  const foreign = foreignAmounts(breakdown, ['gross_amount', 'paypal_fee', 'net_amount', 'receivable_amount']);
+  // Settled into another currency: the DKK net is unknown until confirmed.
+  if (foreign) return { transactionId: capture.id, grossOre: expected.amountOre, feeOre: null, netOre: null, effectiveAt, foreign };
   return { transactionId: capture.id, grossOre: expected.amountOre, feeOre: fee, netOre: net, effectiveAt };
 }
 
@@ -62,6 +82,12 @@ export function normalizeSubscriptionTransaction(transaction: any, expected: { a
       !['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(transaction.status)) return null;
   const breakdown = transaction.amount_with_breakdown;
   const gross = providerOre(breakdown?.gross_amount);
+  const foreign = foreignAmounts(breakdown, ['gross_amount', 'fee_amount', 'net_amount']);
+  const effectiveTime = new Date(transaction.time);
+  if (foreign && gross !== null && gross !== expected.amountOre) throw new PayPalError('SALE_AMOUNT_MISMATCH', 409);
+  if (foreign && Number.isFinite(effectiveTime.getTime()))
+    // Recorded as evidence only: never a DKK receipt until settlement is confirmed.
+    return { transactionId: transaction.id, grossOre: gross, feeOre: null, netOre: null, effectiveAt: effectiveTime, status: transaction.status, foreign };
   const fee = providerOre(breakdown?.fee_amount);
   const net = providerOre(breakdown?.net_amount);
   if (gross !== expected.amountOre) throw new PayPalError('SALE_AMOUNT_MISMATCH', 409);
