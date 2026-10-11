@@ -69,6 +69,7 @@ before(async () => {
   app.use('/admin', (await import('./admin.ts')).default);
   app.use('/operations', (await import('./operations.ts')).default);
   app.use('/migrate', (await import('./migrate.ts')).default);
+  app.use('/ssh', (await import('./ssh.ts')).default);
   const vmRouter = (await import('./vms.ts')).default;
   app.use(vmRouter);
   ownerApp = express();
@@ -332,7 +333,7 @@ test('equivalent unambiguous bare target references support lease and schedule w
   assert.ok(await createLeaseForVm('pve2', 101));
   assert.equal((await request(app).post('/admin/leases/pve2/101/renew')).status, 200);
   assert.equal((await request(app).put('/pve2/101/schedule').send({ stopTime: '23:00', startTime: '07:00' })).status, 200);
-  await assert.rejects(createLeaseForVm('1~pve2', 101), { statusCode: 409 });
+  await assert.rejects(createLeaseForVm('1~pve1', 101), { statusCode: 409 });
   await createLeaseForVm('2~pve2', 101);
   await request(app).put('/2~pve2/101/schedule').send({ stopTime: '22:00', startTime: '07:00' });
   const policies = await readPolicies();
@@ -806,6 +807,145 @@ test('verified legacy binding survives a cleanup failure so retry uses an exact 
   assert.equal(retry.body.alreadyAbsent, true);
   assert.deepEqual(writes, [1]);
   assert.deepEqual(await testDb.db.select().from(vmAssignments), []);
+});
+
+test('SSH configuration writes reject deletion contention and cannot recreate a deleted bare alias', async (t) => {
+  await seedHost();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let absent = false;
+  mockUpstream(t, async (url, options) => {
+    if (options.method === 'DELETE') { entered.resolve(); await release.promise; absent = true; return { data: 'UPID:pve:delete' }; }
+    if (url.pathname.endsWith('/nodes')) return { data: [{ node: 'pve' }] };
+    if (url.pathname.endsWith('/status/current')) return { statusCode: absent ? 404 : 200, data: absent ? null : { status: 'stopped' } };
+    return { data: url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] };
+  });
+  const deleting = request(app).delete('/1~pve/101').then((response) => response);
+  await entered.promise;
+  const body = { host: '192.0.2.10', username: 'guest', hostFingerprint: 'SHA256:test' };
+  try {
+    assert.equal((await request(app).put('/ssh/config/pve/101').send(body)).status, 409);
+    assert.deepEqual(await testDb.db.select().from(vmSshConfigs), []);
+    assert.deepEqual(await testDb.db.select().from(vmSshUserConfigs), []);
+  } finally { release.resolve(); }
+  assert.equal((await deleting).status, 200);
+  assert.equal((await request(app).put('/ssh/config/pve/101').send(body)).status, 404);
+  assert.deepEqual(await testDb.db.select().from(vmSshConfigs), []);
+  assert.deepEqual(await testDb.db.select().from(vmSshUserConfigs), []);
+});
+
+test('SSH operator grants are preserved and revocation is rechecked using the held database', async (t) => {
+  await seedHost();
+  mockUpstream(t, () => ({ data: { status: 'stopped' } }));
+  const { withVmPolicyWrite } = await import('../utils/vmMigrationLock.ts');
+  await testDb.db.update(users).set({ can_operate_all_vms: true }).where(eq(users.id, 2));
+  try {
+    assert.equal(await withVmPolicyWrite('1~pve1', 101, async () => true, { userId: 2, op: 'vm.sshConfig.write' }), true);
+    await testDb.db.update(users).set({ can_operate_all_vms: false }).where(eq(users.id, 2));
+    await assert.rejects(withVmPolicyWrite('1~pve1', 101, async () => true, { userId: 2, op: 'vm.sshConfig.write' }), { statusCode: 403 });
+  } finally {
+    await testDb.db.update(users).set({ can_operate_all_vms: false }).where(eq(users.id, 2));
+  }
+});
+
+test('cleanup atomically rejects unexpected bare rows inserted by any current-location writer during deletion', async (t) => {
+  await seedHost();
+  const canonical = await seedPolicies('1~pve', 101, true);
+  await testDb.db.insert(vmAssignments).values({ user_id: 1, node: '1~pve', vmid: 101 });
+  let injected = false;
+  mockUpstream(t, async (url, options) => {
+    if (options.method === 'DELETE') {
+      await testDb.db.insert(vmAssignments).values({ user_id: 2, node: 'pve', vmid: 101 });
+      await testDb.db.insert(vmSshConfigs).values({ node: 'pve', vmid: 101, host: '192.0.2.10' });
+      await testDb.db.insert(vmSshUserConfigs).values({ user_id: 1, node: 'pve', vmid: 101, username: 'guest' });
+      await testDb.db.insert(provisionedVms).values({ user_id: 1, node: 'pve', vmid: 101, name: 'late' });
+      await seedPolicies('pve');
+      injected = true;
+      return { data: 'UPID:pve:delete' };
+    }
+    return { data: url.pathname.endsWith('/status/current') ? { status: 'stopped' }
+      : url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] };
+  });
+  const response = await request(app).delete('/1~pve/101');
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.equal(injected, true);
+  assert.equal((await testDb.db.select().from(vmAssignments)).length, 2);
+  assert.deepEqual((await testDb.db.select().from(vmLeases).where(eq(vmLeases.id, canonical.lease.id)))[0], canonical.lease);
+  assert.equal((await testDb.db.select().from(vmSshConfigs))[0].node, 'pve');
+  assert.equal((await testDb.db.select().from(provisionedVms))[0].node, 'pve');
+});
+
+test('historical bare backup tasks do not make a known adopted target ambiguous or get rebound on deletion', async (t) => {
+  await seedHost();
+  await seedHost(2);
+  await testDb.db.insert(vmMigrations).values({ vmid: 101, source_node: '1~pve', target_node: '2~pve', status: 'ok', mode: 'adopt', kept_source: true });
+  const [history] = await testDb.db.insert(backupTasks).values({ node: 'pve', vmid: 101, upid: 'UPID:pve:old', status: 'ok' }).returning();
+  let deleted = false;
+  let nodeInventory = 0;
+  mockUpstream(t, (url, options) => {
+    if (url.pathname.endsWith('/nodes')) { nodeInventory++; return { data: [{ node: 'pve' }] }; }
+    if (options.method === 'DELETE') { deleted = true; return { data: 'UPID:pve:delete' }; }
+    return { data: url.pathname.endsWith('/status/current') ? { status: 'stopped' }
+      : url.pathname.includes('/tasks/') ? { status: 'stopped', exitstatus: 'OK' } : [] };
+  });
+  const response = await request(app).delete('/2~pve/101');
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(deleted, true);
+  assert.equal(nodeInventory, 0);
+  assert.deepEqual(await testDb.db.select().from(backupTasks), []);
+  assert.equal(history.node, 'pve');
+});
+
+for (const releaseEarly of [true, false]) {
+  test(`automatic adopt finalization retries contention outside the pool and stays reviewable if exhausted (release=${releaseEarly})`, async (t) => {
+    const migration = await seedMigration('adopt');
+    const source = await seedPolicies('1~pve1', 101, true);
+    const blocker = await testDb.pool.connect();
+    await blocker.query('SELECT pg_advisory_lock_shared(206, 101)');
+    const execute = client.db.transaction.bind(client.db);
+    let attempts = 0;
+    let released = false;
+    t.mock.method(client.db, 'transaction', (callback) => execute(async (tx) => {
+      const run = tx.execute.bind(tx);
+      t.mock.method(tx, 'execute', async (query) => {
+        const result = await run(query);
+        attempts++;
+        if (releaseEarly && !released) {
+          released = true;
+          await blocker.query('SELECT pg_advisory_unlock_shared(206, 101)');
+        }
+        return result;
+      });
+      return callback(tx);
+    }));
+    try {
+      assert.equal(await finalizeMigration(migration.id, true, 'Physical move completed', { contentionAttempts: 3, contentionDelayMs: 10 }), releaseEarly);
+      const [row] = await testDb.db.select().from(vmMigrations);
+      assert.equal(row.status, releaseEarly ? 'ok' : 'needs_review');
+      assert.ok(attempts >= 2);
+      assert.equal(client.pool.waitingCount, 0);
+      if (releaseEarly) await assertRepointed(source, '2~pve2');
+      else {
+        assert.equal(row.upstream_status, 'stopped:OK');
+        assert.deepEqual((await readPolicies()).leases, [source.lease]);
+      }
+    } finally {
+      if (!released) await blocker.query('SELECT pg_advisory_unlock_shared(206, 101)');
+      blocker.release();
+    }
+  });
+}
+
+test('completed migration history does not block a reused VMID at an unrelated location but pending history remains global', async () => {
+  const migration = await seedMigration();
+  await finalizeMigrationSuccess(client.db, migration.id);
+  const replacement = await createLeaseForVm('3~newnode', 101);
+  assert.equal(replacement?.node, '3~newnode');
+  const sameNameOtherHost = await createLeaseForVm('3~pve2', 101);
+  assert.equal(sameNameOtherHost?.node, '3~pve2');
+  await assert.rejects(createLeaseForVm('1~pve1', 101), { statusCode: 409 });
+  await testDb.db.insert(vmMigrations).values({ vmid: 101, source_node: '4~other', target_node: '5~elsewhere', status: 'needs_review' });
+  await assert.rejects(createLeaseForVm('3~newnode', 101), { statusCode: 409 });
 });
 
 test('public-IP assignment node/host move atomically while backup task history retains its task host', async (t) => {

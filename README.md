@@ -53,6 +53,20 @@ This project pulls those into one interface so users can work inside guardrails 
 | API tokens | Personal `Authorization: Bearer` tokens for scripting (curl, cron, CI) with explicit least-privilege scopes, optional expiry, one-time secret display, live owner permissions, and full audit attribution |
 | Security | Session auth, TOTP plus WebAuthn/passkeys and one-time recovery codes, active-session revocation, origin/CSRF checks, login throttling, versioned encryption keys, upstream TLS enforcement, SSH target/host-key checks, and outcome-aware audit logging |
 
+## Power & Energy (private)
+
+An optional, private feature set for an owner who wants to see and manage what the lab's physical servers cost to run. Every part starts disabled and does nothing until an administrator configures it. No simulated data is ever shown as real.
+
+- **iLO telemetry.** Per physical node (Admin → PVE Hosts → Hardware), a read-only HPE Redfish connection to iLO 4/5 collects input watts, the Power Regulator mode and bounded health data. Watts are integrated into 15-minute buckets and Copenhagen-local daily totals. Credentials are encrypted, TLS is verified (a private CA is supported), and repeated credential rejections pause collection before the iLO locks the account.
+- **Power modes.** A weekly Copenhagen schedule (preset: High Mon–Fri 16:00–02:00 and Sat–Sun 12:00–22:00, Low otherwise), optional DKK/kWh price cap/boost rules with hysteresis, time-bounded manual overrides, per-node and global pause, and an external-change hold. Only the runtime Min/Dynamic/Max regulator setting is ever written. Every change is claimed, audited and verified by read-back, and live control needs a separate capability test, reauthentication and explicit enablement.
+- **Electricity data and cost.** An ElOverblik Customer API import of one selected meter (whole-household scope by default; never counted as server use), dated contracts and tariffs, cached Energi Data Service spot prices, optional extra-load estimates, monthly previews and forecasts, immutable finalized statements, and private bill records.
+- **Private support.** Optional PayPal one-off and monthly support from invited members, recorded only after verified provider readback. It never changes access or quotas. Sandbox and live are kept separate, and manual bank transfer is a confirmed fallback.
+- **Energy & Budget dashboard** (`/energy`). An aggregate, alias-only member view of power, cost and funding, with no hardware addresses, meter IDs or contributor identities.
+
+Everything here was verified with fixtures, fakes and throwaway databases only, never against a live iLO, ElOverblik account or PayPal account. Work through the live verification checklist before relying on it.
+
+**Docs:** [Power & Energy operator runbook](backend/docs/power-energy-runbook.md) (rollout order, defaults, rollback, live checklist) · [ElOverblik](backend/docs/eloverblik.md) · [Energy dashboard, contracts and refunds](backend/docs/energy-dashboard.md) · [PayPal support](backend/docs/paypal-support.md)
+
 ## UI Overview
 
 ### User side
@@ -425,7 +439,15 @@ Example values live in [`.env.example`](.env.example).
 | `TRUST_PROXY` | Number of proxy hops in front of the backend (default `2`: external reverse proxy + bundled nginx; set `1` if clients reach port 8181 directly) — see [Counting your proxies](#4-counting-your-proxies-trust_proxy) |
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
 | `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image and ISO downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
-| `PORTAL_BASE_URL` | Absolute portal URL used for "open in portal" links in Discord embeds (falls back to `ALLOWED_ORIGIN`; links omitted if neither is set) |
+| `PORTAL_BASE_URL` | Absolute portal URL used for "open in portal" links in Discord embeds and as the HTTPS origin for PayPal return URLs and webhook registration (falls back to `ALLOWED_ORIGIN`; Discord links omitted if neither is set) |
+| `PAYPAL_RECONCILE_INTERVAL_MINUTES` | PayPal reconciliation interval in minutes (default `360`, range 15–1440); a startup pass runs after boot |
+| `PAYPAL_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Per-client limit on the PayPal webhook ingress (default `120`); throttled events are redelivered by PayPal |
+| `PAYPAL_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE` | Overall limit on the PayPal webhook ingress across all clients (default `600`); protects the PayPal API quota used for checkout and reconciliation |
+| `HARDWARE_POLL_INTERVAL_MS` | iLO telemetry poll interval for nodes with power telemetry explicitly enabled (default `60000`; minimum `30000`) |
+| `HARDWARE_RAW_RETENTION_DAYS` | Days raw iLO watt samples are kept (default `30`; minimum `2`) |
+| `HARDWARE_INTERVAL_RETENTION_DAYS` | Days 15-minute server energy buckets are kept after their daily rollup (default `730`; minimum `400`, because buckets feed monthly cost statements) |
+| `HARDWARE_DAY_RETENTION_DAYS` | Days Copenhagen-local daily server energy totals are kept (default `1826`; never shorter than the bucket retention) |
+| `ENERGY_HISTORY_RETENTION_DAYS` | Days imported ElOverblik meter intervals and cached spot prices are kept (default `1830`) |
 | `NODE_HEALTH_POLL_MS` | Interval for the background Proxmox health monitor that emits node unreachable/recovered notifications (default `60000`; `0` disables it) |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
@@ -622,6 +644,7 @@ Proxy requirements:
 - preserve `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto`
 - set `ALLOWED_ORIGIN` to the exact external URL, for example `https://portal.example.com`
 - keep `COOKIE_SECURE` at its secure default (`true`) — the `Secure` cookie flag must stay on behind the TLS-terminating proxy
+- if PayPal support is enabled, expose only `POST /api/payments/paypal/webhook/<environment>` to PayPal over HTTPS and keep everything else private (see the [Power & Energy runbook](backend/docs/power-energy-runbook.md#9-paypal-private-support))
 
 ## Repo Layout
 

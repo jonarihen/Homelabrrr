@@ -1,0 +1,351 @@
+import https from 'node:https';
+import dns from 'node:dns/promises';
+import { isIP } from 'node:net';
+import { isProhibitedManagementAddress } from '../utils/urlGuard.ts';
+
+export type HardwareMode = 'low' | 'dynamic' | 'high' | 'os_control' | 'unknown';
+export type OptionalCapability = 'supported' | 'unsupported' | 'unavailable';
+export type HardwareHealth = {
+  temperatures: { name: string; celsius: number | null; health: string | null }[];
+  fans: { name: string; value: number | null; unit: 'percent' | 'rpm' | null; health: string | null }[];
+  powerSupplies: { name: string; health: string | null; state: string | null }[];
+  powerRedundancy: { health: string | null; state: string | null } | null;
+  limited: boolean;
+};
+export type IloConfig = { host: string; port: number; username: string; password: string; verifyTls: boolean; caCertificate?: string | null };
+export type IloTransport = (path: string) => Promise<Record<string, any>>;
+// `etag` is the ComputerSystem's @odata.etag from the pre-write read, sent as
+// If-Match when the iLO publishes one; a 412 means the resource changed.
+export type RuntimePatchTransport = (path: string, oem: 'Hp' | 'Hpe', value: 'Min' | 'Dynamic' | 'Max', etag?: string | null) => Promise<void>;
+// 'on' only when the host is powered and finished POST. Anything else is a
+// safe refusal for writes; the controller never powers a host on.
+export type HostPowerState = 'on' | 'off' | 'booting' | 'unknown';
+export type IloNetworkDeps = { validateTarget?: typeof validateManagementTarget; request?: typeof https.request; requestDeadlineMs?: number };
+
+// The socket `timeout` only fires on idle sockets, so a device that drips one
+// byte every few seconds could hold a request (and the collector lease) open
+// indefinitely. Every request also has a wall-clock deadline, and one
+// discovery has an overall deadline well below the 120 s collector lease.
+export const ILO_REQUEST_DEADLINE_MS = 15_000;
+export const ILO_DISCOVERY_DEADLINE_MS = 60_000;
+export type HardwareDiscovery = {
+  identity: { uuid: string | null; serial: string | null };
+  model: string | null;
+  generation: 'ilo4' | 'ilo5' | 'unknown';
+  firmware: string | null;
+  mode: { value: HardwareMode; origin: string | null };
+  powerState?: HostPowerState;
+  etag?: string | null;
+  capabilities: { monitoring: 'supported' | 'unsupported'; runtimeMode: 'supported' | 'unsupported'; writePrivilege: 'unverified';
+    temperatures?: OptionalCapability; fans?: OptionalCapability; powerSupplies?: OptionalCapability; powerRedundancy?: OptionalCapability };
+  sample: { watts: number | null; origin: string | null; unit: 'W'; observedAt: string; health?: HardwareHealth };
+};
+
+function safeName(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64) || fallback : fallback;
+}
+function safeStatus(value: unknown): string | null {
+  return typeof value === 'string' && /^(OK|Warning|Critical|Unknown|Enabled|Disabled|Absent|Offline|Degraded|Failed|Redundant|NonRedundant)$/i.test(value) ? value : null;
+}
+function boundedNumber(value: unknown, min: number, max: number): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : null;
+}
+
+// Redfish iLO 4 and 5 use different names for several thermal properties.
+// This projection deliberately excludes raw vendor payloads and identifiers.
+export function normalizeHardwareHealth(thermal: any, power: any): HardwareHealth {
+  const temperatures = Array.isArray(thermal?.Temperatures) ? thermal.Temperatures : [];
+  const fans = Array.isArray(thermal?.Fans) ? thermal.Fans : [];
+  const supplies = Array.isArray(power?.PowerSupplies) ? power.PowerSupplies : [];
+  const redundancies = Array.isArray(power?.Redundancy) ? power.Redundancy : [];
+  return {
+    temperatures: temperatures.slice(0, 64).map((item: any, index: number) => ({
+      name: safeName(item?.Name ?? item?.SensorName, `Temperature ${index + 1}`),
+      celsius: item?.ReadingCelsius != null ? boundedNumber(item.ReadingCelsius, -40, 125)
+        : item?.Units === 'Celsius' ? boundedNumber(item.CurrentReading, -40, 125) : null,
+      health: safeStatus(item?.Status?.Health),
+    })),
+    fans: fans.slice(0, 32).map((item: any, index: number) => {
+      const unit = item?.ReadingUnits === 'Percent' || item?.Units === 'Percent' ? 'percent' as const
+        : item?.ReadingUnits === 'RPM' || item?.Units === 'RPM' || item?.ReadingRPM != null ? 'rpm' as const : null;
+      const reading = item?.Reading ?? item?.CurrentReading ?? item?.ReadingRPM;
+      return { name: safeName(item?.Name ?? item?.FanName, `Fan ${index + 1}`),
+        value: unit ? boundedNumber(reading, 0, unit === 'percent' ? 100 : 50_000) : null,
+        unit, health: safeStatus(item?.Status?.Health) };
+    }),
+    powerSupplies: supplies.slice(0, 16).map((item: any, index: number) => ({
+      name: safeName(item?.Name ?? item?.MemberId, `Power supply ${index + 1}`),
+      health: safeStatus(item?.Status?.Health ?? item?.Oem?.Hp?.PowerSupplyStatus?.State ?? item?.Oem?.Hpe?.PowerSupplyStatus?.State),
+      state: safeStatus(item?.Status?.State),
+    })),
+    powerRedundancy: redundancies[0] ? { health: safeStatus(redundancies[0]?.Status?.Health), state: safeStatus(redundancies[0]?.Status?.State) } : null,
+    limited: temperatures.length > 64 || fans.length > 32 || supplies.length > 16 || redundancies.length > 1,
+  };
+}
+
+// iLO firmware may vary UUID letter case or pad a serial with whitespace.
+// Persist one comparison form so identity checks survive those variations.
+export function physicalSystemIdentity(identity: { uuid: string | null; serial: string | null }): string | null {
+  const uuid = identity.uuid?.trim();
+  if (uuid) return uuid.toLowerCase();
+  const serial = identity.serial?.trim();
+  return serial ? `serial:${serial.toLowerCase()}` : null;
+}
+
+export class IloError extends Error {
+  code: 'invalid_target' | 'unreachable' | 'authentication_failed' | 'insufficient_privilege' | 'tls_failed' | 'timeout' | 'malformed_response' | 'oversized_response' | 'missing_endpoint'
+    | 'host_not_running' | 'conflict' | 'policy_changed';
+  constructor(code: IloError['code'], message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+export async function validateManagementTarget(host: string, resolver = dns.lookup): Promise<string> {
+  const clean = String(host || '').trim();
+  if (!clean || clean.length > 253 || (isIP(clean) !== 6 && /[\/:?#@\s]/.test(clean)) || clean.toLowerCase() === 'localhost') throw new IloError('invalid_target', 'Invalid management host');
+  let addresses: string[];
+  try { addresses = isIP(clean) ? [clean] : (await resolver(clean, { all: true, verbatim: true }) as { address: string }[]).map((x) => x.address); }
+  catch { throw new IloError('unreachable', 'Management host could not be resolved'); }
+  if (!addresses.length || addresses.some(isProhibitedManagementAddress)) throw new IloError('invalid_target', 'Management target resolves to a prohibited address');
+  return addresses[0];
+}
+
+export async function createIloTransport(config: IloConfig, deps: IloNetworkDeps = {}): Promise<IloTransport> {
+  const address = await (deps.validateTarget || validateManagementTarget)(config.host);
+  const request = deps.request || https.request;
+  if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
+  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true');
+  const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
+  const deadlineMs = deps.requestDeadlineMs ?? ILO_REQUEST_DEADLINE_MS;
+  return (path) => new Promise((resolve, reject) => {
+    if (!/^\/(?:redfish|rest)\/v1(?:\/|$)/.test(path) || path.includes('..') || path.includes('?') || path.includes('#')) return reject(new IloError('invalid_target', 'Invalid iLO resource path'));
+    let settled = false;
+    const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(deadline); fn(); };
+    const fail = (err: IloError) => finish(() => reject(err));
+    const req = request({ hostname: config.host, port: config.port, path, method: 'GET', timeout: 5000, rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined, lookup: (_host, _options, callback) => callback(null, address, isIP(address)), headers: { Authorization: auth, Accept: 'application/json', 'OData-Version': '4.0' } }, (res) => {
+      // 401 is a rejected credential (counts towards iLO lockout); 403 is an
+      // authenticated account that lacks read privilege for this resource.
+      if (res.statusCode === 401) { res.resume(); return fail(new IloError('authentication_failed', 'iLO authentication failed')); }
+      if (res.statusCode === 403) { res.resume(); return fail(new IloError('insufficient_privilege', 'iLO account lacks read privilege')); }
+      if ((res.statusCode || 0) >= 300 && (res.statusCode || 0) < 400) { res.resume(); return fail(new IloError('invalid_target', 'iLO redirect refused')); }
+      if (res.statusCode === 404) { res.resume(); return fail(new IloError('missing_endpoint', 'iLO resource unavailable')); }
+      if (res.statusCode !== 200) { res.resume(); return fail(new IloError('unreachable', 'iLO request failed')); }
+      const chunks: Buffer[] = []; let size = 0;
+      res.on('data', (chunk: Buffer) => { if (settled) return; size += chunk.length; if (size > 1024 * 1024) { req.destroy(new IloError('oversized_response', 'iLO response exceeded limit')); return; } chunks.push(chunk); });
+      res.on('end', () => { try { const value = JSON.parse(Buffer.concat(chunks).toString()); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(); finish(() => resolve(value)); } catch { fail(new IloError('malformed_response', 'Invalid iLO JSON response')); } });
+    });
+    const deadline = setTimeout(() => { const err = new IloError('timeout', 'iLO request exceeded its deadline'); req.destroy(err); fail(err); }, deadlineMs);
+    deadline.unref?.();
+    req.on('timeout', () => req.destroy(new IloError('timeout', 'iLO request timed out')));
+    req.on('error', (err: Error & { code?: string }) => fail(err instanceof IloError ? err : new IloError(err.code?.startsWith('ERR_TLS') || err.code?.startsWith('CERT') ? 'tls_failed' : 'unreachable', 'iLO connection failed')));
+    req.end();
+  });
+}
+
+// Bounds the whole discovery, not just each request: a series of individually
+// slow (but in-deadline) reads must still release the collector lease in time.
+export function withDiscoveryDeadline(transport: IloTransport, deadlineMs = ILO_DISCOVERY_DEADLINE_MS, clock = () => Date.now()): IloTransport {
+  const expiresAt = clock() + deadlineMs;
+  return (path) => {
+    const remaining = expiresAt - clock();
+    if (remaining <= 0) return Promise.reject(new IloError('timeout', 'iLO discovery exceeded its deadline'));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new IloError('timeout', 'iLO discovery exceeded its deadline')), remaining);
+      timer.unref?.();
+    });
+    return Promise.race([transport(path), expired]).finally(() => clearTimeout(timer));
+  };
+}
+
+function link(value: any): string | null {
+  const path = value?.['@odata.id'] ?? value?.href;
+  return typeof path === 'string' && /^\/(?:redfish|rest)\/v1\//.test(path) && !path.includes('..') && !path.includes('?') ? path : null;
+}
+async function firstMember(transport: IloTransport, collection: any): Promise<{ path: string; value: any } | null> {
+  const collectionPath = link(collection);
+  if (!collectionPath) return null;
+  const data = await transport(collectionPath);
+  const path = link(data.Members?.[0]);
+  return path ? { path, value: await transport(path) } : null;
+}
+export function normalizeMode(value: unknown): HardwareMode {
+  if (value === 'Min') return 'low';
+  if (value === 'Dynamic') return 'dynamic';
+  if (value === 'Max') return 'high';
+  if (value === 'OSControl') return 'os_control';
+  return 'unknown';
+}
+export function normalizeHostPowerState(system: any, oem: 'Hp' | 'Hpe' | null): HostPowerState {
+  const power = system?.PowerState;
+  const post = oem ? system?.Oem?.[oem]?.PostState : undefined;
+  if (power === 'Off' || power === 'PoweringOff' || post === 'PowerOff') return 'off';
+  if (power === 'PoweringOn' || post === 'InPost' || post === 'InPostDiscoveryComplete' || post === 'Reset') return 'booting';
+  if (power === 'On' && (post === undefined || post === 'FinishedPost')) return 'on';
+  return 'unknown';
+}
+export async function discoverHardware(config: IloConfig, injectedTransport?: IloTransport, now = () => new Date(), deadlineMs = ILO_DISCOVERY_DEADLINE_MS): Promise<HardwareDiscovery> {
+  const get = withDiscoveryDeadline(injectedTransport || await createIloTransport(config), deadlineMs);
+  let root: any;
+  try { root = await get('/redfish/v1/'); }
+  catch (err) { if (!(err instanceof IloError) || err.code !== 'missing_endpoint') throw err; root = await get('/rest/v1/'); }
+  const system = await firstMember(get, root.Systems);
+  if (!system) throw new IloError('missing_endpoint', 'No iLO computer system found');
+  const chassis = await firstMember(get, root.Chassis);
+  const manager = await firstMember(get, root.Managers);
+  const oem = system.value.Oem?.Hpe ? 'Hpe' : system.value.Oem?.Hp ? 'Hp' : null;
+  const rawMode = oem ? system.value.Oem[oem]?.PowerRegulatorMode : undefined;
+  const powerPath = link(chassis?.value?.Power);
+  const thermalPath = link(chassis?.value?.Thermal);
+  let watts: number | null = null; let origin: string | null = null;
+  let power: Record<string, any> | null = null;
+  if (powerPath) {
+    power = await get(powerPath);
+    const direct = power.PowerConsumedWatts;
+    const control = Array.isArray(power.PowerControl) ? power.PowerControl.find((x: any) => typeof x?.PowerConsumedWatts === 'number') : null;
+    const measured = typeof direct === 'number' ? direct : control?.PowerConsumedWatts;
+    if (typeof measured === 'number' && Number.isFinite(measured) && measured >= 0) { watts = measured; origin = `${powerPath}${typeof direct === 'number' ? '#PowerConsumedWatts' : '#PowerControl.PowerConsumedWatts'}`; }
+  }
+  let thermal: Record<string, any> | null = null;
+  let thermalStatus: OptionalCapability = 'unsupported';
+  if (thermalPath) {
+    try { thermal = await get(thermalPath); thermalStatus = 'supported'; }
+    catch (err) { thermalStatus = err instanceof IloError && err.code === 'missing_endpoint' ? 'unsupported' : 'unavailable'; }
+  }
+  const health = normalizeHardwareHealth(thermal, power);
+  const managerType = `${manager?.value?.Model || ''} ${manager?.value?.Name || ''}`;
+  const generation = /iLO\s*5/i.test(managerType) || oem === 'Hpe' ? 'ilo5' : /iLO\s*4/i.test(managerType) || oem === 'Hp' ? 'ilo4' : 'unknown';
+  return {
+    identity: { uuid: typeof system.value.UUID === 'string' ? system.value.UUID : null, serial: typeof system.value.SerialNumber === 'string' ? system.value.SerialNumber : null },
+    model: typeof system.value.Model === 'string' ? system.value.Model : null,
+    generation,
+    firmware: manager?.value?.FirmwareVersion || null,
+    mode: { value: normalizeMode(rawMode), origin: oem ? `${system.path}#Oem.${oem}.PowerRegulatorMode` : null },
+    powerState: normalizeHostPowerState(system.value, oem),
+    // Only a strong entity tag is usable with If-Match (RFC 9110 strong
+    // comparison); weak W/ tags are ignored rather than guaranteed to fail.
+    etag: typeof system.value['@odata.etag'] === 'string' && /^"[\x21\x23-\x7e]{1,200}"$/.test(system.value['@odata.etag']) ? system.value['@odata.etag'] : null,
+    capabilities: { monitoring: watts === null ? 'unsupported' : 'supported', runtimeMode: oem ? 'supported' : 'unsupported', writePrivilege: 'unverified',
+      temperatures: thermalStatus === 'supported' && !Array.isArray(thermal?.Temperatures) ? 'unsupported' : thermalStatus,
+      fans: thermalStatus === 'supported' && !Array.isArray(thermal?.Fans) ? 'unsupported' : thermalStatus,
+      powerSupplies: Array.isArray(power?.PowerSupplies) ? 'supported' : 'unsupported',
+      powerRedundancy: Array.isArray(power?.Redundancy) ? 'supported' : 'unsupported' },
+    sample: { watts, origin, unit: 'W', observedAt: now().toISOString(), health },
+  };
+}
+export async function readCurrentMode(config: IloConfig, transport?: IloTransport): Promise<HardwareMode> {
+  return (await discoverHardware(config, transport)).mode.value;
+}
+
+export type RuntimeState = { mode: HardwareMode; powerState: HostPowerState };
+// Read-only: mode plus host power state, used before any write decision.
+export async function readRuntimeState(config: IloConfig, transport?: IloTransport): Promise<RuntimeState> {
+  const discovery = await discoverHardware(config, transport);
+  return { mode: discovery.mode.value, powerState: discovery.powerState ?? 'unknown' };
+}
+
+const RUNTIME_VALUES = { low: 'Min', dynamic: 'Dynamic', high: 'Max' } as const;
+
+// This is the only hardware write primitive for the power feature. The path
+// must come from discovery's ComputerSystem link, and the JSON body contains
+// exactly one PowerRegulatorMode property. No reset, BIOS or watt-cap API is
+// available through this interface.
+export async function createRuntimePatchTransport(config: IloConfig, deps: IloNetworkDeps = {}): Promise<RuntimePatchTransport> {
+  const address = await (deps.validateTarget || validateManagementTarget)(config.host);
+  const request = deps.request || https.request;
+  if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
+  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true');
+  const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
+  return (path, oem, value, etag) => new Promise((resolve, reject) => {
+    if (!/^\/(?:redfish|rest)\/v1\/Systems\/[^/?#]+\/?$/.test(path) || path.includes('..')
+      || !['Hp', 'Hpe'].includes(oem) || !['Min', 'Dynamic', 'Max'].includes(value)
+      || (etag != null && !/^"[\x21\x23-\x7e]{1,200}"$/.test(etag))) {
+      return reject(new IloError('invalid_target', 'Invalid runtime mode target'));
+    }
+    const body = JSON.stringify({ Oem: { [oem]: { PowerRegulatorMode: value } } });
+    const req = request({
+      hostname: config.host, port: config.port, path, method: 'PATCH', timeout: 5000,
+      rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined,
+      lookup: (_host, _options, callback) => callback(null, address, isIP(address)),
+      headers: { Authorization: auth, Accept: 'application/json', 'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body), 'OData-Version': '4.0', ...(etag ? { 'If-Match': etag } : {}) },
+    }, (res) => {
+      let size = 0;
+      res.on('data', (chunk: Buffer) => { size += chunk.length; if (size > 64 * 1024) req.destroy(new IloError('oversized_response', 'iLO response exceeded limit')); });
+      res.on('end', () => {
+        clearTimeout(deadline);
+        if ((res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300) resolve();
+        else if (res.statusCode === 401) reject(new IloError('authentication_failed', 'iLO authentication failed'));
+        else if (res.statusCode === 403) reject(new IloError('insufficient_privilege', 'iLO write permission denied'));
+        else if (res.statusCode === 412) reject(new IloError('conflict', 'iLO system changed before the mode request (ETag mismatch)'));
+        else if ((res.statusCode || 0) >= 300 && (res.statusCode || 0) < 400) reject(new IloError('invalid_target', 'iLO redirect refused'));
+        else reject(new IloError('unreachable', 'iLO runtime mode request failed'));
+      });
+    });
+    // A wall-clock deadline maps to `timeout`, which callers already treat as
+    // an uncertain outcome that needs a read-back before any retry.
+    const deadline = setTimeout(() => req.destroy(new IloError('timeout', 'iLO mode request exceeded its deadline')), deps.requestDeadlineMs ?? ILO_REQUEST_DEADLINE_MS);
+    deadline.unref?.();
+    req.on('close', () => clearTimeout(deadline));
+    req.on('timeout', () => req.destroy(new IloError('timeout', 'iLO mode request timed out')));
+    req.on('error', (err: Error & { code?: string }) => reject(err instanceof IloError ? err : new IloError(err.code?.startsWith('ERR_TLS') || err.code?.startsWith('CERT') ? 'tls_failed' : 'unreachable', 'iLO mode connection failed')));
+    req.end(body);
+  });
+}
+
+export type RuntimeWriteOptions = {
+  // Bounded readback: HTTP success is not verified success.
+  readbackAttempts?: number;
+  readbackDelayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); });
+
+export async function setRuntimeMode(
+  config: IloConfig,
+  target: 'low' | 'dynamic' | 'high',
+  readTransport?: IloTransport,
+  patchTransport?: RuntimePatchTransport,
+  preDispatchGuard?: () => Promise<boolean>,
+  options: RuntimeWriteOptions = {},
+): Promise<{ prior: HardwareMode; target: typeof target; outcome: 'already_set' | 'verified' | 'unknown' }> {
+  if (!Object.hasOwn(RUNTIME_VALUES, target)) throw new IloError('invalid_target', 'Unsupported runtime power mode');
+  const before = await discoverHardware(config, readTransport);
+  if (before.mode.value === 'os_control' || before.mode.value === 'unknown'
+    || before.capabilities.runtimeMode !== 'supported' || !before.mode.origin) {
+    throw new IloError('missing_endpoint', 'Runtime Power Regulator mode is unavailable');
+  }
+  // Never act on a host that is off, booting or in an unknown power state.
+  if ((before.powerState ?? 'unknown') !== 'on') throw new IloError('host_not_running', 'Host is not powered on and finished booting');
+  if (before.mode.value === target) return { prior: before.mode.value, target, outcome: 'already_set' };
+  const [path, property] = before.mode.origin.split('#');
+  const oem = property === 'Oem.Hp.PowerRegulatorMode' ? 'Hp'
+    : property === 'Oem.Hpe.PowerRegulatorMode' ? 'Hpe' : null;
+  if (!oem || !/^\/(?:redfish|rest)\/v1\/Systems\/[^/?#]+\/?$/.test(path)) {
+    throw new IloError('missing_endpoint', 'Runtime Power Regulator target was not discovered');
+  }
+  if (preDispatchGuard && !await preDispatchGuard()) {
+    throw new IloError('policy_changed', 'Power policy changed before dispatch');
+  }
+  const patch = patchTransport ?? await createRuntimePatchTransport(config);
+  let timedOut = false;
+  try { await patch(path, oem, RUNTIME_VALUES[target], before.etag ?? null); }
+  catch (err) {
+    // A transport timeout may mean the device applied the PATCH. It is never
+    // retried here; a bounded read decides between verified and unknown.
+    if (!(err instanceof IloError && err.code === 'timeout')) throw err;
+    timedOut = true;
+  }
+  const attempts = Math.max(1, Math.min(options.readbackAttempts ?? 3, 6));
+  const delay = Math.max(0, Math.min(options.readbackDelayMs ?? 2000, 10_000));
+  const sleep = options.sleep ?? defaultSleep;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0 || timedOut) await sleep(delay);
+    try {
+      if (await readCurrentMode(config, readTransport) === target) return { prior: before.mode.value, target, outcome: 'verified' };
+    } catch { /* readback failure keeps the outcome unknown */ }
+  }
+  return { prior: before.mode.value, target, outcome: 'unknown' };
+}
