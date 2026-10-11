@@ -156,8 +156,14 @@ test('authentication and TLS failures expose categories without leaking credenti
     assert.ok(saved.last_test_at instanceof Date);
     assert.equal(saved.config_version, row.config_version, 'a failed test is not a configuration change');
   }
+  discovery = async () => { throw new IloError('unreachable', 'iLO connection failed', 'connection refused — nothing is listening on that port (ECONNREFUSED)'); };
+  const refused = await request(app).post(`/${row.id}/test`).set('x-test-role', 'admin');
+  assert.equal(refused.status, 502);
+  assert.equal(refused.body.code, 'unreachable');
+  assert.match(refused.body.detail, /ECONNREFUSED/, 'the operator sees why the iLO could not be reached');
   const audits = await fixture.db.select().from(auditLog).where(eq(auditLog.target, String(row.id)));
   assert.equal(audits.some((entry) => entry.outcome === 'failure' && entry.detail.includes('status=tls_failed')), true);
+  assert.equal(audits.some((entry) => entry.detail.includes('ECONNREFUSED')), true);
   assert.equal(audits.some((entry) => entry.detail.includes('fixture-secret')), false);
 });
 

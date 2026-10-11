@@ -37,7 +37,7 @@ test('read transport pins the validated address and accepts only bounded JSON ob
   const { options } = fake.calls[0];
   assert.equal(options.method, 'GET');
   assert.equal(options.rejectUnauthorized, true);
-  assert.equal(options.timeout, 5000);
+  assert.equal(options.timeout, 10_000);
   assert.equal(options.path, '/redfish/v1/Chassis/A/Power');
   await new Promise<void>((resolve, reject) => options.lookup(config.host, {}, (err: Error | null, address: string) => {
     if (err) reject(err); else { assert.equal(address, config.host); resolve(); }
@@ -51,7 +51,8 @@ test('read transport pins the validated address and accepts only bounded JSON ob
 for (const [scenario, code] of [
   [{ status: 302 }, 'invalid_target'], [{ status: 401 }, 'authentication_failed'], [{ status: 403 }, 'insufficient_privilege'],
   [{ status: 404 }, 'missing_endpoint'], [{ status: 503 }, 'unreachable'], [{ timeout: true }, 'timeout'],
-  [{ error: 'ERR_TLS_CERT_ALTNAME_INVALID' }, 'tls_failed'], [{ body: 'not-json' }, 'malformed_response'],
+  [{ error: 'ERR_TLS_CERT_ALTNAME_INVALID' }, 'tls_failed'], [{ error: 'ERR_SSL_DH_KEY_TOO_SMALL' }, 'tls_failed'], [{ error: 'EPROTO' }, 'tls_failed'],
+  [{ error: 'ECONNREFUSED' }, 'unreachable'], [{ body: 'not-json' }, 'malformed_response'],
   [{ body: '[]' }, 'malformed_response'], [{ body: 'x'.repeat(1024 * 1024 + 1) }, 'oversized_response'],
 ] as const) {
   test(`read transport reports ${code} without leaking credentials`, async () => {
@@ -61,10 +62,24 @@ for (const [scenario, code] of [
       assert.ok(err instanceof IloError);
       assert.equal(err.code, code);
       assert.equal(err.message.includes(config.password), false);
+      assert.ok(err.detail, 'every failure carries an operator-facing detail');
+      assert.equal(err.detail.includes(config.password), false);
       return true;
     });
   });
 }
+
+test('connection failure details name the cause, the status and the resource', async () => {
+  const detailFor = async (scenario: Scenario) => {
+    const read = await createIloTransport(config, { request: fakeNetwork(scenario).request });
+    return read('/redfish/v1/Systems/1').then(() => assert.fail('expected failure'), (err: IloError) => err.detail);
+  };
+  assert.match(await detailFor({ error: 'ECONNREFUSED' }) || '', /connection refused.*\(ECONNREFUSED\)/);
+  assert.match(await detailFor({ error: 'EHOSTUNREACH' }) || '', /no route to host/);
+  assert.match(await detailFor({ error: 'ERR_SSL_UNSAFE_LEGACY_RENEGOTIATION_DISABLED' }) || '', /TLS handshake failed \(ERR_SSL_UNSAFE_LEGACY_RENEGOTIATION_DISABLED\)/);
+  assert.equal(await detailFor({ status: 500 }), 'HTTP 500 on /redfish/v1/Systems/1');
+  assert.match(await detailFor({ timeout: true }) || '', /no answer from 192\.168\.40\.10:443 for 10 s/);
+});
 
 test('runtime PATCH transport permits only discovered System paths and a single mode property', async () => {
   const fake = fakeNetwork({ status: 204 });
@@ -94,6 +109,7 @@ test('runtime PATCH timeout and redirect are uncertain/fail closed and never inc
       assert.ok(err instanceof IloError);
       assert.equal(err.code, code);
       assert.equal(err.message.includes(config.password), false);
+      assert.equal(err.detail?.includes(config.password) ?? false, false);
       return true;
     });
   }

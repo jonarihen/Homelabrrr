@@ -221,10 +221,10 @@ export default function PVEHostsPage() {
                           Offline
                         </span>
                       )}
-                      <button onClick={() => openEdit(h)} className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-800 transition-colors">
+                      <button onClick={() => openEdit(h)} aria-label={`Edit host ${h.name}`} title="Edit host" className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-800 transition-colors">
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
                       </button>
-                      <button onClick={() => remove(h.id)} className="text-gray-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/10 transition-colors">
+                      <button onClick={() => remove(h.id)} aria-label={`Delete host ${h.name}`} title="Delete host" className="text-gray-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/10 transition-colors">
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
                       </button>
                     </div>
@@ -305,7 +305,7 @@ export default function PVEHostsPage() {
                                   )}
                                 </div>
                               </div>
-                              <HardwareConnection nodeRef={n.nodeRef || `${h.id}~${n.node}`} rebindTargets={hardwareNodeRefs} />
+                              <HardwareConnection nodeRef={n.nodeRef || `${h.id}~${n.node}`} />
                               </div>
                             );
                           })}
@@ -331,7 +331,8 @@ export default function PVEHostsPage() {
       {/* Add/Edit form modal */}
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}>
-          <form onSubmit={save} className="w-full max-w-lg bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl">
+          <div role="dialog" aria-modal="true" aria-label={editId ? 'Edit Host' : 'Add PVE Host'} className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl">
+          <form onSubmit={save}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
               <h2 className="text-white font-semibold">{editId ? 'Edit Host' : 'Add PVE Host'}</h2>
               <button type="button" onClick={() => setShowForm(false)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors">
@@ -475,6 +476,9 @@ export default function PVEHostsPage() {
               </div>
             </div>
           </form>
+          {/* Outside the host <form>: each iLO has its own form and save. */}
+          {editId && <HostHardwareSettings hostId={editId} nodes={statuses[editId]?.nodes || []} rebindTargets={hardwareNodeRefs} />}
+          </div>
         </div>
       )}
 
@@ -523,6 +527,30 @@ export default function PVEHostsPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// iLO settings per physical node of this host, shown in the Edit Host dialog.
+function HostHardwareSettings({ hostId, nodes, rebindTargets }) {
+  return (
+    <div className="px-5 pb-5 pt-4 border-t border-gray-700 space-y-4">
+      <div>
+        <p className="text-sm text-white">Hardware / iLO</p>
+        <p className="text-xs text-gray-500 mt-0.5">
+          One HPE iLO per physical node, saved separately from the host settings above. Collection and power control stay off until a read-only test succeeds.
+        </p>
+      </div>
+      {nodes.length === 0 && <p className="text-xs text-gray-500">Nodes appear here once the host is reachable.</p>}
+      {nodes.map((n) => {
+        const nodeRef = n.nodeRef || `${hostId}~${n.node}`;
+        return (
+          <div key={nodeRef} className="rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3">
+            <p className="text-sm text-white font-mono">{n.node}</p>
+            <HardwareConnection mode="config" nodeRef={nodeRef} rebindTargets={rebindTargets} />
+          </div>
+        );
+      })}
     </div>
   );
 }

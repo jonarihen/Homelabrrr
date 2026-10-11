@@ -34,7 +34,9 @@ export function connectionNotices(connection) {
   }
   switch (connection.last_status) {
     case 'tls_failed':
-      notices.push({ tone: 'error', text: connection.has_ca_certificate
+      notices.push({ tone: 'error', text: connection.verify_tls === false
+        ? 'The TLS handshake with the iLO failed even without certificate verification. Older iLO 4 firmware offers only legacy TLS settings that the backend refuses; update the iLO firmware.'
+        : connection.has_ca_certificate
         ? 'The iLO certificate did not verify against the configured CA. Check that the CA is the issuer and that the management host matches the certificate name.'
         : 'The iLO certificate could not be verified. Add the issuing private CA (PEM) or use the hostname on the certificate; disabling verification is not a fix.' });
       break;
@@ -56,7 +58,7 @@ export function connectionNotices(connection) {
       notices.push({ tone: 'error', text: 'This address now answers as a different physical server. Decommission this connection and create a new one for the replacement.' });
       break;
     case 'unreachable':
-      notices.push({ tone: 'error', text: 'The iLO did not answer within the request deadline.' });
+      notices.push({ tone: 'error', text: 'The iLO could not be reached. Check the management address and HTTPS port, and that the backend container can route to the iLO network.' });
       break;
     case 'invalid_target':
       notices.push({ tone: 'error', text: 'The management target resolves to a prohibited address or redirected the request.' });
@@ -67,6 +69,13 @@ export function connectionNotices(connection) {
     default:
   }
   return notices;
+}
+
+// One line for a failed read-only test: the category plus the backend's safe
+// diagnosis (socket/TLS error code, HTTP status or Redfish path).
+export function testFailureText(body) {
+  if (!body?.status) return body?.error || 'Connection test failed';
+  return `Connection test failed: ${connectionStatusText(body.status)}${body.detail ? ` — ${body.detail}` : ''}`;
 }
 
 export function writePrivilegeText(capabilities) {

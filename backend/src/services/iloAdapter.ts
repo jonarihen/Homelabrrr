@@ -27,6 +27,9 @@ export type IloNetworkDeps = { validateTarget?: typeof validateManagementTarget;
 // indefinitely. Every request also has a wall-clock deadline, and one
 // discovery has an overall deadline well below the 120 s collector lease.
 export const ILO_REQUEST_DEADLINE_MS = 15_000;
+// iLO 4 can sit silent for several seconds before answering heavier Redfish
+// resources, so the idle limit is generous; the wall-clock deadline still bounds it.
+export const ILO_SOCKET_IDLE_MS = 10_000;
 export const ILO_DISCOVERY_DEADLINE_MS = 60_000;
 export type HardwareDiscovery = {
   identity: { uuid: string | null; serial: string | null };
@@ -95,10 +98,38 @@ export function physicalSystemIdentity(identity: { uuid: string | null; serial: 
 export class IloError extends Error {
   code: 'invalid_target' | 'unreachable' | 'authentication_failed' | 'insufficient_privilege' | 'tls_failed' | 'timeout' | 'malformed_response' | 'oversized_response' | 'missing_endpoint'
     | 'host_not_running' | 'conflict' | 'policy_changed';
-  constructor(code: IloError['code'], message: string) {
+  // Operator-facing diagnosis (socket/TLS error code, HTTP status, Redfish
+  // path). Never contains credentials or vendor payloads.
+  detail?: string;
+  constructor(code: IloError['code'], message: string, detail?: string) {
     super(message);
     this.code = code;
+    this.detail = detail;
   }
+}
+
+const SOCKET_DETAIL: Record<string, string> = {
+  ECONNREFUSED: 'connection refused — nothing is listening on that port',
+  EHOSTUNREACH: 'no route to host — the backend cannot reach this network',
+  ENETUNREACH: 'network unreachable from the backend',
+  ETIMEDOUT: 'TCP connection timed out — host down or traffic filtered',
+  ECONNRESET: 'connection reset by the iLO',
+  EPIPE: 'connection closed by the iLO',
+  ENOTFOUND: 'host name could not be resolved',
+  EAI_AGAIN: 'host name lookup failed temporarily',
+};
+
+export function isTlsErrorCode(code?: string) {
+  return Boolean(code && (code.startsWith('ERR_TLS') || code.startsWith('ERR_SSL') || code.startsWith('CERT') || code === 'EPROTO'
+    || code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || code === 'SELF_SIGNED_CERT_IN_CHAIN' || code.startsWith('UNABLE_TO_') || code === 'HOSTNAME_MISMATCH'));
+}
+
+// Maps a Node socket/TLS error to an IloError with a safe explanation.
+export function classifyConnectionError(err: Error & { code?: string }, action: string): IloError {
+  if (err instanceof IloError) return err;
+  const code = typeof err.code === 'string' && /^[A-Z0-9_]{2,64}$/.test(err.code) ? err.code : undefined;
+  if (isTlsErrorCode(code)) return new IloError('tls_failed', `${action} failed`, `TLS handshake failed (${code})`);
+  return new IloError('unreachable', `${action} failed`, code ? `${SOCKET_DETAIL[code] || 'connection failed'} (${code})` : 'connection failed');
 }
 
 export async function validateManagementTarget(host: string, resolver = dns.lookup): Promise<string> {
@@ -106,7 +137,7 @@ export async function validateManagementTarget(host: string, resolver = dns.look
   if (!clean || clean.length > 253 || (isIP(clean) !== 6 && /[\/:?#@\s]/.test(clean)) || clean.toLowerCase() === 'localhost') throw new IloError('invalid_target', 'Invalid management host');
   let addresses: string[];
   try { addresses = isIP(clean) ? [clean] : (await resolver(clean, { all: true, verbatim: true }) as { address: string }[]).map((x) => x.address); }
-  catch { throw new IloError('unreachable', 'Management host could not be resolved'); }
+  catch (err) { const code = (err as { code?: string }).code; throw new IloError('unreachable', 'Management host could not be resolved', `host name could not be resolved${code && /^[A-Z_]{2,32}$/.test(code) ? ` (${code})` : ''}`); }
   if (!addresses.length || addresses.some(isProhibitedManagementAddress)) throw new IloError('invalid_target', 'Management target resolves to a prohibited address');
   return addresses[0];
 }
@@ -115,7 +146,7 @@ export async function createIloTransport(config: IloConfig, deps: IloNetworkDeps
   const address = await (deps.validateTarget || validateManagementTarget)(config.host);
   const request = deps.request || https.request;
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
-  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true');
+  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true', 'TLS verification is off but the server does not allow unverified upstream TLS (ALLOW_INSECURE_UPSTREAM_TLS)');
   const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
   const deadlineMs = deps.requestDeadlineMs ?? ILO_REQUEST_DEADLINE_MS;
   return (path) => new Promise((resolve, reject) => {
@@ -123,22 +154,22 @@ export async function createIloTransport(config: IloConfig, deps: IloNetworkDeps
     let settled = false;
     const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(deadline); fn(); };
     const fail = (err: IloError) => finish(() => reject(err));
-    const req = request({ hostname: config.host, port: config.port, path, method: 'GET', timeout: 5000, rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined, lookup: (_host, _options, callback) => callback(null, address, isIP(address)), headers: { Authorization: auth, Accept: 'application/json', 'OData-Version': '4.0' } }, (res) => {
+    const req = request({ hostname: config.host, port: config.port, path, method: 'GET', timeout: ILO_SOCKET_IDLE_MS, rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined, lookup: (_host, _options, callback) => callback(null, address, isIP(address)), headers: { Authorization: auth, Accept: 'application/json', 'OData-Version': '4.0' } }, (res) => {
       // 401 is a rejected credential (counts towards iLO lockout); 403 is an
       // authenticated account that lacks read privilege for this resource.
-      if (res.statusCode === 401) { res.resume(); return fail(new IloError('authentication_failed', 'iLO authentication failed')); }
-      if (res.statusCode === 403) { res.resume(); return fail(new IloError('insufficient_privilege', 'iLO account lacks read privilege')); }
-      if ((res.statusCode || 0) >= 300 && (res.statusCode || 0) < 400) { res.resume(); return fail(new IloError('invalid_target', 'iLO redirect refused')); }
-      if (res.statusCode === 404) { res.resume(); return fail(new IloError('missing_endpoint', 'iLO resource unavailable')); }
-      if (res.statusCode !== 200) { res.resume(); return fail(new IloError('unreachable', 'iLO request failed')); }
+      if (res.statusCode === 401) { res.resume(); return fail(new IloError('authentication_failed', 'iLO authentication failed', `HTTP 401 on ${path}`)); }
+      if (res.statusCode === 403) { res.resume(); return fail(new IloError('insufficient_privilege', 'iLO account lacks read privilege', `HTTP 403 on ${path}`)); }
+      if ((res.statusCode || 0) >= 300 && (res.statusCode || 0) < 400) { res.resume(); return fail(new IloError('invalid_target', 'iLO redirect refused', `HTTP ${res.statusCode} redirect on ${path} was refused`)); }
+      if (res.statusCode === 404) { res.resume(); return fail(new IloError('missing_endpoint', 'iLO resource unavailable', `HTTP 404 on ${path}`)); }
+      if (res.statusCode !== 200) { res.resume(); return fail(new IloError('unreachable', 'iLO request failed', `HTTP ${res.statusCode} on ${path}`)); }
       const chunks: Buffer[] = []; let size = 0;
-      res.on('data', (chunk: Buffer) => { if (settled) return; size += chunk.length; if (size > 1024 * 1024) { req.destroy(new IloError('oversized_response', 'iLO response exceeded limit')); return; } chunks.push(chunk); });
-      res.on('end', () => { try { const value = JSON.parse(Buffer.concat(chunks).toString()); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(); finish(() => resolve(value)); } catch { fail(new IloError('malformed_response', 'Invalid iLO JSON response')); } });
+      res.on('data', (chunk: Buffer) => { if (settled) return; size += chunk.length; if (size > 1024 * 1024) { req.destroy(new IloError('oversized_response', 'iLO response exceeded limit', `response from ${path} exceeded 1 MiB`)); return; } chunks.push(chunk); });
+      res.on('end', () => { try { const value = JSON.parse(Buffer.concat(chunks).toString()); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(); finish(() => resolve(value)); } catch { fail(new IloError('malformed_response', 'Invalid iLO JSON response', `response from ${path} was not a JSON object`)); } });
     });
-    const deadline = setTimeout(() => { const err = new IloError('timeout', 'iLO request exceeded its deadline'); req.destroy(err); fail(err); }, deadlineMs);
+    const deadline = setTimeout(() => { const err = new IloError('timeout', 'iLO request exceeded its deadline', `no complete answer from ${path} within ${Math.round(deadlineMs / 1000)} s`); req.destroy(err); fail(err); }, deadlineMs);
     deadline.unref?.();
-    req.on('timeout', () => req.destroy(new IloError('timeout', 'iLO request timed out')));
-    req.on('error', (err: Error & { code?: string }) => fail(err instanceof IloError ? err : new IloError(err.code?.startsWith('ERR_TLS') || err.code?.startsWith('CERT') ? 'tls_failed' : 'unreachable', 'iLO connection failed')));
+    req.on('timeout', () => req.destroy(new IloError('timeout', 'iLO request timed out', `no answer from ${config.host}:${config.port} for ${ILO_SOCKET_IDLE_MS / 1000} s — host down, wrong port or traffic filtered`)));
+    req.on('error', (err: Error & { code?: string }) => fail(classifyConnectionError(err, 'iLO connection')));
     req.end();
   });
 }
@@ -149,10 +180,10 @@ export function withDiscoveryDeadline(transport: IloTransport, deadlineMs = ILO_
   const expiresAt = clock() + deadlineMs;
   return (path) => {
     const remaining = expiresAt - clock();
-    if (remaining <= 0) return Promise.reject(new IloError('timeout', 'iLO discovery exceeded its deadline'));
+    if (remaining <= 0) return Promise.reject(new IloError('timeout', 'iLO discovery exceeded its deadline', `discovery took longer than ${Math.round(deadlineMs / 1000)} s`));
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new IloError('timeout', 'iLO discovery exceeded its deadline')), remaining);
+      timer = setTimeout(() => reject(new IloError('timeout', 'iLO discovery exceeded its deadline', `discovery took longer than ${Math.round(deadlineMs / 1000)} s`)), remaining);
       timer.unref?.();
     });
     return Promise.race([transport(path), expired]).finally(() => clearTimeout(timer));
@@ -255,7 +286,7 @@ export async function createRuntimePatchTransport(config: IloConfig, deps: IloNe
   const address = await (deps.validateTarget || validateManagementTarget)(config.host);
   const request = deps.request || https.request;
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
-  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true');
+  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true', 'TLS verification is off but the server does not allow unverified upstream TLS (ALLOW_INSECURE_UPSTREAM_TLS)');
   const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
   return (path, oem, value, etag) => new Promise((resolve, reject) => {
     if (!/^\/(?:redfish|rest)\/v1\/Systems\/[^/?#]+\/?$/.test(path) || path.includes('..')
@@ -289,7 +320,7 @@ export async function createRuntimePatchTransport(config: IloConfig, deps: IloNe
     deadline.unref?.();
     req.on('close', () => clearTimeout(deadline));
     req.on('timeout', () => req.destroy(new IloError('timeout', 'iLO mode request timed out')));
-    req.on('error', (err: Error & { code?: string }) => reject(err instanceof IloError ? err : new IloError(err.code?.startsWith('ERR_TLS') || err.code?.startsWith('CERT') ? 'tls_failed' : 'unreachable', 'iLO mode connection failed')));
+    req.on('error', (err: Error & { code?: string }) => reject(classifyConnectionError(err, 'iLO mode connection')));
     req.end(body);
   });
 }

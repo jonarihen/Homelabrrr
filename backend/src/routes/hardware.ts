@@ -216,9 +216,9 @@ router.post('/:id/test', async (req, res) => {
       if (tested) {
         await db.update(hardwareConnections).set({ last_status: status, last_test_at: new Date(), updated_at: new Date() })
           .where(and(eq(hardwareConnections.id, tested.id), eq(hardwareConnections.config_version, tested.config_version), eq(hardwareConnections.lifecycle_state, 'active')));
-        await logAudit(req, 'hardware_connection_tested', String(tested.id), `node=${tested.node_ref}; status=${status}`, 'failure');
+        await logAudit(req, 'hardware_connection_tested', String(tested.id), `node=${tested.node_ref}; status=${status}${err.detail ? `; ${err.detail}` : ''}`, 'failure');
       }
-      return res.status(status === 'authentication_failed' || status === 'insufficient_privilege' ? 403 : 502).json({ status, error: `iLO connection test failed (${status})` });
+      return res.status(status === 'authentication_failed' || status === 'insufficient_privilege' ? 403 : 502).json({ status, code: err.code, detail: err.detail || null, error: `iLO connection test failed (${status})` });
     }
     res.status(500).json({ error: sanitizeError(err) });
   }

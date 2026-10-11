@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPowerChart, connectionNotices, connectionStatusText, formatAge, telemetryState, writePrivilegeText } from './hardwareView.js';
+import { buildPowerChart, connectionNotices, connectionStatusText, formatAge, telemetryState, testFailureText, writePrivilegeText } from './hardwareView.js';
 
 test('every backend connection state has operator text', () => {
   for (const status of ['not_tested', 'online', 'unreachable', 'authentication_failed', 'insufficient_privilege', 'tls_failed', 'unsupported', 'unsupported_identity', 'identity_changed', 'invalid_target']) {
@@ -22,6 +22,8 @@ test('TLS-off and certificate problems are explained, never silently accepted', 
   assert.match(connectionNotices({ verify_tls: true, last_status: 'authentication_failed', collection_enabled: false })[0].text, /Update the password/);
   assert.deepEqual(connectionNotices({ verify_tls: true, last_status: 'online' }), []);
   assert.deepEqual(connectionNotices(null), []);
+  assert.match(connectionNotices({ verify_tls: true, last_status: 'unreachable' })[0].text, /could not be reached.*backend container/);
+  assert.match(connectionNotices({ verify_tls: false, last_status: 'tls_failed' }).at(-1).text, /handshake.*even without certificate verification/);
 });
 
 test('write privilege is reported as unverified, never as granted', () => {
@@ -75,4 +77,12 @@ test('mode changes become markers inside the visible range only', () => {
   assert.equal(chart.markers[0].x, 300);
   assert.equal(chart.markers[0].mode, 'high');
   assert.equal(chart.markers[0].previousMode, 'low');
+});
+
+test('a failed test names the category and the backend diagnosis', () => {
+  assert.equal(testFailureText({ status: 'unreachable', detail: 'connection refused — nothing is listening on that port (ECONNREFUSED)' }),
+    'Connection test failed: Unreachable — connection refused — nothing is listening on that port (ECONNREFUSED)');
+  assert.equal(testFailureText({ status: 'tls_failed' }), 'Connection test failed: TLS verification failed');
+  assert.equal(testFailureText({ error: 'Connection not found' }), 'Connection not found');
+  assert.equal(testFailureText(undefined), 'Connection test failed');
 });
