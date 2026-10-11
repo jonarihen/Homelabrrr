@@ -125,10 +125,19 @@ export function assertModesSupported(input: { schedule: WeeklyPowerSchedule; pri
   for (const item of used) if (!supported.has(item)) throw new Error(`Unsupported mode for this hardware: ${item}`);
 }
 
+// jsonb does not preserve key order, so compare a key-sorted rendering.
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().filter((key) => (value as any)[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonical((value as any)[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function sameContent<T extends { version: number }>(a: T | null | undefined, b: T): boolean {
   if (!a) return false;
-  const strip = (value: T) => JSON.stringify({ ...value, version: 0 });
-  return strip(a) === strip(b);
+  return canonical({ ...a, version: 0 }) === canonical({ ...b, version: 0 });
 }
 
 export interface PowerControlRouterDeps {

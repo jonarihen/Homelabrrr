@@ -362,8 +362,11 @@ export class PowerController {
       abandoned = true;
       // A failure after dispatch (including a deadline) may still have applied:
       // keep it unresolved so the next tick verifies it read-only.
-      outcome = { ...outcome, outcome: dispatched ? 'unknown' : 'failed', errorCategory: errorCategory(err) };
-      return { status: dispatched ? 'unknown' : 'failed', decision: outcome.decision };
+      // A definitive refusal (auth, ETag conflict, redirect) did not apply.
+      const refused = err instanceof IloError && ['authentication_failed', 'conflict', 'invalid_target'].includes(err.code);
+      const status = dispatched && !refused ? 'unknown' as const : 'failed' as const;
+      outcome = { ...outcome, outcome: status, errorCategory: errorCategory(err) };
+      return { status, decision: outcome.decision };
     } finally {
       abandoned = true;
       await repo.finish(hardwareId, token, outcome);
