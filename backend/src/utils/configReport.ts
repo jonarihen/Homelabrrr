@@ -136,6 +136,11 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'per-client request limit on the PayPal webhook ingress; PayPal redelivers throttled events',
   },
   {
+    name: 'PAYPAL_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE',
+    defaultValue: '600',
+    effect: 'overall request limit on the PayPal webhook ingress across all clients, protecting the PayPal API quota from distributed floods',
+  },
+  {
     name: 'HARDWARE_POLL_INTERVAL_MS',
     defaultValue: '60000',
     effect: 'iLO telemetry collection interval for explicitly enabled physical nodes (minimum 30000)',

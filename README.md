@@ -461,6 +461,7 @@ Example values live in [`.env.example`](.env.example).
 | `PORTAL_BASE_URL` | Absolute portal URL used for "open in portal" links in Discord embeds (falls back to `ALLOWED_ORIGIN`; links omitted if neither is set) |
 | `PAYPAL_RECONCILE_INTERVAL_MINUTES` | PayPal reconciliation interval in minutes (default `360`, range 15–1440); a startup pass runs after boot |
 | `PAYPAL_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Per-client limit on the PayPal webhook ingress (default `120`); throttled events are redelivered by PayPal |
+| `PAYPAL_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE` | Overall limit on the PayPal webhook ingress across all clients (default `600`); protects the PayPal API quota used for checkout and reconciliation |
 | `NODE_HEALTH_POLL_MS` | Interval for the background Proxmox health monitor that emits node unreachable/recovered notifications (default `60000`; `0` disables it) |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |

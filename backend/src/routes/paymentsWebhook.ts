@@ -14,7 +14,19 @@ const webhookLimiter = rateLimit({
   legacyHeaders: false,
   handler: (_req, res) => { res.sendStatus(429); },
 });
-router.post('/:environment', webhookLimiter, raw({ type: 'application/json', limit: '128kb' }), async (req, res) => {
+// Each request that passes the shape checks costs an outbound OAuth-backed
+// verify-webhook-signature call, so a distributed flood is also capped as a
+// whole to protect the PayPal API quota used by checkout and reconciliation.
+// No age cut-off on transmission time: legitimate retries can be late.
+const globalWebhookLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: Number(process.env.PAYPAL_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE) > 0 ? Number(process.env.PAYPAL_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE) : 600,
+  keyGenerator: () => 'paypal-webhook-global',
+  standardHeaders: false,
+  legacyHeaders: false,
+  handler: (_req, res) => { res.sendStatus(429); },
+});
+router.post('/:environment', webhookLimiter, globalWebhookLimiter, raw({ type: 'application/json', limit: '128kb' }), async (req, res) => {
   if (!req.secure) return res.sendStatus(403);
   if (!Buffer.isBuffer(req.body)) return res.sendStatus(400);
   try {
