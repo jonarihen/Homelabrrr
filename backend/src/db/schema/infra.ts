@@ -1,6 +1,6 @@
 // Part of the Drizzle ORM PostgreSQL schema — conventions in docs/postgres-conventions.md.
 
-import { pgTable, integer, text, boolean, timestamp, index, uniqueIndex, jsonb, numeric, date } from 'drizzle-orm/pg-core';
+import { pgTable, integer, text, boolean, timestamp, index, uniqueIndex, jsonb, numeric, date, check } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { users } from './auth.ts';
 
@@ -42,7 +42,10 @@ export const pveHosts = pgTable('pve_hosts', {
 // retain identity/history while active bindings remain unique per node/system.
 export const hardwareConnections = pgTable('hardware_connections', {
   id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
-  pve_host_id: integer('pve_host_id').notNull().references(() => pveHosts.id, { onDelete: 'restrict' }),
+  // Active connections always belong to a host (check below). A decommissioned
+  // connection is an archival identity: deleting its PVE host detaches it
+  // (SET NULL) while node_ref, system_uuid and all energy history are kept.
+  pve_host_id: integer('pve_host_id').references(() => pveHosts.id, { onDelete: 'set null' }),
   node_ref: text('node_ref').notNull(),
   target_host: text('target_host').notNull(),
   target_port: integer('target_port').notNull().default(443),
@@ -67,6 +70,7 @@ export const hardwareConnections = pgTable('hardware_connections', {
   uniqueIndex('hardware_connections_active_node_unique').on(t.node_ref).where(sql`lifecycle_state = 'active'`),
   uniqueIndex('hardware_connections_active_system_unique').on(t.system_uuid).where(sql`lifecycle_state = 'active' AND system_uuid IS NOT NULL`),
   index('hardware_connections_host_idx').on(t.pve_host_id),
+  check('hardware_connections_active_host_check', sql`${t.lifecycle_state} <> 'active' OR ${t.pve_host_id} IS NOT NULL`),
 ]);
 
 export const hardwareTelemetryState = pgTable('hardware_telemetry_state', {
@@ -74,6 +78,9 @@ export const hardwareTelemetryState = pgTable('hardware_telemetry_state', {
   lease_until: timestamp('lease_until', { withTimezone: true, mode: 'date' }),
   next_poll_at: timestamp('next_poll_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   failure_count: integer('failure_count').notNull().default(0),
+  // Consecutive rejected-credential polls. Collection auto-disables at the
+  // threshold so a stale password cannot trip iLO's login lockout.
+  auth_failure_count: integer('auth_failure_count').notNull().default(0),
   last_error_code: text('last_error_code'),
   last_attempt_at: timestamp('last_attempt_at', { withTimezone: true, mode: 'date' }),
   last_success_at: timestamp('last_success_at', { withTimezone: true, mode: 'date' }),

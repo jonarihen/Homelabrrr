@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import type https from 'node:https';
-import { createIloTransport, createRuntimePatchTransport, IloError } from './iloAdapter.ts';
+import { createIloTransport, createRuntimePatchTransport, discoverHardware, IloError, withDiscoveryDeadline } from './iloAdapter.ts';
 
 const config = { host: '192.168.40.10', port: 443, username: 'fixture-reader', password: 'fixture-secret', verifyTls: true };
 
@@ -49,7 +49,7 @@ test('read transport pins the validated address and accepts only bounded JSON ob
 });
 
 for (const [scenario, code] of [
-  [{ status: 302 }, 'invalid_target'], [{ status: 401 }, 'authentication_failed'], [{ status: 403 }, 'authentication_failed'],
+  [{ status: 302 }, 'invalid_target'], [{ status: 401 }, 'authentication_failed'], [{ status: 403 }, 'insufficient_privilege'],
   [{ status: 404 }, 'missing_endpoint'], [{ status: 503 }, 'unreachable'], [{ timeout: true }, 'timeout'],
   [{ error: 'ERR_TLS_CERT_ALTNAME_INVALID' }, 'tls_failed'], [{ body: 'not-json' }, 'malformed_response'],
   [{ body: '[]' }, 'malformed_response'], [{ body: 'x'.repeat(1024 * 1024 + 1) }, 'oversized_response'],
@@ -86,5 +86,61 @@ test('runtime PATCH timeout and redirect are uncertain/fail closed and never inc
       assert.equal(err.message.includes(config.password), false);
       return true;
     });
+  }
+});
+
+// A device that keeps the socket busy with one byte at a time never trips the
+// idle `timeout`; only the wall-clock deadline ends the request.
+function slowDripNetwork() {
+  const calls: { options: any }[] = [];
+  let timers: ReturnType<typeof setInterval>[] = [];
+  const request = ((options: any, callback: (response: any) => void) => {
+    const req = new EventEmitter() as any;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    req.destroy = (error: Error) => { clearInterval(timer); req.emit('error', error); req.emit('close'); };
+    req.end = () => {
+      calls.push({ options });
+      queueMicrotask(() => {
+        const response = new EventEmitter() as any;
+        response.statusCode = options.method === 'PATCH' ? 204 : 200;
+        response.resume = () => {};
+        callback(response);
+        timer = setInterval(() => response.emit('data', Buffer.from(' ')), 5);
+        timers.push(timer);
+      });
+    };
+    return req;
+  }) as unknown as typeof https.request;
+  return { request, calls, stop: () => { timers.forEach(clearInterval); timers = []; } };
+}
+
+test('slow-drip read and PATCH responses end at the wall-clock deadline', async () => {
+  const fake = slowDripNetwork();
+  try {
+    const read = await createIloTransport(config, { request: fake.request, requestDeadlineMs: 60 });
+    const started = Date.now();
+    await assert.rejects(read('/redfish/v1/'), (err: unknown) => err instanceof IloError && err.code === 'timeout');
+    assert.ok(Date.now() - started < 1000, 'deadline, not the drip, ends the request');
+    const patch = await createRuntimePatchTransport(config, { request: fake.request, requestDeadlineMs: 60 });
+    await assert.rejects(patch('/redfish/v1/Systems/1', 'Hpe', 'Dynamic'), (err: unknown) => err instanceof IloError && err.code === 'timeout');
+  } finally { fake.stop(); }
+});
+
+test('discovery has an overall deadline across individually slow reads', async () => {
+  let calls = 0;
+  const slow = async () => { calls += 1; await new Promise((resolve) => setTimeout(resolve, 30)); return { Systems: { '@odata.id': '/redfish/v1/Systems/' }, Members: [{ '@odata.id': '/redfish/v1/Systems/1/' }] } as Record<string, any>; };
+  await assert.rejects(discoverHardware(config, slow, () => new Date(), 45), (err: unknown) => err instanceof IloError && err.code === 'timeout');
+  assert.ok(calls <= 2);
+  let clock = 0;
+  const guarded = withDiscoveryDeadline(async () => ({}), 100, () => clock);
+  assert.deepEqual(await guarded('/redfish/v1/'), {});
+  clock = 100;
+  await assert.rejects(guarded('/redfish/v1/'), (err: unknown) => err instanceof IloError && err.code === 'timeout');
+});
+
+test('PATCH distinguishes rejected credentials from missing write privilege', async () => {
+  for (const [status, code] of [[401, 'authentication_failed'], [403, 'insufficient_privilege']] as const) {
+    const patch = await createRuntimePatchTransport(config, { request: fakeNetwork({ status }).request });
+    await assert.rejects(patch('/redfish/v1/Systems/1', 'Hpe', 'Dynamic'), (err: unknown) => err instanceof IloError && err.code === code);
   }
 });

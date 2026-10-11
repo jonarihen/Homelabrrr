@@ -4,7 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq, sql } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { hardwareConnections, hardwarePowerSamples, pveHosts, users } from '../db/schema/index.ts';
+import { auditLog, hardwareConnections, hardwareEnergyIntervals, hardwarePowerSamples, pveHosts, users } from '../db/schema/index.ts';
 import type { HardwareDiscovery } from '../services/iloAdapter.ts';
 import { IloError } from '../services/iloAdapter.ts';
 
@@ -137,13 +137,37 @@ test('in-flight connection test cannot overwrite a credential edit', async () =>
 
 test('authentication and TLS failures expose categories without leaking credentials', async () => {
   const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-b`));
-  for (const [code, status] of [['authentication_failed', 403], ['tls_failed', 502]] as const) {
+  for (const [code, status, persisted] of [['authentication_failed', 403, 'authentication_failed'], ['insufficient_privilege', 403, 'insufficient_privilege'],
+    ['tls_failed', 502, 'tls_failed'], ['timeout', 502, 'unreachable'], ['missing_endpoint', 502, 'unsupported']] as const) {
     discovery = async () => { throw new IloError(code, `${code} while testing fixture-secret`); };
     const result = await request(app).post(`/${row.id}/test`).set('x-test-role', 'admin');
     assert.equal(result.status, status);
-    assert.equal(result.body.status, code);
+    assert.equal(result.body.status, persisted);
     assert.equal(JSON.stringify(result.body).includes('fixture-secret'), false);
+    const [saved] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.id, row.id));
+    assert.equal(saved.last_status, persisted, 'failed result survives a reload');
+    assert.ok(saved.last_test_at instanceof Date);
+    assert.equal(saved.config_version, row.config_version, 'a failed test is not a configuration change');
   }
+  const audits = await fixture.db.select().from(auditLog).where(eq(auditLog.target, String(row.id)));
+  assert.equal(audits.some((entry) => entry.outcome === 'failure' && entry.detail.includes('status=tls_failed')), true);
+  assert.equal(audits.some((entry) => entry.detail.includes('fixture-secret')), false);
+});
+
+test('a failed test that races an edit does not overwrite the edited connection status', async () => {
+  const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-b`));
+  let fail: (err: Error) => void = () => {};
+  let started = false;
+  discovery = () => new Promise((_resolve, reject) => { fail = reject; started = true; });
+  const pending = request(app).post(`/${row.id}/test`).set('x-test-role', 'admin').then((response) => response);
+  while (!started) await new Promise((resolve) => setTimeout(resolve, 1));
+  const edit = await request(app).put(`/${row.id}`).set('x-test-role', 'admin').send({ host: row.target_host, username: 'monitor', configVersion: row.config_version });
+  assert.equal(edit.status, 200);
+  fail(new IloError('authentication_failed', 'old password'));
+  assert.equal((await pending).status, 403);
+  const [saved] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.id, row.id));
+  assert.equal(saved.last_status, 'not_tested');
+  assert.equal(saved.config_version, row.config_version + 1);
 });
 
 test('missing stable identity cannot enable telemetry', async () => {
@@ -202,4 +226,88 @@ test('decommission preserves identity and history while making the old binding i
   assert.equal(archived.secret, '');
   assert.equal(archived.collection_enabled, false);
   assert.equal(archived.control_enabled, false);
+});
+
+test('telemetry exposes a time range, exact stats and mode-change markers within bounds', async () => {
+  const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-renamed`));
+  const now = Date.now();
+  const samples = [[-50, 200, 'low'], [-49, 220, 'low'], [-48, 400, 'high'], [-47, 380, 'high'], [-20, 210, 'low']] as const;
+  await fixture.db.insert(hardwarePowerSamples).values(samples.map(([minutes, watts, mode]) => ({ hardware_id: row.id, node_ref: row.node_ref,
+    observed_at: new Date(now + minutes * 60_000), watts: String(watts), mode, origin: 'fixture', device_epoch: row.system_uuid })));
+  const result = await request(app).get(`/${row.id}/telemetry?hours=1`).set('x-test-role', 'admin');
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.range.binSeconds, 60);
+  assert.ok(Math.abs(Date.parse(result.body.range.end) - Date.parse(result.body.range.start) - 3600_000) < 5000);
+  assert.equal(Number(result.body.stats.min_watts), 200);
+  assert.equal(Number(result.body.stats.max_watts), 400);
+  assert.equal(result.body.stats.samples, 5);
+  assert.deepEqual(result.body.modeChanges.map((change: any) => [change.previous_mode, change.mode]), [['low', 'high'], ['high', 'low']]);
+  assert.equal(result.body.points.length, 5);
+  assert.equal(result.body.failureCount, 0);
+  for (const hours of ['0', '169', 'abc', '1.5']) {
+    assert.equal((await request(app).get(`/${row.id}/telemetry?hours=${hours}`).set('x-test-role', 'admin')).status, 400, hours);
+  }
+});
+
+async function clockedApp(clock: () => Date) {
+  const clocked = express();
+  clocked.use((req, _res, next) => { req.session = { userId: adminId, isAdmin: true } as never; next(); });
+  clocked.use('/', (await import('./hardware.ts')).createHardwareRouter(async () => discovery(), clock));
+  return clocked;
+}
+
+async function dstConnection(node: string) {
+  const [row] = await fixture.db.insert(hardwareConnections).values({ pve_host_id: hostId, node_ref: `${hostId}~${node}`, target_host: `${node}.example.test`, username: 'r', secret: 'enc', system_uuid: `${node}-uuid` }).returning();
+  return row;
+}
+
+function bucket(hardwareId: number, startUtc: string, kwh = '0.050000000') {
+  const start = new Date(startUtc);
+  return { hardware_id: hardwareId, start_utc: start, end_utc: new Date(start.getTime() + 900_000), kwh, covered_seconds: 900, expected_seconds: 900, quality: 'integrated_complete', method_version: 'trapezoid_v1' };
+}
+
+for (const [label, nowIso, localMidnightUtc, monthStartUtc] of [
+  ['autumn DST (25 h day)', '2026-10-25T12:00:00Z', '2026-10-24T22:00:00Z', '2026-09-30T22:00:00Z'],
+  ['spring DST (23 h day)', '2026-03-29T12:00:00Z', '2026-03-28T23:00:00Z', '2026-02-28T23:00:00Z'],
+] as const) {
+  test(`today/month summary uses Copenhagen boundaries on ${label}`, async () => {
+    const row = await dstConnection(`dst-${nowIso.slice(5, 7)}`);
+    const midnight = Date.parse(localMidnightUtc);
+    await fixture.db.insert(hardwareEnergyIntervals).values([
+      bucket(row.id, new Date(midnight - 900_000).toISOString()), // last bucket of the local previous day
+      bucket(row.id, localMidnightUtc), // first bucket of the local day
+      bucket(row.id, new Date(Date.parse(nowIso) - 900_000).toISOString()),
+      bucket(row.id, nowIso), // starts at "now": not yet part of the elapsed day
+      bucket(row.id, new Date(Date.parse(monthStartUtc) - 900_000).toISOString()), // previous local month
+      bucket(row.id, monthStartUtc),
+    ]);
+    const clocked = await clockedApp(() => new Date(nowIso));
+    const result = await request(clocked).get(`/${row.id}/telemetry?hours=24`);
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    const summary = result.body.summary;
+    assert.equal(summary.today_expected_seconds, (Date.parse(nowIso) - midnight) / 1000);
+    assert.equal(Number(summary.today_kwh), 0.1);
+    assert.equal(summary.today_covered_seconds, 1800);
+    assert.equal(summary.month_expected_seconds, (Date.parse(nowIso) - Date.parse(monthStartUtc)) / 1000);
+    // Month = today's two buckets + previous-day bucket + month-start bucket.
+    assert.equal(Number(summary.month_kwh), 0.2);
+    assert.equal(result.body.range.end, new Date(nowIso).toISOString());
+  });
+}
+
+test('history is bounded to 500 bins and keeps the newest bin at the widest range', async () => {
+  const row = await dstConnection('dense');
+  const nowAt = new Date('2026-10-09T12:00:30Z');
+  const rows = Array.from({ length: 168 * 60 + 30 }, (_, index) => ({ hardware_id: row.id, node_ref: row.node_ref,
+    observed_at: new Date(nowAt.getTime() - index * 60_000), watts: String(200 + (index % 7)), mode: index % 600 === 0 ? 'high' : 'low', origin: 'fixture' }));
+  for (let i = 0; i < rows.length; i += 2000) await fixture.db.insert(hardwarePowerSamples).values(rows.slice(i, i + 2000));
+  const clocked = await clockedApp(() => nowAt);
+  const result = await request(clocked).get(`/${row.id}/telemetry?hours=168`);
+  assert.equal(result.status, 200);
+  assert.ok(result.body.points.length <= 500, `got ${result.body.points.length} points`);
+  assert.ok(result.body.points.length > 400);
+  const newest = Date.parse(result.body.points.at(-1).at);
+  assert.ok(nowAt.getTime() - newest < result.body.range.binSeconds * 1000, 'the most recent bin is not truncated');
+  assert.ok(result.body.modeChanges.length <= 100);
+  assert.equal(result.body.stats.samples, 168 * 60 + 1);
 });

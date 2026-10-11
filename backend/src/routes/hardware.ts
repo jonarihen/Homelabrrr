@@ -34,7 +34,20 @@ function canonicalNode(raw: unknown) {
   if (!node.hostId || !isValidNodeName(node.nodeName) || node.nodeRef !== `${node.hostId}~${node.nodeName}`) throw new Error('Canonical node reference required');
   return node;
 }
-export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware) {
+// Collapses transport error codes into the connection states shown to the
+// operator. A read-only account (no 403 on reads) is valid for monitoring.
+export function testStatusFor(code: IloError['code']): string {
+  switch (code) {
+    case 'authentication_failed': return 'authentication_failed';
+    case 'insufficient_privilege': return 'insufficient_privilege';
+    case 'tls_failed': return 'tls_failed';
+    case 'unreachable': case 'timeout': return 'unreachable';
+    case 'invalid_target': return 'invalid_target';
+    case 'missing_endpoint': case 'malformed_response': case 'oversized_response': return 'unsupported';
+    default: return 'unreachable';
+  }
+}
+export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware, clock: () => Date = () => new Date()) {
 const router = Router();
 router.use(requireAuth, requirePermission('can_manage_hosts'), requireInteractiveSession);
 router.get('/', async (_req, res) => {
@@ -48,7 +61,8 @@ router.put('/:id/collection', async (req, res) => {
     const [row] = await db.update(hardwareConnections).set({ collection_enabled: req.body.enabled, config_version: sql`${hardwareConnections.config_version} + 1`, updated_at: new Date() })
       .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)), ...(req.body.enabled ? [sql`${hardwareConnections.system_uuid} IS NOT NULL AND ${hardwareConnections.last_status} = 'online' AND ${hardwareConnections.capabilities}->>'monitoring' = 'supported'`] : []))).returning();
     if (!row) return res.status(409).json({ error: 'Connection changed or has not passed a connection test' });
-    await db.insert(hardwareTelemetryState).values({ hardware_id: id, next_poll_at: new Date() }).onConflictDoUpdate({ target: hardwareTelemetryState.hardware_id, set: { next_poll_at: new Date() } });
+    // An explicit (re-)enable starts a fresh failure streak.
+    await db.insert(hardwareTelemetryState).values({ hardware_id: id, next_poll_at: new Date() }).onConflictDoUpdate({ target: hardwareTelemetryState.hardware_id, set: { next_poll_at: new Date(), failure_count: 0, auth_failure_count: 0 } });
     await logAudit(req, req.body.enabled ? 'hardware_collection_enabled' : 'hardware_collection_disabled', String(id), `node=${row.node_ref}`);
     res.json(safeDto(row));
   } catch (err) { if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
@@ -61,33 +75,50 @@ router.get('/:id/telemetry', async (req, res) => {
     const hours = Number(req.query.hours ?? 24);
     if (!Number.isInteger(hours) || hours < 1 || hours > 168) return res.status(400).json({ error: 'hours must be between 1 and 168' });
     const binSeconds = Math.max(60, Math.ceil(hours * 3600 / 500 / 60) * 60);
-    const start = new Date(Date.now() - hours * 3600_000);
+    // One clock for every bound in this response (injectable for DST tests).
+    const nowAt = clock();
+    const start = new Date(nowAt.getTime() - hours * 3600_000);
     const points = await db.execute(sql`
       SELECT to_timestamp(floor(extract(epoch from observed_at) / ${binSeconds}) * ${binSeconds}) AS at,
         min(watts)::text AS min_watts, avg(watts)::text AS mean_watts, max(watts)::text AS max_watts,
         count(*)::integer AS count
-      FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start}
+      FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start} AND observed_at <= ${nowAt}
       GROUP BY 1 ORDER BY 1 LIMIT 500
     `);
     const summary = await db.execute(sql`
       WITH bounds AS (
-        SELECT (date_trunc('day', now() AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS day_start,
-          (date_trunc('month', now() AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS month_start
+        SELECT (date_trunc('day', ${nowAt}::timestamptz AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS day_start,
+          (date_trunc('month', ${nowAt}::timestamptz AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS month_start
       )
       SELECT sum(kwh) FILTER (WHERE start_utc >= bounds.day_start)::text AS today_kwh,
         sum(covered_seconds) FILTER (WHERE start_utc >= bounds.day_start)::integer AS today_covered_seconds,
-        floor(extract(epoch FROM now() - bounds.day_start))::integer AS today_expected_seconds,
+        floor(extract(epoch FROM ${nowAt}::timestamptz - bounds.day_start))::integer AS today_expected_seconds,
         sum(kwh)::text AS month_kwh, sum(covered_seconds)::integer AS month_covered_seconds,
-        floor(extract(epoch FROM now() - bounds.month_start))::integer AS month_expected_seconds
-      FROM bounds LEFT JOIN hardware_energy_intervals ON hardware_id = ${id} AND start_utc >= bounds.month_start AND start_utc <= now()
+        floor(extract(epoch FROM ${nowAt}::timestamptz - bounds.month_start))::integer AS month_expected_seconds
+      FROM bounds LEFT JOIN hardware_energy_intervals ON hardware_id = ${id} AND start_utc >= bounds.month_start AND start_utc < ${nowAt}
       GROUP BY bounds.day_start, bounds.month_start
     `);
-    const [state] = await db.select({ last_error_code: hardwareTelemetryState.last_error_code, last_attempt_at: hardwareTelemetryState.last_attempt_at, last_success_at: hardwareTelemetryState.last_success_at }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
+    // Exact range statistics (not bin averages) and mode transitions for chart
+    // markers. Both scan the same indexed (hardware_id, observed_at) range.
+    const stats = await db.execute(sql`
+      SELECT min(watts)::text AS min_watts, avg(watts)::text AS mean_watts, max(watts)::text AS max_watts, count(*)::integer AS samples
+      FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start} AND observed_at <= ${nowAt}
+    `);
+    const modeChanges = await db.execute(sql`
+      SELECT at, mode, previous_mode FROM (
+        SELECT observed_at AS at, mode, lag(mode) OVER (ORDER BY observed_at) AS previous_mode
+        FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start} AND observed_at <= ${nowAt}
+      ) transitions WHERE previous_mode IS NOT NULL AND previous_mode <> mode ORDER BY at DESC LIMIT 100
+    `);
+    const [state] = await db.select({ last_error_code: hardwareTelemetryState.last_error_code, last_attempt_at: hardwareTelemetryState.last_attempt_at, last_success_at: hardwareTelemetryState.last_success_at, failure_count: hardwareTelemetryState.failure_count, auth_failure_count: hardwareTelemetryState.auth_failure_count }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
     const latest = await latestHardwareSample(id);
-    const ageSeconds = latest ? Math.max(0, Math.round((Date.now() - latest.observed_at.getTime()) / 1000)) : null;
+    const ageSeconds = latest ? Math.max(0, Math.round((nowAt.getTime() - latest.observed_at.getTime()) / 1000)) : null;
     res.json({ hardwareId: id, nodeRef: connection.node_ref, collectionEnabled: connection.collection_enabled, lifecycleState: connection.lifecycle_state,
       latest: latest && { watts: latest.watts, mode: latest.mode, health: latest.health, observedAt: latest.observed_at, ageSeconds, stale: (ageSeconds ?? Infinity) > Math.ceil(3 * HARDWARE_POLL_INTERVAL_MS / 1000) },
-      lastErrorCode: state?.last_error_code || null, lastAttemptAt: state?.last_attempt_at || null, points: points.rows, summary: summary.rows[0] || null });
+      lastErrorCode: state?.last_error_code || null, lastAttemptAt: state?.last_attempt_at || null, lastSuccessAt: state?.last_success_at || null,
+      failureCount: state?.failure_count ?? 0, authFailureCount: state?.auth_failure_count ?? 0,
+      range: { start, end: nowAt, binSeconds, pollIntervalSeconds: Math.round(HARDWARE_POLL_INTERVAL_MS / 1000) },
+      stats: stats.rows[0] || null, modeChanges: modeChanges.rows.reverse(), points: points.rows, summary: summary.rows[0] || null });
   } catch (err) { if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
 });
 router.post('/', async (req, res) => {
@@ -144,10 +175,12 @@ router.post('/:id/rebind', async (req, res) => {
   }
 });
 router.post('/:id/test', async (req, res) => {
+  let tested: { id: number; config_version: number; node_ref: string } | null = null;
   try {
     const id = parsedId(req.params.id);
     const [row] = await db.select().from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
     if (!row) return res.status(404).json({ error: 'Connection not found' });
+    tested = row;
     const discovery = await hardwareReader({ host: row.target_host, port: row.target_port, username: row.username, password: decryptSecret(row.secret), verifyTls: row.verify_tls, caCertificate: row.ca_certificate });
     const systemUuid = physicalSystemIdentity(discovery.identity);
     if (row.system_uuid && row.system_uuid.trim().toLowerCase() !== systemUuid) {
@@ -168,7 +201,18 @@ router.post('/:id/test', async (req, res) => {
   } catch (err) {
     if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message });
     if (isUniqueViolation(err)) return res.status(409).json({ error: 'This physical system is already bound to another node' });
-    if (err instanceof IloError) return res.status(err.code === 'authentication_failed' ? 403 : 502).json({ status: err.code, error: `iLO connection test failed (${err.code})` });
+    if (err instanceof IloError) {
+      const status = testStatusFor(err.code);
+      // Persist the failure so the Hardware view shows it after a reload, but
+      // only for the configuration that was tested: an edit made while the
+      // request was in flight keeps its own not_tested state.
+      if (tested) {
+        await db.update(hardwareConnections).set({ last_status: status, last_test_at: new Date(), updated_at: new Date() })
+          .where(and(eq(hardwareConnections.id, tested.id), eq(hardwareConnections.config_version, tested.config_version), eq(hardwareConnections.lifecycle_state, 'active')));
+        await logAudit(req, 'hardware_connection_tested', String(tested.id), `node=${tested.node_ref}; status=${status}`, 'failure');
+      }
+      return res.status(status === 'authentication_failed' || status === 'insufficient_privilege' ? 403 : 502).json({ status, error: `iLO connection test failed (${status})` });
+    }
     res.status(500).json({ error: sanitizeError(err) });
   }
 });

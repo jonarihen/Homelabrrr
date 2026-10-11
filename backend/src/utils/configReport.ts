@@ -131,6 +131,21 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'iLO telemetry collection interval for explicitly enabled physical nodes (minimum 30000)',
   },
   {
+    name: 'HARDWARE_RAW_RETENTION_DAYS',
+    defaultValue: '30',
+    effect: 'days raw iLO watt samples are kept (minimum 2)',
+  },
+  {
+    name: 'HARDWARE_INTERVAL_RETENTION_DAYS',
+    defaultValue: '730',
+    effect: 'days 15-minute server energy buckets are kept after their daily rollup (minimum 400)',
+  },
+  {
+    name: 'HARDWARE_DAY_RETENTION_DAYS',
+    defaultValue: '1826',
+    effect: 'days daily server energy totals are kept (never less than the bucket retention)',
+  },
+  {
     name: 'LEASE_CHECK_INTERVAL_MS',
     defaultValue: '900000',
     effect: 'how often expired VM leases are swept (floored at 60000)',

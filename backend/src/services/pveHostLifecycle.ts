@@ -17,7 +17,6 @@ const NODE_DEPENDENCIES = [
 ] as const;
 
 const HOST_ID_DEPENDENCIES = [
-  ['hardware connections', 'hardware_connections', 'pve_host_id'],
   ['storage visibility rules', 'storage_visibility', 'pve_host_id'],
   ['maintenance windows', 'node_maintenance', 'pve_host_id'],
   ['public IP assignments', 'public_ip_assignments', 'proxmox_host_id'],
@@ -70,6 +69,17 @@ async function pveHostDependenciesTx(database: DbOrTx, hostId: number | string) 
       sql`SELECT COUNT(*) AS count FROM ${sql.identifier(table)} WHERE ${sql.identifier(column)} = ${parsedId}`,
     );
     if (c) dependencies.push({ label, table, count: c });
+  }
+
+  // Only an *active* iLO binding blocks deletion. Decommissioned connections
+  // are archival (credential already wiped, no jobs) and are detached by the
+  // FK's ON DELETE SET NULL, keeping their identity and energy history.
+  if (await tableExists(database, 'hardware_connections')) {
+    const c = await countWhere(
+      database,
+      sql`SELECT COUNT(*) AS count FROM hardware_connections WHERE pve_host_id = ${parsedId} AND lifecycle_state = 'active'`,
+    );
+    if (c) dependencies.push({ label: 'active hardware connections', table: 'hardware_connections', count: c });
   }
 
   return { hostId: parsedId, total: dependencies.reduce((sum, item) => sum + item.count, 0), dependencies };

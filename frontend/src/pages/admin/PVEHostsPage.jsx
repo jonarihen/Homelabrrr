@@ -141,6 +141,10 @@ export default function PVEHostsPage() {
     return d > 0 ? `${d}d ${h}h` : `${h}h`;
   };
 
+  // Canonical node refs currently reported by every host: the targets an
+  // iLO binding may be explicitly rebound to.
+  const hardwareNodeRefs = hosts.flatMap((h) => (statuses[h.id]?.nodes || []).map((n) => n.nodeRef || `${h.id}~${n.node}`));
+
   return (
     <div className="p-6 lg:p-8 max-w-5xl mx-auto space-y-6">
       {/* Header */}
@@ -301,7 +305,7 @@ export default function PVEHostsPage() {
                                   )}
                                 </div>
                               </div>
-                              <HardwareConnection nodeRef={n.nodeRef || `${h.id}~${n.node}`} />
+                              <HardwareConnection nodeRef={n.nodeRef || `${h.id}~${n.node}`} rebindTargets={hardwareNodeRefs} />
                               </div>
                             );
                           })}
