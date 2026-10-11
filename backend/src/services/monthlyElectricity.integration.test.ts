@@ -46,3 +46,24 @@ test('a month with the next month\'s first interval already ingested is complete
   assert.equal(statement.revision, 1);
   assert.equal((await fixture.db.select().from(electricityCostStatements)).length, 1);
 });
+
+test('verified live PayPal net (gross minus actual fee) funds the finalized cost; sandbox never does', async () => {
+  const { paypalPostings } = await import('../db/schema/index.ts');
+  const { recalculatePaypalAllocations } = await import('./paypalAllocation.ts');
+  const { monthlyEnergyFunding } = await import('./energyFunding.ts');
+  const at = new Date('2026-06-12T12:00:00Z');
+  const posting = (environment: string, kind: string, amount: number, id = 'capture-e2e') => ({ environment, merchant_id: 'fixture-merchant', provider_transaction_id: id,
+    posting_kind: kind, source_id: id, amount_ore: amount, currency: 'DKK', effective_at: at, verification: 'fixture' });
+  await fixture.db.insert(paypalPostings).values([posting('live', 'gross', 10_000), posting('live', 'fee', -400),
+    posting('sandbox', 'gross', 50_000, 'sandbox-capture'), posting('sandbox', 'fee', -1_000, 'sandbox-capture')]);
+  await recalculatePaypalAllocations('2026-06');
+  const funding = await monthlyEnergyFunding('2026-06');
+  assert.equal(funding.status, 'reconciled');
+  assert.equal(funding.grossOre, 10_000, 'sandbox gross is excluded');
+  assert.equal(funding.feeDebitsOre, 400);
+  assert.equal(funding.knownNetOre, 9_600, 'the actual fee is deducted exactly once');
+  // Finalized June lab cost is 5760 øre (28.8 kWh at 2.00 DKK/kWh).
+  assert.equal(funding.appliedOre, 5_760);
+  assert.equal(funding.ownerFundedOre, 0);
+  assert.equal(funding.carryForwardOre, 3_840, 'surplus net carries forward, never more than received');
+});
