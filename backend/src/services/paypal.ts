@@ -403,7 +403,7 @@ export async function adminPaypalSubscriptions(value: unknown, offset = 0) {
   const rows = await db.select({ id: paypalSubscriptions.id, userId: paypalSubscriptions.user_id,
     status: paypalSubscriptions.status, amountOre: paypalSubscriptions.amount_ore,
     nextBillingAt: paypalSubscriptions.next_billing_at, cancellationRequestedAt: paypalSubscriptions.cancellation_requested_at,
-    updatedAt: paypalSubscriptions.updated_at })
+    reconcileErrorCode: paypalSubscriptions.reconcile_error_code, updatedAt: paypalSubscriptions.updated_at })
     .from(paypalSubscriptions).where(eq(paypalSubscriptions.environment, env))
     .orderBy(sql`CASE WHEN ${paypalSubscriptions.status} IN ('CANCELLED', 'EXPIRED') THEN 1 ELSE 0 END`,
       desc(paypalSubscriptions.updated_at), desc(paypalSubscriptions.id))

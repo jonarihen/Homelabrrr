@@ -300,3 +300,19 @@ test('webhook ingress is rate limited without revealing anything', async () => {
   assert.ok(limited, 'flooding the webhook is throttled');
   assert.equal(limited.text, 'Too Many Requests');
 });
+
+test('admin health and CSV export are admin-only, reauth-gated and formula-safe', async () => {
+  assert.equal((await request(app).get('/api/payments/admin/health?environment=sandbox').set('Cookie', member)).status, 403);
+  const health = await request(app).get('/api/payments/admin/health?environment=sandbox').set('Cookie', admin);
+  assert.equal(health.status, 200);
+  assert.equal(typeof health.body.unresolvedTransactions, 'number');
+  const stale = await login('sid-admin-stale-export', { userId: 2 });
+  assert.equal((await request(app).get('/api/payments/admin/export.csv?environment=sandbox').set('Cookie', stale)).body.code, 'REAUTHENTICATION_REQUIRED');
+  await fixture.db.update(users).set({ username: '=HYPERLINK("http://evil")' }).where(eq(users.id, 1));
+  const csv = await request(app).get('/api/payments/admin/export.csv?environment=sandbox').set('Cookie', admin);
+  assert.equal(csv.status, 200);
+  assert.match(String(csv.headers['content-type']), /text\/csv/);
+  assert.ok(csv.text.includes(`"'=HYPERLINK(""http://evil"")"`), 'member text cannot become a formula');
+  assert.ok(csv.text.includes(',-4.00,'), 'negative amounts stay numeric');
+  assert.equal((await request(app).get('/api/payments/admin/export.csv?environment=other').set('Cookie', admin)).status, 400);
+});

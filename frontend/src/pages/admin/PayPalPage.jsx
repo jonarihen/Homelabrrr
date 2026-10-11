@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
+import PayPalOperationsPanel from './PayPalOperationsPanel.jsx';
 
 const monthNow = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit' }).format(new Date());
 const money = (ore) => typeof ore === 'number' ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(ore / 100) : 'Unknown';
@@ -88,5 +89,6 @@ export default function PayPalPage() {
         <button type="button" disabled={!!busy || !month} onClick={() => act('allocate', () => api.post('/payments/admin/allocate', { month }))} className="mt-4 border border-gray-700 px-4 py-2 text-xs text-gray-200 disabled:opacity-40">Recalculate through month</button>
       </section></div>
     </div>
+    <PayPalOperationsPanel environment={environment} act={act} busy={busy} />
   </div>;
 }

@@ -3,6 +3,7 @@ import rateLimit from 'express-rate-limit';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
 import { captureOneOff, createOneOff, createMonthly, cancelMonthly, adminPaypalSubscriptions, adminCancelMonthly, ownPaymentHistory, memberPaypalStatus, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual, processPaypalInbox } from '../services/paypal.ts';
 import { listPaypalReviewEvents, retryPaypalReviewEvent, dismissPaypalReviewEvent } from '../services/paypalReview.ts';
+import { paypalLedgerCsv, paypalReconciliationHealth } from '../services/paypalOperations.ts';
 import { startBackgroundWork } from '../services/backgroundWork.ts';
 import { latestPaypalAllocation, recalculatePaypalAllocations } from '../services/paypalAllocation.ts';
 import { PayPalError } from '../services/paypalClient.ts';
@@ -56,6 +57,19 @@ router.post('/admin/subscriptions/:id/cancel', requireAdmin, requireRecentReauth
   try { const result = await adminCancelMonthly(req.body?.environment, req.params.id);
     await logAudit(req, 'paypal.subscription.cancel', req.params.id); res.json(result); }
   catch (err) { fail(res, err); }
+});
+router.get('/admin/health', requireAdmin, async (req, res) => {
+  try { res.json(await paypalReconciliationHealth(req.query.environment ?? 'live')); } catch (err) { fail(res, err); }
+});
+// Private ledger export; the download itself is audited (without amounts).
+router.get('/admin/export.csv', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try {
+    const environment = String(req.query.environment ?? 'live');
+    const body = await paypalLedgerCsv(environment);
+    await logAudit(req, 'paypal.ledger.export', environment);
+    res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="paypal-ledger-${environment}.csv"`,
+      'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }).send(body);
+  } catch (err) { fail(res, err); }
 });
 router.get('/admin/review', requireAdmin, async (req, res) => {
   try { res.json(await listPaypalReviewEvents(req.query.environment ?? 'live', Number(req.query.offset ?? 0), req.query.status ?? 'needs_review')); }
