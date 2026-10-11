@@ -13,6 +13,10 @@
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
 - Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+## 2026-10-08 — Admin PayPal subscription management
+
+- Administrators can inspect linked subscriptions by environment and request provider-verified cancellation with recent reauthentication. Member access to this management route is denied.
+
 ## 2026-10-08 — PayPal webhook evidence retention
 
 - Processed PayPal webhook payloads are removed after 30 days, while event IDs and verified ledger records remain for duplicate protection and accounting. Events needing review retain their evidence.

@@ -155,6 +155,12 @@ test('sandbox provider fixture: authorization, capture, webhook replay, refund a
   await setPaypalEnabled('sandbox', true);
   const monthly = await request(app).post(`${path}/monthly`).set(as('member')).send({ environment: 'sandbox' });
   assert.equal(monthly.status, 201);
+  assert.equal((await request(app).get(`${path}/admin/subscriptions?environment=sandbox`).set(as('member'))).status, 403);
+  const adminSubscriptions = await request(app).get(`${path}/admin/subscriptions?environment=sandbox`).set(as('admin'));
+  assert.equal(adminSubscriptions.status, 200);
+  assert.equal(adminSubscriptions.body.items[0].id, 'SUB123');
+  assert.equal((await request(app).post(`${path}/admin/subscriptions/SUB123/cancel`).set(as('admin'))
+    .send({ environment: 'sandbox' })).body.code, 'REAUTHENTICATION_REQUIRED');
   assert.equal((await fixture.db.select().from(paypalPostings)).length, 4, 'approval alone is not a monthly receipt');
   const [subBefore] = await fixture.db.select().from(paypalSubscriptions).where(eq(paypalSubscriptions.id, 'SUB123'));
   await reconcileSubscription(subBefore, new Date('2026-10-07T00:00:00Z'), new Date('2026-10-09T00:00:00Z'));
@@ -163,6 +169,8 @@ test('sandbox provider fixture: authorization, capture, webhook replay, refund a
     [-2000, -400, -200, 50, 5000, 10000]);
   assert.equal((await request(app).post(`${path}/monthly/SUB123/cancel`).set(as('other'))).status, 404);
   assert.equal((await request(app).post(`${path}/monthly/SUB123/cancel`).set(as('member'))).body.status, 'cancelled');
+  assert.equal((await request(app).post(`${path}/admin/subscriptions/SUB123/cancel`).set(as('admin'))
+    .set('x-test-reauth', 'yes').send({ environment: 'sandbox' })).body.status, 'cancelled');
   const [subscription] = await fixture.db.select().from(paypalSubscriptions).where(eq(paypalSubscriptions.id, 'SUB123'));
   assert.equal(subscription.status, 'CANCELLED');
   assert.equal(calls.filter((call) => call.path === '/v1/billing/subscriptions/SUB123/cancel').length, 1);
