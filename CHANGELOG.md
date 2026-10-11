@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-08 — Resumable meter backfill
+
+- An enabled ElOverblik meter begins syncing shortly after selection or restart. The initial 13-month history advances in bounded 30-day chunks about one minute apart; the normal refresh runs every six hours.
+- Manual resyncs have a durable five-minute cooldown and return `Retry-After` when limited. Configuration changes invalidate in-flight imports, and failures retry without repeatedly downloading all history.
+
 ## 2026-10-08 — Server power telemetry and history
 
 - iLO collection can now be enabled per tested physical node. The backend records actual input watts and regulator mode without an open browser; collection never writes a hardware setting.

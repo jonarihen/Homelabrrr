@@ -10,6 +10,11 @@ import { startBackgroundWork } from './backgroundWork.ts';
 const ID = 1;
 let running: Promise<unknown> | null = null;
 let timer: NodeJS.Timeout | null = null;
+let schedulerActive = false;
+const NORMAL_SYNC_MS = 6 * 60 * 60_000;
+const BACKFILL_STEP_MS = 60_000;
+const FAILURE_RETRY_MS = 15 * 60_000;
+const MANUAL_COOLDOWN_MS = 5 * 60_000;
 
 async function connection() {
   const [row] = await db.select().from(eloverblikConnections).where(eq(eloverblikConnections.id, ID)).limit(1);
@@ -31,6 +36,7 @@ export async function saveRefreshToken(raw: string) {
     .onConflictDoUpdate({ target: eloverblikConnections.id, set: { refresh_token: encrypted, enabled: false, selected_meter_id: null,
       meter_scope: 'household', config_version: (previous?.config_version ?? 0) + 1, import_cursor: null, last_error_code: null } });
   eloverblikClient.invalidate();
+  if (schedulerActive) scheduleNext(1_000);
 }
 export async function listAvailableMeters() {
   const row = await connection();
@@ -46,6 +52,7 @@ export async function selectMeter(meterId: string, scope: 'household' | 'dedicat
   await db.update(eloverblikConnections).set({ selected_meter_id: meterId, meter_scope: scope, enabled: true, import_cursor: null,
     config_version: row.config_version + 1, last_error_code: null }).where(and(eq(eloverblikConnections.id, ID), eq(eloverblikConnections.config_version, row.config_version)));
   eloverblikClient.invalidate();
+  if (schedulerActive) scheduleNext(1_000);
 }
 export async function disconnect() {
   const row = await connection();
@@ -107,9 +114,32 @@ export async function syncSelectedMeter(now = new Date()) {
   running = work;
   try { return await work; } finally { if (running === work) running = null; }
 }
-export function startElOverblikScheduler() {
-  if (timer) return;
-  timer = setInterval(() => { void syncSelectedMeter().catch(() => {}); }, 6 * 60 * 60_000);
+export async function manualSyncSelectedMeter(now = new Date()) {
+  const row = await connection();
+  if (row?.last_attempt_at && now.getTime() - row.last_attempt_at.getTime() < MANUAL_COOLDOWN_MS) {
+    throw new ElOverblikError('RATE_LIMIT', MANUAL_COOLDOWN_MS - (now.getTime() - row.last_attempt_at.getTime()));
+  }
+  return syncSelectedMeter(now);
+}
+
+function scheduleNext(delayMs: number) {
+  if (!schedulerActive) return;
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(() => {
+    timer = null;
+    void syncSelectedMeter().then((result: any) => {
+      scheduleNext(result?.nextCursor ? BACKFILL_STEP_MS : NORMAL_SYNC_MS);
+    }).catch((err) => {
+      if (err instanceof ElOverblikError && err.code === 'CONFIG_CHANGED') return scheduleNext(1_000);
+      const retry = err instanceof ElOverblikError && err.retryAfterMs ? err.retryAfterMs : FAILURE_RETRY_MS;
+      scheduleNext(Math.max(BACKFILL_STEP_MS, retry));
+    });
+  }, delayMs);
   timer.unref();
 }
-export function stopElOverblikScheduler() { if (timer) clearInterval(timer); timer = null; }
+export function startElOverblikScheduler() {
+  if (schedulerActive) return;
+  schedulerActive = true;
+  scheduleNext(30_000);
+}
+export function stopElOverblikScheduler() { schedulerActive = false; if (timer) clearTimeout(timer); timer = null; }
