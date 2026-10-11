@@ -18,6 +18,10 @@ export const EVENT_TYPES = [
   { key: 'node.recovered', label: 'Node recovered', category: 'health', ownerScoped: false },
   { key: 'notice.published', label: 'New notice published', category: 'notice', ownerScoped: false },
   { key: 'security.lockout', label: 'Account locked out', category: 'security', ownerScoped: false },
+  // Deduplicated: one notice per persistent failure streak, one on recovery.
+  // Normal power-mode changes stay in operation history, never here.
+  { key: 'hardware.power_control_failing', label: 'Power mode control failing', category: 'health', ownerScoped: false },
+  { key: 'hardware.power_control_recovered', label: 'Power mode control recovered', category: 'health', ownerScoped: false },
   // TIE-IN (#21 — lease expiry): the event type is registered now so admins can
   // pre-select a channel for it, but the emit call site lives in the lease
   // tracker from #21 and is wired in when that branch merges. See PR notes.
@@ -59,8 +63,8 @@ interface DiscordEmbed {
 
 function colorForEvent(key: string, status: unknown): number {
   if (key === 'deployment.failed' || key === 'backup.failed'
-    || key === 'node.unreachable' || key === 'security.lockout') return COLORS.failure;
-  if (key === 'node.recovered' || key === 'backup.created') return COLORS.success;
+    || key === 'node.unreachable' || key === 'security.lockout' || key === 'hardware.power_control_failing') return COLORS.failure;
+  if (key === 'node.recovered' || key === 'backup.created' || key === 'hardware.power_control_recovered') return COLORS.success;
   if (key === 'deployment.finished') return status === 'warning' ? COLORS.warning : COLORS.success;
   if (key === 'lease.expiring') return COLORS.warning;
   return COLORS.info;

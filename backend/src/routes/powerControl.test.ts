@@ -93,6 +93,7 @@ test('invalid manual duration is rejected before changing a policy or contacting
   const [host] = await fixture.db.insert(pveHosts).values({ name: 'manual', host: 'pve-manual.test', token_id: 'test', token_secret: 'encrypted' }).returning();
   const [hardware] = await fixture.db.insert(hardwareConnections).values({ pve_host_id: host.id,
     node_ref: `${host.id}~node`, target_host: 'ilo-manual.test', username: 'reader', secret: 'encrypted', control_enabled: true,
+    capabilities: { runtimeMode: 'supported', supportedModes: ['low', 'dynamic', 'high'] },
   }).returning();
   const schedule = weekdayPreset();
   const pricePolicy: PowerPricePolicy = { enabled: false, basis: 'variable_retail_including_vat', contractRef: '', area: '', version: 1,

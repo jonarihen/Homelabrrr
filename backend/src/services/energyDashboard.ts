@@ -6,7 +6,8 @@ import { getApplicablePrice } from './electricityPricing.ts';
 import { previewMonthlyElectricity } from './monthlyElectricity.ts';
 import { monthlyEnergyFunding } from './energyFunding.ts';
 import { getSetting } from '../db/settings.ts';
-import { resolvePowerDecision, type ApplicablePowerPrice, type PowerPricePolicy, type WeeklyPowerSchedule, type WritablePowerMode } from './powerPolicy.ts';
+import { resolvePowerDecision, type ApplicablePowerPrice, type PowerPricePolicy, type WeeklyPowerSchedule } from './powerPolicy.ts';
+import { controllerDecisionInput, observedMode, storedManualOverride, supportedModesFrom } from './powerDecisionContext.ts';
 
 export function parseEnergyMonth(value: unknown, now = new Date()): string {
   const month = value === undefined ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit' }).format(now) : value;
@@ -63,20 +64,16 @@ export async function energyHosts(now = new Date()) {
       const applicable = pricePolicy.enabled ? await getApplicablePrice(now, pricePolicy) : null;
       const price = applicable?.status === 'valid' && applicable.dkk_per_kwh && applicable.start_utc && applicable.end_utc
         ? applicable as ApplicablePowerPrice : null;
-      const manualActive = row.manual_mode && (!row.manual_expires_at || new Date(row.manual_expires_at) > now);
-      const capabilities = row.capabilities as { runtimeMode?: string; supportedModes?: string[] } | null;
-      const supportedModes = (capabilities?.runtimeMode === 'supported' ? capabilities.supportedModes ?? ['low', 'dynamic', 'high'] : [])
-        .filter((mode): mode is WritablePowerMode => ['low', 'dynamic', 'high'].includes(mode));
-      const observed = ['low', 'dynamic', 'high', 'os_control'].includes(row.mode) ? row.mode : 'unknown';
-      const decision = resolvePowerDecision({ now,
-        controlEnabled: Boolean(row.control_enabled && (row.automation_enabled || manualActive)),
-        automationPaused: globalPaused || row.paused, driftHold: row.drift_hold,
-        actualMode: observed, supportedModes,
-        schedule: row.schedule as WeeklyPowerSchedule, pricePolicy,
-        price, previousLatch: row.latch,
-        manualOverride: manualActive ? { mode: row.manual_mode, expiresAt: row.manual_expires_at ? new Date(row.manual_expires_at) : null } : null,
-        manualAction: Boolean(manualActive),
-      });
+      // Same resolver input as the worker (automatic, not a manual command),
+      // so the dashboard cannot report a mode the worker would not select.
+      const observed = observedMode(row.mode);
+      const decision = resolvePowerDecision(controllerDecisionInput({
+        controlEnabled: Boolean(row.control_enabled), automationEnabled: Boolean(row.automation_enabled),
+        paused: globalPaused || Boolean(row.paused), driftHold: Boolean(row.drift_hold),
+        supportedModes: supportedModesFrom(row.capabilities),
+        schedule: row.schedule as WeeklyPowerSchedule, pricePolicy, latch: row.latch,
+        manualOverride: storedManualOverride(row.manual_mode, row.manual_expires_at),
+      }, { now, actualMode: observed, price }));
       Object.assign(host, { reason: decision.reason, baseMode: decision.baseMode,
         desiredMode: decision.target, priceStatus: decision.priceStatus,
         priceValidUntil: decision.validUntil });
