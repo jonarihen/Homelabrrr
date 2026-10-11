@@ -48,7 +48,10 @@ export function allocateMonth(openingBalanceOre: number | null, receivedNetOre: 
   unresolvedCount = 0): AllocationResult {
   if (openingBalanceOre === null || unresolvedCount > 0) return { status: 'unresolved', appliedOre: null,
     ownerRemainderOre: null, ownerAdjustmentOre: null, closingBalanceOre: null };
-  const available = safeOre(openingBalanceOre + receivedNetOre);
+  // A negative closing balance is an owner-absorbed loss, reported once as
+  // that month's ownerAdjustmentOre. It is never carried forward as a debt for
+  // later contributions to repay, which would count the same loss twice.
+  const available = safeOre(Math.max(0, openingBalanceOre) + receivedNetOre);
   if (costOre === null || costOre < 0) return { status: 'cost_unknown', appliedOre: null,
     ownerRemainderOre: null, ownerAdjustmentOre: null, closingBalanceOre: null };
   const applied = Math.min(costOre, Math.max(0, available));
@@ -124,7 +127,9 @@ export async function recalculatePaypalAllocations(throughMonth: string) {
       } else {
         priorMonthAllocationId = prior.id;
       }
-      opening = calculated.closingBalanceOre;
+      // Only positive credit carries forward; a negative close was already
+      // reported as this month's owner adjustment.
+      opening = calculated.closingBalanceOre === null ? null : Math.max(0, calculated.closingBalanceOre);
     }
     if (cursor <= throughMonth) throw new Error('Allocation range exceeds 120 months');
     return { throughMonth, created, closingBalanceOre: opening };

@@ -15,8 +15,22 @@ test('late refund creates an owner-funded adjustment, never donor debt', () => {
   const refunded = allocateMonth(0, -10_000, 5_000);
   assert.deepEqual(refunded, { status: 'known', appliedOre: 0, ownerRemainderOre: 5000,
     ownerAdjustmentOre: 10_000, closingBalanceOre: -10_000 });
+  // The loss was absorbed once by the owner; a later contribution is not used
+  // to repay it, so it is not counted a second time as owner-funded cost.
   assert.deepEqual(allocateMonth(-10_000, 20_000, 5000), { status: 'known', appliedOre: 5000,
-    ownerRemainderOre: 0, ownerAdjustmentOre: 0, closingBalanceOre: 5000 });
+    ownerRemainderOre: 0, ownerAdjustmentOre: 0, closingBalanceOre: 15_000 });
+});
+test('a refund loss is visible once and never repaid by later contributions', () => {
+  const funded = allocateMonth(0, 10_000, 10_000);
+  assert.equal(funded.closingBalanceOre, 0);
+  const refunded = allocateMonth(funded.closingBalanceOre, -10_000, 0);
+  assert.equal(refunded.ownerAdjustmentOre, 10_000);
+  assert.equal(refunded.closingBalanceOre, -10_000, 'actual negative net remains visible in the month it happened');
+  const quiet = allocateMonth(refunded.closingBalanceOre, 0, 0);
+  assert.equal(quiet.ownerAdjustmentOre, 0, 'the same loss is not reported again');
+  assert.equal(quiet.closingBalanceOre, 0);
+  const later = allocateMonth(refunded.closingBalanceOre, 10_000, 10_000);
+  assert.deepEqual(later, { status: 'known', appliedOre: 10_000, ownerRemainderOre: 0, ownerAdjustmentOre: 0, closingBalanceOre: 0 });
 });
 test('unresolved net and unknown costs cannot fabricate an owner remainder', () => {
   assert.equal(allocateMonth(0, 5000, 10_000, 1).status, 'unresolved');
