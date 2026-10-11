@@ -29,12 +29,14 @@ export function connectionStatusTone(status) {
 export function connectionNotices(connection) {
   if (!connection) return [];
   const notices = [];
-  if (connection.verify_tls === false) {
+  if (connection.verify_tls === false && !connection.tls_fingerprint) {
     notices.push({ tone: 'warn', text: 'TLS verification is OFF for this iLO. Credentials are sent to whoever answers at this address. Prefer adding the private CA certificate and re-enabling verification.' });
   }
   switch (connection.last_status) {
     case 'tls_failed':
-      notices.push({ tone: 'error', text: connection.verify_tls === false
+      notices.push({ tone: 'error', text: connection.tls_fingerprint
+        ? 'The iLO presented a different certificate than the pinned one, so nothing was sent to it. If you replaced or regenerated the iLO certificate, fetch and confirm the new one under Edit Host; otherwise treat it as a possible impersonation.'
+        : connection.verify_tls === false
         ? 'The TLS handshake with the iLO failed even without certificate verification. Older iLO 4 firmware offers only legacy TLS settings that the backend refuses; update the iLO firmware.'
         : connection.has_ca_certificate
         ? 'The iLO certificate did not verify against the configured CA. Check that the CA is the issuer and that the management host matches the certificate name.'
@@ -76,6 +78,12 @@ export function connectionNotices(connection) {
 export function testFailureText(body) {
   if (!body?.status) return body?.error || 'Connection test failed';
   return `Connection test failed: ${connectionStatusText(body.status)}${body.detail ? ` — ${body.detail}` : ''}`;
+}
+
+export function tlsTrustText(connection) {
+  if (connection?.tls_fingerprint) return `pinned (SHA-256 ${connection.tls_fingerprint.slice(0, 11)}…)`;
+  if (connection?.verify_tls) return connection.has_ca_certificate ? 'verified (private CA)' : 'verified';
+  return 'NOT verified';
 }
 
 export function writePrivilegeText(capabilities) {

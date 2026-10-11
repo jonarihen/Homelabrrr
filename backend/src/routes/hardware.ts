@@ -7,7 +7,7 @@ import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
 import { decodeNodeRef, isValidNodeName } from '../utils/nodeRef.ts';
 import { logAudit } from '../utils/audit.ts';
 import { isUniqueViolation } from '../db/errors.ts';
-import { discoverHardware, IloError, physicalSystemIdentity } from '../services/iloAdapter.ts';
+import { discoverHardware, IloError, normalizeTlsFingerprint, physicalSystemIdentity, probeIloCertificate } from '../services/iloAdapter.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { HARDWARE_POLL_INTERVAL_MS, latestHardwareSample } from '../services/hardwareTelemetry.ts';
 
@@ -25,6 +25,30 @@ function target(body: any) {
 function validOptionalSecrets(body: any): boolean {
   return (body?.password == null || (typeof body.password === 'string' && body.password.length <= 4096))
     && (body?.caCertificate == null || (typeof body.caCertificate === 'string' && body.caCertificate.length <= 65536));
+}
+type TlsTrust = { verify_tls: boolean; tls_fingerprint: string | null; ca_certificate: string | null };
+// Resolves the requested trust mode into stored columns. `pinned` trusts only
+// the confirmed certificate fingerprint; `ca` verifies the chain (optionally
+// against a private CA); `insecure` is break-glass and needs the server flag.
+// Requests without `tlsMode` keep the older verifyTls boolean semantics.
+function tlsTrust(body: any, existing?: TlsTrust): TlsTrust {
+  const mode = body?.tlsMode ?? (body?.verifyTls === false ? 'insecure' : 'ca');
+  const keptCa = body?.clearCaCertificate ? null : (body?.caCertificate || existing?.ca_certificate || null);
+  if (mode === 'pinned') {
+    const pin = body?.tlsFingerprint == null ? existing?.tls_fingerprint ?? null : normalizeTlsFingerprint(body.tlsFingerprint);
+    if (!pin) throw new Error('A confirmed SHA-256 certificate fingerprint is required to pin the iLO certificate');
+    return { verify_tls: false, tls_fingerprint: pin, ca_certificate: null };
+  }
+  if (mode === 'ca') return { verify_tls: true, tls_fingerprint: null, ca_certificate: keptCa };
+  if (mode === 'insecure') {
+    if (process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new Error('Unverified TLS is disabled');
+    return { verify_tls: false, tls_fingerprint: null, ca_certificate: keptCa };
+  }
+  throw new Error('Invalid TLS mode');
+}
+const TRUST_ERRORS = ['A confirmed SHA-256 certificate fingerprint is required to pin the iLO certificate', 'Unverified TLS is disabled', 'Invalid TLS mode'];
+function iloConfig(row: { target_host: string; target_port: number; username: string; secret: string; verify_tls: boolean; ca_certificate: string | null; tls_fingerprint: string | null }) {
+  return { host: row.target_host, port: row.target_port, username: row.username, password: decryptSecret(row.secret), verifyTls: row.verify_tls, caCertificate: row.ca_certificate, tlsFingerprint: row.tls_fingerprint };
 }
 function parsedId(raw: string): number {
   const n = Number(raw); if (!Number.isSafeInteger(n) || n < 1) throw new Error('Invalid connection id'); return n;
@@ -47,9 +71,23 @@ export function testStatusFor(code: IloError['code']): string {
     default: return 'unreachable';
   }
 }
-export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware, clock: () => Date = () => new Date()) {
+export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware, clock: () => Date = () => new Date(), certificateProbe: typeof probeIloCertificate = probeIloCertificate) {
 const router = Router();
 router.use(requireAuth, requirePermission('can_manage_hosts'), requireInteractiveSession);
+// Shows the certificate an iLO presents so it can be confirmed and pinned.
+// No credentials are sent; the same address guard as connections applies.
+router.post('/certificate-probe', async (req, res) => {
+  try {
+    const host = String(req.body?.host || '').trim();
+    const port = Number(req.body?.port ?? 443);
+    if (!host || host.length > 253 || /[\/:?#@\s]/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) return res.status(400).json({ error: 'Invalid iLO address' });
+    const certificate = await certificateProbe(host, port);
+    res.set('Cache-Control', 'no-store').json(certificate);
+  } catch (err) {
+    if (err instanceof IloError) return res.status(err.code === 'invalid_target' ? 400 : 502).json({ status: testStatusFor(err.code), code: err.code, detail: err.detail || null, error: 'Could not read the iLO certificate' });
+    res.status(500).json({ error: sanitizeError(err) });
+  }
+});
 router.get('/', async (_req, res) => {
   const rows = await db.select().from(hardwareConnections).where(eq(hardwareConnections.lifecycle_state, 'active'));
   res.json(rows.map(safeDto));
@@ -130,12 +168,11 @@ router.post('/', async (req, res) => {
     if (!hostRow) return res.status(404).json({ error: 'PVE host not found' });
     const input = target(req.body);
     if (!req.body?.password) return res.status(400).json({ error: 'Password required' });
-    const verifyTls = req.body?.verifyTls !== false;
-    if (!verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') return res.status(400).json({ error: 'Unverified TLS is disabled' });
-    const [row] = await db.insert(hardwareConnections).values({ pve_host_id: node.hostId, node_ref: node.nodeRef, target_host: input.host, target_port: input.port, username: input.username, secret: encryptSecret(String(req.body.password)), verify_tls: verifyTls, ca_certificate: req.body?.caCertificate || null }).returning();
+    const trust = tlsTrust(req.body);
+    const [row] = await db.insert(hardwareConnections).values({ pve_host_id: node.hostId, node_ref: node.nodeRef, target_host: input.host, target_port: input.port, username: input.username, secret: encryptSecret(String(req.body.password)), ...trust }).returning();
     await logAudit(req, 'hardware_connection_created', String(row.id), `node=${row.node_ref}`);
     res.status(201).json(safeDto(row));
-  } catch (err) { if (isUniqueViolation(err)) return res.status(409).json({ error: 'Node or physical system already has an active hardware connection' }); if (err instanceof Error && err.message === 'Invalid iLO connection fields') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
+  } catch (err) { if (isUniqueViolation(err)) return res.status(409).json({ error: 'Node or physical system already has an active hardware connection' }); if (err instanceof Error && (err.message === 'Invalid iLO connection fields' || TRUST_ERRORS.includes(err.message))) return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
 });
 router.put('/:id', async (req, res) => {
   try {
@@ -144,23 +181,23 @@ router.put('/:id', async (req, res) => {
     const [existing] = await db.select().from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
     if (!existing) return res.status(404).json({ error: 'Connection not found' });
     const input = target(req.body);
-    const verifyTls = req.body?.verifyTls !== false;
-    if (!verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') return res.status(400).json({ error: 'Unverified TLS is disabled' });
+    const trust = tlsTrust(req.body, existing);
     // The stored password is write-only. Reusing it for a different address,
-    // account or trust anchor would let an editor point the next connection
-    // test at a server they control and receive it in the Basic auth header.
-    const nextCa = req.body.clearCaCertificate ? null : (req.body.caCertificate || existing.ca_certificate);
+    // account or trust anchor (CA or pinned certificate) would let an editor
+    // point the next connection test at a server they control and receive it
+    // in the Basic auth header.
     const targetChanged = input.host !== existing.target_host || input.port !== existing.target_port
-      || input.username !== existing.username || nextCa !== existing.ca_certificate || verifyTls !== existing.verify_tls;
+      || input.username !== existing.username || trust.ca_certificate !== existing.ca_certificate || trust.verify_tls !== existing.verify_tls
+      || trust.tls_fingerprint !== existing.tls_fingerprint;
     if (targetChanged && !req.body.password) return res.status(400).json({ error: 'Re-enter the iLO password when changing the address, account or TLS trust', code: 'PASSWORD_REQUIRED' });
     // Keep the physical identity attached to historical samples. Credential or
     // address edits require a fresh test, and that test must prove it is still
     // the same machine before collection/control can resume.
-    const [row] = await db.update(hardwareConnections).set({ target_host: input.host, target_port: input.port, username: input.username, secret: req.body.password ? encryptSecret(String(req.body.password)) : existing.secret, ca_certificate: nextCa, verify_tls: verifyTls, collection_enabled: false, control_enabled: false, config_version: existing.config_version + 1, model: null, generation: null, firmware: null, capabilities: null, last_status: 'not_tested', updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)))).returning();
+    const [row] = await db.update(hardwareConnections).set({ target_host: input.host, target_port: input.port, username: input.username, secret: req.body.password ? encryptSecret(String(req.body.password)) : existing.secret, ...trust, collection_enabled: false, control_enabled: false, config_version: existing.config_version + 1, model: null, generation: null, firmware: null, capabilities: null, last_status: 'not_tested', updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)))).returning();
     if (!row) return res.status(409).json({ error: 'Connection was changed concurrently' });
     await logAudit(req, 'hardware_connection_updated', String(id), `node=${row.node_ref}`);
     res.json(safeDto(row));
-  } catch (err) { if (err instanceof Error && (err.message === 'Invalid iLO connection fields' || err.message === 'Invalid connection id')) return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
+  } catch (err) { if (err instanceof Error && (err.message === 'Invalid iLO connection fields' || err.message === 'Invalid connection id' || TRUST_ERRORS.includes(err.message))) return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
 });
 router.post('/:id/rebind', async (req, res) => {
   try {
@@ -188,7 +225,7 @@ router.post('/:id/test', async (req, res) => {
     const [row] = await db.select().from(hardwareConnections).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
     if (!row) return res.status(404).json({ error: 'Connection not found' });
     tested = row;
-    const discovery = await hardwareReader({ host: row.target_host, port: row.target_port, username: row.username, password: decryptSecret(row.secret), verifyTls: row.verify_tls, caCertificate: row.ca_certificate });
+    const discovery = await hardwareReader(iloConfig(row));
     const systemUuid = physicalSystemIdentity(discovery.identity);
     if (row.system_uuid && row.system_uuid.trim().toLowerCase() !== systemUuid) {
       await db.update(hardwareConnections).set({ collection_enabled: false, control_enabled: false,
@@ -226,7 +263,7 @@ router.post('/:id/test', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const id = parsedId(req.params.id);
-    const [row] = await db.update(hardwareConnections).set({ lifecycle_state: 'decommissioned', collection_enabled: false, control_enabled: false, secret: '', ca_certificate: null, updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).returning();
+    const [row] = await db.update(hardwareConnections).set({ lifecycle_state: 'decommissioned', collection_enabled: false, control_enabled: false, secret: '', ca_certificate: null, tls_fingerprint: null, updated_at: new Date() }).where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).returning();
     if (!row) return res.status(404).json({ error: 'Connection not found' });
     await logAudit(req, 'hardware_connection_decommissioned', String(id), `node=${row.node_ref}`);
     res.json({ ok: true });

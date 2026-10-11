@@ -1,6 +1,8 @@
 import https from 'node:https';
+import tls from 'node:tls';
 import dns from 'node:dns/promises';
 import { isIP } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { isProhibitedManagementAddress } from '../utils/urlGuard.ts';
 
 export type HardwareMode = 'low' | 'dynamic' | 'high' | 'os_control' | 'unknown';
@@ -12,7 +14,9 @@ export type HardwareHealth = {
   powerRedundancy: { health: string | null; state: string | null } | null;
   limited: boolean;
 };
-export type IloConfig = { host: string; port: number; username: string; password: string; verifyTls: boolean; caCertificate?: string | null };
+// `tlsFingerprint` pins the iLO's own certificate (SHA-256, colon-separated
+// upper-case hex). It replaces CA verification: nothing else is trusted.
+export type IloConfig = { host: string; port: number; username: string; password: string; verifyTls: boolean; caCertificate?: string | null; tlsFingerprint?: string | null };
 export type IloTransport = (path: string) => Promise<Record<string, any>>;
 // `etag` is the ComputerSystem's @odata.etag from the pre-write read, sent as
 // If-Match when the iLO publishes one; a 412 means the resource changed.
@@ -20,7 +24,7 @@ export type RuntimePatchTransport = (path: string, oem: 'Hp' | 'Hpe', value: 'Mi
 // 'on' only when the host is powered and finished POST. Anything else is a
 // safe refusal for writes; the controller never powers a host on.
 export type HostPowerState = 'on' | 'off' | 'booting' | 'unknown';
-export type IloNetworkDeps = { validateTarget?: typeof validateManagementTarget; request?: typeof https.request; requestDeadlineMs?: number };
+export type IloNetworkDeps = { validateTarget?: typeof validateManagementTarget; request?: typeof https.request; requestDeadlineMs?: number; connect?: typeof tls.connect };
 
 // The socket `timeout` only fires on idle sockets, so a device that drips one
 // byte every few seconds could hold a request (and the collector lease) open
@@ -142,11 +146,100 @@ export async function validateManagementTarget(host: string, resolver = dns.look
   return addresses[0];
 }
 
+const FINGERPRINT_RE = /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/;
+
+// Accepts "AB:CD:…", "ab cd …" or 64 bare hex digits; returns the canonical
+// colon form Node reports as `fingerprint256`, or null when it is not one.
+export function normalizeTlsFingerprint(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const hex = raw.replace(/[\s:]/g, '').toUpperCase();
+  if (!/^[0-9A-F]{64}$/.test(hex)) return null;
+  const value = hex.match(/.{2}/g)!.join(':');
+  return FINGERPRINT_RE.test(value) ? value : null;
+}
+
+function assertTlsAllowed(config: IloConfig) {
+  if (config.tlsFingerprint && !normalizeTlsFingerprint(config.tlsFingerprint)) throw new IloError('tls_failed', 'Invalid pinned certificate fingerprint', 'the stored certificate pin is not a SHA-256 fingerprint');
+  if (!config.verifyTls && !config.tlsFingerprint && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') {
+    throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true', 'TLS verification is off but the server does not allow unverified upstream TLS (ALLOW_INSECURE_UPSTREAM_TLS); pin the iLO certificate instead');
+  }
+}
+
+// Opens the TLS socket for a pinned connection and hands it to the HTTP
+// request only after the presented certificate matched the pin, so the Basic
+// auth header is never written to an impostor.
+function pinnedConnection(config: IloConfig, address: string, connect: typeof tls.connect) {
+  const pin = normalizeTlsFingerprint(config.tlsFingerprint)!;
+  return (_options: unknown, callback: (err: Error | null, socket: Duplex) => void) => {
+    let done = false;
+    // Node ignores the socket argument when an error is passed.
+    const finish = (err: Error | null) => { if (done) return; done = true; callback(err, socket); };
+    const socket = connect({ host: address, port: config.port, servername: isIP(config.host) ? undefined : config.host, rejectUnauthorized: false });
+    socket.setTimeout(ILO_SOCKET_IDLE_MS, () => socket.destroy(new IloError('timeout', 'iLO TLS handshake timed out', `no TLS handshake from ${config.host}:${config.port} for ${ILO_SOCKET_IDLE_MS / 1000} s`)));
+    socket.once('error', (err) => finish(err));
+    socket.once('secureConnect', () => {
+      const presented = socket.getPeerCertificate()?.fingerprint256 || null;
+      if (presented !== pin) {
+        const err = new IloError('tls_failed', 'iLO certificate does not match the pin', `certificate changed: the iLO presented SHA-256 ${presented || 'none'}, but ${pin} is pinned`);
+        socket.destroy();
+        return finish(err);
+      }
+      socket.setTimeout(0);
+      finish(null);
+    });
+    return undefined;
+  };
+}
+
+// TLS part of the request options for one iLO call.
+function tlsRequestOptions(config: IloConfig, address: string, deps: IloNetworkDeps) {
+  if (config.tlsFingerprint) {
+    // One-off agent: its connections are opened by the pinning check, and no
+    // socket is pooled or reused across configurations.
+    const agent = new https.Agent({ keepAlive: false, maxSockets: 1 });
+    (agent as unknown as { createConnection: unknown }).createConnection = pinnedConnection(config, address, deps.connect || tls.connect);
+    return { agent };
+  }
+  return { rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined, lookup: (_host: string, _options: unknown, callback: (err: Error | null, address: string, family: number) => void) => callback(null, address, isIP(address)) };
+}
+
+export type CertificateProbe = { fingerprint256: string; subject: string | null; issuer: string | null; validFrom: string | null; validTo: string | null; selfSigned: boolean };
+
+// Reads the certificate an iLO presents so an admin can confirm and pin it.
+// Sends no credentials and no HTTP request: it completes a TLS handshake and
+// closes the socket.
+export async function probeIloCertificate(host: string, port: number, deps: IloNetworkDeps = {}): Promise<CertificateProbe> {
+  const address = await (deps.validateTarget || validateManagementTarget)(host);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new IloError('invalid_target', 'Invalid management port');
+  const connect = deps.connect || tls.connect;
+  const deadlineMs = deps.requestDeadlineMs ?? ILO_REQUEST_DEADLINE_MS;
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: address, port, servername: isIP(host) ? undefined : host, rejectUnauthorized: false });
+    const deadline = setTimeout(() => socket.destroy(new IloError('timeout', 'iLO TLS handshake timed out', `no TLS handshake from ${host}:${port} within ${Math.round(deadlineMs / 1000)} s`)), deadlineMs);
+    deadline.unref?.();
+    socket.once('error', (err) => { clearTimeout(deadline); reject(classifyConnectionError(err, 'iLO certificate probe')); });
+    socket.once('secureConnect', () => {
+      clearTimeout(deadline);
+      const cert = socket.getPeerCertificate();
+      socket.end();
+      const fingerprint256 = normalizeTlsFingerprint(cert?.fingerprint256);
+      if (!fingerprint256) return reject(new IloError('tls_failed', 'iLO presented no certificate', 'the iLO completed TLS without a usable certificate'));
+      const name = (part: unknown) => {
+        const cn = (part as Record<string, unknown> | undefined)?.CN;
+        const value = Array.isArray(cn) ? cn[0] : cn;
+        return typeof value === 'string' ? value.slice(0, 200) : null;
+      };
+      resolve({ fingerprint256, subject: name(cert.subject), issuer: name(cert.issuer), validFrom: cert.valid_from || null, validTo: cert.valid_to || null,
+        selfSigned: JSON.stringify(cert.subject) === JSON.stringify(cert.issuer) });
+    });
+  });
+}
+
 export async function createIloTransport(config: IloConfig, deps: IloNetworkDeps = {}): Promise<IloTransport> {
   const address = await (deps.validateTarget || validateManagementTarget)(config.host);
   const request = deps.request || https.request;
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
-  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true', 'TLS verification is off but the server does not allow unverified upstream TLS (ALLOW_INSECURE_UPSTREAM_TLS)');
+  assertTlsAllowed(config);
   const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
   const deadlineMs = deps.requestDeadlineMs ?? ILO_REQUEST_DEADLINE_MS;
   return (path) => new Promise((resolve, reject) => {
@@ -154,7 +247,7 @@ export async function createIloTransport(config: IloConfig, deps: IloNetworkDeps
     let settled = false;
     const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(deadline); fn(); };
     const fail = (err: IloError) => finish(() => reject(err));
-    const req = request({ hostname: config.host, port: config.port, path, method: 'GET', timeout: ILO_SOCKET_IDLE_MS, rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined, lookup: (_host, _options, callback) => callback(null, address, isIP(address)), headers: { Authorization: auth, Accept: 'application/json', 'OData-Version': '4.0' } }, (res) => {
+    const req = request({ hostname: config.host, port: config.port, path, method: 'GET', timeout: ILO_SOCKET_IDLE_MS, ...tlsRequestOptions(config, address, deps), headers: { Authorization: auth, Accept: 'application/json', 'OData-Version': '4.0' } }, (res) => {
       // 401 is a rejected credential (counts towards iLO lockout); 403 is an
       // authenticated account that lacks read privilege for this resource.
       if (res.statusCode === 401) { res.resume(); return fail(new IloError('authentication_failed', 'iLO authentication failed', `HTTP 401 on ${path}`)); }
@@ -286,7 +379,7 @@ export async function createRuntimePatchTransport(config: IloConfig, deps: IloNe
   const address = await (deps.validateTarget || validateManagementTarget)(config.host);
   const request = deps.request || https.request;
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new IloError('invalid_target', 'Invalid management port');
-  if (!config.verifyTls && process.env.ALLOW_INSECURE_UPSTREAM_TLS !== 'true') throw new IloError('tls_failed', 'Unverified iLO TLS requires ALLOW_INSECURE_UPSTREAM_TLS=true', 'TLS verification is off but the server does not allow unverified upstream TLS (ALLOW_INSECURE_UPSTREAM_TLS)');
+  assertTlsAllowed(config);
   const auth = `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`;
   return (path, oem, value, etag) => new Promise((resolve, reject) => {
     if (!/^\/(?:redfish|rest)\/v1\/Systems\/[^/?#]+\/?$/.test(path) || path.includes('..')
@@ -297,8 +390,7 @@ export async function createRuntimePatchTransport(config: IloConfig, deps: IloNe
     const body = JSON.stringify({ Oem: { [oem]: { PowerRegulatorMode: value } } });
     const req = request({
       hostname: config.host, port: config.port, path, method: 'PATCH', timeout: 5000,
-      rejectUnauthorized: config.verifyTls, ca: config.caCertificate || undefined,
-      lookup: (_host, _options, callback) => callback(null, address, isIP(address)),
+      ...tlsRequestOptions(config, address, deps),
       headers: { Authorization: auth, Accept: 'application/json', 'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body), 'OData-Version': '4.0', ...(etag ? { 'If-Match': etag } : {}) },
     }, (res) => {

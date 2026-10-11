@@ -5,7 +5,8 @@ import { test, expect } from '@playwright/test';
 const admin = { id: 1, username: 'owner', isAdmin: true, twoFactorEnabled: true, require2fa: false, permissions: {} };
 const host = { id: 1, name: 'lab', host: 'pve.test', port: 8006, token_id: 'root@pam!t', verify_tls: true };
 const nodes = [{ node: 'pve01', nodeRef: '1~pve01', status: 'online', cpu: 0.1, mem: 1, maxmem: 4 }, { node: 'pve03', nodeRef: '1~pve03', status: 'online', cpu: 0.1, mem: 1, maxmem: 4 }];
-const saved = { id: 11, node_ref: '1~pve01', target_host: '10.0.40.11', target_port: 443, username: 'monitor', verify_tls: false, has_ca_certificate: false,
+const pin = 'AB:'.repeat(31) + 'CD';
+const saved = { id: 11, node_ref: '1~pve01', target_host: '10.0.40.11', target_port: 443, username: 'monitor', verify_tls: false, tls_fingerprint: pin, has_ca_certificate: false,
   collection_enabled: false, control_enabled: false, last_status: 'not_tested', generation: null, model: null, firmware: null, config_version: 1, capabilities: null };
 
 async function mockApi(page, { connections = [] } = {}) {
@@ -22,6 +23,7 @@ async function mockApi(page, { connections = [] } = {}) {
     if (request.method() === 'GET' && path === '/api/admin/hardware-connections') return route.fulfill({ json: current });
     if (request.method() === 'GET') return route.fulfill({ json: { samples: [], energy: [], status: 'available' } });
     writes.push({ method: request.method(), path, body: request.postDataJSON?.() ?? null });
+    if (path.endsWith('/certificate-probe')) return route.fulfill({ json: { fingerprint256: pin, subject: 'ILOCZ1234', issuer: 'ILOCZ1234', validFrom: 'Jan 1 2020', validTo: 'Jan 1 2035', selfSigned: true } });
     if (path.endsWith('/test')) return route.fulfill({ status: 502, json: { status: 'unreachable', code: 'unreachable', detail: 'connection refused — nothing is listening on that port (ECONNREFUSED)', error: 'iLO connection test failed (unreachable)' } });
     if (request.method() === 'POST') { current = [saved]; return route.fulfill({ status: 201, json: saved }); }
     if (request.method() === 'PUT') { current = [{ ...saved, ...{ target_host: request.postDataJSON().host, config_version: 2 } }]; return route.fulfill({ json: current[0] }); }
@@ -49,6 +51,13 @@ test('Edit Host configures an iLO per node and keeps it editable after saving', 
   await pve01.getByLabel('Management host').fill('10.0.40.11');
   await pve01.getByLabel('Username').fill('monitor');
   await pve01.getByLabel(/^Password/).fill('fixture-password');
+  await expect(pve01.getByLabel(/Pin this iLO/)).toBeChecked();
+  // Saving without a confirmed certificate is refused in the browser.
+  await pve01.getByRole('button', { name: 'Add iLO connection' }).click();
+  await expect(pve01.getByRole('alert')).toContainText('Fetch the iLO certificate and confirm it');
+  await pve01.getByRole('button', { name: 'Fetch certificate' }).click();
+  await expect(pve01.getByText(`SHA-256 ${pin}`)).toBeVisible();
+  await pve01.getByLabel(/This is my iLO’s certificate/).check();
   await pve01.getByRole('button', { name: 'Add iLO connection' }).click();
   await expect(pve01.getByText(/^Saved\./)).toBeVisible();
   // Still editable: the saved values are in the form and a second save is a PUT.
@@ -57,9 +66,12 @@ test('Edit Host configures an iLO per node and keeps it editable after saving', 
   await pve01.getByLabel(/^Password/).fill('fixture-password');
   await pve01.getByRole('button', { name: 'Save iLO changes' }).click();
   await expect(pve01.getByLabel('Management host')).toHaveValue('10.0.40.12');
-  expect(writes.map((w) => `${w.method} ${w.path}`)).toEqual(['POST /api/admin/hardware-connections', 'PUT /api/admin/hardware-connections/11']);
-  expect(writes[0].body).toMatchObject({ nodeRef: '1~pve01', host: '10.0.40.11', username: 'monitor' });
-  expect(writes[1].body).toMatchObject({ host: '10.0.40.12', configVersion: 1 });
+  expect(writes.map((w) => `${w.method} ${w.path}`)).toEqual(['POST /api/admin/hardware-connections/certificate-probe', 'POST /api/admin/hardware-connections', 'PUT /api/admin/hardware-connections/11']);
+  expect(writes[0].body).toEqual({ host: '10.0.40.11', port: 443 });
+  expect(JSON.stringify(writes[0].body)).not.toContain('fixture-password');
+  expect(writes[1].body).toMatchObject({ nodeRef: '1~pve01', host: '10.0.40.11', username: 'monitor', tlsMode: 'pinned', tlsFingerprint: pin });
+  // A host edit after the save keeps the pinned mode; the backend decides whether the pin still applies.
+  expect(writes[2].body).toMatchObject({ host: '10.0.40.12', configVersion: 1, tlsMode: 'pinned' });
 });
 
 test('a failed read-only test shows why the iLO could not be reached', async ({ page }) => {

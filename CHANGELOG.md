@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-11 — Pin the iLO certificate
+
+- iLO connections can now **pin the iLO's own certificate**, and this is the default for new connections. In Edit Host → Hardware / iLO, click **Fetch certificate**, compare the fingerprint with the iLO web interface and confirm it. This works with the self-signed certificates iLOs ship with and needs no `ALLOW_INSECURE_UPSTREAM_TLS`.
+- Before the password is sent, every connection checks that the iLO still presents the pinned certificate. If the certificate changes, collection, tests and power control stop with a "certificate changed" message until you confirm the new certificate. Re-pinning requires re-entering the iLO password.
+- Fetching the certificate only completes a TLS handshake. It sends no credentials and no HTTP request.
+
 ## 2026-10-11 — iLO settings in Edit Host and clearer connection failures
 
 - iLO connections are now set up in the **Edit Host** dialog, with one Hardware / iLO section per node. The node row keeps the status, the read-only test, telemetry and the power policy.
