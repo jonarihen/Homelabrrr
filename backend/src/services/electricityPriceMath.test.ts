@@ -13,6 +13,15 @@ test('fixed all-in is a complete retail price and cannot masquerade as spot', ()
   assert.equal(resolveApplicablePrice(start, fixed, [], null, 'variable_retail_including_vat').dkk_per_kwh, '2.500000');
   assert.equal(resolveApplicablePrice(start, fixed, [], null, 'spot_only_excluding_retail_additions').status, 'incomplete');
 });
+test('open-ended fixed price has a stable horizon across guarded controller reads', () => {
+  const agreement = { ...fixed, validTo: null };
+  const first = resolveApplicablePrice(start, agreement, [], null, 'variable_retail_including_vat');
+  const rechecked = resolveApplicablePrice(new Date(start.getTime() + 1200), agreement, [], null, 'variable_retail_including_vat');
+  assert.equal(first.status, 'valid');
+  assert.equal(first.end_utc, '2026-10-09T00:00:00.000Z');
+  assert.equal(rechecked.end_utc, first.end_utc);
+  assert.equal(rechecked.source_revision, first.source_revision);
+});
 test('negative spot plus charges and VAT once; explicit spot basis stays raw', () => {
   const tariffs = [
     { component: 'network', validFrom: start, validTo: end, rate: '0.300000', vatIncluded: false, provenance: 'owner', revision: 1 },

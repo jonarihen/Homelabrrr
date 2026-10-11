@@ -4,6 +4,14 @@ import { parseDkkPerKwh } from './powerPolicy.ts';
 const SOURCE = 'https://api.energidataservice.dk/dataset/DayAheadPrices';
 const MAX_BYTES = 2 * 1024 * 1024;
 const QUARTER_MS = 15 * 60_000;
+const LOCAL_DATE_TIME = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+function localQueryTime(date: Date): string {
+  const parts = LOCAL_DATE_TIME.formatToParts(date);
+  const part = (type: string) => parts.find((value) => value.type === type)?.value;
+  return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}`;
+}
 export interface DayAheadRow { area: 'DK1' | 'DK2'; startUtc: Date; endUtc: Date; dkkPerKwh: string; sourceRevision: string }
 export class DayAheadError extends Error {
   code: string;
@@ -52,7 +60,10 @@ export async function fetchDayAheadPrices(area: 'DK1' | 'DK2', at = new Date(), 
   // prices; absence before publication stays missing in the cache.
   const start = new Date(at.getTime() - 24 * 3600_000);
   const end = new Date(at.getTime() + 24 * 3600_000);
-  const params = new URLSearchParams({ start: start.toISOString(), end: end.toISOString(), filter: JSON.stringify({ PriceArea: [area] }), sort: 'TimeUTC', limit: '400' });
+  // EDS interprets API range parameters as Copenhagen local wall time and
+  // rejects ISO strings with a UTC suffix. Record TimeUTC remains the instant
+  // used for storage, so DST does not create duplicate interval identities.
+  const params = new URLSearchParams({ start: localQueryTime(start), end: localQueryTime(end), filter: JSON.stringify({ PriceArea: [area] }), sort: 'TimeUTC', limit: '400' });
   const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
     const response = await fetcher(`${SOURCE}?${params}`, { headers: { Accept: 'application/json' }, redirect: 'error', signal: controller.signal });

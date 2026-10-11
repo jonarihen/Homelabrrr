@@ -13,6 +13,10 @@
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
 - Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+## 2026-10-08 — Day-ahead price source compatibility
+
+- The Energi Data Service request now sends Copenhagen local `start` and `end` values accepted by the live API, while stored price intervals continue to use unambiguous UTC timestamps across daylight-saving changes.
+
 ## 2026-10-08 — Private funding figures in Energy & Budget
 
 - The dashboard now separates verified live gross support, actual PayPal fees, fee credits, refunds, and known net receipts. It shows finalized monthly credit applied, owner-funded remainder, owner adjustments, and carried credit only when the allocation snapshot is current.
