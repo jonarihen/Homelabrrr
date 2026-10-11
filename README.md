@@ -459,6 +459,8 @@ Example values live in [`.env.example`](.env.example).
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
 | `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image and ISO downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
 | `PORTAL_BASE_URL` | Absolute portal URL used for "open in portal" links in Discord embeds (falls back to `ALLOWED_ORIGIN`; links omitted if neither is set) |
+| `PAYPAL_RECONCILE_INTERVAL_MINUTES` | PayPal reconciliation interval in minutes (default `360`, range 15–1440); a startup pass runs after boot |
+| `PAYPAL_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Per-client limit on the PayPal webhook ingress (default `120`); throttled events are redelivered by PayPal |
 | `NODE_HEALTH_POLL_MS` | Interval for the background Proxmox health monitor that emits node unreachable/recovered notifications (default `60000`; `0` disables it) |
 | `INITIAL_ADMIN_USERNAME` | First admin username for empty DB bootstrap |
 | `INITIAL_ADMIN_PASSWORD` | First admin password for empty DB bootstrap |
@@ -637,6 +639,10 @@ Operationally important:
 - Run exactly **one backend replica**. Console/SFTP handoff tokens, VMID reservations, background-job locks, notification queues, and schedulers keep process-local state. Multiple replicas can lose console handoffs or perform the same scheduled work twice.
 - Provisioning and migration rows persist their Proxmox UPID, actor, phase, and request ID. A restart moves every unfinished operation—with or without an upstream task ID—to `needs_review` in **Admin → Operations** instead of guessing that it failed. **Check upstream** records the observed task state without silently changing the portal resource, while **Remove tracking only** is available only after a terminal result and never deletes the Proxmox guest. Verify the resource in Proxmox before resolving, retrying, or removing tracking. ISO/image-specific pollers still require operator review after interruption.
 - Keep PostgreSQL on the local `pg_data` volume; this deployment is not designed for horizontally scaled backend writers (the single-replica constraint above is what matters — in-process schedulers, locks, and console-handoff maps assume one backend). Scheduled backups use an online `pg_dump`, so no downtime is needed for them.
+
+## Optional PayPal Support
+
+Members can optionally support the lab with direct PayPal one-off payments or monthly subscriptions. Support never changes access, quotas or priority. Everything starts disabled. Configure sandbox and live separately under **Admin → PayPal**. Only the webhook `POST /api/payments/paypal/webhook/<environment>` needs to be reachable from the internet over HTTPS. Receipts post only after verified provider readback, and unknown fees, refunds or disputes stay unresolved rather than estimated. A manual bank-transfer fallback requires admin confirmation with evidence. Setup, reverse-proxy, reconciliation, cancellation and simulator caveats are in the [PayPal runbook](backend/docs/paypal-support.md).
 
 ## Reverse Proxy Notes
 

@@ -126,6 +126,16 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'node health poll interval for unreachable/recovered notifications; 0 disables it',
   },
   {
+    name: 'PAYPAL_RECONCILE_INTERVAL_MINUTES',
+    defaultValue: '360',
+    effect: 'PayPal reconciliation interval in minutes (15-1440; invalid values fall back to 360); a startup pass also runs after boot',
+  },
+  {
+    name: 'PAYPAL_WEBHOOK_RATE_LIMIT_PER_MINUTE',
+    defaultValue: '120',
+    effect: 'per-client request limit on the PayPal webhook ingress; PayPal redelivers throttled events',
+  },
+  {
     name: 'HARDWARE_POLL_INTERVAL_MS',
     defaultValue: '60000',
     effect: 'iLO telemetry collection interval for explicitly enabled physical nodes (minimum 30000)',
