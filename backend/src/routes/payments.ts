@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
-import { captureOneOff, createOneOff, createMonthly, cancelMonthly, adminPaypalSubscriptions, adminCancelMonthly, ownPaymentHistory, memberPaypalStatus, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual, processPaypalInbox } from '../services/paypal.ts';
+import { captureOneOff, createOneOff, createMonthly, changeMonthly, addMonthlyPlan, deactivateMonthlyPlan, listMonthlyPlans, cancelMonthly, adminPaypalSubscriptions, adminCancelMonthly, ownPaymentHistory, memberPaypalStatus, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual, processPaypalInbox } from '../services/paypal.ts';
 import { listPaypalReviewEvents, retryPaypalReviewEvent, dismissPaypalReviewEvent } from '../services/paypalReview.ts';
 import { paypalLedgerCsv, paypalReconciliationHealth } from '../services/paypalOperations.ts';
 import { paypalConfigHistoryList, provisionPaypalResource, testPaypalConnection } from '../services/paypalSetup.ts';
@@ -43,7 +43,13 @@ router.post('/one-off/:intentId/capture', captureLimiter, async (req, res) => {
   catch (err) { fail(res, err); }
 });
 router.post('/monthly', checkoutLimiter, async (req, res) => {
-  try { res.status(201).json(await createMonthly(req.session.userId!, req.body?.environment ?? 'sandbox')); } catch (err) { fail(res, err); }
+  try { res.status(201).json(await createMonthly(req.session.userId!, req.body?.environment ?? 'sandbox', req.body?.amount)); } catch (err) { fail(res, err); }
+});
+// Change = confirmed cancellation of the current subscription, then a new
+// explicit PayPal approval for the new amount.
+router.post('/monthly/:id/change', checkoutLimiter, async (req, res) => {
+  try { res.json(await changeMonthly(req.session.userId!, String(req.params.id), req.body?.environment ?? 'sandbox', req.body?.amount)); }
+  catch (err) { fail(res, err); }
 });
 router.post('/monthly/:id/cancel', cancelLimiter, async (req, res) => {
   try { res.json(await cancelMonthly(req.session.userId!, String(req.params.id))); } catch (err) { fail(res, err); }
@@ -106,6 +112,19 @@ router.post('/admin/manual/:id/reject', requireAdmin, async (req, res) => {
 router.post('/admin/manual/:id/reverse', requireAdmin, requireRecentReauthentication, async (req, res) => {
   try { const id = manualId(req.params.id); const result = await reverseManualContribution(req.session.userId!, id, req.body);
     await logAudit(req, 'paypal.manual.reverse', `manual:${id}`); res.json(result); }
+  catch (err) { fail(res, err); }
+});
+router.get('/admin/monthly-plans', requireAdmin, async (req, res) => {
+  try { res.json({ items: await listMonthlyPlans(req.query.environment ?? 'live') }); } catch (err) { fail(res, err); }
+});
+router.post('/admin/monthly-plans', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try { const items = await addMonthlyPlan(req.body?.environment, req.body?.planId, req.body?.amount);
+    await logAudit(req, 'paypal.monthly_plan.add', String(req.body?.environment || '')); res.status(201).json({ items }); }
+  catch (err) { fail(res, err); }
+});
+router.post('/admin/monthly-plans/:id/deactivate', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try { const items = await deactivateMonthlyPlan(req.body?.environment, manualId(req.params.id));
+    await logAudit(req, 'paypal.monthly_plan.deactivate', `plan:${String(req.params.id)}`); res.json({ items }); }
   catch (err) { fail(res, err); }
 });
 router.get('/admin/review', requireAdmin, async (req, res) => {

@@ -261,3 +261,20 @@ export const paypalPaymentStates = pgTable('paypal_payment_states', {
   uniqueIndex('paypal_payment_state_ref').on(t.environment, t.merchant_id, t.kind, t.provider_ref),
   index('paypal_payment_state_open').on(t.environment, t.status),
 ]);
+
+// Server-controlled monthly plans: one validated provider plan per offered
+// amount. Members choose among these amounts only; a member's contribution is
+// never changed by editing a shared plan.
+export const paypalMonthlyPlans = pgTable('paypal_monthly_plans', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  environment: text('environment').notNull(),
+  merchant_id: text('merchant_id').notNull(),
+  plan_id: text('plan_id').notNull(),
+  amount_ore: integer('amount_ore').notNull(),
+  active: boolean('active').notNull().default(true),
+  validated_at: timestamp('validated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('paypal_monthly_plan_id').on(t.environment, t.plan_id),
+  uniqueIndex('paypal_monthly_plan_amount').on(t.environment, t.merchant_id, t.amount_ore).where(sql`${t.active}`),
+]);

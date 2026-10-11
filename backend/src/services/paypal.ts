@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq, desc, lt, gt, or, isNull, lte, notInArray, inArray, sql, count } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { paypalConfigs, paypalConfigHistory, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
+import { paypalConfigs, paypalConfigHistory, paypalMonthlyPlans, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
 import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
 import { log } from '../utils/logger.ts';
+import { isUniqueViolation } from '../db/errors.ts';
 import { incrementMetric } from '../utils/metricRegistry.ts';
 import { PayPalError, paypalClient, type PayPalEnvironment, type PayPalCredentials } from './paypalClient.ts';
 import { normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund, normalizeReportedAdjustment, oreToDkk, parseDkkOre } from './paypalMoney.ts';
@@ -297,13 +298,13 @@ export async function ownPaymentHistory(userId: number) {
   return { items: intents, postings, subscriptions };
 }
 export async function memberPaypalStatus() {
-  const [row] = await db.select({ enabled: paypalConfigs.enabled, monthly_plan_id: paypalConfigs.monthly_plan_id,
-    monthly_amount_ore: paypalConfigs.monthly_amount_ore, client_id: paypalConfigs.client_id,
-    client_secret: paypalConfigs.client_secret, merchant_id: paypalConfigs.merchant_id, webhook_id: paypalConfigs.webhook_id })
-    .from(paypalConfigs).where(eq(paypalConfigs.environment, 'live')).limit(1);
+  const [row] = await db.select().from(paypalConfigs).where(eq(paypalConfigs.environment, 'live')).limit(1);
+  const enabled = row?.enabled === true;
+  const options = enabled ? await monthlyOptions(row) : [];
   return { environment: 'live', configured: Boolean(row?.client_id && row.client_secret && row.merchant_id && row.webhook_id),
-    checkoutEnabled: row?.enabled === true, monthlyAvailable: row?.enabled === true && Boolean(row.monthly_plan_id && row.monthly_amount_ore),
-    monthlyAmountOre: row?.enabled === true ? row.monthly_amount_ore : null };
+    checkoutEnabled: enabled, monthlyAvailable: options.length > 0,
+    monthlyAmountOre: options.length === 1 ? options[0].amountOre : null,
+    monthlyOptions: options.map((item) => item.amountOre) };
 }
 
 export async function processPaypalInbox(limit = 20) {
@@ -418,22 +419,89 @@ export function paypalInboxRetryDelayMs(attempt: number) {
   return Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.max(0, Math.min(attempt - 1, 10)));
 }
 
-export async function createMonthly(userId: number, value: unknown) {
+type MonthlyOption = { amountOre: number; planId: string };
+async function monthlyOptions(row: { environment: string; merchant_id: string | null; monthly_plan_id: string | null; monthly_amount_ore: number | null }) {
+  const plans = await db.select({ amountOre: paypalMonthlyPlans.amount_ore, planId: paypalMonthlyPlans.plan_id }).from(paypalMonthlyPlans)
+    .where(and(eq(paypalMonthlyPlans.environment, row.environment), eq(paypalMonthlyPlans.merchant_id, row.merchant_id || ''),
+      eq(paypalMonthlyPlans.active, true))).orderBy(paypalMonthlyPlans.amount_ore).limit(20);
+  const options: MonthlyOption[] = [...plans];
+  if (row.monthly_plan_id && row.monthly_amount_ore && !options.some((item) => item.amountOre === row.monthly_amount_ore))
+    options.push({ amountOre: row.monthly_amount_ore, planId: row.monthly_plan_id });
+  return options.sort((a, b) => a.amountOre - b.amountOre);
+}
+const OVERLAPPING_STATUSES = ['APPROVED', 'ACTIVE', 'SUSPENDED', 'CANCELLATION_REQUESTED', 'UNKNOWN'];
+/**
+ * Start a monthly subscription for one of the server-offered amounts. The
+ * client may only pick an amount; the plan ID is resolved server-side and
+ * re-validated against PayPal before use. A member with a live subscription
+ * must use the change flow, so two subscriptions never overlap by accident.
+ */
+export async function createMonthly(userId: number, value: unknown, amount?: unknown) {
   const row = await configured(value);
-  if (!row.enabled || !row.monthly_plan_id || !row.monthly_amount_ore) throw new PayPalError('MONTHLY_DISABLED', 409);
+  const options = row.enabled ? await monthlyOptions(row) : [];
+  if (!options.length) throw new PayPalError('MONTHLY_DISABLED', 409);
+  const option = amount === undefined || amount === null || amount === ''
+    ? (options.length === 1 ? options[0] : null)
+    : options.find((item) => item.amountOre === parseDkkOre(amount)) ?? null;
+  if (!option) throw new PayPalError('MONTHLY_AMOUNT_NOT_OFFERED', 400);
+  const [existing] = await db.select({ id: paypalSubscriptions.id }).from(paypalSubscriptions).where(and(eq(paypalSubscriptions.user_id, userId),
+    eq(paypalSubscriptions.environment, row.environment), inArray(paypalSubscriptions.status, OVERLAPPING_STATUSES))).limit(1);
+  if (existing) throw new PayPalError('SUBSCRIPTION_EXISTS', 409);
+  validateMonthlyPlan(await paypalClient.getPlan(credentials(row), option.planId), option.amountOre);
   const id = randomUUID(); const requestId = randomUUID();
   await insertRateLimitedIntent(userId, { id, user_id: userId, environment: row.environment, merchant_id: row.merchant_id!, kind: 'monthly',
-    amount_ore: row.monthly_amount_ore, create_request_id: requestId, config_version: row.config_version });
+    amount_ore: option.amountOre, create_request_id: requestId, config_version: row.config_version });
   const { returnUrl, cancelUrl } = checkoutReturnUrls('monthly');
-  const result = await paypalClient.createSubscription(credentials(row), row.monthly_plan_id, id, requestId, returnUrl, cancelUrl);
+  const result = await paypalClient.createSubscription(credentials(row), option.planId, id, requestId, returnUrl, cancelUrl);
   if (typeof result.id !== 'string' || result.status !== 'APPROVAL_PENDING') throw new PayPalError('SUBSCRIPTION_CREATE_UNKNOWN');
   await db.transaction(async (tx) => {
     await tx.update(paypalIntents).set({ provider_id: result.id, status: 'approval_pending', updated_at: new Date() }).where(eq(paypalIntents.id, id));
     await tx.insert(paypalSubscriptions).values({ id: result.id, intent_id: id, user_id: userId, environment: row.environment,
-      merchant_id: row.merchant_id!, status: 'APPROVAL_PENDING', plan_id: row.monthly_plan_id!, amount_ore: row.monthly_amount_ore! });
+      merchant_id: row.merchant_id!, status: 'APPROVAL_PENDING', plan_id: option.planId, amount_ore: option.amountOre });
   });
   const approval = Array.isArray(result.links) ? result.links.find((link: any) => link.rel === 'approve')?.href : null;
   return { intentId: id, subscriptionId: result.id, approvalUrl: paypalApprovalUrl(approval, row.environment as PayPalEnvironment), status: 'approval_pending' };
+}
+/**
+ * Amount change = cancel, confirm, then a NEW explicit approval. The old
+ * subscription must be confirmed cancelled at PayPal before the new approval
+ * is offered, so the member can never end up billed twice by accident.
+ */
+export async function changeMonthly(userId: number, id: string, value: unknown, amount: unknown) {
+  const [subscription] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.id, id), eq(paypalSubscriptions.user_id, userId))).limit(1);
+  if (!subscription) throw new PayPalError('SUBSCRIPTION_NOT_FOUND', 404);
+  if (subscription.environment !== environment(value)) throw new PayPalError('SUBSCRIPTION_NOT_FOUND', 404);
+  const row = await configured(value);
+  const requested = parseDkkOre(amount);
+  if (requested === subscription.amount_ore) throw new PayPalError('MONTHLY_AMOUNT_UNCHANGED', 400);
+  if (!(await monthlyOptions(row)).some((item) => item.amountOre === requested)) throw new PayPalError('MONTHLY_AMOUNT_NOT_OFFERED', 400);
+  const cancellation = await cancelSubscriptionRecord(subscription);
+  if (cancellation.status !== 'cancelled') return { status: 'cancellation_unknown' };
+  return { ...(await createMonthly(userId, value, amount)), replaced: subscription.id };
+}
+export async function addMonthlyPlan(value: unknown, planId: unknown, amount: unknown) {
+  const row = await configured(value);
+  if (typeof planId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(planId)) throw new PayPalError('INVALID_ID', 400);
+  const amountOre = parseDkkOre(amount);
+  validateMonthlyPlan(await paypalClient.getPlan(credentials(row), planId), amountOre);
+  try {
+    await db.insert(paypalMonthlyPlans).values({ environment: row.environment, merchant_id: row.merchant_id!, plan_id: planId, amount_ore: amountOre });
+  } catch (err) { if (isUniqueViolation(err)) throw new PayPalError('MONTHLY_PLAN_EXISTS', 409); throw err; }
+  return listMonthlyPlans(row.environment);
+}
+export async function deactivateMonthlyPlan(value: unknown, id: number) {
+  const env = environment(value);
+  // Deactivation only stops NEW approvals; existing subscriptions keep billing
+  // until cancelled and keep being reconciled.
+  const result = await db.update(paypalMonthlyPlans).set({ active: false }).where(and(eq(paypalMonthlyPlans.id, id), eq(paypalMonthlyPlans.environment, env)));
+  if (result.rowCount !== 1) throw new PayPalError('MONTHLY_PLAN_NOT_FOUND', 404);
+  return listMonthlyPlans(env);
+}
+export async function listMonthlyPlans(value: unknown) {
+  const env = environment(value);
+  return db.select({ id: paypalMonthlyPlans.id, planId: paypalMonthlyPlans.plan_id, amountOre: paypalMonthlyPlans.amount_ore,
+    active: paypalMonthlyPlans.active, merchantId: paypalMonthlyPlans.merchant_id, validatedAt: paypalMonthlyPlans.validated_at })
+    .from(paypalMonthlyPlans).where(eq(paypalMonthlyPlans.environment, env)).orderBy(desc(paypalMonthlyPlans.active), paypalMonthlyPlans.amount_ore).limit(100);
 }
 export async function cancelMonthly(userId: number, id: string) {
   const [subscription] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.id, id), eq(paypalSubscriptions.user_id, userId))).limit(1);

@@ -361,3 +361,44 @@ test('gap 8: test-connection is read-only and setup provisioning is idempotent a
   assert.equal((await setup.provisionPaypalResource('sandbox', 'webhook')).providerId, 'EXISTINGHOOK');
   await assert.rejects(setup.provisionPaypalResource('sandbox', 'anything'), /INVALID_SETUP_KIND/);
 });
+
+test('gap 9: members pick only server-offered monthly amounts; changes cancel first, then need new approval', async () => {
+  const plan = (amount: string) => ({ status: 'ACTIVE', billing_cycles: [{ tenure_type: 'REGULAR', frequency: { interval_unit: 'MONTH', interval_count: 1 },
+    pricing_scheme: { fixed_price: dkk(amount) } }], payment_preferences: { auto_bill_outstanding: false } });
+  routes['GET /v1/billing/plans/PLANAMT2500'] = () => plan('25.00');
+  routes['GET /v1/billing/plans/PLANAMT7500'] = () => plan('75.00');
+  routes['GET /v1/billing/plans/PLANLIES99'] = () => plan('99.00');
+  process.env.PORTAL_BASE_URL = 'https://portal.example';
+  await paypal.setPaypalEnabled('sandbox', true);
+  await paypal.addMonthlyPlan('sandbox', 'PLANAMT2500', '25.00');
+  await paypal.addMonthlyPlan('sandbox', 'PLANAMT7500', '75.00');
+  await assert.rejects(paypal.addMonthlyPlan('sandbox', 'PLANLIES99', '10.00'), /UNSAFE_MONTHLY_PLAN/, 'plan price must match the offered amount');
+  await assert.rejects(paypal.addMonthlyPlan('sandbox', 'PLANAMT2500', '25.00'), /MONTHLY_PLAN_EXISTS/);
+  await fixture.db.insert(users).values({ id: 9, username: 'monthly-member', password: 'unused' });
+  await assert.rejects(paypal.createMonthly(9, 'sandbox', '30.00'), /MONTHLY_AMOUNT_NOT_OFFERED/);
+  await assert.rejects(paypal.createMonthly(9, 'sandbox'), /MONTHLY_AMOUNT_NOT_OFFERED/, 'with several options the member must choose');
+  let subCounter = 0; const subStatus: Record<string, string> = {}; let cancelWorks = false; const created: any[] = [];
+  routes['POST /v1/billing/subscriptions'] = (_url, body) => { subCounter++; const id = `SUBAMT${subCounter}`; subStatus[id] = 'APPROVAL_PENDING';
+    created.push({ id, ...body }); return { id, status: 'APPROVAL_PENDING', links: [{ rel: 'approve', href: `https://www.sandbox.paypal.com/webapps/billing/subscriptions?ba_token=${id}` }] }; };
+  for (const id of ['SUBAMT1', 'SUBAMT2']) {
+    routes[`GET /v1/billing/subscriptions/${id}`] = () => ({ id, plan_id: created.find((item) => item.id === id).plan_id,
+      custom_id: created.find((item) => item.id === id).custom_id, status: subStatus[id] });
+    routes[`POST /v1/billing/subscriptions/${id}/cancel`] = () => { if (!cancelWorks) return new Response('{}', { status: 503 }); subStatus[id] = 'CANCELLED'; return new Response(null, { status: 204 }); };
+  }
+  const first = await paypal.createMonthly(9, 'sandbox', '25.00');
+  assert.equal(created[0].plan_id, 'PLANAMT2500', 'the plan is resolved server-side from the amount');
+  await fixture.db.update(paypalSubscriptions).set({ status: 'ACTIVE' }).where(eq(paypalSubscriptions.id, first.subscriptionId));
+  subStatus.SUBAMT1 = 'ACTIVE';
+  await assert.rejects(paypal.createMonthly(9, 'sandbox', '75.00'), /SUBSCRIPTION_EXISTS/, 'no accidental overlapping subscription');
+  assert.deepEqual(await paypal.changeMonthly(9, first.subscriptionId, 'sandbox', '75.00'), { status: 'cancellation_unknown' });
+  assert.equal(created.length, 1, 'no new approval while the old subscription may still bill');
+  cancelWorks = true;
+  const changed = await paypal.changeMonthly(9, first.subscriptionId, 'sandbox', '75.00') as any;
+  assert.equal(changed.status, 'approval_pending');
+  assert.equal(changed.replaced, 'SUBAMT1');
+  assert.equal(created[1].plan_id, 'PLANAMT7500');
+  const [old] = await fixture.db.select().from(paypalSubscriptions).where(eq(paypalSubscriptions.id, 'SUBAMT1'));
+  assert.equal(old.status, 'CANCELLED');
+  const status = await paypal.listMonthlyPlans('sandbox');
+  assert.equal(status.filter((item) => item.active).length, 2);
+});

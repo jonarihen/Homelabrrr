@@ -17,6 +17,7 @@ export default function SupportPage() {
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [monthlyAmount, setMonthlyAmount] = useState(null);
   const [transfer, setTransfer] = useState({ amount: '', reference: '', receivedOn: '' });
   const refresh = useCallback(async () => {
     const [{ data: nextStatus }, { data: nextHistory }] = await Promise.all([api.get('/payments/status'), api.get('/payments/mine')]);
@@ -45,7 +46,7 @@ export default function SupportPage() {
     setBusy(kind); setError(''); setNotice('');
     try {
       const { data } = await api.post(kind === 'monthly' ? '/payments/monthly' : '/payments/one-off',
-        kind === 'monthly' ? { environment: 'live' } : { amount, environment: 'live' });
+        kind === 'monthly' ? { environment: 'live', amount: monthlyChoice != null ? (monthlyChoice / 100).toFixed(2) : undefined } : { amount, environment: 'live' });
       sessionStorage.setItem('paypalPendingIntent', data.intentId);
       window.location.assign(data.approvalUrl);
     } catch (err) { setError(err.response?.data?.error || 'Could not open PayPal checkout.'); setBusy(''); }
@@ -57,6 +58,18 @@ export default function SupportPage() {
       setNotice('Transfer reported. It counts only after the owner confirms it against the bank statement.'); await refresh(); }
     catch (err) { setError(err.response?.data?.error || 'Could not report the transfer.'); }
     finally { setBusy(''); }
+  };
+  const options = status?.monthlyOptions || [];
+  const monthlyChoice = options.includes(monthlyAmount) ? monthlyAmount : options[0] ?? null;
+  const change = async (subscription, target) => {
+    if (!window.confirm(`Change to ${money(target)} per month? Your current subscription is cancelled at PayPal first; you then approve the new amount at PayPal. If you do not approve, no monthly contribution continues.`)) return;
+    setBusy(subscription.id); setError(''); setNotice('');
+    try {
+      const { data } = await api.post(`/payments/monthly/${encodeURIComponent(subscription.id)}/change`, { environment: 'live', amount: (target / 100).toFixed(2) });
+      if (data.status === 'cancellation_unknown') { setNotice('Cancellation of the current subscription is not yet confirmed by PayPal, so no new subscription was started. Try again later.'); await refresh(); return; }
+      sessionStorage.setItem('paypalPendingIntent', data.intentId);
+      window.location.assign(data.approvalUrl);
+    } catch (err) { setError(err.response?.data?.error || 'Could not change the monthly amount.'); setBusy(''); }
   };
   const cancel = async (subscription) => {
     if (!window.confirm('Cancel this monthly contribution? PayPal may still process a payment already due.')) return;
@@ -81,7 +94,10 @@ export default function SupportPage() {
           className="mt-4 border border-orange-600 bg-orange-700/30 px-4 py-2 font-mono text-xs uppercase text-orange-100 disabled:opacity-40">Continue to PayPal</button>
       </div>
       <div className={card}><p className="font-mono text-xs uppercase tracking-widest text-gray-500">Optional monthly contribution</p>
-        <p className="text-2xl text-white mt-4">{money(status?.monthlyAmountOre)} <span className="text-sm text-gray-400">per month</span></p>
+        {options.length > 1 ? <div className="mt-4 flex flex-wrap gap-2" role="radiogroup" aria-label="Monthly amount">{options.map((ore) => <button key={ore} type="button" role="radio" aria-checked={monthlyChoice === ore}
+          onClick={() => setMonthlyAmount(ore)} className={`border px-3 py-2 text-sm ${monthlyChoice === ore ? 'border-orange-500 text-orange-100' : 'border-gray-700 text-gray-300'}`}>{money(ore)}</button>)}</div>
+          : <p className="text-2xl text-white mt-4">{money(monthlyChoice)} <span className="text-sm text-gray-400">per month</span></p>}
+        <p className="text-xs text-gray-500 mt-2">Monthly, in DKK, first payment when you approve at PayPal. No setup fee or trial. Missed payments are never collected later.</p>
         <p className="text-sm text-gray-400 mt-3">A recurring subscription requires your explicit approval at PayPal. You can cancel it here at any time.</p>
         <button type="button" disabled={!status?.monthlyAvailable || !!busy} onClick={() => begin('monthly')}
           className="mt-5 border border-orange-600 bg-orange-700/30 px-4 py-2 font-mono text-xs uppercase text-orange-100 disabled:opacity-40">Review monthly subscription</button>
@@ -92,7 +108,10 @@ export default function SupportPage() {
       {history.subscriptions.length === 0 ? <p className="text-sm text-gray-500 mt-3">No subscriptions recorded.</p> :
         <div className="mt-4 space-y-3">{history.subscriptions.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-800 pt-3 text-sm">
           <div><p className="text-white">{money(item.amountOre)} monthly · {item.status}</p><p className="text-xs text-gray-500">{item.environment === 'sandbox' ? 'Sandbox test · ' : ''}Next billing {date(item.nextBillingAt)}</p></div>
-          {!['CANCELLED', 'EXPIRED'].includes(item.status) && <button type="button" disabled={!!busy} onClick={() => cancel(item)} className="border border-gray-700 px-3 py-2 text-xs text-gray-300 disabled:opacity-40">Cancel subscription</button>}
+          {!['CANCELLED', 'EXPIRED'].includes(item.status) && <div className="flex flex-wrap gap-2">
+            {item.environment === 'live' && options.filter((ore) => ore !== item.amountOre).map((ore) => <button key={ore} type="button" disabled={!!busy} onClick={() => change(item, ore)}
+              className="border border-gray-700 px-3 py-2 text-xs text-gray-300 disabled:opacity-40">Change to {money(ore)}</button>)}
+            <button type="button" disabled={!!busy} onClick={() => cancel(item)} className="border border-gray-700 px-3 py-2 text-xs text-gray-300 disabled:opacity-40">Cancel subscription</button></div>}
         </div>)}</div>}
     </section>
     <section className={card}><h2 className="aaris-display text-lg text-gray-100">Paid by bank transfer?</h2>
