@@ -13,6 +13,10 @@
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
 - Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+## 2026-10-08 — Server energy history
+
+- Energy & Budget now charts integrated server kWh alongside instantaneous watts for 24-hour and seven-day views, with coverage in an accessible interval table. Missing intervals leave visible gaps in both trend lines.
+
 ## 2026-10-08 — Day-ahead price source compatibility
 
 - The Energi Data Service request now sends Copenhagen local `start` and `end` values accepted by the live API, while stored price intervals continue to use unambiguous UTC timestamps across daylight-saving changes.

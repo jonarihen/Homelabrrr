@@ -177,6 +177,17 @@ export async function energyHistory(range: '24h' | '7d', now = new Date()) {
     SELECT at, sum(watts)::text AS watts, count(*)::integer AS measured_hosts
     FROM per_host GROUP BY at ORDER BY at LIMIT 100
   `);
+  const energy = await db.execute(sql`
+    SELECT to_timestamp(floor(extract(epoch FROM i.start_utc) / ${binSeconds}) * ${binSeconds}) AS at,
+      sum(i.kwh)::text AS kwh, sum(i.covered_seconds)::integer AS covered_seconds,
+      sum(i.expected_seconds)::integer AS expected_seconds, count(DISTINCT i.hardware_id)::integer AS measured_hosts
+    FROM hardware_energy_intervals i JOIN hardware_connections c ON c.id = i.hardware_id
+    WHERE c.lifecycle_state = 'active' AND i.start_utc >= ${start} AND i.end_utc <= ${now}
+    GROUP BY at ORDER BY at LIMIT 100
+  `);
   return { range, from: start, through: now, unit: 'W', points: result.rows.map((row: any) =>
-    ({ at: row.at, watts: numberOrNull(row.watts), measuredHosts: row.measured_hosts })) };
+    ({ at: row.at, watts: numberOrNull(row.watts), measuredHosts: row.measured_hosts })),
+  energy: { unit: 'kWh', method: 'integrated_server_input', binSeconds,
+    points: energy.rows.map((row: any) => ({ at: row.at, kwh: numberOrNull(row.kwh),
+      coveredSeconds: row.covered_seconds, expectedSeconds: row.expected_seconds, measuredHosts: row.measured_hosts })) } };
 }

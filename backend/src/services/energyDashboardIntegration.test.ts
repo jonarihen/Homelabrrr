@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 
 const fixture = await createTestDatabase();
 process.env.DATABASE_URL = fixture.url;
-const { energySummary } = await import('./energyDashboard.ts');
+const { energySummary, energyHistory } = await import('./energyDashboard.ts');
 const { closeDb } = await import('../db/client.ts');
 test.after(async () => { await closeDb(); await fixture.drop(); });
 
@@ -42,4 +42,10 @@ test('historical server cost uses its effective contract while current price use
   assert.equal(summary.price.orePerKwh, 300);
   assert.equal(summary.cost.actualOre, '200');
   assert.equal(summary.cost.status, 'partial');
+  const history = await energyHistory('24h', new Date('2026-09-10T12:30:00Z'));
+  assert.equal(history.energy.unit, 'kWh');
+  assert.equal(history.energy.method, 'integrated_server_input');
+  assert.equal(history.energy.points.length, 1);
+  assert.equal(history.energy.points[0].kwh, 1);
+  assert.equal(history.energy.points[0].coveredSeconds, 900);
 });
