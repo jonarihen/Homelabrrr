@@ -227,3 +227,24 @@ test('decommission preserves identity and history while making the old binding i
   assert.equal(archived.collection_enabled, false);
   assert.equal(archived.control_enabled, false);
 });
+
+test('telemetry exposes a time range, exact stats and mode-change markers within bounds', async () => {
+  const [row] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.node_ref, `${hostId}~pve-renamed`));
+  const now = Date.now();
+  const samples = [[-50, 200, 'low'], [-49, 220, 'low'], [-48, 400, 'high'], [-47, 380, 'high'], [-20, 210, 'low']] as const;
+  await fixture.db.insert(hardwarePowerSamples).values(samples.map(([minutes, watts, mode]) => ({ hardware_id: row.id, node_ref: row.node_ref,
+    observed_at: new Date(now + minutes * 60_000), watts: String(watts), mode, origin: 'fixture', device_epoch: row.system_uuid })));
+  const result = await request(app).get(`/${row.id}/telemetry?hours=1`).set('x-test-role', 'admin');
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.range.binSeconds, 60);
+  assert.ok(Math.abs(Date.parse(result.body.range.end) - Date.parse(result.body.range.start) - 3600_000) < 5000);
+  assert.equal(Number(result.body.stats.min_watts), 200);
+  assert.equal(Number(result.body.stats.max_watts), 400);
+  assert.equal(result.body.stats.samples, 5);
+  assert.deepEqual(result.body.modeChanges.map((change: any) => [change.previous_mode, change.mode]), [['low', 'high'], ['high', 'low']]);
+  assert.equal(result.body.points.length, 5);
+  assert.equal(result.body.failureCount, 0);
+  for (const hours of ['0', '169', 'abc', '1.5']) {
+    assert.equal((await request(app).get(`/${row.id}/telemetry?hours=${hours}`).set('x-test-role', 'admin')).status, 400, hours);
+  }
+});
