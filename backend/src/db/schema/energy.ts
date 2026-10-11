@@ -13,6 +13,18 @@ export const eloverblikConnections = pgTable('eloverblik_connections', {
   last_success_at: timestamp('last_success_at', { withTimezone: true, mode: 'date' }),
   latest_interval_end: timestamp('latest_interval_end', { withTimezone: true, mode: 'date' }),
   last_error_code: text('last_error_code'),
+  // Durable retry state so backoff and upstream Retry-After survive restarts.
+  consecutive_failures: integer('consecutive_failures').notNull().default(0),
+  next_attempt_at: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
+  retry_after_until: timestamp('retry_after_until', { withTimezone: true, mode: 'date' }),
+  // A backfill chunk that keeps failing is skipped (recorded as a gap) after
+  // a bounded number of attempts instead of stalling the backfill forever.
+  failing_chunk_start: timestamp('failing_chunk_start', { withTimezone: true, mode: 'date' }),
+  chunk_failures: integer('chunk_failures').notNull().default(0),
+  skipped_ranges: jsonb('skipped_ranges').notNull().default([]),
+  // Reconnect-required / meter-unauthorized: polling stops until the owner acts.
+  attention_code: text('attention_code'),
+  attention_since: timestamp('attention_since', { withTimezone: true, mode: 'date' }),
 });
 
 // Each provider series and interval is unique; only A04/A64 consumption in kWh
@@ -44,6 +56,20 @@ export const eloverblikChargeSnapshots = pgTable('eloverblik_charge_snapshots', 
 }, (t) => [
   uniqueIndex('eloverblik_charge_version').on(t.meter_id, t.content_hash),
   index('eloverblik_charge_recent').on(t.meter_id, t.observed_at),
+]);
+
+// When each distinct charge snapshot was seen. A snapshot that returns after
+// a different one (A -> B -> A) gets a new observation row, so the sequence of
+// observed charge versions is preserved. Observation times are when the
+// source reported the content, not tariff effective dates.
+export const eloverblikChargeObservations = pgTable('eloverblik_charge_observations', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  meter_id: text('meter_id').notNull(),
+  snapshot_id: integer('snapshot_id').notNull().references(() => eloverblikChargeSnapshots.id, { onDelete: 'cascade' }),
+  first_observed_at: timestamp('first_observed_at', { withTimezone: true, mode: 'date' }).notNull(),
+  last_observed_at: timestamp('last_observed_at', { withTimezone: true, mode: 'date' }).notNull(),
+}, (t) => [
+  index('eloverblik_charge_observation_recent').on(t.meter_id, t.first_observed_at),
 ]);
 
 // Pricing is independent of delayed meter consumption. Contract and charge

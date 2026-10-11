@@ -99,6 +99,13 @@
       "when": 1791734327583,
       "tag": "0013_electricity_contract_succession",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1791734670352,
+      "tag": "0014_eloverblik_sync_resilience",
+      "breakpoints": true
     }
   ]
 }

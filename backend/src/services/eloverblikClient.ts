@@ -2,9 +2,26 @@ const ORIGIN = 'https://api.eloverblik.dk';
 const BASE = '/customerapi/api';
 const MAX_BYTES = 4 * 1024 * 1024;
 const ACCESS_SAFETY_MS = 10 * 60_000;
+// Upstream Retry-After is honoured up to a day; longer values are clamped so a
+// bogus header cannot park the integration indefinitely.
+export const MAX_RETRY_AFTER_MS = 24 * 60 * 60_000;
 
 type FetchLike = typeof fetch;
 type Access = { value: string; expires: number; generation: number };
+// token: refresh-token exchange; account: owner-level reads (meter list);
+// meter: reads scoped to one metering point. A 401/403 means different things
+// for each: a revoked refresh token versus a missing per-meter authorization.
+type RequestScope = 'token' | 'account' | 'meter';
+
+// Retry-After is either delay-seconds or an HTTP-date (RFC 9110 10.2.3).
+export function parseRetryAfter(value: string | null, now: number): number | null {
+  if (!value) return null;
+  const text = value.trim();
+  if (/^\d+$/.test(text)) return Math.min(Number(text) * 1000, MAX_RETRY_AFTER_MS);
+  const at = Date.parse(text);
+  if (!Number.isFinite(at)) return null;
+  return Math.min(Math.max(0, at - now), MAX_RETRY_AFTER_MS);
+}
 
 export class ElOverblikError extends Error {
   code: string;
@@ -61,7 +78,7 @@ export class ElOverblikClient {
     this.now = now;
   }
   invalidate() { this.generation++; this.access = null; this.pending = null; }
-  private async request(path: string, bearer: string, body?: object): Promise<Record<string, any>> {
+  private async request(path: string, bearer: string, scope: RequestScope, body?: object): Promise<Record<string, any>> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
@@ -72,9 +89,16 @@ export class ElOverblikClient {
         redirect: 'error', signal: controller.signal,
       });
       if (!response.ok) {
-        const seconds = Number(response.headers.get('retry-after'));
-        throw new ElOverblikError(response.status === 401 || response.status === 403 ? 'RECONNECT_REQUIRED' : `HTTP_${response.status}`,
-          response.status === 429 && Number.isFinite(seconds) ? Math.min(seconds * 1000, 60_000) : null);
+        // Release the connection; the error body is never parsed or logged.
+        await response.body?.cancel().catch(() => undefined);
+        const status = response.status;
+        if (status === 401 || status === 403) {
+          if (scope === 'token') throw new ElOverblikError('RECONNECT_REQUIRED');
+          if (status === 401) throw new ElOverblikError('ACCESS_REJECTED');
+          throw new ElOverblikError(scope === 'meter' ? 'METER_UNAUTHORIZED' : 'RECONNECT_REQUIRED');
+        }
+        const retry = status === 429 || status === 503 ? parseRetryAfter(response.headers.get('retry-after'), this.now()) : null;
+        throw new ElOverblikError(status === 429 ? 'RATE_LIMITED' : `HTTP_${status}`, retry);
       }
       return readJson(response);
     } catch (err) {
@@ -87,9 +111,9 @@ export class ElOverblikClient {
     if (this.pending) return this.pending;
     const generation = this.generation;
     const pending = (async () => {
-      const envelope = await this.request('/token', refreshToken);
+      const envelope = await this.request('/token', refreshToken, 'token');
       const result = envelope.result;
-      if (typeof result !== 'string' || !result) throw new ElOverblikError('RECONNECT_REQUIRED');
+      if (typeof result !== 'string' || !result) throw new ElOverblikError('MALFORMED');
       const access = { value: result, expires: tokenExpiry(result, this.now()), generation };
       if (generation !== this.generation) throw new ElOverblikError('CONFIG_CHANGED');
       this.access = access;
@@ -98,30 +122,40 @@ export class ElOverblikClient {
     this.pending = pending;
     try { return await pending; } finally { if (this.pending === pending) this.pending = null; }
   }
-  private async authorized(path: string, refreshToken: string, body?: object): Promise<Record<string, any>> {
+  // An expired/rejected access token is refreshed and the call retried once.
+  // If a freshly issued token is still rejected, the refresh token itself is
+  // valid, so a meter-scoped rejection is a per-meter authorization problem
+  // rather than a reason to ask the owner to reconnect.
+  private async authorized(path: string, refreshToken: string, scope: Exclude<RequestScope, 'token'>, body?: object): Promise<Record<string, any>> {
     let access = await this.getAccess(refreshToken);
-    try { return await this.request(path, access.value, body); }
+    try { return await this.request(path, access.value, scope, body); }
     catch (err) {
-      if (!(err instanceof ElOverblikError) || err.code !== 'RECONNECT_REQUIRED') throw err;
+      if (!(err instanceof ElOverblikError) || err.code !== 'ACCESS_REJECTED') throw err;
       if (access.generation !== this.generation) throw new ElOverblikError('CONFIG_CHANGED');
-      this.access = null;
+      if (this.access === access) this.access = null;
       access = await this.getAccess(refreshToken);
-      return this.request(path, access.value, body);
+      try { return await this.request(path, access.value, scope, body); }
+      catch (retryErr) {
+        if (retryErr instanceof ElOverblikError && retryErr.code === 'ACCESS_REJECTED') throw new ElOverblikError(scope === 'meter' ? 'METER_UNAUTHORIZED' : 'RECONNECT_REQUIRED');
+        throw retryErr;
+      }
     }
   }
   async listMeters(refreshToken: string): Promise<Array<{ id: string; hasRelation: boolean; type: string }>> {
-    const envelope = await this.authorized('/meteringpoints/meteringpoints?includeAll=false', refreshToken);
+    const envelope = await this.authorized('/meteringpoints/meteringpoints?includeAll=false', refreshToken, 'account');
     if (!Array.isArray(envelope.result)) throw new ElOverblikError('MALFORMED');
-    return envelope.result.map((item: any) => ({ id: String(item.meteringPointId || ''), hasRelation: item.hasRelation === true, type: String(item.typeOfMP || '') }))
-      .filter((item: any) => /^\d{18}$/.test(item.id));
+    // An 18-digit GSRN exceeds Number.MAX_SAFE_INTEGER: a JSON number has
+    // already lost precision, so only string identifiers are accepted.
+    return envelope.result.filter((item: any) => typeof item?.meteringPointId === 'string' && /^\d{18}$/.test(item.meteringPointId))
+      .map((item: any) => ({ id: item.meteringPointId as string, hasRelation: item.hasRelation === true, type: String(item.typeOfMP || '') }));
   }
   async timeSeries(refreshToken: string, meterId: string, from: string, to: string): Promise<Record<string, any>> {
     if (!/^\d{18}$/.test(meterId) || !/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from >= to) throw new ElOverblikError('INVALID_REQUEST');
-    return this.authorized(`/meterdata/gettimeseries/${from}/${to}/Actual`, refreshToken, { meteringPoints: { meteringPoint: [meterId] } });
+    return this.authorized(`/meterdata/gettimeseries/${from}/${to}/Actual`, refreshToken, 'meter', { meteringPoints: { meteringPoint: [meterId] } });
   }
   async charges(refreshToken: string, meterId: string): Promise<Record<string, any>> {
     if (!/^\d{18}$/.test(meterId)) throw new ElOverblikError('INVALID_REQUEST');
-    return this.authorized('/meteringpoints/meteringpoint/getcharges', refreshToken, { meteringPoints: { meteringPoint: [meterId] } });
+    return this.authorized('/meteringpoints/meteringpoint/getcharges', refreshToken, 'meter', { meteringPoints: { meteringPoint: [meterId] } });
   }
 }
 

@@ -18,6 +18,9 @@ export const EVENT_TYPES = [
   { key: 'node.recovered', label: 'Node recovered', category: 'health', ownerScoped: false },
   { key: 'notice.published', label: 'New notice published', category: 'notice', ownerScoped: false },
   { key: 'security.lockout', label: 'Account locked out', category: 'security', ownerScoped: false },
+  // Private owner alert: ElOverblik polling paused until the owner reconnects
+  // or reselects the meter. Carries no meter ID, token or household data.
+  { key: 'energy.meter_attention', label: 'Electricity meter sync needs attention', category: 'energy', ownerScoped: false },
   // TIE-IN (#21 — lease expiry): the event type is registered now so admins can
   // pre-select a channel for it, but the emit call site lives in the lease
   // tracker from #21 and is wired in when that branch merges. See PR notes.
@@ -62,7 +65,7 @@ function colorForEvent(key: string, status: unknown): number {
     || key === 'node.unreachable' || key === 'security.lockout') return COLORS.failure;
   if (key === 'node.recovered' || key === 'backup.created') return COLORS.success;
   if (key === 'deployment.finished') return status === 'warning' ? COLORS.warning : COLORS.success;
-  if (key === 'lease.expiring') return COLORS.warning;
+  if (key === 'lease.expiring' || key === 'energy.meter_attention') return COLORS.warning;
   return COLORS.info;
 }
 
