@@ -291,16 +291,6 @@ test('review queue and resync routes are admin-only and reauth-gated where destr
   assert.equal(dismiss.body.code, 'REAUTHENTICATION_REQUIRED');
 });
 
-test('webhook ingress is rate limited without revealing anything', async () => {
-  let limited: any = null;
-  for (let index = 0; index < 60 && !limited; index++) {
-    const response = await request(app).post('/api/payments/paypal/webhook/sandbox').set(webhookHeaders).send('{not json');
-    if (response.status === 429) limited = response;
-  }
-  assert.ok(limited, 'flooding the webhook is throttled');
-  assert.equal(limited.text, 'Too Many Requests');
-});
-
 test('admin health and CSV export are admin-only, reauth-gated and formula-safe', async () => {
   assert.equal((await request(app).get('/api/payments/admin/health?environment=sandbox').set('Cookie', member)).status, 403);
   const health = await request(app).get('/api/payments/admin/health?environment=sandbox').set('Cookie', admin);
@@ -315,4 +305,43 @@ test('admin health and CSV export are admin-only, reauth-gated and formula-safe'
   assert.ok(csv.text.includes(`"'=HYPERLINK(""http://evil"")"`), 'member text cannot become a formula');
   assert.ok(csv.text.includes(',-4.00,'), 'negative amounts stay numeric');
   assert.equal((await request(app).get('/api/payments/admin/export.csv?environment=other').set('Cookie', admin)).status, 400);
+});
+
+test('gap 10: pending, denied and disputes are tracked without posting or double-subtracting', async () => {
+  const { paypalPaymentStates } = await import('../db/schema/index.ts');
+  const before = (await fixture.db.select().from(paypalPostings)).map((row) => row.amount_ore).sort();
+  const send = async (event: any) => { assert.equal((await webhook(event)).status, 204); await waitForBackgroundWork(); await paypal.processPaypalInbox(); };
+  // Delayed PENDING for the capture that already completed: must not open a hold.
+  await send({ id: 'WHPEND1', event_type: 'PAYMENT.CAPTURE.PENDING', create_time: '2026-10-08T11:59:00Z',
+    resource: { id: 'CAPSEC', amount: dkk('100.00'), status_details: { reason: 'PENDING_REVIEW' }, supplementary_data: { related_ids: { order_id: 'ORDERSEC' } } } });
+  await send({ id: 'WHDISP1', event_type: 'CUSTOMER.DISPUTE.CREATED', create_time: '2026-10-10T00:00:00Z',
+    resource: { dispute_id: 'PP-D-1', reason: 'UNAUTHORISED', dispute_amount: dkk('70.00'), disputed_transactions: [{ seller_transaction_id: 'CAPSEC' }] } });
+  await send({ id: 'WHDISPX', event_type: 'CUSTOMER.DISPUTE.CREATED', create_time: '2026-10-10T00:00:00Z',
+    resource: { dispute_id: 'PP-D-UNRELATED', dispute_amount: dkk('5.00'), disputed_transactions: [{ seller_transaction_id: 'NOTOURS' }] } });
+  const states = await fixture.db.select().from(paypalPaymentStates);
+  assert.deepEqual(states.map((row) => [row.kind, row.provider_ref, row.status]).sort(), [['dispute', 'PP-D-1', 'open'], ['pending', 'CAPSEC', 'completed']]);
+  const snapshot = await paypal.verifiedContributionSnapshot('sandbox');
+  assert.equal(snapshot.disputeCount, 1);
+  assert.equal(snapshot.disputedOre, 7000);
+  assert.equal(snapshot.pendingCount, 0);
+  assert.deepEqual((await fixture.db.select().from(paypalPostings)).map((row) => row.amount_ore).sort(), before, 'holds never post');
+  await send({ id: 'WHDISP2', event_type: 'CUSTOMER.DISPUTE.RESOLVED', create_time: '2026-10-11T00:00:00Z',
+    resource: { dispute_id: 'PP-D-1', status: 'RESOLVED', dispute_outcome: { outcome_code: 'RESOLVED_SELLER_FAVOUR' }, disputed_transactions: [{ seller_transaction_id: 'CAPSEC' }] } });
+  await send({ id: 'WHDISP3', event_type: 'CUSTOMER.DISPUTE.UPDATED', create_time: '2026-10-10T12:00:00Z',
+    resource: { dispute_id: 'PP-D-1', status: 'UNDER_REVIEW', disputed_transactions: [{ seller_transaction_id: 'CAPSEC' }] } });
+  const [dispute] = await fixture.db.select().from(paypalPaymentStates).where(eq(paypalPaymentStates.provider_ref, 'PP-D-1'));
+  assert.equal(dispute.status, 'resolved', 'a delayed update never reopens a resolved dispute');
+  assert.equal(dispute.reason_code, 'RESOLVED_SELLER_FAVOUR');
+  assert.equal((await paypal.verifiedContributionSnapshot('sandbox')).disputeCount, 0);
+});
+
+// Runs last: it deliberately exhausts the per-client webhook budget.
+test('webhook ingress is rate limited without revealing anything', async () => {
+  let limited: any = null;
+  for (let index = 0; index < 60 && !limited; index++) {
+    const response = await request(app).post('/api/payments/paypal/webhook/sandbox').set(webhookHeaders).send('{not json');
+    if (response.status === 429) limited = response;
+  }
+  assert.ok(limited, 'flooding the webhook is throttled');
+  assert.equal(limited.text, 'Too Many Requests');
 });

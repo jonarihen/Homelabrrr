@@ -8,6 +8,7 @@ import { incrementMetric } from '../utils/metricRegistry.ts';
 import { PayPalError, paypalClient, type PayPalEnvironment, type PayPalCredentials } from './paypalClient.ts';
 import { normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeCaptureRefund, normalizeReportedAdjustment, oreToDkk, parseDkkOre } from './paypalMoney.ts';
 import { postReceipt, postCaptureRefund, postProviderAdjustment } from './paypalLedger.ts';
+import { PAYMENT_STATE_EVENTS, closePendingState, openPaymentStateTotals, recordPaymentStateEvent } from './paypalPaymentStates.ts';
 import { isAdjustedSaleStatus, linkedCaptureId, settleCaptureAdjustments, settleSaleAdjustments } from './paypalCoverage.ts';
 
 function environment(value: unknown): PayPalEnvironment {
@@ -329,6 +330,10 @@ export async function processPaypalInbox(limit = 20) {
         const row = await configured(entry.environment);
         if (row.merchant_id !== entry.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
         await ingestOneOffCapture(credentials(row), intent, resource.id, entry.source);
+        await closePendingState(entry.environment, entry.merchant_id, resource.id);
+      } else if (PAYMENT_STATE_EVENTS.has(entry.event_type)) {
+        // Pending/denied/dispute: tracked, never posted or subtracted.
+        outcome = (await recordPaymentStateEvent(entry, resource)) === 'recorded' ? 'tracked' : 'unlinked';
       } else if (entry.event_type === 'PAYMENT.CAPTURE.REFUNDED') {
         const row = await configured(entry.environment);
         if (row.merchant_id !== entry.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
@@ -341,6 +346,7 @@ export async function processPaypalInbox(limit = 20) {
         const center = limitedTime(event.create_time);
         await reconcileSubscription(sub, new Date(center.getTime() - 2 * 86_400_000),
           new Date(center.getTime() + 86_400_000), resource.id);
+        await closePendingState(entry.environment, entry.merchant_id, resource.id);
       } else if (entry.event_type.startsWith('BILLING.SUBSCRIPTION.')) {
         const [sub] = await db.select().from(paypalSubscriptions).where(and(eq(paypalSubscriptions.id, resource.id),
           eq(paypalSubscriptions.environment, entry.environment), eq(paypalSubscriptions.merchant_id, entry.merchant_id))).limit(1);
@@ -835,10 +841,13 @@ export async function verifiedContributionSnapshot(value: unknown = 'live') {
   const [{ review }] = await db.select({ review: count() }).from(paypalWebhookInbox)
     .where(and(eq(paypalWebhookInbox.environment, env), eq(paypalWebhookInbox.status, 'needs_review')));
   const knownNetOre = totals.grossOre + totals.feeDebitsOre + totals.refundDebitsOre + totals.feeCreditsOre;
+  // Known pending/held amounts are informational only and already excluded
+  // from net; an eventual refund/reversal posting is the only deduction.
+  const held = await openPaymentStateTotals(env);
   return { environment: env, grossOre: totals.grossOre, feeDebitsOre: totals.feeDebitsOre,
     refundDebitsOre: totals.refundDebitsOre, feeCreditsOre: totals.feeCreditsOre, knownNetOre,
     eligibleNetOre: unresolved || review ? null : Math.max(0, knownNetOre), unresolvedTransactions: unresolved,
-    reviewEvents: review, ledgerRevision: totals.revision, paypalAccountBalanceKnown: false };
+    reviewEvents: review, ledgerRevision: totals.revision, paypalAccountBalanceKnown: false, ...held };
 }
 export async function reconcilePaypalManual(value: unknown, now = new Date()) {
   const env = environment(value);

@@ -238,3 +238,26 @@ export const manualContributions = pgTable('manual_contributions', {
   index('manual_contribution_user').on(t.user_id, t.reported_at),
   index('manual_contribution_status').on(t.status, t.reported_at),
 ]);
+
+// Non-posting provider states for payments this integration created: pending
+// captures/sales, denials and disputes/holds. They are tracked separately so
+// they are visible in the snapshot but never subtracted; only an actual
+// refund/reversal posting changes net support (no double-counted loss).
+export const paypalPaymentStates = pgTable('paypal_payment_states', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  environment: text('environment').notNull(),
+  merchant_id: text('merchant_id').notNull(),
+  kind: text('kind').notNull(),
+  provider_ref: text('provider_ref').notNull(),
+  related_transaction_id: text('related_transaction_id'),
+  intent_id: text('intent_id').references(() => paypalIntents.id),
+  status: text('status').notNull(),
+  amount_ore: integer('amount_ore'),
+  reason_code: text('reason_code'),
+  opened_at: timestamp('opened_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  closed_at: timestamp('closed_at', { withTimezone: true, mode: 'date' }),
+}, (t) => [
+  uniqueIndex('paypal_payment_state_ref').on(t.environment, t.merchant_id, t.kind, t.provider_ref),
+  index('paypal_payment_state_open').on(t.environment, t.status),
+]);
