@@ -4,6 +4,10 @@ import { dkk, fundingProgress, shiftMonth, currentMonth, wattPath, historyPath }
 
 test('money and progress preserve unknowns and avoid misleading percentages', () => {
   assert.equal(dkk(null), 'Unknown');
+  assert.equal(dkk('12345'), dkk(12345), 'PostgreSQL decimal strings display as currency');
+  assert.equal(dkk('-250'), dkk(-250));
+  assert.equal(dkk('12.5'), 'Unknown');
+  assert.equal(dkk('9007199254740993'), 'Unknown');
   assert.equal(fundingProgress(null, 9600), null);
   assert.equal(fundingProgress(0, 9600), null);
   assert.equal(fundingProgress(100_000, 9600), 9.6);

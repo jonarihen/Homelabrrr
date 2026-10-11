@@ -41,6 +41,10 @@
 
 - Administrators can add dated, constant-watt estimates for switch or UPS overhead outside measured server input power. The default remains no extra loads; inclusive household or upstream measurements are rejected, and overlapping revisions of one source are blocked.
 - Monthly previews separate measured server kWh from estimated extra kWh and price both under the same contract intervals. Scheduled future estimates join the forecast through published prices and an explicit later scenario. Finalized prior statements remain revisioned and unchanged until explicitly recalculated.
+## 2026-10-08 — Private energy dashboard verification
+
+- Calculated lab costs and forecasts now display when the backend returns exact decimal-string øre amounts; unsafe or malformed amounts stay unknown.
+- Missing electricity-price validity is labeled unavailable. Dashboard browser and API tests cover signed-out access, member-only aggregate data, stale hardware, missing price and history, and hidden contributor and infrastructure identifiers.
 
 ## 2026-10-08 — Server energy history
 
