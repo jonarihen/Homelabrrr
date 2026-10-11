@@ -15,7 +15,7 @@ router.use(requireAuth, requireAdmin, requireInteractiveSession);
 const rate = (value: unknown) => { if (typeof value !== 'string') throw new Error('INVALID_RATE'); parseDkkPerKwh(value); return value; };
 const instant = (value: unknown) => { const date = new Date(String(value)); if (!Number.isFinite(date.getTime())) throw new Error('INVALID_DATE'); return date; };
 const fail = (res: any, err: unknown) => {
-  const known = err instanceof Error && (/^(INVALID_|OVERLAPPING_|MISSING_|FINALIZED_|EXTRA_LOAD_LIMIT)/.test(err.message) || ['Cannot finalize an open month', 'Incomplete calculation cannot be finalized', 'Recalculation reason required', 'Invalid billing month', 'Invalid statement input', 'Month has not started', 'Calculation inputs changed; preview again'].includes(err.message));
+  const known = err instanceof Error && (/^(INVALID_|OVERLAPPING_|MISSING_|FINALIZED_|EXTRA_LOAD_LIMIT)/.test(err.message) || ['Cannot finalize an open month', 'Incomplete calculation cannot be finalized', 'Recalculation reason required', 'Invalid billing month', 'Invalid statement input', 'Month has not started', 'Calculation inputs changed; preview again', 'Contract not found'].includes(err.message));
   return res.status(known ? 400 : 500).json({ error: known ? (err as Error).message : 'INTERNAL' });
 };
 
@@ -36,31 +36,88 @@ router.get('/contracts/:id/tariffs', async (req, res) => {
   if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'INVALID_CONTRACT' });
   res.json(await db.select().from(electricityTariffs).where(eq(electricityTariffs.contract_id, id)).orderBy(electricityTariffs.valid_from).limit(500));
 });
+function parseContractBody(b: any) {
+  if (!['spot', 'fixed_all_in'].includes(b.kind) || !['DK1', 'DK2'].includes(b.area) || typeof b.label !== 'string' || !b.label.trim() || typeof b.provenance !== 'string' || !b.provenance.trim()) throw new Error('INVALID_CONTRACT');
+  const from = instant(b.validFrom); const to = b.validTo ? instant(b.validTo) : null;
+  if (to && to <= from) throw new Error('INVALID_CONTRACT');
+  const fixed = b.kind === 'fixed_all_in' ? rate(b.fixedDkkPerKwh) : null;
+  const margin = b.kind === 'spot' ? rate(b.spotMarginDkkPerKwh) : null;
+  const vat = b.kind === 'spot' ? rate(b.vatRate) : null;
+  if (vat && (parseDkkPerKwh(vat) < 0n || parseDkkPerKwh(vat) > 1_000_000n)) throw new Error('INVALID_VAT');
+  if (b.kind === 'spot' && (!Array.isArray(b.requiredComponents) || b.requiredComponents.some((x: unknown) => !['network', 'system', 'tax', 'retailer'].includes(String(x))) || new Set(b.requiredComponents).size !== b.requiredComponents.length)) throw new Error('INVALID_COMPONENTS');
+  const monthly = b.fixedMonthlyOre == null ? null : Number(b.fixedMonthlyOre);
+  if (monthly != null && (!Number.isSafeInteger(monthly) || monthly < 0)) throw new Error('INVALID_FIXED_FEE');
+  const feePolicy = b.fixedFeeAllocation || 'none';
+  if (!['none', 'manual_share', 'energy_proportion'].includes(feePolicy)) throw new Error('INVALID_FIXED_FEE_POLICY');
+  const feeShare = feePolicy === 'manual_share' ? rate(b.fixedFeeManualShare) : null;
+  if (feeShare && (parseDkkPerKwh(feeShare) < 0n || parseDkkPerKwh(feeShare) > 1_000_000n)) throw new Error('INVALID_FIXED_FEE_SHARE');
+  return { label: b.label.trim(), kind: b.kind, area: b.area, valid_from: from, valid_to: to, fixed_dkk_per_kwh: fixed, spot_margin_dkk_per_kwh: margin, vat_rate: vat,
+    required_components: b.kind === 'spot' ? b.requiredComponents : null, fixed_monthly_ore: monthly, fixed_fee_allocation: feePolicy, fixed_fee_manual_share: feeShare, provenance: b.provenance.trim() };
+}
+type ContractValues = ReturnType<typeof parseContractBody>;
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function insertContract(tx: Tx, values: ContractValues, active: boolean) {
+  const overlapping = await tx.select({ id: electricityContracts.id }).from(electricityContracts).where(and(eq(electricityContracts.active, true), lt(electricityContracts.valid_from, values.valid_to || new Date('9999-12-31T00:00:00Z')), or(isNull(electricityContracts.valid_to), gt(electricityContracts.valid_to, values.valid_from)))).limit(1);
+  if (active && overlapping.length) throw new Error('OVERLAPPING_CONTRACT');
+  const [created] = await tx.insert(electricityContracts).values({ ...values, active }).returning();
+  return created;
+}
+
+// Ending a contract never rewrites a finalized month: the new end must not cut
+// into any period already covered by a finalized statement that used it.
+async function endContract(tx: Tx, id: number, validTo: Date, reason: string) {
+  const [row] = await tx.select().from(electricityContracts).where(and(eq(electricityContracts.id, id), eq(electricityContracts.active, true))).for('update').limit(1);
+  if (!row) throw new Error('INVALID_CONTRACT_NOT_ACTIVE');
+  if (validTo <= row.valid_from || (row.valid_to && validTo >= row.valid_to)) throw new Error('INVALID_CONTRACT_END');
+  const statements = await tx.select({ contract_id: electricityCostStatements.contract_id, calculation: electricityCostStatements.calculation }).from(electricityCostStatements)
+    .where(and(eq(electricityCostStatements.finalized, true), gt(electricityCostStatements.period_end, validTo), row.valid_to ? lt(electricityCostStatements.period_start, row.valid_to) : sql`true`)).limit(1000);
+  if (statements.some((statement) => statement.contract_id === id || ((statement.calculation as { contractRefs?: unknown })?.contractRefs as string[] | undefined)?.includes(String(id)))) throw new Error('FINALIZED_PERIOD');
+  const [ended] = await tx.update(electricityContracts).set({ valid_to: validTo, end_reason: reason, revision: sql`${electricityContracts.revision} + 1` })
+    .where(eq(electricityContracts.id, id)).returning();
+  return ended;
+}
+const endReason = (value: unknown) => { const reason = typeof value === 'string' ? value.trim() : ''; if (!reason || reason.length > 1000) throw new Error('INVALID_REASON'); return reason; };
+const contractId = (value: unknown) => { const id = Number(value); if (!Number.isSafeInteger(id) || id < 1) throw new Error('INVALID_CONTRACT'); return id; };
+
 router.post('/contracts', requireRecentReauthentication, async (req, res) => {
   try {
-    const b = req.body || {};
-    if (!['spot', 'fixed_all_in'].includes(b.kind) || !['DK1', 'DK2'].includes(b.area) || typeof b.label !== 'string' || !b.label.trim() || typeof b.provenance !== 'string' || !b.provenance.trim()) throw new Error('INVALID_CONTRACT');
-    const from = instant(b.validFrom); const to = b.validTo ? instant(b.validTo) : null;
-    if (to && to <= from) throw new Error('INVALID_CONTRACT');
-    const fixed = b.kind === 'fixed_all_in' ? rate(b.fixedDkkPerKwh) : null;
-    const margin = b.kind === 'spot' ? rate(b.spotMarginDkkPerKwh) : null;
-    const vat = b.kind === 'spot' ? rate(b.vatRate) : null;
-    if (vat && (parseDkkPerKwh(vat) < 0n || parseDkkPerKwh(vat) > 1_000_000n)) throw new Error('INVALID_VAT');
-    if (b.kind === 'spot' && (!Array.isArray(b.requiredComponents) || b.requiredComponents.some((x: unknown) => !['network', 'system', 'tax', 'retailer'].includes(String(x))) || new Set(b.requiredComponents).size !== b.requiredComponents.length)) throw new Error('INVALID_COMPONENTS');
-    const monthly = b.fixedMonthlyOre == null ? null : Number(b.fixedMonthlyOre);
-    if (monthly != null && (!Number.isSafeInteger(monthly) || monthly < 0)) throw new Error('INVALID_FIXED_FEE');
-    const feePolicy = b.fixedFeeAllocation || 'none';
-    if (!['none', 'manual_share', 'energy_proportion'].includes(feePolicy)) throw new Error('INVALID_FIXED_FEE_POLICY');
-    const feeShare = feePolicy === 'manual_share' ? rate(b.fixedFeeManualShare) : null;
-    if (feeShare && (parseDkkPerKwh(feeShare) < 0n || parseDkkPerKwh(feeShare) > 1_000_000n)) throw new Error('INVALID_FIXED_FEE_SHARE');
+    const values = parseContractBody(req.body || {});
     const result = await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(237001)`);
-      const overlapping = await tx.select({ id: electricityContracts.id }).from(electricityContracts).where(and(eq(electricityContracts.active, true), lt(electricityContracts.valid_from, to || new Date('9999-12-31T00:00:00Z')), or(isNull(electricityContracts.valid_to), gt(electricityContracts.valid_to, from)))).limit(1);
-      if (b.active && overlapping.length) throw new Error('OVERLAPPING_CONTRACT');
-      const [created] = await tx.insert(electricityContracts).values({ label: b.label.trim(), kind: b.kind, area: b.area, valid_from: from, valid_to: to, fixed_dkk_per_kwh: fixed, spot_margin_dkk_per_kwh: margin, vat_rate: vat, required_components: b.kind === 'spot' ? b.requiredComponents : null, fixed_monthly_ore: monthly, fixed_fee_allocation: feePolicy, fixed_fee_manual_share: feeShare, active: b.active === true, provenance: b.provenance.trim() }).returning();
-      return created;
+      return insertContract(tx, values, req.body?.active === true);
     });
     await logAudit(req, 'electricity_contract_created', String(result.id), `kind=${result.kind}; area=${result.area}; active=${result.active}`);
+    res.status(201).json(result);
+  } catch (err) { fail(res, err); }
+});
+// End-date an active contract (e.g. the agreement terminated). History before
+// the end keeps being priced under it; it is not withdrawn.
+router.post('/contracts/:id/end', requireRecentReauthentication, async (req, res) => {
+  try {
+    const id = contractId(req.params.id); const validTo = instant(req.body?.validTo); const reason = endReason(req.body?.reason);
+    const ended = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(237001)`);
+      return endContract(tx, id, validTo, reason);
+    });
+    await logAudit(req, 'electricity_contract_ended', String(id), `valid_to=${validTo.toISOString()}; reason=${reason}`);
+    res.json(ended);
+  } catch (err) { fail(res, err); }
+});
+// Atomically end the current contract and start its successor at the same
+// instant, so there is neither a pricing gap nor an overlap.
+router.post('/contracts/:id/supersede', requireRecentReauthentication, async (req, res) => {
+  try {
+    const id = contractId(req.params.id); const effectiveAt = instant(req.body?.effectiveAt); const reason = endReason(req.body?.reason);
+    const values = parseContractBody({ ...(req.body?.successor || {}), validFrom: effectiveAt.toISOString() });
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(237001)`);
+      await endContract(tx, id, effectiveAt, reason);
+      const successor = await insertContract(tx, values, true);
+      const [previous] = await tx.update(electricityContracts).set({ superseded_by_id: successor.id }).where(eq(electricityContracts.id, id)).returning();
+      return { previous, successor };
+    });
+    await logAudit(req, 'electricity_contract_superseded', String(id), `successor=${result.successor.id}; effective=${effectiveAt.toISOString()}; reason=${reason}`);
     res.status(201).json(result);
   } catch (err) { fail(res, err); }
 });
@@ -167,8 +224,10 @@ router.get('/months/:month/statements', async (req, res) => {
 router.post('/months/:month/finalize', requireRecentReauthentication, async (req, res) => {
   try {
     if (typeof req.body?.reason !== 'string') return res.status(400).json({ error: 'INVALID_REASON' });
-    const result = await finalizeMonthlyElectricity(String(req.params.month), String(req.body.contractRef || ''), req.body.reason);
-    await logAudit(req, 'electricity_month_finalized', String(result.id), `contract=${result.contract_id}; month=${req.params.month}; revision=${result.revision}`);
+    if (req.body.acknowledgePartial !== undefined && typeof req.body.acknowledgePartial !== 'boolean') return res.status(400).json({ error: 'INVALID_ACKNOWLEDGEMENT' });
+    const result = await finalizeMonthlyElectricity(String(req.params.month), String(req.body.contractRef || ''), req.body.reason, new Date(), { acknowledgePartial: req.body.acknowledgePartial === true });
+    const partial = (result.calculation as { partialAcknowledged?: boolean }).partialAcknowledged === true;
+    await logAudit(req, 'electricity_month_finalized', String(result.id), `contract=${result.contract_id}; month=${req.params.month}; revision=${result.revision}${partial ? '; partial_coverage_acknowledged' : ''}`);
     res.status(201).json(result);
   } catch (err) { fail(res, err); }
 });

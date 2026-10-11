@@ -26,7 +26,8 @@ test('private summary uses configured fixed retail price and marks missing serve
 });
 
 test('historical server cost uses its effective contract while current price uses the current one', async () => {
-  await fixture.db.update(electricityContracts).set({ fixed_dkk_per_kwh: '2.000000', valid_to: new Date('2026-10-01T00:00:00Z'), active: false })
+  // Succession end-dates the old contract; it stays active (not withdrawn).
+  await fixture.db.update(electricityContracts).set({ fixed_dkk_per_kwh: '2.000000', valid_to: new Date('2026-10-01T00:00:00Z') })
     .where(eq(electricityContracts.label, 'fixture fixed tariff'));
   await fixture.db.insert(electricityContracts).values({
     label: 'current contract', kind: 'fixed_all_in', area: 'DK2', valid_from: new Date('2026-10-01T00:00:00Z'),

@@ -1,5 +1,5 @@
-import { and, eq, lte, gt, desc, lt } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { and, eq, lte, gt, desc, lt, inArray } from 'drizzle-orm';
+import { db, type DbOrTx } from '../db/client.ts';
 import { electricityContracts, electricityTariffs, electricitySpotPrices, electricityExtraLoads, hardwareEnergyIntervals } from '../db/schema/index.ts';
 import { fetchDayAheadPrices, type DayAheadRow } from './dayAheadPrices.ts';
 import { resolveApplicablePrice, type ApplicablePrice, type ContractPriceInput, type TariffPriceInput } from './electricityPriceMath.ts';
@@ -85,11 +85,76 @@ export function stopElectricityPriceSync() {
   syncStartTimer = null; syncTimer = null;
 }
 
+type ContractRow = typeof electricityContracts.$inferSelect;
+type TariffRow = typeof electricityTariffs.$inferSelect;
+type SpotRow = typeof electricitySpotPrices.$inferSelect;
+export interface PricingInputs { contracts: ContractRow[]; tariffs: TariffRow[]; spots: SpotRow[] }
+export interface PriceSegment { startUtc: Date; endUtc: Date; dkkPerKwh: string | null; status: 'valid' | 'incomplete'; reason: string | null; contractRef: string }
+const SPOT_ROW_LIMIT = 20_000;
+
+function tariffInput(row: TariffRow): TariffPriceInput {
+  return { component: row.component, validFrom: row.valid_from, validTo: row.valid_to, rate: row.dkk_per_kwh, vatIncluded: row.vat_included, provenance: row.provenance, revision: row.revision };
+}
+
+// Batched loader: one tariff and one spot query for every contract in a
+// period, so previews and forecasts never issue a query per price interval.
+export async function loadPricingInputs(database: DbOrTx, contracts: ContractRow[], startUtc: Date, endUtc: Date): Promise<PricingInputs> {
+  if (!contracts.length || endUtc <= startUtc) return { contracts, tariffs: [], spots: [] };
+  const ids = contracts.map((row) => row.id);
+  const tariffs = await database.select().from(electricityTariffs).where(and(inArray(electricityTariffs.contract_id, ids), lt(electricityTariffs.valid_from, endUtc), gt(electricityTariffs.valid_to, startUtc))).orderBy(electricityTariffs.id);
+  const areas = [...new Set(contracts.filter((row) => row.kind === 'spot').map((row) => row.area))];
+  const spots = areas.length ? await database.select().from(electricitySpotPrices).where(and(inArray(electricitySpotPrices.area, areas), lt(electricitySpotPrices.start_utc, endUtc), gt(electricitySpotPrices.end_utc, startUtc)))
+    .orderBy(electricitySpotPrices.area, electricitySpotPrices.start_utc).limit(SPOT_ROW_LIMIT + 1) : [];
+  if (spots.length > SPOT_ROW_LIMIT) throw new Error('INVALID_PERIOD_TOO_LONG');
+  return { contracts, tariffs, spots };
+}
+
+// Pure: splits [startUtc, endUtc) at every contract, tariff and spot boundary
+// and resolves each piece with the same resolver getApplicablePrice uses.
+// Successive contracts must not overlap; an uncovered gap stays absent, so the
+// cost engine reports it as missing price coverage instead of zero.
+export function resolvePriceSegments(inputs: PricingInputs, startUtc: Date, endUtc: Date, basis: PriceBasis = 'variable_retail_including_vat'): PriceSegment[] {
+  const segments: PriceSegment[] = [];
+  const contracts = [...inputs.contracts].sort((a, b) => a.valid_from.getTime() - b.valid_from.getTime() || a.id - b.id);
+  let previousEnd = -Infinity;
+  for (const contract of contracts) {
+    const from = Math.max(startUtc.getTime(), contract.valid_from.getTime());
+    const to = Math.min(endUtc.getTime(), contract.valid_to?.getTime() ?? endUtc.getTime());
+    if (to <= from) continue;
+    if (from < previousEnd) throw new Error('OVERLAPPING_CONTRACT');
+    previousEnd = to;
+    const tariffs = inputs.tariffs.filter((row) => row.contract_id === contract.id);
+    const spots = contract.kind === 'spot' ? inputs.spots.filter((row) => row.area === contract.area) : [];
+    const inside = (time: number) => time > from && time < to;
+    const boundaries = [...new Set([from, to, ...tariffs.flatMap((row) => [row.valid_from.getTime(), row.valid_to.getTime()]).filter(inside),
+      ...spots.flatMap((row) => [row.start_utc.getTime(), row.end_utc.getTime()]).filter(inside)])].sort((a, b) => a - b);
+    const input = contractInput(contract);
+    const tariffInputs = tariffs.map(tariffInput);
+    let spotIndex = 0;
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      const at = new Date(boundaries[i]);
+      while (spotIndex < spots.length && spots[spotIndex].end_utc <= at) spotIndex++;
+      const source = spotIndex < spots.length && spots[spotIndex].start_utc <= at ? spots[spotIndex] : null;
+      const price = resolveApplicablePrice(at, input, tariffInputs, source ? { area: source.area, startUtc: source.start_utc, endUtc: source.end_utc, rate: source.dkk_per_kwh, revision: source.source_revision, fetchedAt: source.fetched_at } : null, basis);
+      segments.push({ startUtc: at, endUtc: new Date(boundaries[i + 1]), dkkPerKwh: price.status === 'valid' ? price.dkk_per_kwh : null,
+        status: price.status === 'valid' && price.dkk_per_kwh ? 'valid' : 'incomplete', reason: price.reason, contractRef: String(contract.id) });
+    }
+  }
+  return segments;
+}
+
 export async function calculateLabCost(startUtc: Date, endUtc: Date, contractRef: string) {
-  if (!(startUtc instanceof Date) || !(endUtc instanceof Date) || endUtc <= startUtc || endUtc.getTime() - startUtc.getTime() > 32 * 86400_000) throw new Error('Invalid cost period');
   if (!/^\d+$/.test(contractRef)) throw new Error('Invalid contract reference');
   const [contract] = await db.select().from(electricityContracts).where(eq(electricityContracts.id, Number(contractRef))).limit(1);
   if (!contract) throw new Error('Contract not found');
+  return calculateLabCostForContracts(startUtc, endUtc, [contract], contractRef);
+}
+
+// Prices one period under one or several successive (non-overlapping)
+// contracts, e.g. a month in which the agreement was superseded.
+export async function calculateLabCostForContracts(startUtc: Date, endUtc: Date, contracts: ContractRow[], contractRef = String(contracts[0]?.id ?? '')) {
+  if (!(startUtc instanceof Date) || !(endUtc instanceof Date) || endUtc <= startUtc || endUtc.getTime() - startUtc.getTime() > 32 * 86400_000) throw new Error('Invalid cost period');
+  if (!contracts.length) throw new Error('Contract not found');
   // Half-open period: an interval starting exactly at endUtc belongs to the
   // next period and must not make this one permanently incomplete.
   const energy = await db.select().from(hardwareEnergyIntervals).where(and(lt(hardwareEnergyIntervals.start_utc, endUtc), gt(hardwareEnergyIntervals.end_utc, startUtc)));
@@ -97,21 +162,13 @@ export async function calculateLabCost(startUtc: Date, endUtc: Date, contractRef
   if (extraLoads.length > 500) throw new Error('EXTRA_LOAD_LIMIT');
   const byHardware = new Map<number, typeof energy>();
   for (const interval of energy) { const items = byHardware.get(interval.hardware_id) || []; items.push(interval); byHardware.set(interval.hardware_id, items); }
-  const tariffRows = await db.select().from(electricityTariffs).where(and(eq(electricityTariffs.contract_id, contract.id), lt(electricityTariffs.valid_from, endUtc), gt(electricityTariffs.valid_to, startUtc)));
-  const spotRows = contract.kind === 'spot' ? await db.select().from(electricitySpotPrices).where(and(eq(electricitySpotPrices.area, contract.area), lt(electricitySpotPrices.start_utc, endUtc), gt(electricitySpotPrices.end_utc, startUtc))) : [];
-  const boundaries = [...new Set([startUtc.getTime(), endUtc.getTime(), ...tariffRows.flatMap((row) => [row.valid_from.getTime(), row.valid_to.getTime()]), ...spotRows.flatMap((row) => [row.start_utc.getTime(), row.end_utc.getTime()]), contract.valid_from.getTime(), contract.valid_to?.getTime() ?? endUtc.getTime()].filter((time) => time >= startUtc.getTime() && time <= endUtc.getTime()))].sort((a, b) => a - b);
-  const prices: Array<{ startUtc: Date; endUtc: Date; dkkPerKwh: string; status: 'valid' | 'incomplete' }> = [];
-  const tariffInputs: TariffPriceInput[] = tariffRows.map((row) => ({ component: row.component, validFrom: row.valid_from, validTo: row.valid_to, rate: row.dkk_per_kwh, vatIncluded: row.vat_included, provenance: row.provenance, revision: row.revision }));
-  for (let i = 0; i < boundaries.length - 1; i++) {
-    const from = new Date(boundaries[i]); const to = new Date(boundaries[i + 1]);
-    const source = spotRows.find((row) => row.start_utc <= from && from < row.end_utc);
-    const price = resolveApplicablePrice(from, contractInput(contract), tariffInputs, source ? { area: source.area, startUtc: source.start_utc, endUtc: source.end_utc, rate: source.dkk_per_kwh, revision: source.source_revision, fetchedAt: source.fetched_at } : null, 'variable_retail_including_vat');
-    if (price.status === 'valid' && price.dkk_per_kwh) prices.push({ startUtc: from, endUtc: to, dkkPerKwh: price.dkk_per_kwh, status: 'valid' });
-  }
+  const inputs = await loadPricingInputs(db, contracts, startUtc, endUtc);
+  const prices = resolvePriceSegments(inputs, startUtc, endUtc).filter((segment) => segment.status === 'valid')
+    .map((segment) => ({ startUtc: segment.startUtc, endUtc: segment.endUtc, dkkPerKwh: segment.dkkPerKwh!, status: 'valid' as const }));
   const totals = [...byHardware].map(([hardwareId, intervals]) => ({ hardwareId, result: calculateIntervalCost(intervals.map((row) => ({ startUtc: row.start_utc, endUtc: row.end_utc, kwh: row.kwh, coveredSeconds: row.covered_seconds, expectedSeconds: row.expected_seconds })), prices) }));
   const extraTotals = extraLoads.map((load) => ({ load, interval: extraLoadInterval(load, startUtc, endUtc) })).filter((entry) => entry.interval !== null)
     .map(({ load, interval }) => ({ load, result: calculateIntervalCost([interval!], prices) }));
-  return { contractRef, startUtc, endUtc, method: 'uniform_energy_within_15_minute_bucket',
+  return { contractRef, contractRefs: contracts.map((row) => String(row.id)), startUtc, endUtc, method: 'uniform_energy_within_15_minute_bucket',
     totals: totals.map(({ hardwareId, result }) => ({ hardwareId, kwhPriced: result.kwhPriced, costOre: result.costOre.toString(), energyCoveredSeconds: result.energyCoveredSeconds, priceCoveredSeconds: result.priceCoveredSeconds, complete: result.complete })),
     extraLoadCosts: extraTotals.map(({ load, result }) => ({ loadId: load.id, sourceKey: load.source_key, label: load.label, quality: 'estimated_constant_watts',
       kwhPriced: result.kwhPriced, costOre: result.costOre.toString(), energyCoveredSeconds: result.energyCoveredSeconds, priceCoveredSeconds: result.priceCoveredSeconds, complete: result.complete })),

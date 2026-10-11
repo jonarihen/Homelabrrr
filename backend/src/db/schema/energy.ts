@@ -65,6 +65,9 @@ export const electricityContracts = pgTable('electricity_contracts', {
   revision: integer('revision').notNull().default(1),
   active: boolean('active').notNull().default(false),
   provenance: text('provenance').notNull(),
+  // Set when the contract was end-dated or superseded (audit-logged too).
+  end_reason: text('end_reason'),
+  superseded_by_id: integer('superseded_by_id'),
   created_at: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
 }, (t) => [index('electricity_contract_validity').on(t.active, t.valid_from, t.valid_to)]);
 
