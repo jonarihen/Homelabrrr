@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
 import { manualPowerDurationRequest } from '../../utils/manualPowerDuration.js';
+import { POWER_MODES as modes, controlStatusLines, modeLabel, outcomeLabel, policyRequest } from '../../utils/powerPolicyView.js';
 
 const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const modes = [['low', 'Static Low Power'], ['dynamic', 'Dynamic / Balanced'], ['high', 'Static High Performance']];
+const toneClass = { warning: 'text-amber-400', error: 'text-red-400', info: 'text-gray-400' };
 const preset = () => [
   { days: 0b0111110, start: '16:00', end: '02:00', mode: 'high' },
   { days: 0b1000001, start: '12:00', end: '22:00', mode: 'high' },
 ];
-const modeLabel = (mode) => modes.find(([value]) => value === mode)?.[1] || 'No automatic change';
 const copenhagenTime = (value) => value ? new Intl.DateTimeFormat('en-GB', {
   timeZone: 'Europe/Copenhagen', weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
   timeZoneName: 'shortOffset',
@@ -20,10 +20,12 @@ function PowerPreviewTimeline({ preview }) {
   const segments = timeline?.segments || [];
   const visible = showAll ? segments : segments.slice(0, 48);
   return <section className="mt-3 border border-gray-700 bg-gray-900/60 p-3" aria-label="Seven-day power mode preview">
-    <h3 className="uppercase tracking-wider text-orange-400">Saved policy · next seven days</h3>
+    <h3 className="uppercase tracking-wider text-orange-400">{preview.draft ? 'Unsaved draft' : 'Saved policy'} · next seven days</h3>
     <p className="mt-2 text-gray-300">At {copenhagenTime(preview.at)} · observed {preview.observedMode === 'unknown' ? 'Unknown' : preview.observedMode === 'os_control' ? 'OS Control' : modeLabel(preview.observedMode)} · selected {preview.selectedMode ? modeLabel(preview.selectedMode) : 'No automatic change'} · reason {preview.reason.replaceAll('_', ' ')}.</p>
     <p className="mt-1 text-gray-400">Next schedule change: {copenhagenTime(timeline?.nextScheduleTransition)} · next known selected-mode change: {copenhagenTime(timeline?.nextKnownTransition)}.</p>
-    <p className="mt-1 text-amber-400">Future selections after published price coverage are unknown. This preview is read-only and uses the saved policy.</p>
+    {preview.policyError && <p className="mt-1 text-red-400">Stored policy invalid: {preview.policyError}. Automation only restricts until it is fixed.</p>}
+    {preview.ifEnabled && preview.reason === 'disabled' && <p className="mt-1 text-gray-400">If control and automation were enabled: {modeLabel(preview.ifEnabled.selectedMode)} ({preview.ifEnabled.reason.replaceAll('_', ' ')}).</p>}
+    <p className="mt-1 text-amber-400">Future selections after published price coverage are unknown. This preview is read-only and matches what the worker would do{preview.draft ? '; the draft is not saved' : ''}.</p>
     <div className="mt-3 max-h-80 overflow-auto border border-gray-700">
       <table className="w-full min-w-[760px] border-collapse text-left"><caption className="sr-only">Copenhagen time, baseline, selected mode, reason and applicable price for each policy interval</caption>
         <thead className="sticky top-0 bg-gray-950 text-gray-400"><tr><th className="p-2">From</th><th className="p-2">Until</th><th className="p-2">Baseline</th><th className="p-2">Selected mode</th><th className="p-2">Reason</th><th className="p-2">Price</th></tr></thead>
@@ -38,8 +40,9 @@ function PowerPreviewTimeline({ preview }) {
   </section>;
 }
 
-function ModeSelect({ value, onChange, omitHigh = false }) {
-  return <select value={value} onChange={(event) => onChange(event.target.value)} className="border border-gray-700 bg-gray-900 px-2 py-1 text-gray-100">
+function ModeSelect({ value, onChange, omitHigh = false, placeholder = null }) {
+  return <select value={value || ''} onChange={(event) => onChange(event.target.value || undefined)} className="border border-gray-700 bg-gray-900 px-2 py-1 text-gray-100">
+    {placeholder && <option value="">{placeholder}</option>}
     {modes.filter(([mode]) => !omitHigh || mode !== 'high').map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}
   </select>;
 }
@@ -54,9 +57,11 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
   const [durationKind, setDurationKind] = useState('minutes');
   const [duration, setDuration] = useState(180);
   const [preview, setPreview] = useState(null);
+  const [operations, setOperations] = useState(null);
   const refresh = useCallback(async () => {
     const { data } = await api.get(`/admin/power-control/${connection.id}`);
     setRecord(data);
+    setOperations(null);
     setDraft({ ...data.policy, schedule: structuredClone(data.policy.schedule), pricePolicy: structuredClone(data.policy.pricePolicy) });
   }, [connection.id]);
   useEffect(() => { refresh().catch(() => setError('Could not load power policy')); }, [refresh]);
@@ -71,10 +76,7 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
     finally { setBusy(false); }
   };
   const save = () => action(async () => {
-    await api.put(`/admin/power-control/${connection.id}`, {
-      version: draft.version, automationEnabled: draft.automationEnabled,
-      schedule: draft.schedule, pricePolicy: draft.pricePolicy,
-    });
+    await api.put(`/admin/power-control/${connection.id}`, policyRequest(draft));
     setNotice('Power policy saved. Hardware changes still require separate enablement.');
     setPreview(null);
   });
@@ -85,8 +87,15 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
     setNotice(enable ? 'Live mode control enabled.' : 'Live mode control disabled. In-flight commands cannot be recalled.');
   });
   const mutateVersion = (path, body) => action(async () => {
-    await api.post(`/admin/power-control/${connection.id}/${path}`, { version: record.policy.version, ...body });
-    setNotice('Power control state updated.');
+    const { data } = await api.post(`/admin/power-control/${connection.id}/${path}`, { version: record.policy.version, ...body });
+    setNotice(data?.adoptedMode ? `Resumed. Current iLO mode ${modeLabel(data.adoptedMode)} is now the verified baseline.` : 'Power control state updated.');
+  });
+  const previewDraft = () => action(async () => {
+    setPreview((await api.post(`/admin/power-control/${connection.id}/preview`, policyRequest(draft))).data);
+  });
+  const loadOperations = () => action(async () => {
+    const { data } = await api.get(`/admin/power-control/${connection.id}/operations`);
+    setOperations(data.operations);
   });
   if (!draft || !record) return <p className="mt-3 text-gray-500">Loading power policy…</p>;
   const schedule = draft.schedule;
@@ -94,11 +103,12 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
   return <section className="mt-3 border-t border-gray-700/50 pt-3 text-xs font-mono text-gray-300">
     <div className="flex flex-wrap items-center gap-3">
       <span className="uppercase tracking-widest text-orange-400">Power policy</span>
-      <span>Actual last verified: {record.policy.lastVerifiedMode || 'unknown'}</span>
-      <span>Last outcome: {record.policy.lastOutcome || 'none'}</span>
+      <span>Actual last verified: {record.policy.lastVerifiedMode ? modeLabel(record.policy.lastVerifiedMode) : 'unknown'}</span>
+      <span>Last outcome: {outcomeLabel(record.policy.lastOutcome)}</span>
       <span>Control: {record.controlEnabled ? 'enabled' : 'disabled'}</span>
       <span>Global automation: {record.globalPaused ? 'paused' : 'running'}</span>
     </div>
+    {controlStatusLines(record.policy).map((line) => <p key={line.text} className={`mt-1 ${toneClass[line.tone]}`}>{line.text}</p>)}
     {error && <p role="alert" className="mt-2 text-red-400">{error}</p>}
     {notice && <p role="status" className="mt-2 text-green-400">{notice}</p>}
     <div className="mt-3 flex flex-wrap gap-2">
@@ -123,13 +133,15 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
       <div className="border border-gray-700 bg-gray-900/40 p-3">
         <h3 className="mb-3 uppercase tracking-wider text-gray-100">Electricity price rules</h3>
         <label className="block"><input type="checkbox" checked={policy.enabled} onChange={(event) => change('pricePolicy', { enabled: event.target.checked })} /> Enable price-aware selection</label>
-        <div className="mt-2 grid gap-2 sm:grid-cols-2"><label>Price basis<select value={policy.basis} onChange={(event) => change('pricePolicy', { basis: event.target.value })} className="block w-full border border-gray-700 bg-gray-900 px-2 py-1"><option value="variable_retail_including_vat">Variable retail incl. VAT</option><option value="spot_only_excluding_retail_additions">Spot only (excludes retail charges)</option></select></label><label>Area<input value={policy.area} onChange={(event) => change('pricePolicy', { area: event.target.value })} placeholder="Configured contract area" className="block w-full border border-gray-700 bg-gray-900 px-2 py-1" /></label><label>Contract reference<input value={policy.contractRef} onChange={(event) => change('pricePolicy', { contractRef: event.target.value })} className="block w-full border border-gray-700 bg-gray-900 px-2 py-1" /></label><label>Price-only default<ModeSelect value={policy.priceOnlyDefault || 'low'} onChange={(mode) => change('pricePolicy', { priceOnlyDefault: mode })} /></label><label>Minimum automatic upshift minutes<input type="number" min="0" max="1440" value={policy.minAutomaticUpshiftMinutes ?? 5} onChange={(event) => change('pricePolicy', { minAutomaticUpshiftMinutes: Number(event.target.value) })} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label></div>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2"><label>Price basis<select value={policy.basis} onChange={(event) => change('pricePolicy', { basis: event.target.value })} className="block w-full border border-gray-700 bg-gray-900 px-2 py-1"><option value="variable_retail_including_vat">Variable retail incl. VAT</option><option value="spot_only_excluding_retail_additions">Spot only (excludes retail charges)</option></select></label><label>Area<input value={policy.area} onChange={(event) => change('pricePolicy', { area: event.target.value })} placeholder="Configured contract area" className="block w-full border border-gray-700 bg-gray-900 px-2 py-1" /></label><label>Contract reference<input value={policy.contractRef} onChange={(event) => change('pricePolicy', { contractRef: event.target.value })} className="block w-full border border-gray-700 bg-gray-900 px-2 py-1" /></label><label>Price-only default<ModeSelect value={policy.priceOnlyDefault} placeholder="Choose a mode…" onChange={(mode) => change('pricePolicy', { priceOnlyDefault: mode })} /></label><label>Minimum automatic upshift minutes<input type="number" min="0" max="1440" value={policy.minAutomaticUpshiftMinutes ?? 5} onChange={(event) => change('pricePolicy', { minAutomaticUpshiftMinutes: Number(event.target.value) })} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label></div>
         <div className="mt-3 border-t border-gray-700 pt-2"><label><input type="checkbox" checked={policy.expensive.enabled} onChange={(event) => priceRule('expensive', { enabled: event.target.checked })} /> Above upper price, cap performance</label><div className="mt-2 flex flex-wrap items-center gap-2"><label>Upper kr./kWh<input inputMode="decimal" value={policy.expensive.threshold} onChange={(event) => priceRule('expensive', { threshold: event.target.value })} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label><label>Hysteresis<input inputMode="decimal" value={policy.expensive.hysteresis} onChange={(event) => priceRule('expensive', { hysteresis: event.target.value })} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label><ModeSelect value={policy.expensive.capMode} omitHigh onChange={(capMode) => priceRule('expensive', { capMode })} /></div></div>
         <div className="mt-3 border-t border-gray-700 pt-2"><label><input type="checkbox" checked={policy.cheap.enabled} onChange={(event) => priceRule('cheap', { enabled: event.target.checked })} /> Below lower price, boost to High</label><div className="mt-2 flex flex-wrap items-center gap-2"><label>Lower kr./kWh<input inputMode="decimal" value={policy.cheap.threshold} onChange={(event) => priceRule('cheap', { threshold: event.target.value })} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label><label>Hysteresis<input inputMode="decimal" value={policy.cheap.hysteresis} onChange={(event) => priceRule('cheap', { hysteresis: event.target.value })} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label></div></div>
-        <p className="mt-3 text-gray-500">Price rules use valid current DKK/kWh intervals only. Missing or incomplete prices fall back to the weekly schedule or chosen default.</p>
+        <p className="mt-3 text-gray-500">Price rules use valid current DKK/kWh intervals only. Missing or incomplete prices fall back to the weekly schedule or chosen default. Comma decimals are accepted and stored as exact values.</p>
+        <p className="mt-1 text-gray-500">This price cap only limits the selected Power Regulator mode. It is not an iLO watt cap and never shuts a server down.</p>
       </div>
     </div>
-    <div className="mt-3 flex items-center gap-3"><label><input type="checkbox" checked={draft.automationEnabled} onChange={(event) => setDraft((current) => ({ ...current, automationEnabled: event.target.checked }))} /> Allow automatic changes</label><button disabled={busy} onClick={save} className="border border-orange-600 px-3 py-2 uppercase text-orange-400 disabled:opacity-50">Save policy</button><button disabled={busy || !record.policy.version} onClick={() => action(async () => { setPreview((await api.get(`/admin/power-control/${connection.id}/preview`)).data); })} className="border border-gray-600 px-3 py-2 uppercase disabled:opacity-50">Preview saved policy</button></div>
+    <div className="mt-3 flex items-center gap-3"><label><input type="checkbox" checked={draft.automationEnabled} onChange={(event) => setDraft((current) => ({ ...current, automationEnabled: event.target.checked }))} /> Allow automatic changes</label><button disabled={busy} onClick={save} className="border border-orange-600 px-3 py-2 uppercase text-orange-400 disabled:opacity-50">Save policy</button><button disabled={busy || !record.policy.version} onClick={() => action(async () => { setPreview((await api.get(`/admin/power-control/${connection.id}/preview`)).data); })} className="border border-gray-600 px-3 py-2 uppercase disabled:opacity-50">Preview saved policy</button><button disabled={busy} onClick={previewDraft} className="border border-gray-600 px-3 py-2 uppercase disabled:opacity-50">Preview draft</button></div>
+    <p className="mt-2 text-gray-500">Pause stops all automatic changes (weekly and price) and leaves the hardware as it is. Disabling only the weekly schedule keeps an explicitly enabled price-only policy running. Disabling live control stops all writes; an already-sent request cannot be recalled.</p>
     {preview && <PowerPreviewTimeline preview={preview} />}
     <div className="mt-4 border-t border-gray-700 pt-3">
       <h3 className="mb-2 uppercase text-gray-100">Manual mode override</h3>
@@ -151,6 +163,17 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
       </div>
       {!record.policy.schedule.enabled && <p className="mt-2 text-gray-500">Save an enabled weekly schedule to use its next boundary.</p>}
       <p className="mt-2 text-amber-400">An explicit manual High selection can bypass the expensive-price cap. It never reboots a server or VM.</p>
+    </div>
+    <div className="mt-4 border-t border-gray-700 pt-3">
+      <div className="flex items-center gap-3"><h3 className="uppercase text-gray-100">Mode change history</h3><button disabled={busy} onClick={loadOperations} className="border border-gray-600 px-2 py-1 disabled:opacity-40">{operations ? 'Refresh' : 'Show last 50'}</button></div>
+      {operations && (operations.length === 0 ? <p className="mt-2 text-gray-500">No mode operations recorded.</p>
+        : <div className="mt-2 max-h-64 overflow-auto border border-gray-700"><table className="w-full min-w-[720px] text-left"><thead className="sticky top-0 bg-gray-950 text-gray-400"><tr><th className="p-2">When</th><th className="p-2">Actor</th><th className="p-2">Change</th><th className="p-2">Reason</th><th className="p-2">Outcome</th><th className="p-2">Price</th></tr></thead>
+          <tbody>{operations.map((op) => <tr key={op.id} className="border-t border-gray-800">
+            <td className="p-2">{copenhagenTime(op.occurred_at)}</td><td className="p-2">{op.actor}{op.actor_user_id ? ` #${op.actor_user_id}` : ''}</td>
+            <td className="p-2">{op.prior_mode || '?'} → {op.target_mode || '?'}</td><td className="p-2">{op.reason.replaceAll('_', ' ')}</td>
+            <td className="p-2">{outcomeLabel(op.outcome)}{op.error_category ? ` (${op.error_category.replaceAll('_', ' ')})` : ''}</td>
+            <td className="p-2">{op.price_dkk_per_kwh == null ? '—' : `${op.price_dkk_per_kwh} kr./kWh`}</td>
+          </tr>)}</tbody></table></div>)}
     </div>
   </section>;
 }
