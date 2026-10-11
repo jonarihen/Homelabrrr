@@ -18,7 +18,7 @@ A fresh install or an upgrade changes nothing until you configure it:
 
 | Feature | Default | Turned on by |
 | --- | --- | --- |
-| iLO connection | none | Adding one per node (Admin → PVE Hosts → Hardware) |
+| iLO connection | none | Adding one per node (Admin → PVE Hosts → Edit Host → Hardware / iLO) |
 | Power telemetry collection | off | An explicit per-node switch, available only after a successful read-only test |
 | Automatic power changes | off | Saving a policy, turning on **Allow automatic changes**, then **Enable live control** (reauthentication plus acknowledgement) |
 | ElOverblik import | off | Saving a token *and* selecting a meter |
@@ -39,7 +39,9 @@ No simulated data is shown as real. Values without a source show as *unknown* or
 
 **TLS.** Leave **Verify TLS** on. If the management network uses an internal CA, paste the CA certificate (PEM) into the connection. Unverified TLS is refused unless the server runs with the break-glass setting `ALLOW_INSECURE_UPSTREAM_TLS=true`, which also affects Proxmox and FortiGate. Management addresses go through the SSRF guard. Cloud metadata (`169.254.169.254`, `100.100.100.200`), loopback and multicast are refused, and redirects are never followed.
 
-**Add and test.** In Admin → PVE Hosts, open **Hardware** on a node. Each physical node gets its own connection, even if one PVE API endpoint exposes several nodes. Enter the address, port, account and password, then run **Test**.
+**Add and test.** In Admin → PVE Hosts, click **Edit host** (the pencil). The dialog has a **Hardware / iLO** section with one entry per node. Each physical node gets its own connection, even if one PVE API endpoint exposes several nodes. Enter the address, port, account and password, save, then run **Test read-only connection** (in the dialog or on the node row, which also shows telemetry and the power policy).
+
+**When the test fails.** The message names the cause the backend saw: `connection refused (ECONNREFUSED)` means nothing listens on that port; `no route to host (EHOSTUNREACH)` or `TCP connection timed out (ETIMEDOUT)` means the **backend container** cannot reach the iLO network — check Docker networking and firewall rules from the backend container, not from your workstation; `TLS handshake failed (ERR_SSL_…)` means the iLO only offers TLS settings the backend refuses, usually old iLO 4 firmware that needs updating; `HTTP <status> on <path>` is the iLO answering with an error.
 
 - The password is write-only and never returned to the browser.
 - A test reads the generation, firmware, physical identity, regulator mode, chassis input watts and optional health data. Failed results are kept and shown.

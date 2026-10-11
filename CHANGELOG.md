@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-11 — iLO settings in Edit Host and clearer connection failures
+
+- iLO connections are now set up in the **Edit Host** dialog, with one Hardware / iLO section per node. The node row keeps the status, the read-only test, telemetry and the power policy.
+- A saved iLO connection stays editable: the form keeps the saved values and shows a confirmation instead of collapsing.
+- A failed iLO test now says why: connection refused, no route to the host, a TCP timeout, a TLS handshake failure (with the error code) or the HTTP status and Redfish path the iLO answered with. TLS handshake errors are no longer reported as "unreachable".
+- iLO reads wait up to 10 seconds for a silent connection instead of 5, because iLO 4 can be slow to answer some Redfish resources. The 15-second limit per request is unchanged.
+
 ## 2026-10-11 — Power & Energy: iLO power modes, electricity costs and private PayPal support
 
 A private, optional Power & Energy area: measure what the lab's physical servers draw, steer their HPE Power Regulator mode by schedule and electricity price, see what that costs, and let invited members chip in. Everything starts disabled. Operators: see `backend/docs/power-energy-runbook.md` for the rollout order.
