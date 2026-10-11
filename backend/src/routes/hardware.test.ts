@@ -4,7 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq, sql } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { auditLog, hardwareConnections, hardwarePowerSamples, pveHosts, users } from '../db/schema/index.ts';
+import { auditLog, hardwareConnections, hardwareEnergyIntervals, hardwarePowerSamples, pveHosts, users } from '../db/schema/index.ts';
 import type { HardwareDiscovery } from '../services/iloAdapter.ts';
 import { IloError } from '../services/iloAdapter.ts';
 
@@ -247,4 +247,67 @@ test('telemetry exposes a time range, exact stats and mode-change markers within
   for (const hours of ['0', '169', 'abc', '1.5']) {
     assert.equal((await request(app).get(`/${row.id}/telemetry?hours=${hours}`).set('x-test-role', 'admin')).status, 400, hours);
   }
+});
+
+async function clockedApp(clock: () => Date) {
+  const clocked = express();
+  clocked.use((req, _res, next) => { req.session = { userId: adminId, isAdmin: true } as never; next(); });
+  clocked.use('/', (await import('./hardware.ts')).createHardwareRouter(async () => discovery(), clock));
+  return clocked;
+}
+
+async function dstConnection(node: string) {
+  const [row] = await fixture.db.insert(hardwareConnections).values({ pve_host_id: hostId, node_ref: `${hostId}~${node}`, target_host: `${node}.example.test`, username: 'r', secret: 'enc', system_uuid: `${node}-uuid` }).returning();
+  return row;
+}
+
+function bucket(hardwareId: number, startUtc: string, kwh = '0.050000000') {
+  const start = new Date(startUtc);
+  return { hardware_id: hardwareId, start_utc: start, end_utc: new Date(start.getTime() + 900_000), kwh, covered_seconds: 900, expected_seconds: 900, quality: 'integrated_complete', method_version: 'trapezoid_v1' };
+}
+
+for (const [label, nowIso, localMidnightUtc, monthStartUtc] of [
+  ['autumn DST (25 h day)', '2026-10-25T12:00:00Z', '2026-10-24T22:00:00Z', '2026-09-30T22:00:00Z'],
+  ['spring DST (23 h day)', '2026-03-29T12:00:00Z', '2026-03-28T23:00:00Z', '2026-02-28T23:00:00Z'],
+] as const) {
+  test(`today/month summary uses Copenhagen boundaries on ${label}`, async () => {
+    const row = await dstConnection(`dst-${nowIso.slice(5, 7)}`);
+    const midnight = Date.parse(localMidnightUtc);
+    await fixture.db.insert(hardwareEnergyIntervals).values([
+      bucket(row.id, new Date(midnight - 900_000).toISOString()), // last bucket of the local previous day
+      bucket(row.id, localMidnightUtc), // first bucket of the local day
+      bucket(row.id, new Date(Date.parse(nowIso) - 900_000).toISOString()),
+      bucket(row.id, nowIso), // starts at "now": not yet part of the elapsed day
+      bucket(row.id, new Date(Date.parse(monthStartUtc) - 900_000).toISOString()), // previous local month
+      bucket(row.id, monthStartUtc),
+    ]);
+    const clocked = await clockedApp(() => new Date(nowIso));
+    const result = await request(clocked).get(`/${row.id}/telemetry?hours=24`);
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    const summary = result.body.summary;
+    assert.equal(summary.today_expected_seconds, (Date.parse(nowIso) - midnight) / 1000);
+    assert.equal(Number(summary.today_kwh), 0.1);
+    assert.equal(summary.today_covered_seconds, 1800);
+    assert.equal(summary.month_expected_seconds, (Date.parse(nowIso) - Date.parse(monthStartUtc)) / 1000);
+    // Month = today's two buckets + previous-day bucket + month-start bucket.
+    assert.equal(Number(summary.month_kwh), 0.2);
+    assert.equal(result.body.range.end, new Date(nowIso).toISOString());
+  });
+}
+
+test('history is bounded to 500 bins and keeps the newest bin at the widest range', async () => {
+  const row = await dstConnection('dense');
+  const nowAt = new Date('2026-10-09T12:00:30Z');
+  const rows = Array.from({ length: 168 * 60 + 30 }, (_, index) => ({ hardware_id: row.id, node_ref: row.node_ref,
+    observed_at: new Date(nowAt.getTime() - index * 60_000), watts: String(200 + (index % 7)), mode: index % 600 === 0 ? 'high' : 'low', origin: 'fixture' }));
+  for (let i = 0; i < rows.length; i += 2000) await fixture.db.insert(hardwarePowerSamples).values(rows.slice(i, i + 2000));
+  const clocked = await clockedApp(() => nowAt);
+  const result = await request(clocked).get(`/${row.id}/telemetry?hours=168`);
+  assert.equal(result.status, 200);
+  assert.ok(result.body.points.length <= 500, `got ${result.body.points.length} points`);
+  assert.ok(result.body.points.length > 400);
+  const newest = Date.parse(result.body.points.at(-1).at);
+  assert.ok(nowAt.getTime() - newest < result.body.range.binSeconds * 1000, 'the most recent bin is not truncated');
+  assert.ok(result.body.modeChanges.length <= 100);
+  assert.equal(result.body.stats.samples, 168 * 60 + 1);
 });

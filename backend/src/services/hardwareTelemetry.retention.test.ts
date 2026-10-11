@@ -2,7 +2,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { and, eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { hardwareConnections, hardwareEnergyDays, hardwareEnergyIntervals, pveHosts } from '../db/schema/index.ts';
+import { hardwareConnections, hardwareEnergyDays, hardwareEnergyIntervals, hardwarePowerSamples, pveHosts } from '../db/schema/index.ts';
 
 let fixture: TestDatabase;
 let closeDb: () => Promise<void>;
@@ -70,4 +70,16 @@ test('retention preserves the entire local cutoff day until it can be pruned who
   assert.equal(pruned.length, 0);
   const [preserved] = await fixture.db.select().from(hardwareEnergyDays).where(and(eq(hardwareEnergyDays.hardware_id, hardwareId), eq(hardwareEnergyDays.local_date, localDay)));
   assert.equal(Number(preserved.kwh), 6);
+});
+
+test('configured raw retention prunes only samples past its own cutoff', async () => {
+  const now = new Date('2029-01-10T12:00:00Z');
+  const ages = [1, 3, 10];
+  await fixture.db.insert(hardwarePowerSamples).values(ages.map((days) => ({ hardware_id: hardwareId, node_ref: 'fixture', observed_at: new Date(now.getTime() - days * 86400_000), watts: '100', mode: 'low', origin: 'fixture' })));
+  const remaining = async () => (await fixture.db.select().from(hardwarePowerSamples).where(eq(hardwarePowerSamples.hardware_id, hardwareId))).length;
+  await retain(now, { rawDays: 30, intervalDays: 730, dayDays: 1826 });
+  assert.equal(await remaining(), 3);
+  const result = await retain(now, { rawDays: 2, intervalDays: 730, dayDays: 1826 });
+  assert.equal(result.rawDeleted, 2);
+  assert.equal(await remaining(), 1);
 });

@@ -47,7 +47,7 @@ export function testStatusFor(code: IloError['code']): string {
     default: return 'unreachable';
   }
 }
-export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware) {
+export function createHardwareRouter(hardwareReader: typeof discoverHardware = discoverHardware, clock: () => Date = () => new Date()) {
 const router = Router();
 router.use(requireAuth, requirePermission('can_manage_hosts'), requireInteractiveSession);
 router.get('/', async (_req, res) => {
@@ -75,47 +75,49 @@ router.get('/:id/telemetry', async (req, res) => {
     const hours = Number(req.query.hours ?? 24);
     if (!Number.isInteger(hours) || hours < 1 || hours > 168) return res.status(400).json({ error: 'hours must be between 1 and 168' });
     const binSeconds = Math.max(60, Math.ceil(hours * 3600 / 500 / 60) * 60);
-    const start = new Date(Date.now() - hours * 3600_000);
+    // One clock for every bound in this response (injectable for DST tests).
+    const nowAt = clock();
+    const start = new Date(nowAt.getTime() - hours * 3600_000);
     const points = await db.execute(sql`
       SELECT to_timestamp(floor(extract(epoch from observed_at) / ${binSeconds}) * ${binSeconds}) AS at,
         min(watts)::text AS min_watts, avg(watts)::text AS mean_watts, max(watts)::text AS max_watts,
         count(*)::integer AS count
-      FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start}
+      FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start} AND observed_at <= ${nowAt}
       GROUP BY 1 ORDER BY 1 LIMIT 500
     `);
     const summary = await db.execute(sql`
       WITH bounds AS (
-        SELECT (date_trunc('day', now() AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS day_start,
-          (date_trunc('month', now() AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS month_start
+        SELECT (date_trunc('day', ${nowAt}::timestamptz AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS day_start,
+          (date_trunc('month', ${nowAt}::timestamptz AT TIME ZONE 'Europe/Copenhagen') AT TIME ZONE 'Europe/Copenhagen') AS month_start
       )
       SELECT sum(kwh) FILTER (WHERE start_utc >= bounds.day_start)::text AS today_kwh,
         sum(covered_seconds) FILTER (WHERE start_utc >= bounds.day_start)::integer AS today_covered_seconds,
-        floor(extract(epoch FROM now() - bounds.day_start))::integer AS today_expected_seconds,
+        floor(extract(epoch FROM ${nowAt}::timestamptz - bounds.day_start))::integer AS today_expected_seconds,
         sum(kwh)::text AS month_kwh, sum(covered_seconds)::integer AS month_covered_seconds,
-        floor(extract(epoch FROM now() - bounds.month_start))::integer AS month_expected_seconds
-      FROM bounds LEFT JOIN hardware_energy_intervals ON hardware_id = ${id} AND start_utc >= bounds.month_start AND start_utc <= now()
+        floor(extract(epoch FROM ${nowAt}::timestamptz - bounds.month_start))::integer AS month_expected_seconds
+      FROM bounds LEFT JOIN hardware_energy_intervals ON hardware_id = ${id} AND start_utc >= bounds.month_start AND start_utc < ${nowAt}
       GROUP BY bounds.day_start, bounds.month_start
     `);
     // Exact range statistics (not bin averages) and mode transitions for chart
     // markers. Both scan the same indexed (hardware_id, observed_at) range.
     const stats = await db.execute(sql`
       SELECT min(watts)::text AS min_watts, avg(watts)::text AS mean_watts, max(watts)::text AS max_watts, count(*)::integer AS samples
-      FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start}
+      FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start} AND observed_at <= ${nowAt}
     `);
     const modeChanges = await db.execute(sql`
       SELECT at, mode, previous_mode FROM (
         SELECT observed_at AS at, mode, lag(mode) OVER (ORDER BY observed_at) AS previous_mode
-        FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start}
+        FROM hardware_power_samples WHERE hardware_id = ${id} AND observed_at >= ${start} AND observed_at <= ${nowAt}
       ) transitions WHERE previous_mode IS NOT NULL AND previous_mode <> mode ORDER BY at DESC LIMIT 100
     `);
     const [state] = await db.select({ last_error_code: hardwareTelemetryState.last_error_code, last_attempt_at: hardwareTelemetryState.last_attempt_at, last_success_at: hardwareTelemetryState.last_success_at, failure_count: hardwareTelemetryState.failure_count, auth_failure_count: hardwareTelemetryState.auth_failure_count }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
     const latest = await latestHardwareSample(id);
-    const ageSeconds = latest ? Math.max(0, Math.round((Date.now() - latest.observed_at.getTime()) / 1000)) : null;
+    const ageSeconds = latest ? Math.max(0, Math.round((nowAt.getTime() - latest.observed_at.getTime()) / 1000)) : null;
     res.json({ hardwareId: id, nodeRef: connection.node_ref, collectionEnabled: connection.collection_enabled, lifecycleState: connection.lifecycle_state,
       latest: latest && { watts: latest.watts, mode: latest.mode, health: latest.health, observedAt: latest.observed_at, ageSeconds, stale: (ageSeconds ?? Infinity) > Math.ceil(3 * HARDWARE_POLL_INTERVAL_MS / 1000) },
       lastErrorCode: state?.last_error_code || null, lastAttemptAt: state?.last_attempt_at || null, lastSuccessAt: state?.last_success_at || null,
       failureCount: state?.failure_count ?? 0, authFailureCount: state?.auth_failure_count ?? 0,
-      range: { start, end: new Date(), binSeconds, pollIntervalSeconds: Math.round(HARDWARE_POLL_INTERVAL_MS / 1000) },
+      range: { start, end: nowAt, binSeconds, pollIntervalSeconds: Math.round(HARDWARE_POLL_INTERVAL_MS / 1000) },
       stats: stats.rows[0] || null, modeChanges: modeChanges.rows.reverse(), points: points.rows, summary: summary.rows[0] || null });
   } catch (err) { if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }
 });
