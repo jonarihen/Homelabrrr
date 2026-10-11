@@ -22,6 +22,7 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
   const [notice, setNotice] = useState('');
   const [manualMode, setManualMode] = useState('low');
   const [duration, setDuration] = useState(180);
+  const [preview, setPreview] = useState(null);
   const refresh = useCallback(async () => {
     const { data } = await api.get(`/admin/power-control/${connection.id}`);
     setRecord(data);
@@ -44,6 +45,7 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
       schedule: draft.schedule, pricePolicy: draft.pricePolicy,
     });
     setNotice('Power policy saved. Hardware changes still require separate enablement.');
+    setPreview(null);
   });
   const control = (enable) => action(async () => {
     if (enable && !window.confirm('Enable live iLO Power Regulator changes for this physical server? The server and VMs stay running.')) return;
@@ -96,7 +98,8 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
         <p className="mt-3 text-gray-500">Price rules use valid current DKK/kWh intervals only. Missing or incomplete prices fall back to the weekly schedule or chosen default.</p>
       </div>
     </div>
-    <div className="mt-3 flex items-center gap-3"><label><input type="checkbox" checked={draft.automationEnabled} onChange={(event) => setDraft((current) => ({ ...current, automationEnabled: event.target.checked }))} /> Allow automatic changes</label><button disabled={busy} onClick={save} className="border border-orange-600 px-3 py-2 uppercase text-orange-400 disabled:opacity-50">Save policy</button></div>
+    <div className="mt-3 flex items-center gap-3"><label><input type="checkbox" checked={draft.automationEnabled} onChange={(event) => setDraft((current) => ({ ...current, automationEnabled: event.target.checked }))} /> Allow automatic changes</label><button disabled={busy} onClick={save} className="border border-orange-600 px-3 py-2 uppercase text-orange-400 disabled:opacity-50">Save policy</button><button disabled={busy || !record.policy.version} onClick={() => action(async () => { setPreview((await api.get(`/admin/power-control/${connection.id}/preview`)).data); })} className="border border-gray-600 px-3 py-2 uppercase disabled:opacity-50">Preview saved policy</button></div>
+    {preview && <div className="mt-3 border border-gray-700 bg-gray-900/60 p-3">At {new Date(preview.at).toLocaleString()} · observed {preview.observedMode} · baseline {preview.baseMode || 'none'} · selected {preview.selectedMode || 'none'} · reason {preview.reason.replaceAll('_', ' ')} · price {preview.priceDkkPerKwh == null ? 'unavailable' : `${preview.priceDkkPerKwh} kr./kWh`}{preview.priceValidUntil ? ` until ${new Date(preview.priceValidUntil).toLocaleString()}` : ''}. Future selections beyond published prices are unknown.</div>}
     <div className="mt-4 border-t border-gray-700 pt-3"><h3 className="mb-2 uppercase text-gray-100">Manual temporary mode</h3><div className="flex flex-wrap items-center gap-2"><ModeSelect value={manualMode} onChange={setManualMode} /><label>Minutes<input type="number" min="1" max="1440" value={duration} onChange={(event) => setDuration(Number(event.target.value))} className="ml-2 w-20 border border-gray-700 bg-gray-900 px-2 py-1" /></label><button disabled={busy || !record.controlEnabled} onClick={() => mutateVersion('manual', { mode: manualMode, durationMinutes: duration })} className="border border-orange-600 px-2 py-1 text-orange-400 disabled:opacity-40">Apply now</button>{record.policy.manualMode && <><span>Override: {record.policy.manualMode} until {record.policy.manualExpiresAt ? new Date(record.policy.manualExpiresAt).toLocaleString() : 'cleared'}</span><button disabled={busy} onClick={() => action(async () => { await api.delete(`/admin/power-control/${connection.id}/manual`, { data: { version: record.policy.version } }); setNotice('Manual override cleared.'); })} className="border border-gray-600 px-2 py-1">Clear override</button></>}</div><p className="mt-2 text-amber-400">An explicit manual High selection can bypass the expensive-price cap. It never reboots a server or VM.</p></div>
   </section>;
 }

@@ -4,7 +4,8 @@ import { db } from '../db/client.ts';
 import { hardwareConnections, hardwarePowerPolicies } from '../db/schema/index.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
-import { validatePowerSchedule, validatePricePolicy, weekdayPreset, type PowerPricePolicy, type WeeklyPowerSchedule } from '../services/powerPolicy.ts';
+import { resolvePowerDecision, validatePowerSchedule, validatePricePolicy, weekdayPreset, type ApplicablePowerPrice, type PowerPricePolicy, type WeeklyPowerSchedule, type WritablePowerMode } from '../services/powerPolicy.ts';
+import { getApplicablePrice } from '../services/electricityPricing.ts';
 import { logAudit, logAuditTx } from '../utils/audit.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { PowerController } from '../services/powerController.ts';
@@ -51,6 +52,40 @@ router.post('/global/pause', requireRecentReauthentication, async (req, res) => 
     await setSetting('power_automation_paused', req.body.paused ? 'true' : 'false');
     await logAudit(req, req.body.paused ? 'power_automation_paused' : 'power_automation_resumed');
     res.json({ paused: req.body.paused });
+  } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
+});
+
+router.get('/:id/preview', async (req, res) => {
+  try {
+    const id = hardwareId(req.params.id);
+    const at = req.query.at === undefined ? new Date() : new Date(String(req.query.at));
+    if (!Number.isFinite(at.getTime())) return res.status(400).json({ error: 'Invalid preview time' });
+    const [row] = await db.select({ connection: hardwareConnections, policy: hardwarePowerPolicies })
+      .from(hardwareConnections).leftJoin(hardwarePowerPolicies, eq(hardwareConnections.id, hardwarePowerPolicies.hardware_id))
+      .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'))).limit(1);
+    if (!row?.policy) return res.status(404).json({ error: 'Saved power policy not found' });
+    const capabilities = row.connection.capabilities as { runtimeMode?: string; supportedModes?: string[] } | null;
+    const supportedModes = (capabilities?.runtimeMode === 'supported' ? capabilities.supportedModes ?? ['low', 'dynamic', 'high'] : [])
+      .filter((mode): mode is WritablePowerMode => ['low', 'dynamic', 'high'].includes(mode));
+    const applicable = row.policy.price_policy.enabled ? await getApplicablePrice(at, row.policy.price_policy) : null;
+    const price = applicable?.status === 'valid' && applicable.dkk_per_kwh && applicable.start_utc && applicable.end_utc
+      ? applicable as ApplicablePowerPrice : null;
+    const manualActive = row.policy.manual_mode && (!row.policy.manual_expires_at || row.policy.manual_expires_at > at);
+    const observed = row.policy.last_verified_mode;
+    const actualMode = ['low', 'dynamic', 'high', 'os_control'].includes(observed || '')
+      ? observed as 'low' | 'dynamic' | 'high' | 'os_control' : 'unknown';
+    const decision = resolvePowerDecision({ now: at, actualMode, supportedModes,
+      controlEnabled: row.connection.control_enabled && (row.policy.automation_enabled || Boolean(manualActive)),
+      automationPaused: row.policy.paused || await getSetting('power_automation_paused') === 'true',
+      driftHold: row.policy.drift_hold, schedule: row.policy.schedule, pricePolicy: row.policy.price_policy,
+      price, previousLatch: row.policy.latch,
+      manualOverride: manualActive ? { mode: row.policy.manual_mode as WritablePowerMode, expiresAt: row.policy.manual_expires_at } : null,
+      manualAction: Boolean(manualActive),
+    });
+    res.json({ at, observedMode: actualMode, policyVersion: row.policy.version,
+      baseMode: decision.baseMode, selectedMode: decision.target, reason: decision.reason,
+      priceStatus: decision.priceStatus, priceDkkPerKwh: price?.dkk_per_kwh ?? null,
+      priceValidUntil: decision.validUntil, futureBeyondPublishedPrice: row.policy.price_policy.enabled && at > new Date() && decision.priceStatus !== 'valid' });
   } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
 });
 
