@@ -8,6 +8,7 @@ import { importDatabase } from '../scripts/importSqlite.ts';
 import {
   users, roles, rolePermissions, sshKeys, pveHosts, firewalls,
   notificationWebhooks, caddyServers, provisionedVms, vmMigrations, isos,
+  hardwareConnections, eloverblikConnections, paypalConfigs,
 } from './schema/index.ts';
 import {
   assertSecretEncryptionKey, decryptSecret, encryptSecret, isEncryptedSecret, secretNeedsMigration,
@@ -34,6 +35,9 @@ const ENCRYPTED_COLUMNS = [
   { label: 'notification_webhooks.url', table: notificationWebhooks, id: notificationWebhooks.id, column: notificationWebhooks.url, key: 'url' as const },
   { label: 'caddy_servers.auth_secret', table: caddyServers, id: caddyServers.id, column: caddyServers.auth_secret, key: 'auth_secret' as const },
   { label: 'caddy_servers.ssh_secret', table: caddyServers, id: caddyServers.id, column: caddyServers.ssh_secret, key: 'ssh_secret' as const },
+  { label: 'hardware_connections.secret', table: hardwareConnections, id: hardwareConnections.id, column: hardwareConnections.secret, key: 'secret' as const },
+  { label: 'eloverblik_connections.refresh_token', table: eloverblikConnections, id: eloverblikConnections.id, column: eloverblikConnections.refresh_token, key: 'refresh_token' as const },
+  { label: 'paypal_configs.client_secret', table: paypalConfigs, id: paypalConfigs.environment, column: paypalConfigs.client_secret, key: 'client_secret' as const },
 ];
 
 type EncryptedColumn = (typeof ENCRYPTED_COLUMNS)[number];
