@@ -84,12 +84,24 @@ export async function setPaypalEnabled(value: unknown, enabled: boolean) {
   await db.update(paypalConfigs).set({ enabled, config_version: row.config_version + 1, updated_at: new Date() }).where(eq(paypalConfigs.environment, row.environment));
   paypalClient.invalidate();
 }
+// Durable per-member checkout limit: counting and inserting happen under a
+// per-user advisory lock so concurrent clicks cannot exceed it.
+export const CHECKOUT_INTENTS_PER_HOUR = 10;
+async function insertRateLimitedIntent(userId: number, values: typeof paypalIntents.$inferInsert) {
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(238100, ${userId})`);
+    const [{ recent }] = await tx.select({ recent: count() }).from(paypalIntents)
+      .where(and(eq(paypalIntents.user_id, userId), gt(paypalIntents.created_at, new Date(Date.now() - 60 * 60_000))));
+    if (recent >= CHECKOUT_INTENTS_PER_HOUR) throw new PayPalError('CHECKOUT_RATE_LIMIT', 429);
+    await tx.insert(paypalIntents).values(values);
+  });
+}
 export async function createOneOff(userId: number, amount: string, value: unknown) {
   const row = await configured(value);
   if (!row.enabled) throw new PayPalError('CHECKOUT_DISABLED', 409);
   const amountOre = parseDkkOre(amount);
   const id = randomUUID(); const requestId = randomUUID();
-  await db.insert(paypalIntents).values({ id, user_id: userId, environment: row.environment, merchant_id: row.merchant_id!, kind: 'one_off',
+  await insertRateLimitedIntent(userId, { id, user_id: userId, environment: row.environment, merchant_id: row.merchant_id!, kind: 'one_off',
     amount_ore: amountOre, create_request_id: requestId, config_version: row.config_version });
   const { returnUrl, cancelUrl } = checkoutReturnUrls('one_off');
   const order = await paypalClient.createOrder(credentials(row), oreToDkk(amountOre), id, requestId, returnUrl, cancelUrl);
@@ -111,10 +123,13 @@ export async function captureOneOff(userId: number, intentId: string) {
   if (order.id !== intent.provider_id || !['APPROVED', 'COMPLETED'].includes(order.status) || unit?.custom_id !== intent.id ||
       unit?.payee?.merchant_id !== intent.merchant_id || unit?.amount?.currency_code !== 'DKK' ||
       unit?.amount?.value !== oreToDkk(intent.amount_ore)) throw new PayPalError('ORDER_MISMATCH', 409);
-  if (intent.status !== 'approval_pending') {
+  if (intent.status !== 'approval_pending' || order.status === 'COMPLETED') {
+    // Already captured (by an earlier request, reconciliation or a webhook):
+    // ingest the provider's capture rather than capturing again.
     const captures = unit?.payments?.captures;
-    if (Array.isArray(captures) && captures.length === 1 && captures[0]?.status === 'COMPLETED' &&
+    if (Array.isArray(captures) && captures.length === 1 && COMPLETED_CAPTURE_STATUSES.includes(captures[0]?.status) &&
         typeof captures[0].id === 'string') return ingestOneOffCapture(config, intent, captures[0].id, 'member_readback');
+    if (intent.status === 'approval_pending') throw new PayPalError('ORDER_MISMATCH', 409);
     // A previous POST may still be in flight or its outcome may not yet be visible.
     // Never issue another capture from a member retry; reconciliation will read it back.
     return { status: 'pending_verification' };
@@ -163,6 +178,42 @@ export async function storeVerifiedWebhook(value: unknown, headers: Record<strin
     event_at: event.create_time ? new Date(event.create_time) : null }).onConflictDoNothing();
   return { acknowledged: true };
 }
+const MAX_PROVIDER_PAGES = 20;
+const EVENT_PAGE_PARAMS = ['page_size', 'start_time', 'end_time', 'page', 'next_page_token', 'event_type', 'transaction_id'];
+const TRANSACTION_PAGE_PARAMS = ['start_time', 'end_time', 'page', 'page_size', 'next_page_token'];
+function nextLink(page: any): string | null {
+  const link = Array.isArray(page?.links) ? page.links.find((item: any) => item?.rel === 'next') : null;
+  return typeof link?.href === 'string' ? link.href : null;
+}
+/**
+ * All transactions of one subscription in [from, to]. Follows validated
+ * `next` links; if PayPal reports more pages without a link, the window is
+ * split in half (bounded depth) and results are de-duplicated by ID.
+ */
+export async function listAllSubscriptionTransactions(config: PayPalCredentials, id: string, from: Date, to: Date, depth = 0): Promise<any[]> {
+  const path = `/v1/billing/subscriptions/${id}/transactions`;
+  let page = await paypalClient.listSubscriptionTransactions(config, id, from, to);
+  const items: any[] = [];
+  for (let pageNumber = 0; ; pageNumber++) {
+    if (!Array.isArray(page?.transactions) || page.transactions.length > 200) throw new PayPalError('TRANSACTIONS_INCOMPLETE', 409);
+    items.push(...page.transactions);
+    const next = nextLink(page);
+    if (next) {
+      if (pageNumber >= MAX_PROVIDER_PAGES - 1) throw new PayPalError('TRANSACTIONS_INCOMPLETE', 409);
+      page = await paypalClient.followNext(config, next, path, TRANSACTION_PAGE_PARAMS);
+      continue;
+    }
+    if (Number(page.total_pages || 1) > pageNumber + 1) {
+      if (depth >= 4 || to.getTime() - from.getTime() < 2 * 60 * 60_000) throw new PayPalError('TRANSACTIONS_INCOMPLETE', 409);
+      const middle = new Date(from.getTime() + Math.floor((to.getTime() - from.getTime()) / 2));
+      const halves = [...await listAllSubscriptionTransactions(config, id, from, middle, depth + 1),
+        ...await listAllSubscriptionTransactions(config, id, middle, to, depth + 1)];
+      return [...new Map(halves.map((item) => [item?.id, item])).values()];
+    }
+    break;
+  }
+  return [...new Map(items.map((item) => [item?.id, item])).values()];
+}
 // The OAuth-authenticated, app-scoped event list recovers deliveries lost during an
 // outage. Events still pass the normal local intent/merchant linkage checks.
 export async function recoverPaypalEvents(row: Awaited<ReturnType<typeof configured>>, now: Date, cursor: Date | null) {
@@ -170,20 +221,26 @@ export async function recoverPaypalEvents(row: Awaited<ReturnType<typeof configu
     (cursor?.getTime() ?? now.getTime() - 30 * 86_400_000) - 24 * 60 * 60_000));
   const to = new Date(Math.min(now.getTime(), from.getTime() + 7 * 86_400_000));
   if (to <= from) return { through: now, stored: 0 };
-  const page = await paypalClient.listWebhookEvents(credentials(row), from, to);
-  if (!Array.isArray(page.events) || page.events.length > 100 ||
-      (Array.isArray(page.links) && page.links.some((link: any) => link?.rel === 'next')))
-    throw new PayPalError('EVENTS_INCOMPLETE', 409);
+  const config = credentials(row);
+  let page = await paypalClient.listWebhookEvents(config, from, to);
   let stored = 0;
-  for (const event of page.events) {
-    if (!event || typeof event.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(event.id) ||
-        typeof event.event_type !== 'string' || typeof event.resource !== 'object' || !event.resource)
-      throw new PayPalError('EVENT_MALFORMED', 409);
-    const result = await db.insert(paypalWebhookInbox).values({ id: `${row.environment}:${row.merchant_id}:${event.id}`,
-      environment: row.environment, merchant_id: row.merchant_id!, event_type: event.event_type,
-      resource_id: String(event.resource.id || ''), payload: event, source: 'provider_readback',
-      event_at: event.create_time ? limitedTime(event.create_time) : null }).onConflictDoNothing();
-    stored += result.rowCount ?? 0;
+  for (let pageNumber = 0; ; pageNumber++) {
+    if (!Array.isArray(page?.events) || page.events.length > 100) throw new PayPalError('EVENTS_INCOMPLETE', 409);
+    for (const event of page.events) {
+      if (!event || typeof event.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(event.id) ||
+          typeof event.event_type !== 'string' || typeof event.resource !== 'object' || !event.resource)
+        throw new PayPalError('EVENT_MALFORMED', 409);
+      const result = await db.insert(paypalWebhookInbox).values({ id: `${row.environment}:${row.merchant_id}:${event.id}`,
+        environment: row.environment, merchant_id: row.merchant_id!, event_type: event.event_type,
+        resource_id: String(event.resource.id || ''), payload: event, source: 'provider_readback',
+        event_at: event.create_time ? limitedTime(event.create_time) : null }).onConflictDoNothing();
+      stored += result.rowCount ?? 0;
+    }
+    const next = nextLink(page);
+    if (!next) break;
+    // Bounded: a window that needs more pages fails visibly and keeps the cursor.
+    if (pageNumber >= MAX_PROVIDER_PAGES - 1) throw new PayPalError('EVENTS_INCOMPLETE', 409);
+    page = await paypalClient.followNext(config, next, '/v1/notifications/webhooks-events', EVENT_PAGE_PARAMS);
   }
   return { through: to, stored };
 }
@@ -221,6 +278,7 @@ export async function processPaypalInbox(limit = 20) {
       attempt_count: entry.attempt_count + 1 })
       .where(and(eq(paypalWebhookInbox.id, entry.id), eq(paypalWebhookInbox.status, 'pending')));
     if (claim.rowCount !== 1) continue;
+    let outcome = 'processed';
     try {
       const event = entry.payload as any;
       const resource = event.resource;
@@ -255,12 +313,16 @@ export async function processPaypalInbox(limit = 20) {
         const row = await configured(entry.environment);
         if (row.merchant_id !== entry.merchant_id) throw new PayPalError('CONFIG_CHANGED', 409);
         await ingestReportedAdjustment(credentials(row), resource.id, entry.event_type, limitedTime(event.create_time), entry.source);
+      } else {
+        // Pending/denied/dispute/unknown events are evidence, never income.
+        outcome = 'not_posted';
       }
-      // Pending/denied/unknown events are evidence, never income.
+      recordInboxOutcome(entry.environment, entry.event_type, outcome);
       await db.update(paypalWebhookInbox).set({ status: 'processed', processed_at: new Date(), error_code: null })
         .where(eq(paypalWebhookInbox.id, entry.id));
     } catch (err) {
       const code = err instanceof PayPalError ? err.code : 'PROCESSING_FAILED';
+      recordInboxOutcome(entry.environment, entry.event_type, code.startsWith('UNLINKED_') ? 'unlinked' : 'failed', code);
       const retryable = ['ADJUSTMENT_NOT_READY', 'UNLINKED_ADJUSTMENT', 'UNLINKED_CAPTURE', 'UNLINKED_SALE', 'UNLINKED_REFUND', 'ORIGINAL_RECEIPT_MISSING',
         'HTTP_429', 'HTTP_503', 'NETWORK'].includes(code);
       const retry = retryable && entry.attempt_count < 10;
@@ -274,16 +336,38 @@ export async function processPaypalInbox(limit = 20) {
 // Keep economic postings and inbox IDs for replay protection while discarding
 // old provider payloads, which can contain payer data. Review/pending events
 // retain their evidence until an operator has resolved them.
+// Observability for inbox outcomes. Labels use a fixed vocabulary: the event
+// type is reduced to a known name or OTHER, and no IDs, amounts or payer data
+// ever reach logs or metric labels.
+const KNOWN_EVENT_TYPES = new Set(['PAYMENT.CAPTURE.COMPLETED', 'PAYMENT.CAPTURE.PENDING', 'PAYMENT.CAPTURE.DENIED', 'PAYMENT.CAPTURE.DECLINED',
+  'PAYMENT.CAPTURE.REFUNDED', 'PAYMENT.CAPTURE.REVERSED', 'PAYMENT.SALE.COMPLETED', 'PAYMENT.SALE.PENDING', 'PAYMENT.SALE.DENIED',
+  'PAYMENT.SALE.REFUNDED', 'PAYMENT.SALE.REVERSED', 'CHECKOUT.ORDER.APPROVED', 'CHECKOUT.ORDER.COMPLETED',
+  'BILLING.SUBSCRIPTION.CREATED', 'BILLING.SUBSCRIPTION.ACTIVATED', 'BILLING.SUBSCRIPTION.UPDATED', 'BILLING.SUBSCRIPTION.EXPIRED',
+  'BILLING.SUBSCRIPTION.CANCELLED', 'BILLING.SUBSCRIPTION.SUSPENDED', 'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+  'CUSTOMER.DISPUTE.CREATED', 'CUSTOMER.DISPUTE.UPDATED', 'CUSTOMER.DISPUTE.RESOLVED', 'RISK.DISPUTE.CREATED']);
+export function paypalEventLabel(eventType: unknown) {
+  return typeof eventType === 'string' && KNOWN_EVENT_TYPES.has(eventType) ? eventType : 'OTHER';
+}
+function recordInboxOutcome(environment: string, eventType: string, outcome: string, code?: string) {
+  const type = paypalEventLabel(eventType);
+  const env = environment === 'live' ? 'live' : 'sandbox';
+  incrementMetric('paypal_webhook_events', `environment="${env}",type="${type}",outcome="${outcome}"`);
+  if (outcome === 'processed') return;
+  const dispute = type.includes('DISPUTE');
+  log(outcome === 'failed' || outcome === 'unlinked' ? 'warn' : 'info', 'paypal_webhook_event_not_posted', {
+    environment: env, type, outcome, ...(dispute ? { dispute: true } : {}),
+    ...(code ? { code: /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'OTHER' } : {}) });
+}
 export async function pruneProcessedPaypalWebhookEvidence(now = new Date(), limit = 50) {
   const cutoff = new Date(now.getTime() - 30 * 86_400_000);
   if (!Number.isFinite(cutoff.getTime())) throw new PayPalError('INVALID_TIME', 400);
   const ids = await db.select({ id: paypalWebhookInbox.id }).from(paypalWebhookInbox)
-    .where(and(eq(paypalWebhookInbox.status, 'processed'), lt(paypalWebhookInbox.processed_at, cutoff),
+    .where(and(inArray(paypalWebhookInbox.status, ['processed', 'dismissed']), lt(paypalWebhookInbox.processed_at, cutoff),
       sql`${paypalWebhookInbox.payload} <> '{}'::jsonb`))
     .orderBy(paypalWebhookInbox.processed_at).limit(Math.max(1, Math.min(limit, 50)));
   if (!ids.length) return 0;
   await db.update(paypalWebhookInbox).set({ payload: {} })
-    .where(and(eq(paypalWebhookInbox.status, 'processed'), inArray(paypalWebhookInbox.id, ids.map((row) => row.id))));
+    .where(and(inArray(paypalWebhookInbox.status, ['processed', 'dismissed']), inArray(paypalWebhookInbox.id, ids.map((row) => row.id))));
   return ids.length;
 }
 export function paypalInboxRetryDelayMs(attempt: number) {
@@ -294,7 +378,7 @@ export async function createMonthly(userId: number, value: unknown) {
   const row = await configured(value);
   if (!row.enabled || !row.monthly_plan_id || !row.monthly_amount_ore) throw new PayPalError('MONTHLY_DISABLED', 409);
   const id = randomUUID(); const requestId = randomUUID();
-  await db.insert(paypalIntents).values({ id, user_id: userId, environment: row.environment, merchant_id: row.merchant_id!, kind: 'monthly',
+  await insertRateLimitedIntent(userId, { id, user_id: userId, environment: row.environment, merchant_id: row.merchant_id!, kind: 'monthly',
     amount_ore: row.monthly_amount_ore, create_request_id: requestId, config_version: row.config_version });
   const { returnUrl, cancelUrl } = checkoutReturnUrls('monthly');
   const result = await paypalClient.createSubscription(credentials(row), row.monthly_plan_id, id, requestId, returnUrl, cancelUrl);
@@ -413,10 +497,12 @@ export async function ingestCaptureRefund(config: PayPalCredentials, refundId: s
   if (!intent || intent.kind !== 'one_off' || intent.merchant_id !== capture?.payee?.merchant_id) throw new PayPalError('UNLINKED_REFUND', 409);
   // Refund-before-capture: the original receipt is posted from provider state
   // first, so the refund always links to an existing economic transaction.
-  await postOneOffCaptureDetail(intent, capture, verification);
+  const receipt = await postOneOffCaptureDetail(intent, capture, verification);
   const result = await postCaptureRefund({ environment: intent.environment, merchantId: intent.merchant_id, intentId: intent.id, userId: intent.user_id },
     captureId, normalized, verification);
-  await settleCaptureAdjustments(config, intent, capture, verification);
+  const coverage = await settleCaptureAdjustments(config, intent, capture, verification);
+  await db.update(paypalIntents).set({ status: receipt.status === 'posted' && coverage.status !== 'unresolved' ? 'verified' : 'net_unresolved',
+    updated_at: new Date() }).where(eq(paypalIntents.id, intent.id));
   return result;
 }
 
@@ -452,11 +538,9 @@ export async function reconcileSubscription(subscription: typeof paypalSubscript
   const detail = await paypalClient.getSubscription(config, subscription.id);
   if (detail.id !== subscription.id || detail.plan_id !== subscription.plan_id || detail.custom_id !== subscription.intent_id)
     throw new PayPalError('SUBSCRIPTION_MISMATCH', 409);
-  const page = await paypalClient.listSubscriptionTransactions(config, subscription.id, from, to);
-  if (!Array.isArray(page.transactions) || Number(page.total_pages || 1) > 1 || page.transactions.length > 200)
-    throw new PayPalError('TRANSACTIONS_INCOMPLETE', 409);
-  if (expectedSaleId && !page.transactions.some((item: any) => item.id === expectedSaleId)) throw new PayPalError('SALE_NOT_FOUND', 409);
-  for (const item of page.transactions) {
+  const transactions = await listAllSubscriptionTransactions(config, subscription.id, from, to);
+  if (expectedSaleId && !transactions.some((item: any) => item?.id === expectedSaleId)) throw new PayPalError('SALE_NOT_FOUND', 409);
+  for (const item of transactions) {
     const normalized = normalizeSubscriptionTransaction(item, { amountOre: subscription.amount_ore });
     if (normalized) await postReceipt({ environment: subscription.environment, merchantId: subscription.merchant_id,
       intentId: subscription.intent_id, userId: subscription.user_id }, 'sale', normalized, 'subscription_transactions');
@@ -474,10 +558,11 @@ export async function reconcileSubscription(subscription: typeof paypalSubscript
     reconciled_through_at: sql`greatest(coalesce(${paypalSubscriptions.reconciled_through_at}, ${to}), ${to})`,
     cancelled_at: detail.status === 'CANCELLED' && detail.status_update_time ? limitedTime(detail.status_update_time) : subscription.cancelled_at })
     .where(eq(paypalSubscriptions.id, subscription.id));
-  return { checked: page.transactions.length };
+  return { checked: transactions.length };
 }
 
-const reconciliationRunning = new Map<string, Promise<unknown>>();
+export type PaypalReconcileResult = { status: 'ok' | 'partial'; checked: number; failed: number };
+const reconciliationRunning = new Map<string, Promise<PaypalReconcileResult>>();
 const CAPTURE_RETRY_LIMIT = 5;
 const STALE_CAPTURING_MS = 10 * 60_000;
 const COMPLETED_CAPTURE_STATUSES = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REVERSED'];
@@ -567,11 +652,11 @@ export async function enrichUnresolvedTransaction(config: PayPalCredentials, row
   throw new PayPalError('UNKNOWN_TRANSACTION_KIND', 409);
 }
 
-export async function reconcilePaypal(value: unknown, now = new Date()) {
+export async function reconcilePaypal(value: unknown, now = new Date()): Promise<PaypalReconcileResult> {
   const selectedEnvironment = environment(value);
   const active = reconciliationRunning.get(selectedEnvironment);
   if (active) return active;
-  const work = (async () => {
+  const work = (async (): Promise<PaypalReconcileResult> => {
     const env = selectedEnvironment;
     const row = await configured(env);
     const current = row.config_version;
@@ -679,7 +764,7 @@ async function scheduledReconciliation() {
   for (const setup of setups) {
     if (!setup.configured) continue;
     try {
-      const result = await reconcilePaypal(setup.environment) as { status: string; failed: number };
+      const result = await reconcilePaypal(setup.environment);
       if (result.status !== 'ok') log('warn', 'paypal_reconcile_partial', { environment: setup.environment, failed: result.failed });
     } catch (err) { reportReconcileFailure(setup.environment, 'pass', err); }
   }

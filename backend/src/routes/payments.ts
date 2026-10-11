@@ -1,28 +1,38 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { requireAuth, requireAdmin, requireInteractiveSession, requireRecentReauthentication } from '../middleware/auth.ts';
-import { captureOneOff, createOneOff, createMonthly, cancelMonthly, adminPaypalSubscriptions, adminCancelMonthly, ownPaymentHistory, memberPaypalStatus, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual } from '../services/paypal.ts';
+import { captureOneOff, createOneOff, createMonthly, cancelMonthly, adminPaypalSubscriptions, adminCancelMonthly, ownPaymentHistory, memberPaypalStatus, paypalSetupStatus, savePaypalConfiguration, setPaypalEnabled, verifiedContributionSnapshot, reconcilePaypalManual, processPaypalInbox } from '../services/paypal.ts';
+import { listPaypalReviewEvents, retryPaypalReviewEvent, dismissPaypalReviewEvent } from '../services/paypalReview.ts';
+import { startBackgroundWork } from '../services/backgroundWork.ts';
 import { latestPaypalAllocation, recalculatePaypalAllocations } from '../services/paypalAllocation.ts';
 import { PayPalError } from '../services/paypalClient.ts';
 import { logAudit } from '../utils/audit.ts';
 
 const router = Router();
 router.use(requireAuth, requireInteractiveSession);
+// Per-member limits on provider-calling endpoints (checkout creation is also
+// limited durably in the service). Keyed by the authenticated member.
+const memberLimiter = (limit: number) => rateLimit({ windowMs: 10 * 60_000, limit, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => `user:${req.session?.userId}`, handler: (_req, res) => { res.status(429).json({ error: 'RATE_LIMITED' }); } });
+const checkoutLimiter = memberLimiter(10);
+const captureLimiter = memberLimiter(30);
+const cancelLimiter = memberLimiter(10);
 function fail(res: any, err: unknown) { res.status(err instanceof PayPalError ? err.status : 500).json({ error: err instanceof PayPalError ? err.code : 'INTERNAL' }); }
 router.get('/status', async (_req, res) => { try { res.json(await memberPaypalStatus()); } catch (err) { fail(res, err); } });
 router.get('/mine', async (req, res) => { try { res.json(await ownPaymentHistory(req.session.userId!)); } catch (err) { fail(res, err); } });
-router.post('/one-off', async (req, res) => {
+router.post('/one-off', checkoutLimiter, async (req, res) => {
   try { res.status(201).json(await createOneOff(req.session.userId!, req.body?.amount, req.body?.environment ?? 'sandbox')); }
   catch (err) { fail(res, err); }
 });
-router.post('/one-off/:intentId/capture', async (req, res) => {
-  try { res.json(await captureOneOff(req.session.userId!, req.params.intentId)); }
+router.post('/one-off/:intentId/capture', captureLimiter, async (req, res) => {
+  try { res.json(await captureOneOff(req.session.userId!, String(req.params.intentId))); }
   catch (err) { fail(res, err); }
 });
-router.post('/monthly', async (req, res) => {
+router.post('/monthly', checkoutLimiter, async (req, res) => {
   try { res.status(201).json(await createMonthly(req.session.userId!, req.body?.environment ?? 'sandbox')); } catch (err) { fail(res, err); }
 });
-router.post('/monthly/:id/cancel', async (req, res) => {
-  try { res.json(await cancelMonthly(req.session.userId!, req.params.id)); } catch (err) { fail(res, err); }
+router.post('/monthly/:id/cancel', cancelLimiter, async (req, res) => {
+  try { res.json(await cancelMonthly(req.session.userId!, String(req.params.id))); } catch (err) { fail(res, err); }
 });
 router.get('/admin/summary', requireAdmin, async (_req, res) => { try { res.json(await verifiedContributionSnapshot('live')); } catch (err) { fail(res, err); } });
 router.get('/admin/allocation', requireAdmin, async (req, res) => {
@@ -45,6 +55,24 @@ router.get('/admin/subscriptions', requireAdmin, async (req, res) => {
 router.post('/admin/subscriptions/:id/cancel', requireAdmin, requireRecentReauthentication, async (req, res) => {
   try { const result = await adminCancelMonthly(req.body?.environment, req.params.id);
     await logAudit(req, 'paypal.subscription.cancel', req.params.id); res.json(result); }
+  catch (err) { fail(res, err); }
+});
+router.get('/admin/review', requireAdmin, async (req, res) => {
+  try { res.json(await listPaypalReviewEvents(req.query.environment ?? 'live', Number(req.query.offset ?? 0), req.query.status ?? 'needs_review')); }
+  catch (err) { fail(res, err); }
+});
+router.post('/admin/review/:id/retry', requireAdmin, async (req, res) => {
+  try { const result = await retryPaypalReviewEvent(String(req.body?.environment || ''), req.params.id, req.session.userId!);
+    await logAudit(req, 'paypal.review.retry', String(req.params.id));
+    void startBackgroundWork(() => processPaypalInbox(), { kind: 'paypal-webhook-inbox' }).catch(() => {});
+    res.json(result); }
+  catch (err) { fail(res, err); }
+});
+// The free-text note stays in the payments table; the audit entry carries
+// only the event reference.
+router.post('/admin/review/:id/dismiss', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try { const result = await dismissPaypalReviewEvent(String(req.body?.environment || ''), req.params.id, req.session.userId!, req.body?.note);
+    await logAudit(req, 'paypal.review.dismiss', String(req.params.id)); res.json(result); }
   catch (err) { fail(res, err); }
 });
 router.get('/admin/config', requireAdmin, async (_req, res) => { try { res.json(await paypalSetupStatus()); } catch (err) { fail(res, err); } });

@@ -72,7 +72,7 @@ const { processPaypalInbox, pruneProcessedPaypalWebhookEvidence, reconcileSubscr
 const { postReceipt } = await import('../services/paypalLedger.ts');
 const { waitForBackgroundWork } = await import('../services/backgroundWork.ts');
 const app = express();
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 app.use('/api/payments/paypal/webhook', webhookRoutes);
 app.use(express.json());
 app.use((req, _res, next) => {

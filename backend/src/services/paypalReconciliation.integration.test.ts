@@ -226,3 +226,73 @@ test('gap 5: missing fee detail is enriched from the provider without estimating
   await paypal.enrichUnresolvedTransaction(config, row);
   assert.deepEqual(await postingsFor(intent.id), ['fee:-400', 'gross:10000']);
 });
+
+test('gap 4: quarantined events can be retried or dismissed, and dismissal unblocks finalized net', async () => {
+  const { paypalWebhookInbox } = await import('../db/schema/index.ts');
+  const review = await import('./paypalReview.ts');
+  await fixture.db.update(paypalTransactions).set({ status: 'resolved' }).where(eq(paypalTransactions.status, 'net_unresolved'));
+  const postingsBefore = (await fixture.db.select().from(paypalPostings)).length;
+  await fixture.db.insert(paypalWebhookInbox).values([
+    { id: 'sandbox:MERCHANT123:WHREVIEW1', environment: 'sandbox', merchant_id: MERCHANT, event_type: 'PAYMENT.CAPTURE.COMPLETED',
+      payload: { id: 'WHREVIEW1', resource: { id: 'UNRELATED' } }, status: 'needs_review', error_code: 'UNLINKED_CAPTURE' },
+    { id: 'sandbox:MERCHANT123:WHREVIEW2', environment: 'sandbox', merchant_id: MERCHANT, event_type: 'PAYMENT.SALE.REFUNDED',
+      payload: { id: 'WHREVIEW2', resource: { id: 'X' } }, status: 'needs_review', error_code: 'ADJUSTMENT_NOT_READY', attempt_count: 10 },
+  ]);
+  assert.equal((await paypal.verifiedContributionSnapshot('sandbox')).eligibleNetOre, null);
+  const listed = await review.listPaypalReviewEvents('sandbox');
+  assert.deepEqual(listed.items.map((item) => item.id).sort(), ['sandbox:MERCHANT123:WHREVIEW1', 'sandbox:MERCHANT123:WHREVIEW2']);
+  assert.ok(listed.items.every((item) => !('payload' in item)), 'review listing never exposes raw payloads');
+  await assert.rejects(review.dismissPaypalReviewEvent('sandbox', 'sandbox:MERCHANT123:WHREVIEW1', 1, ' '), /REVIEW_NOTE_REQUIRED/);
+  await assert.rejects(review.dismissPaypalReviewEvent('live', 'sandbox:MERCHANT123:WHREVIEW1', 1, 'unrelated'), /INVALID_ID/);
+  assert.equal((await review.dismissPaypalReviewEvent('sandbox', 'sandbox:MERCHANT123:WHREVIEW1', 1, 'Unrelated personal transfer')).status, 'dismissed');
+  await assert.rejects(review.dismissPaypalReviewEvent('sandbox', 'sandbox:MERCHANT123:WHREVIEW1', 1, 'again'), /REVIEW_EVENT_NOT_FOUND/);
+  assert.equal((await review.retryPaypalReviewEvent('sandbox', 'sandbox:MERCHANT123:WHREVIEW2', 1)).status, 'pending');
+  const [retried] = await fixture.db.select().from(paypalWebhookInbox).where(eq(paypalWebhookInbox.id, 'sandbox:MERCHANT123:WHREVIEW2'));
+  assert.equal(retried.attempt_count, 0);
+  assert.equal(retried.resolution, 'retried');
+  await fixture.db.update(paypalWebhookInbox).set({ status: 'processed' }).where(eq(paypalWebhookInbox.id, 'sandbox:MERCHANT123:WHREVIEW2'));
+  const snapshot = await paypal.verifiedContributionSnapshot('sandbox');
+  assert.equal(snapshot.reviewEvents, 0);
+  assert.notEqual(snapshot.eligibleNetOre, null);
+  assert.equal((await fixture.db.select().from(paypalPostings)).length, postingsBefore, 'review resolution posts nothing');
+});
+
+test('gap 7: event recovery follows validated next links and refuses foreign ones', async () => {
+  const { paypalWebhookInbox } = await import('../db/schema/index.ts');
+  const [setup] = await fixture.db.select().from(paypalReconciliation);
+  const priorCursor = setup?.cursor_at ?? null;
+  routes['GET /v1/notifications/webhooks-events'] = (url) => url.searchParams.get('page') === '2'
+    ? { events: [{ id: 'WHPAGE2', event_type: 'CHECKOUT.ORDER.APPROVED', resource: { id: 'O2' }, create_time: '2026-10-08T00:00:00Z' }] }
+    : { events: [{ id: 'WHPAGE1', event_type: 'CHECKOUT.ORDER.APPROVED', resource: { id: 'O1' }, create_time: '2026-10-08T00:00:00Z' }],
+      links: [{ rel: 'next', href: `https://api-m.sandbox.paypal.com/v1/notifications/webhooks-events?page=2&page_size=100&start_time=${encodeURIComponent(url.searchParams.get('start_time')!)}` }] };
+  const [row] = await (await import('../db/client.ts')).db.select().from((await import('../db/schema/index.ts')).paypalConfigs);
+  const recovered = await paypal.recoverPaypalEvents(row, new Date(), priorCursor);
+  assert.equal(recovered.stored, 2);
+  const ids = (await fixture.db.select({ id: paypalWebhookInbox.id }).from(paypalWebhookInbox)).map((item) => item.id);
+  assert.ok(ids.includes('sandbox:MERCHANT123:WHPAGE2'));
+  for (const href of ['https://evil.example/v1/notifications/webhooks-events?page=2',
+    'https://api-m.sandbox.paypal.com/v1/oauth2/token?page=2', 'https://api-m.sandbox.paypal.com/v1/notifications/webhooks-events?redirect=x']) {
+    routes['GET /v1/notifications/webhooks-events'] = () => ({ events: [], links: [{ rel: 'next', href }] });
+    await assert.rejects(paypal.recoverPaypalEvents(row, new Date(), priorCursor), /NEXT_LINK_INVALID/);
+  }
+  assert.equal(calls.filter((call) => !call.path.startsWith('/v1/notifications/') && call.path !== '/v1/oauth2/token').length, 0,
+    'a foreign next link is never fetched');
+});
+
+test('gap 7: subscription transactions paginate and split windows when no next link is given', async () => {
+  const sale = (id: string, time: string) => ({ id, status: 'COMPLETED', time,
+    amount_with_breakdown: { gross_amount: dkk('50.00'), fee_amount: dkk('2.00'), net_amount: dkk('48.00') } });
+  routes['GET /v1/billing/subscriptions/SUBGOOD/transactions'] = (url) => {
+    const start = new Date(url.searchParams.get('start_time')!); const end = new Date(url.searchParams.get('end_time')!);
+    const all = [sale('PG1', '2026-09-02T00:00:00Z'), sale('PG2', '2026-09-20T00:00:00Z')].filter((item) => new Date(item.time) >= start && new Date(item.time) <= end);
+    return all.length > 1 ? { total_pages: 2, transactions: [all[0]] } : { total_pages: 1, transactions: all };
+  };
+  const items = await paypal.listAllSubscriptionTransactions(config, 'SUBGOOD', new Date('2026-09-01T00:00:00Z'), new Date('2026-09-30T00:00:00Z'));
+  assert.deepEqual(items.map((item) => item.id).sort(), ['PG1', 'PG2']);
+  routes['GET /v1/billing/subscriptions/SUBGOOD/transactions'] = (url) => url.searchParams.get('page') === '2'
+    ? { total_pages: 2, transactions: [sale('PN2', '2026-09-20T00:00:00Z')] }
+    : { total_pages: 2, transactions: [sale('PN1', '2026-09-02T00:00:00Z')], links: [{ rel: 'next', href:
+      'https://api-m.sandbox.paypal.com/v1/billing/subscriptions/SUBGOOD/transactions?start_time=2026-09-01T00:00:00Z&end_time=2026-09-30T00:00:00Z&page=2' }] };
+  const paged = await paypal.listAllSubscriptionTransactions(config, 'SUBGOOD', new Date('2026-09-01T00:00:00Z'), new Date('2026-09-30T00:00:00Z'));
+  assert.deepEqual(paged.map((item) => item.id), ['PN1', 'PN2']);
+});
