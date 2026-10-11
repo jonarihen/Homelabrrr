@@ -1,0 +1,1 @@
+ALTER TABLE "hardware_connections" ADD COLUMN "tls_fingerprint" text;

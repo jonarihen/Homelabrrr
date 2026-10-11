@@ -438,7 +438,7 @@ export function createPowerControlRouter(deps: PowerControlRouterDeps = {}) {
       let state: RuntimeState;
       try {
         state = await readState({ host: row.connection.target_host, port: row.connection.target_port, username: row.connection.username,
-          password: decryptSecret(row.connection.secret), verifyTls: row.connection.verify_tls, caCertificate: row.connection.ca_certificate });
+          password: decryptSecret(row.connection.secret), verifyTls: row.connection.verify_tls, caCertificate: row.connection.ca_certificate, tlsFingerprint: row.connection.tls_fingerprint });
       } catch (err) {
         return res.status(503).json({ error: 'Could not read the current iLO mode; the hold stays in place',
           code: err instanceof IloError ? err.code : 'unavailable' });

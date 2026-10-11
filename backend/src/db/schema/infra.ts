@@ -53,6 +53,9 @@ export const hardwareConnections = pgTable('hardware_connections', {
   secret: text('secret').notNull(),
   ca_certificate: text('ca_certificate'),
   verify_tls: boolean('verify_tls').notNull().default(true),
+  // SHA-256 of the iLO's own (usually self-signed) certificate, confirmed by an
+  // admin. When set, connections trust exactly this certificate and nothing else.
+  tls_fingerprint: text('tls_fingerprint'),
   collection_enabled: boolean('collection_enabled').notNull().default(false),
   control_enabled: boolean('control_enabled').notNull().default(false),
   lifecycle_state: text('lifecycle_state').notNull().default('active'),

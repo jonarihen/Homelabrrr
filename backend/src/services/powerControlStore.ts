@@ -82,7 +82,7 @@ export class PowerControlStore implements ControlRepository {
       ilo: {
         host: connection.target_host, port: connection.target_port, username: connection.username,
         password: decryptSecret(connection.secret), verifyTls: connection.verify_tls,
-        caCertificate: connection.ca_certificate,
+        caCertificate: connection.ca_certificate, tlsFingerprint: connection.tls_fingerprint,
       },
     };
   }

@@ -324,3 +324,47 @@ test('history is bounded to 500 bins and keeps the newest bin at the widest rang
   assert.ok(result.body.modeChanges.length <= 100);
   assert.equal(result.body.stats.samples, 168 * 60 + 1);
 });
+
+test('a pinned certificate is confirmed by fingerprint, used for tests and needs the password to change', async () => {
+  const pin = 'AB:'.repeat(31) + 'CD';
+  const other = '12:'.repeat(31) + '34';
+  const configs: { tlsFingerprint?: string | null; verifyTls: boolean }[] = [];
+  const probes: { host: string; port: number }[] = [];
+  const pinApp = express();
+  pinApp.use(express.json());
+  pinApp.use((req, _res, next) => { req.session = { userId: adminId, isAdmin: true } as never; next(); });
+  pinApp.use('/', (await import('./hardware.ts')).createHardwareRouter(async (config) => { configs.push(config); return found('pinned-system'); }, () => new Date(),
+    async (host, port) => { probes.push({ host, port }); return { fingerprint256: pin, subject: 'ILO-PIN', issuer: 'ILO-PIN', validFrom: null, validTo: null, selfSigned: true }; }));
+  const previous = process.env.ALLOW_INSECURE_UPSTREAM_TLS;
+  delete process.env.ALLOW_INSECURE_UPSTREAM_TLS;
+  try {
+    const probe = await request(pinApp).post('/certificate-probe').send({ host: 'ilo-pin.mgmt.example.test', port: 443 });
+    assert.equal(probe.status, 200);
+    assert.equal(probe.body.fingerprint256, pin);
+    assert.equal(probe.headers['cache-control'], 'no-store');
+    assert.deepEqual(probes, [{ host: 'ilo-pin.mgmt.example.test', port: 443 }]);
+    assert.equal((await request(pinApp).post('/certificate-probe').send({ host: 'http://evil/', port: 443 })).status, 400);
+
+    const base = { nodeRef: `${hostId}~pve-pin`, host: 'ilo-pin.mgmt.example.test', port: 443, username: 'monitor' };
+    assert.equal((await request(pinApp).post('/').send({ ...base, password: 'pin-secret', tlsMode: 'pinned' })).status, 400, 'pinning needs a fingerprint');
+    assert.equal((await request(pinApp).post('/').send({ ...base, password: 'pin-secret', tlsMode: 'insecure' })).status, 400, 'break-glass still needs the server flag');
+    const created = await request(pinApp).post('/').send({ ...base, password: 'pin-secret', tlsMode: 'pinned', tlsFingerprint: pin.toLowerCase().replace(/:/g, '') });
+    assert.equal(created.status, 201, 'a pinned connection works without ALLOW_INSECURE_UPSTREAM_TLS');
+    assert.equal(created.body.tls_fingerprint, pin);
+    assert.equal(created.body.verify_tls, false);
+
+    assert.equal((await request(pinApp).post(`/${created.body.id}/test`)).status, 200);
+    assert.equal(configs.at(-1)?.tlsFingerprint, pin, 'the connection test trusts exactly the pinned certificate');
+
+    const keep = await request(pinApp).put(`/${created.body.id}`).send({ ...base, tlsMode: 'pinned', configVersion: created.body.config_version });
+    assert.equal(keep.status, 200, 'an unchanged pin keeps the stored password');
+    assert.equal(keep.body.tls_fingerprint, pin);
+    const repin = await request(pinApp).put(`/${created.body.id}`).send({ ...base, tlsMode: 'pinned', tlsFingerprint: other, configVersion: keep.body.config_version });
+    assert.equal(repin.status, 400);
+    assert.equal(repin.body.code, 'PASSWORD_REQUIRED', 'a new pin is a new trust anchor');
+    const toCa = await request(pinApp).put(`/${created.body.id}`).send({ ...base, tlsMode: 'ca', password: 'pin-secret', configVersion: keep.body.config_version });
+    assert.equal(toCa.status, 200);
+    assert.equal(toCa.body.tls_fingerprint, null);
+    assert.equal(toCa.body.verify_tls, true);
+  } finally { if (previous !== undefined) process.env.ALLOW_INSECURE_UPSTREAM_TLS = previous; }
+});

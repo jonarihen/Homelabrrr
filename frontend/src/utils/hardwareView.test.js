@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPowerChart, connectionNotices, connectionStatusText, formatAge, telemetryState, testFailureText, writePrivilegeText } from './hardwareView.js';
+import { buildPowerChart, connectionNotices, connectionStatusText, formatAge, telemetryState, testFailureText, tlsTrustText, writePrivilegeText } from './hardwareView.js';
 
 test('every backend connection state has operator text', () => {
   for (const status of ['not_tested', 'online', 'unreachable', 'authentication_failed', 'insufficient_privilege', 'tls_failed', 'unsupported', 'unsupported_identity', 'identity_changed', 'invalid_target']) {
@@ -85,4 +85,13 @@ test('a failed test names the category and the backend diagnosis', () => {
   assert.equal(testFailureText({ status: 'tls_failed' }), 'Connection test failed: TLS verification failed');
   assert.equal(testFailureText({ error: 'Connection not found' }), 'Connection not found');
   assert.equal(testFailureText(undefined), 'Connection test failed');
+});
+
+test('a pinned certificate is its own trust state', () => {
+  const pin = 'AB:'.repeat(31) + 'CD';
+  assert.equal(tlsTrustText({ verify_tls: false, tls_fingerprint: pin }), 'pinned (SHA-256 AB:AB:AB:AB…)');
+  assert.equal(tlsTrustText({ verify_tls: true, has_ca_certificate: true }), 'verified (private CA)');
+  assert.equal(tlsTrustText({ verify_tls: false }), 'NOT verified');
+  assert.deepEqual(connectionNotices({ verify_tls: false, tls_fingerprint: pin, last_status: 'online' }), [], 'pinning is not the break-glass warning');
+  assert.match(connectionNotices({ verify_tls: false, tls_fingerprint: pin, last_status: 'tls_failed' })[0].text, /different certificate than the pinned one/);
 });

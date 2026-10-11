@@ -115,7 +115,7 @@ export async function pollHardwareConnection(id: number, now = () => new Date(),
       return { status: 'disabled' as const };
     }
     try {
-      const sample = await reader({ host: connection.target_host, port: connection.target_port, username: connection.username, password: decryptSecret(connection.secret), verifyTls: connection.verify_tls, caCertificate: connection.ca_certificate });
+      const sample = await reader({ host: connection.target_host, port: connection.target_port, username: connection.username, password: decryptSecret(connection.secret), verifyTls: connection.verify_tls, caCertificate: connection.ca_certificate, tlsFingerprint: connection.tls_fingerprint });
       // A changed physical identity must never silently extend the old energy series.
       const identity = physicalSystemIdentity(sample.identity);
       if (identity !== connection.system_uuid.trim().toLowerCase()) throw new Error('HARDWARE_IDENTITY_CHANGED');

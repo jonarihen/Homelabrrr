@@ -37,7 +37,17 @@ No simulated data is shown as real. Values without a source show as *unknown* or
 - Live control sends one `PATCH` to `/redfish/v1/Systems/<id>` that sets only `Oem.Hp.PowerRegulatorMode` (iLO 4) or `Oem.Hpe.PowerRegulatorMode` (iLO 5) to `Min`, `Dynamic` or `Max`. The test cannot check write privilege. The Hardware panel shows it as *unverified* until a real controlled change succeeds. Grant the smallest iLO privilege that lets this PATCH succeed on your firmware, and confirm the choice on real hardware (see the checklist).
 - Three consecutive credential rejections (`401`) auto-disable collection for that node (`hardware_collection_auto_disabled` in the audit log). Each rejection also backs off for at least 15 minutes. Together these keep a stale password from tripping the iLO login lockout. To recover, update the password, test, and re-enable. The power controller never auto-disables itself. On credential errors it backs off for up to 60 minutes and sends one notification per failure streak.
 
-**TLS.** Leave **Verify TLS** on. If the management network uses an internal CA, paste the CA certificate (PEM) into the connection. Unverified TLS is refused unless the server runs with the break-glass setting `ALLOW_INSECURE_UPSTREAM_TLS=true`, which also affects Proxmox and FortiGate. Management addresses go through the SSRF guard. Cloud metadata (`169.254.169.254`, `100.100.100.200`), loopback and multicast are refused, and redirects are never followed.
+**TLS.** iLOs almost always present a self-signed certificate, so the default is **Pin this iLO's certificate**:
+
+1. Enter the management host and port, then click **Fetch certificate**. The backend completes a TLS handshake only. It sends no credentials and no HTTP request.
+2. Compare the SHA-256 fingerprint with the one in the iLO web interface (**Security → SSL Certificate**). Then tick the confirmation and save.
+3. From then on, every read, test and mode change checks that the iLO still presents exactly this certificate *before* the password is sent. If it differs, the connection stops with `tls_failed` and a "certificate changed" message that shows both fingerprints.
+
+If you regenerated or replaced the iLO certificate on purpose, open Edit Host, click **Fetch current certificate**, confirm the new one and re-enter the password. A new pin is a new trust anchor, so the stored password is never reused for it. Pinning needs no server setting.
+
+The other trust modes:
+- **Verify against a trusted or private CA** is for iLOs that have a certificate issued by your CA. Paste the CA certificate (PEM).
+- **No verification** is break-glass. It is refused unless the server runs with `ALLOW_INSECURE_UPSTREAM_TLS=true`, which also affects Proxmox and FortiGate. Management addresses go through the SSRF guard. Cloud metadata (`169.254.169.254`, `100.100.100.200`), loopback and multicast are refused, and redirects are never followed.
 
 **Add and test.** In Admin → PVE Hosts, click **Edit host** (the pencil). The dialog has a **Hardware / iLO** section with one entry per node. Each physical node gets its own connection, even if one PVE API endpoint exposes several nodes. Enter the address, port, account and password, save, then run **Test read-only connection** (in the dialog or on the node row, which also shows telemetry and the power policy).
 

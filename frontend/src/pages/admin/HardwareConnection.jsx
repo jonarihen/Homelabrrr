@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react';
 import api from '../../api.js';
 import HardwareTelemetryView from './HardwareTelemetryView.jsx';
 import HardwarePowerPolicy from './HardwarePowerPolicy.jsx';
-import { connectionNotices, connectionStatusText, connectionStatusTone, testFailureText, writePrivilegeText } from '../../utils/hardwareView.js';
+import { connectionNotices, connectionStatusText, connectionStatusTone, testFailureText, tlsTrustText, writePrivilegeText } from '../../utils/hardwareView.js';
 
-const blank = { host: '', port: 443, username: '', password: '', verifyTls: true, caCertificate: '', clearCaCertificate: false };
+const blank = { host: '', port: 443, username: '', password: '', tlsMode: 'pinned', caCertificate: '', clearCaCertificate: false };
+// iLOs almost always present a self-signed certificate, so pinning it is the default.
+const tlsModeOf = (connection) => (connection.tls_fingerprint ? 'pinned' : connection.verify_tls ? 'ca' : 'insecure');
 // Every node's Hardware section reloads when a connection moves between nodes.
 const CHANGED_EVENT = 'hardware-connections-changed';
 const NOTICE_CLASS = { warn: 'border-yellow-500/40 text-yellow-300', error: 'border-red-500/40 text-red-300', info: 'border-gray-700 text-gray-400' };
@@ -23,6 +25,9 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
   const [rebindTo, setRebindTo] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
   const [saved, setSaved] = useState(false);
+  // Certificate the iLO presented on "Fetch certificate", and whether the admin confirmed it.
+  const [probe, setProbe] = useState(null);
+  const [pinConfirmed, setPinConfirmed] = useState(false);
   useEffect(() => {
     const reload = () => setReloadKey((k) => k + 1);
     window.addEventListener(CHANGED_EVENT, reload);
@@ -34,20 +39,33 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
       if (!live) return;
       const found = data.find((x) => x.node_ref === nodeRef) || null;
       setConnection(found);
-      if (found) setForm({ host: found.target_host, port: found.target_port, username: found.username, password: '', verifyTls: found.verify_tls, caCertificate: '', clearCaCertificate: false });
+      if (found) setForm({ host: found.target_host, port: found.target_port, username: found.username, password: '', tlsMode: tlsModeOf(found), caCertificate: '', clearCaCertificate: false });
+      setProbe(null); setPinConfirmed(false);
     }).catch(() => { if (live) setError('Could not load hardware connection'); });
     return () => { live = false; };
   }, [nodeRef, reloadKey]);
   async function save(e) {
-    e.preventDefault(); setBusy(true); setError(''); setSaved(false);
+    e.preventDefault(); setError(''); setSaved(false);
+    const newPin = form.tlsMode === 'pinned' && probe && pinConfirmed ? probe.fingerprint256 : undefined;
+    if (form.tlsMode === 'pinned' && !newPin && !connection?.tls_fingerprint) { setError('Fetch the iLO certificate and confirm it before saving.'); return; }
+    setBusy(true);
     try {
-      const payload = { ...form, nodeRef, configVersion: connection?.config_version };
+      const payload = { ...form, tlsFingerprint: newPin, nodeRef, configVersion: connection?.config_version };
       const { data } = connection ? await api.put(`/admin/hardware-connections/${connection.id}`, payload) : await api.post('/admin/hardware-connections', payload);
       setConnection(data); setForm((v) => ({ ...v, password: '', caCertificate: '', clearCaCertificate: false })); setDiscovery(null);
       setSaved(true); window.dispatchEvent(new Event(CHANGED_EVENT));
     } catch (err) { setError(err.response?.data?.error || 'Could not save connection'); }
     finally { setBusy(false); }
   }
+  async function fetchCertificate() {
+    setBusy(true); setError(''); setProbe(null); setPinConfirmed(false);
+    try {
+      const { data } = await api.post('/admin/hardware-connections/certificate-probe', { host: form.host, port: form.port });
+      setProbe(data);
+    } catch (err) { setError(testFailureText(err.response?.data).replace('Connection test failed', 'Could not read the certificate')); }
+    finally { setBusy(false); }
+  }
+  const setTarget = (patch) => { setForm((v) => ({ ...v, ...patch })); setProbe(null); setPinConfirmed(false); };
   async function test() {
     setBusy(true); setError(''); setDiscovery(null);
     try {
@@ -87,21 +105,40 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
       {connection && <button type="button" disabled={busy} onClick={test} className="text-orange-400 hover:text-orange-300 disabled:opacity-50">Test read-only connection</button>}
       {configMode && connection && <button type="button" disabled={busy} onClick={disconnect} className="text-red-400 hover:text-red-300 disabled:opacity-50">Decommission</button>}
     </div>
-    {connection && <p className="mt-2 text-gray-500">Collection {connection.collection_enabled ? 'enabled' : 'disabled'} · Control {connection.control_enabled ? 'enabled' : 'disabled'} · Runtime capability {connection.capabilities?.runtimeMode || 'unverified'} · Write privilege {writePrivilegeText(connection.capabilities)} · TLS {connection.verify_tls ? 'verified' : 'NOT verified'}{connection.has_ca_certificate ? ' (private CA)' : ''}{connection.last_test_at ? ` · Last test ${new Date(connection.last_test_at).toLocaleString()}` : ''}</p>}
+    {connection && <p className="mt-2 text-gray-500">Collection {connection.collection_enabled ? 'enabled' : 'disabled'} · Control {connection.control_enabled ? 'enabled' : 'disabled'} · Runtime capability {connection.capabilities?.runtimeMode || 'unverified'} · Write privilege {writePrivilegeText(connection.capabilities)} · TLS {tlsTrustText(connection)}{connection.last_test_at ? ` · Last test ${new Date(connection.last_test_at).toLocaleString()}` : ''}</p>}
     {connectionNotices(connection).map((notice) => <p key={notice.text} className={`mt-2 border-l-2 pl-2 ${NOTICE_CLASS[notice.tone]}`}>{notice.text}</p>)}
     {discovery && <div className="mt-2 text-gray-300">Mode {discovery.mode.value} · Actual input {discovery.sample.watts == null ? 'unavailable' : `${discovery.sample.watts} W`} · Monitoring {discovery.capabilities.monitoring} · Runtime mode {discovery.capabilities.runtimeMode} · Temperatures {discovery.capabilities.temperatures} · Fans {discovery.capabilities.fans} · Power supplies {discovery.capabilities.powerSupplies}</div>}
     {error && <p role="alert" className="mt-2 text-red-400">{error}</p>}
     {!configMode && connection && <HardwareTelemetryView connection={connection} onConnectionChange={setConnection} />}
     {!configMode && connection && <HardwarePowerPolicy connection={connection} onConnectionChange={setConnection} />}
     {configMode && <form onSubmit={save} className="mt-3 grid gap-2 sm:grid-cols-2">
-      <label className="text-gray-400">Management host<input required value={form.host} onChange={(e) => setForm((v) => ({ ...v, host: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
-      <label className="text-gray-400">HTTPS port<input required type="number" min="1" max="65535" value={form.port} onChange={(e) => setForm((v) => ({ ...v, port: Number(e.target.value) }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
+      <label className="text-gray-400">Management host<input required value={form.host} onChange={(e) => setTarget({ host: e.target.value })} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
+      <label className="text-gray-400">HTTPS port<input required type="number" min="1" max="65535" value={form.port} onChange={(e) => setTarget({ port: Number(e.target.value) })} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
       <label className="text-gray-400">Username<input required value={form.username} onChange={(e) => setForm((v) => ({ ...v, username: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
       <label className="text-gray-400">Password {connection && '(blank keeps existing only while address, account and TLS trust are unchanged)'}<input type="password" required={!connection} autoComplete="new-password" value={form.password} onChange={(e) => setForm((v) => ({ ...v, password: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
-      <label className="text-gray-400 sm:col-span-2">Private CA certificate (PEM; blank keeps existing)<textarea value={form.caCertificate} onChange={(e) => setForm((v) => ({ ...v, caCertificate: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
-      {connection?.has_ca_certificate && <label className="text-gray-400 sm:col-span-2"><input type="checkbox" checked={form.clearCaCertificate} onChange={(e) => setForm((v) => ({ ...v, clearCaCertificate: e.target.checked, caCertificate: e.target.checked ? '' : v.caCertificate }))} /> Remove the stored private CA certificate</label>}
-      <label className="text-gray-400 sm:col-span-2"><input type="checkbox" checked={form.verifyTls} onChange={(e) => setForm((v) => ({ ...v, verifyTls: e.target.checked }))} /> Verify TLS certificate</label>
-      {!form.verifyTls && <p role="alert" className="sm:col-span-2 border-l-2 border-yellow-500/40 pl-2 text-yellow-300">Break-glass only: without verification anyone on the management path can impersonate this iLO and receive its password. The server must also allow it explicitly.</p>}
+      <fieldset className="sm:col-span-2 border border-gray-700/60 px-2 py-2">
+        <legend className="px-1 text-gray-400">Certificate trust</legend>
+        {[['pinned', 'Pin this iLO’s certificate (recommended: iLOs use self-signed certificates)'], ['ca', 'Verify against a trusted or private CA'], ['insecure', 'No verification (break-glass; the server must allow it)']].map(([value, label]) => (
+          <label key={value} className="flex items-center gap-2 text-gray-300"><input type="radio" name={`tls-${nodeRef}`} value={value} checked={form.tlsMode === value} onChange={() => setForm((v) => ({ ...v, tlsMode: value }))} /> {label}</label>
+        ))}
+        {form.tlsMode === 'pinned' && <div className="mt-2 space-y-2">
+          <p className="text-gray-500">Only the confirmed certificate is trusted. If the iLO ever presents a different one, every connection stops before the password is sent, until you confirm the new certificate here.</p>
+          {connection?.tls_fingerprint && <p className="text-gray-300 break-all">Pinned SHA-256: {connection.tls_fingerprint}</p>}
+          <button type="button" disabled={busy || !form.host} onClick={fetchCertificate} className="border border-gray-600 px-3 py-1 text-gray-200 hover:border-orange-400 disabled:opacity-50">{connection?.tls_fingerprint ? 'Fetch current certificate' : 'Fetch certificate'}</button>
+          {probe && <div className="border-l-2 border-orange-500/40 pl-2 text-gray-300">
+            <p>Subject {probe.subject || 'unknown'} · Issuer {probe.issuer || 'unknown'}{probe.selfSigned ? ' (self-signed)' : ''}{probe.validTo ? ` · Valid until ${probe.validTo}` : ''}</p>
+            <p className="break-all">SHA-256 {probe.fingerprint256}</p>
+            {connection?.tls_fingerprint === probe.fingerprint256
+              ? <p className="text-green-400">Matches the pinned certificate.</p>
+              : <label className="flex items-start gap-2 text-yellow-300"><input type="checkbox" checked={pinConfirmed} onChange={(e) => setPinConfirmed(e.target.checked)} /> This is my iLO’s certificate. I compared the fingerprint with the iLO web interface (Security → SSL Certificate).</label>}
+          </div>}
+        </div>}
+        {form.tlsMode === 'ca' && <div className="mt-2 space-y-2">
+          <label className="block text-gray-400">Private CA certificate (PEM; blank keeps existing or uses public CAs)<textarea value={form.caCertificate} onChange={(e) => setForm((v) => ({ ...v, caCertificate: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
+          {connection?.has_ca_certificate && <label className="text-gray-400"><input type="checkbox" checked={form.clearCaCertificate} onChange={(e) => setForm((v) => ({ ...v, clearCaCertificate: e.target.checked, caCertificate: e.target.checked ? '' : v.caCertificate }))} /> Remove the stored private CA certificate</label>}
+        </div>}
+        {form.tlsMode === 'insecure' && <p role="alert" className="mt-2 border-l-2 border-yellow-500/40 pl-2 text-yellow-300">Break-glass only: without verification anyone on the management path can impersonate this iLO and receive its password. The server must also allow it explicitly. Pinning the certificate is safer and needs no server setting.</p>}
+      </fieldset>
       <button disabled={busy} className="border border-orange-500 px-3 py-2 text-orange-400 uppercase sm:col-span-2 disabled:opacity-50">{connection ? 'Save iLO changes' : 'Add iLO connection'}</button>
       {saved && <p role="status" className="sm:col-span-2 text-green-400">Saved. Run the read-only test to bring collection and control back.</p>}
     </form>}
