@@ -17,6 +17,7 @@ let webhookValid = true;
 let cancellationConfirmed = false;
 let createdIntent = '';
 let createdSubscriptionIntent = '';
+let orderCompleted = false;
 const capture = { id: 'CAPTURE123', status: 'COMPLETED', payee: { merchant_id: 'MERCHANT123' },
   supplementary_data: { related_ids: { order_id: 'ORDER123' } }, amount: { currency_code: 'DKK', value: '100.00' },
   seller_receivable_breakdown: { gross_amount: { currency_code: 'DKK', value: '100.00' },
@@ -40,8 +41,9 @@ globalThis.fetch = (async (url: string | URL | Request, init: RequestInit = {}) 
     assert.equal(body.payment_source.paypal.experience_context.return_url, 'https://portal.example/support?paypal=one-off');
     return Response.json({ id: 'ORDER123', status: 'PAYER_ACTION_REQUIRED', links: [{ rel: 'payer-action', href: 'https://www.sandbox.paypal.com/checkoutnow?token=ORDER123' }] });
   }
-  if (parsed.pathname === '/v2/checkout/orders/ORDER123' && method === 'GET') return Response.json({ id: 'ORDER123', status: 'APPROVED',
-    purchase_units: [{ custom_id: createdIntent, payee: { merchant_id: 'MERCHANT123' }, amount: { currency_code: 'DKK', value: '100.00' } }] });
+  if (parsed.pathname === '/v2/checkout/orders/ORDER123' && method === 'GET') return Response.json({ id: 'ORDER123', status: orderCompleted ? 'COMPLETED' : 'APPROVED',
+    purchase_units: [{ custom_id: createdIntent, payee: { merchant_id: 'MERCHANT123' }, amount: { currency_code: 'DKK', value: '100.00' },
+      ...(orderCompleted ? { payments: { captures: [{ id: 'CAPTURE123', status: 'COMPLETED' }] } } : {}) }] });
   if (parsed.pathname === '/v2/checkout/orders/ORDER123/capture') return Response.json({ purchase_units: [{ payments: { captures: [{ id: 'CAPTURE123', status: 'COMPLETED' }] } }] });
   if (parsed.pathname === '/v2/payments/captures/CAPTURE123') return Response.json(capture);
   if (parsed.pathname === '/v2/payments/refunds/REFUND123') return Response.json(refund);
@@ -105,7 +107,16 @@ test('sandbox provider fixture: authorization, capture, webhook replay, refund a
   const captured = await request(app).post(`${path}/one-off/${checkout.body.intentId}/capture`).set(as('member'));
   assert.equal(captured.status, 200);
   assert.equal(captured.body.status, 'verified');
-  assert.equal((await request(app).post(`${path}/one-off/${checkout.body.intentId}/capture`).set(as('member'))).status, 409);
+  assert.equal((await request(app).post(`${path}/one-off/${checkout.body.intentId}/capture`).set(as('member'))).body.status, 'verified');
+  await fixture.db.update(paypalIntents).set({ status: 'capture_unknown' }).where(eq(paypalIntents.id, checkout.body.intentId));
+  const capturePosts = calls.filter((call) => call.path === '/v2/checkout/orders/ORDER123/capture').length;
+  assert.equal((await request(app).post(`${path}/one-off/${checkout.body.intentId}/capture`).set(as('member'))).body.status, 'pending_verification');
+  assert.equal(calls.filter((call) => call.path === '/v2/checkout/orders/ORDER123/capture').length, capturePosts,
+    'retry while provider outcome is unknown must not issue another capture');
+  orderCompleted = true;
+  assert.equal((await request(app).post(`${path}/one-off/${checkout.body.intentId}/capture`).set(as('member'))).body.status, 'verified');
+  assert.equal(calls.filter((call) => call.path === '/v2/checkout/orders/ORDER123/capture').length, capturePosts,
+    'completed order readback must reuse the existing economic posting');
 
   const webhookEvent = { id: 'EVENT123', event_type: 'PAYMENT.CAPTURE.COMPLETED', create_time: '2026-10-08T12:01:00Z',
     resource: { id: 'CAPTURE123', payee: { merchant_id: 'MERCHANT123' }, supplementary_data: { related_ids: { order_id: 'ORDER123' } } } };

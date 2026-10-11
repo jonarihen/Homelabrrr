@@ -92,14 +92,24 @@ export async function createOneOff(userId: number, amount: string, value: unknow
 export async function captureOneOff(userId: number, intentId: string) {
   const [intent] = await db.select().from(paypalIntents).where(and(eq(paypalIntents.id, intentId), eq(paypalIntents.user_id, userId))).limit(1);
   if (!intent || intent.kind !== 'one_off' || !intent.provider_id) throw new PayPalError('INTENT_NOT_FOUND', 404);
+  if (intent.status === 'verified') return { status: 'verified' };
   const row = await configured(intent.environment);
   if (row.merchant_id !== intent.merchant_id || row.config_version !== intent.config_version) throw new PayPalError('CONFIG_CHANGED', 409);
   const config = credentials(row);
   const order = await paypalClient.getOrder(config, intent.provider_id);
   const unit = Array.isArray(order.purchase_units) && order.purchase_units.length === 1 ? order.purchase_units[0] : null;
-  if (order.id !== intent.provider_id || order.status !== 'APPROVED' || unit?.custom_id !== intent.id ||
+  if (order.id !== intent.provider_id || !['APPROVED', 'COMPLETED'].includes(order.status) || unit?.custom_id !== intent.id ||
       unit?.payee?.merchant_id !== intent.merchant_id || unit?.amount?.currency_code !== 'DKK' ||
       unit?.amount?.value !== oreToDkk(intent.amount_ore)) throw new PayPalError('ORDER_MISMATCH', 409);
+  if (intent.status !== 'approval_pending') {
+    const captures = unit?.payments?.captures;
+    if (Array.isArray(captures) && captures.length === 1 && captures[0]?.status === 'COMPLETED' &&
+        typeof captures[0].id === 'string') return ingestOneOffCapture(config, intent, captures[0].id, 'member_readback');
+    // A previous POST may still be in flight or its outcome may not yet be visible.
+    // Never issue another capture from a member retry; reconciliation will read it back.
+    return { status: 'pending_verification' };
+  }
+  if (order.status !== 'APPROVED') throw new PayPalError('ORDER_MISMATCH', 409);
   const requestId = intent.capture_request_id || randomUUID();
   const claim = await db.update(paypalIntents).set({ status: 'capturing', capture_request_id: requestId, updated_at: new Date() })
     .where(and(eq(paypalIntents.id, intentId), eq(paypalIntents.status, 'approval_pending')));
