@@ -11,9 +11,14 @@ if (!url) {
   throw new Error('DATABASE_URL must be set before the application can start');
 }
 
+const poolSize = Number(process.env.PG_POOL_SIZE || 10);
+if (!Number.isInteger(poolSize) || poolSize < 2) {
+  throw new Error('PG_POOL_SIZE must be an integer of at least 2');
+}
+
 export const pool = new pg.Pool({
   connectionString: url,
-  max: Number(process.env.PG_POOL_SIZE || 10),
+  max: poolSize,
 });
 
 // An idle client erroring (e.g. the server restarted) must never crash the
