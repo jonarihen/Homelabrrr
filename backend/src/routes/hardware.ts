@@ -48,7 +48,8 @@ router.put('/:id/collection', async (req, res) => {
     const [row] = await db.update(hardwareConnections).set({ collection_enabled: req.body.enabled, config_version: sql`${hardwareConnections.config_version} + 1`, updated_at: new Date() })
       .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.config_version, Number(req.body?.configVersion)), ...(req.body.enabled ? [sql`${hardwareConnections.system_uuid} IS NOT NULL AND ${hardwareConnections.last_status} = 'online' AND ${hardwareConnections.capabilities}->>'monitoring' = 'supported'`] : []))).returning();
     if (!row) return res.status(409).json({ error: 'Connection changed or has not passed a connection test' });
-    await db.insert(hardwareTelemetryState).values({ hardware_id: id, next_poll_at: new Date() }).onConflictDoUpdate({ target: hardwareTelemetryState.hardware_id, set: { next_poll_at: new Date() } });
+    // An explicit (re-)enable starts a fresh failure streak.
+    await db.insert(hardwareTelemetryState).values({ hardware_id: id, next_poll_at: new Date() }).onConflictDoUpdate({ target: hardwareTelemetryState.hardware_id, set: { next_poll_at: new Date(), failure_count: 0, auth_failure_count: 0 } });
     await logAudit(req, req.body.enabled ? 'hardware_collection_enabled' : 'hardware_collection_disabled', String(id), `node=${row.node_ref}`);
     res.json(safeDto(row));
   } catch (err) { if (err instanceof Error && err.message === 'Invalid connection id') return res.status(400).json({ error: err.message }); res.status(500).json({ error: sanitizeError(err) }); }

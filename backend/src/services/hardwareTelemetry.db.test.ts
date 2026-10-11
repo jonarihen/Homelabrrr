@@ -2,8 +2,8 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { and, eq, sql } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { hardwareConnections, hardwareEnergyIntervals, hardwarePowerSamples, pveHosts } from '../db/schema/index.ts';
-import type { HardwareDiscovery } from './iloAdapter.ts';
+import { auditLog, hardwareConnections, hardwareEnergyIntervals, hardwarePowerSamples, hardwareTelemetryState, pveHosts } from '../db/schema/index.ts';
+import { IloError, type HardwareDiscovery } from './iloAdapter.ts';
 
 let fixture: TestDatabase;
 let closeDb: () => Promise<void>;
@@ -129,4 +129,50 @@ test('unaligned 60 s samples across quarter-hour boundaries keep every bucket co
   assert.equal((await poll(hardware.id, () => pollAt, async () => reading('2026-10-09T10:31:00Z', 400, 'UNALIGNED-UUID'))).status, 'ok');
   const [first] = await fixture.db.select().from(hardwareEnergyIntervals).where(and(eq(hardwareEnergyIntervals.hardware_id, hardware.id), eq(hardwareEnergyIntervals.start_utc, new Date('2026-10-09T10:00:00Z'))));
   assert.equal(first.covered_seconds, 900);
+});
+
+test('repeated authentication failures back off and auto-disable collection', async () => {
+  const [host] = await fixture.db.select({ id: pveHosts.id }).from(pveHosts).limit(1);
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  const [hardware] = await fixture.db.insert(hardwareConnections).values({ pve_host_id: host.id, node_ref: `${host.id}~pve-auth`, target_host: 'ilo3.example.test', username: 'reader', secret: encryptSecret('fixture-secret'), system_uuid: 'auth-uuid', collection_enabled: true, last_status: 'online' }).returning();
+  const denied = async (): Promise<HardwareDiscovery> => { throw new IloError('authentication_failed', 'fixture denial'); };
+  let at = new Date('2026-10-10T08:00:00Z');
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await fixture.db.update(hardwareTelemetryState).set({ next_poll_at: at, lease_until: null }).where(eq(hardwareTelemetryState.hardware_id, hardware.id));
+    const result = await poll(hardware.id, () => at, denied);
+    assert.equal(result.status, 'failed');
+    const [state] = await fixture.db.select().from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, hardware.id));
+    assert.equal(state.auth_failure_count, attempt);
+    assert.ok(state.next_poll_at.getTime() - at.getTime() >= 15 * 60_000, 'credential failures never retry quickly');
+    const [connection] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.id, hardware.id));
+    assert.equal(connection.collection_enabled, attempt < 3);
+    if (attempt === 3) {
+      assert.equal(connection.last_status, 'authentication_failed');
+      assert.equal(connection.config_version, hardware.config_version + 1);
+      assert.equal((result as any).disabled, true);
+    }
+    at = new Date(at.getTime() + 60 * 60_000);
+  }
+  const audits = await fixture.db.select().from(auditLog).where(eq(auditLog.action, 'hardware_collection_auto_disabled'));
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].detail.includes('fixture-secret'), false);
+  // Disabled collection performs no further iLO logins.
+  await fixture.db.update(hardwareTelemetryState).set({ next_poll_at: at, lease_until: null }).where(eq(hardwareTelemetryState.hardware_id, hardware.id));
+  assert.equal((await poll(hardware.id, () => at, async () => { throw new Error('reader must not run'); })).status, 'disabled');
+});
+
+test('non-credential failures do not count towards the authentication lockout', async () => {
+  const [host] = await fixture.db.select({ id: pveHosts.id }).from(pveHosts).limit(1);
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  const [hardware] = await fixture.db.insert(hardwareConnections).values({ pve_host_id: host.id, node_ref: `${host.id}~pve-flaky`, target_host: 'ilo4.example.test', username: 'reader', secret: encryptSecret('fixture-secret'), system_uuid: 'flaky-uuid', collection_enabled: true }).returning();
+  let at = new Date('2026-10-10T08:00:00Z');
+  for (const code of ['timeout', 'insufficient_privilege', 'unreachable', 'timeout'] as const) {
+    await fixture.db.execute(sql`INSERT INTO hardware_telemetry_state (hardware_id, next_poll_at) VALUES (${hardware.id}, ${at}) ON CONFLICT (hardware_id) DO UPDATE SET next_poll_at = ${at}, lease_until = NULL`);
+    await poll(hardware.id, () => at, async () => { throw new IloError(code, 'fixture'); });
+    at = new Date(at.getTime() + 60 * 60_000);
+  }
+  const [state] = await fixture.db.select().from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, hardware.id));
+  assert.equal(state.auth_failure_count, 0);
+  const [connection] = await fixture.db.select().from(hardwareConnections).where(eq(hardwareConnections.id, hardware.id));
+  assert.equal(connection.collection_enabled, true);
 });

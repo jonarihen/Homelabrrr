@@ -74,6 +74,9 @@ export const hardwareTelemetryState = pgTable('hardware_telemetry_state', {
   lease_until: timestamp('lease_until', { withTimezone: true, mode: 'date' }),
   next_poll_at: timestamp('next_poll_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   failure_count: integer('failure_count').notNull().default(0),
+  // Consecutive rejected-credential polls. Collection auto-disables at the
+  // threshold so a stale password cannot trip iLO's login lockout.
+  auth_failure_count: integer('auth_failure_count').notNull().default(0),
   last_error_code: text('last_error_code'),
   last_attempt_at: timestamp('last_attempt_at', { withTimezone: true, mode: 'date' }),
   last_success_at: timestamp('last_success_at', { withTimezone: true, mode: 'date' }),

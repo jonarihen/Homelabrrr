@@ -92,6 +92,13 @@
       "when": 1791476770097,
       "tag": "0012_extra_lab_loads",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1791734040813,
+      "tag": "0013_hardware_auth_failures",
+      "breakpoints": true
     }
   ]
 }

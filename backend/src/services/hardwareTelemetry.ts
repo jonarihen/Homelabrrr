@@ -6,10 +6,15 @@ import { discoverHardware, IloError, physicalSystemIdentity, type HardwareHealth
 import { integrateWattSamples } from './energyIntervals.ts';
 import { startBackgroundWork } from './backgroundWork.ts';
 import { log } from '../utils/logger.ts';
+import { logAuditEntry } from '../utils/audit.ts';
 
 const parsedInterval = Number(process.env.HARDWARE_POLL_INTERVAL_MS || 60_000);
 export const HARDWARE_POLL_INTERVAL_MS = Number.isInteger(parsedInterval) && parsedInterval >= 30_000 ? parsedInterval : 60_000;
 const LEASE_MS = 120_000;
+// Rejected credentials back off for at least this long, and collection
+// disables itself after this many consecutive rejections (iLO lockout risk).
+export const AUTH_FAILURE_MIN_BACKOFF_MS = 15 * 60_000;
+export const AUTH_FAILURE_DISABLE_THRESHOLD = 3;
 let timer: ReturnType<typeof setInterval> | null = null;
 let initialTimer: ReturnType<typeof setTimeout> | null = null;
 let sweepRunning = false;
@@ -115,16 +120,33 @@ export async function pollHardwareConnection(id: number, now = () => new Date(),
         if (!fresh || fresh.config_version !== connection.config_version || state?.lease_until?.getTime() !== lease.getTime()) return;
         await tx.insert(hardwarePowerSamples).values({ hardware_id: id, node_ref: connection.node_ref, observed_at: measurement.observedAt, watts: String(measurement.watts), mode: sample.mode.value, origin, device_epoch: connection.system_uuid, health: healthForStorage(sample.sample.health) }).onConflictDoNothing();
         await recomputeAffectedBuckets(tx, id, measurement.observedAt, now());
-        await tx.update(hardwareTelemetryState).set({ lease_until: null, next_poll_at: new Date(now().getTime() + HARDWARE_POLL_INTERVAL_MS), failure_count: 0, last_error_code: null, last_success_at: measurement.observedAt }).where(eq(hardwareTelemetryState.hardware_id, id));
+        await tx.update(hardwareTelemetryState).set({ lease_until: null, next_poll_at: new Date(now().getTime() + HARDWARE_POLL_INTERVAL_MS), failure_count: 0, auth_failure_count: 0, last_error_code: null, last_success_at: measurement.observedAt }).where(eq(hardwareTelemetryState.hardware_id, id));
       });
       return { status: 'ok' as const };
     } catch (err) {
-      const [state] = await db.select({ failure_count: hardwareTelemetryState.failure_count }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
+      const [state] = await db.select({ failure_count: hardwareTelemetryState.failure_count, auth_failure_count: hardwareTelemetryState.auth_failure_count }).from(hardwareTelemetryState).where(eq(hardwareTelemetryState.hardware_id, id)).limit(1);
       const failures = Math.min(6, (state?.failure_count || 0) + 1);
-      const next = new Date(now().getTime() + Math.min(30 * 60_000, HARDWARE_POLL_INTERVAL_MS * 2 ** failures) + Math.floor(Math.random() * 5000));
       const code = err instanceof IloError ? err.code : err instanceof Error && /^(INVALID_HARDWARE_SAMPLE|HARDWARE_IDENTITY_CHANGED)$/.test(err.message) ? err.message : 'COLLECTION_FAILED';
-      await db.update(hardwareTelemetryState).set({ lease_until: null, next_poll_at: next, failure_count: failures, last_error_code: code }).where(and(eq(hardwareTelemetryState.hardware_id, id), eq(hardwareTelemetryState.lease_until, lease)));
+      const authFailure = code === 'authentication_failed';
+      // Only rejected credentials count towards lockout; other failures leave
+      // the streak untouched and a success resets it.
+      const authFailures = authFailure ? (state?.auth_failure_count || 0) + 1 : (state?.auth_failure_count || 0);
+      const backoff = Math.min(30 * 60_000, HARDWARE_POLL_INTERVAL_MS * 2 ** failures);
+      const next = new Date(now().getTime() + (authFailure ? Math.max(AUTH_FAILURE_MIN_BACKOFF_MS, backoff) : backoff) + Math.floor(Math.random() * 5000));
+      const updated = await db.update(hardwareTelemetryState).set({ lease_until: null, next_poll_at: next, failure_count: failures, auth_failure_count: authFailures, last_error_code: code }).where(and(eq(hardwareTelemetryState.hardware_id, id), eq(hardwareTelemetryState.lease_until, lease)));
       log('warn', 'hardware_telemetry_poll_failed', { hardwareId: id, code });
+      if (authFailure && authFailures >= AUTH_FAILURE_DISABLE_THRESHOLD && (updated.rowCount || 0) > 0) {
+        // Guarded by the version this poll read: an admin edit (new password)
+        // made in the meantime is never undone by a stale failure.
+        const [disabled] = await db.update(hardwareConnections).set({ collection_enabled: false, last_status: 'authentication_failed', config_version: sql`${hardwareConnections.config_version} + 1`, updated_at: now() })
+          .where(and(eq(hardwareConnections.id, id), eq(hardwareConnections.config_version, connection.config_version), eq(hardwareConnections.collection_enabled, true))).returning({ node_ref: hardwareConnections.node_ref });
+        if (disabled) {
+          log('warn', 'hardware_collection_auto_disabled', { hardwareId: id, code, consecutiveAuthFailures: authFailures });
+          await logAuditEntry({ action: 'hardware_collection_auto_disabled', target: String(id), detail: `node=${disabled.node_ref}; consecutive authentication failures=${authFailures}`, outcome: 'failure' })
+            .catch((auditErr) => log('warn', 'hardware_audit_failed', { hardwareId: id, error: auditErr }));
+        }
+        return { status: 'failed' as const, code, disabled: true };
+      }
       return { status: 'failed' as const, code };
     }
   }, { kind: 'hardware-telemetry', hardwareId: id });
