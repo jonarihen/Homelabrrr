@@ -76,6 +76,16 @@ test('runtime PATCH transport permits only discovered System paths and a single 
   assert.equal(fake.calls.length, 1);
 });
 
+test('runtime PATCH sends a validated If-Match and maps 412 to a conflict', async () => {
+  const fake = fakeNetwork({ status: 412 });
+  const patch = await createRuntimePatchTransport(config, { request: fake.request });
+  await assert.rejects(patch('/redfish/v1/Systems/42', 'Hpe', 'Max', '"etag-1"'),
+    (err: unknown) => err instanceof IloError && err.code === 'conflict');
+  assert.equal(fake.calls[0].options.headers['If-Match'], '"etag-1"');
+  await assert.rejects(patch('/redfish/v1/Systems/42', 'Hpe', 'Max', '"bad\r\nheader"'), IloError);
+  assert.equal(fake.calls.length, 1);
+});
+
 test('runtime PATCH timeout and redirect are uncertain/fail closed and never include secret text', async () => {
   for (const [scenario, code] of [[{ timeout: true }, 'timeout'], [{ status: 302 }, 'invalid_target']] as const) {
     const fake = fakeNetwork(scenario);
