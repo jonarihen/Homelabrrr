@@ -4,6 +4,7 @@
 
 - An enabled ElOverblik meter begins syncing shortly after selection or restart. The initial 13-month history advances in bounded 30-day chunks about one minute apart; the normal refresh runs every six hours.
 - Manual resyncs have a durable five-minute cooldown and return `Retry-After` when limited. Configuration changes invalidate in-flight imports, and failures retry without repeatedly downloading all history.
+
 ## 2026-10-08 — Optional iLO hardware health
 
 - Hardware discovery and telemetry now capture bounded temperatures, fan readings, power-supply status and redundancy when supported on iLO 4 or iLO 5.
@@ -13,6 +14,7 @@
 
 - Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
 - Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
+
 ## 2026-10-08 — Admin PayPal subscription management
 
 - Administrators can inspect linked subscriptions by environment and request provider-verified cancellation with recent reauthentication. Member access to this management route is denied.
@@ -25,6 +27,7 @@
 ## 2026-10-08 — PayPal capture retry readback
 
 - A member can retry confirmation after an uncertain one-off PayPal capture response. The portal reads the existing order and posts a verified completed capture once; it does not send a second capture request.
+
 ## 2026-10-08 — Manual power override durations
 
 - Hardware administrators can choose fixed minutes, the next saved weekly schedule boundary, or an explicit until-cleared iLO mode override. Fixed duration defaults to three hours. The next-boundary option follows Copenhagen daylight-saving transitions and requires an enabled schedule.
@@ -37,10 +40,12 @@
 
 - The saved hardware policy preview now includes seven days of schedule and published-price decisions, the next schedule boundary, and the next known selected-mode change. Future price-dependent selections beyond published coverage are explicitly unknown.
 - Weekly power windows resolve Copenhagen daylight-saving gaps and repeated hours to stable UTC boundaries, including custom windows during the repeated autumn hour.
+
 ## 2026-10-08 — Optional extra lab load estimates
 
 - Administrators can add dated, constant-watt estimates for switch or UPS overhead outside measured server input power. The default remains no extra loads; inclusive household or upstream measurements are rejected, and overlapping revisions of one source are blocked.
 - Monthly previews separate measured server kWh from estimated extra kWh and price both under the same contract intervals. Scheduled future estimates join the forecast through published prices and an explicit later scenario. Finalized prior statements remain revisioned and unchanged until explicitly recalculated.
+
 ## 2026-10-08 — Private energy dashboard verification
 
 - Calculated lab costs and forecasts now display when the backend returns exact decimal-string øre amounts; unsafe or malformed amounts stay unknown.
@@ -49,6 +54,7 @@
 ## 2026-10-08 — Server energy history
 
 - Energy & Budget now charts integrated server kWh alongside instantaneous watts for 24-hour and seven-day views, with coverage in an accessible interval table. Missing intervals leave visible gaps in both trend lines.
+
 ## 2026-10-08 — iLO transport and energy history safeguards
 
 - Fixture tests now exercise bounded iLO GET/PATCH transport failures, legacy iLO 4 fallback, redirect refusal and credential-safe errors without contacting hardware.
@@ -73,35 +79,23 @@
 - Members can review their own verified PayPal postings and subscriptions, start an optional PayPal-hosted one-off or monthly approval when live checkout is enabled, and request subscription cancellation. Approval redirects alone never count as receipts.
 - Administrators can configure separate sandbox and live merchant credentials, keep checkout disabled by default, inspect verified live ledger totals, reconcile with PayPal, and calculate append-only monthly allocations of net support to finalized lab electricity costs.
 - Late refunds revise subsequent credit balances. Unknown provider fees or incomplete costs remain explicitly unresolved; negative balances are owner-funded adjustments, never contributor debts. No live PayPal transaction has been performed.
-## 2026-10-08 — Electricity accounting corrections
-
-- Month-end forecasts include a known allocated monthly fixed fee once. When allocation is incomplete, the total forecast remains unavailable.
-- Historical Energy & Budget cost uses a contract covering the requested month; the displayed current price continues to use the current contract. Partial server coverage stays marked partial.
 
 ## 2026-10-08 — Power mode policy foundation
 
 - Hardware administrators can save a Copenhagen weekly Power Regulator schedule, configure price cap and boost thresholds, pause automation, and request a temporary manual mode. All automatic hardware changes start disabled; live control requires a separate capability test, recent reauthentication, and explicit enablement.
 - One per-node controller resolves manual, schedule, and price decisions, claims work before dispatch, rechecks policy and price state, and verifies the resulting iLO mode. It only writes the three supported runtime Power Regulator values; it never requests a reboot, BIOS setting, watt cap, or VM action.
 - The price worker currently falls back to the configured schedule until the electricity price provider is integrated. These controls have only been exercised against tests and fixtures, not a live server.
+
 ## 2026-10-08 — Configured electricity price foundation
 
 - Administrators can record dated spot or fixed all-in electricity terms, applicable variable tariffs, VAT treatment, and actual household bills. Missing terms keep the retail price incomplete; wholesale spot is labeled separately.
 - Published DayAheadPrices can be cached for DK1 or DK2 in 15-minute UTC intervals. The current-price service supplies the same exact basis and revisions to previews and price-aware power policy, without accessing meter consumption or changing hardware.
 - Lab cost calculations join measured server kWh to applicable price intervals. These are calculated operating expenses, separate from actual invoices or payments. No supplier rates or owner tariff facts are prefilled.
 - Monthly previews compare server energy with the household meter only when scope and coverage match, apply fixed fees by an explicit policy, and forecast with weekday/weekend evidence plus a labeled future price scenario. Closed months can be finalized as immutable revisioned statements.
+
 ## 2026-10-08 — Private energy dashboard foundation
 
 Added an authenticated Energy & Budget page with server power, measured kWh and bounded history. Missing electricity pricing and contribution accounting appear as unknown until verified sources are integrated.
-
-## 2026-10-08 — Optional iLO hardware health
-
-- Hardware discovery and telemetry now capture bounded temperatures, fan readings, power-supply status and redundancy when supported on iLO 4 or iLO 5.
-- The Hardware panel labels stale, partial, unsupported and unavailable health without interpreting missing readings as zero. Raw vendor payloads and PSU serials are excluded.
-
-## 2026-10-08 — Hardware identity and telemetry reliability
-
-- Connection edits and explicit node rebinds preserve physical identity and disable collection/control until the same server passes a fresh read-only test. A different server requires a new connection record.
-- Duplicate physical bindings are checked with normalized identifiers. Late watt readings recompute affected energy buckets. PostgreSQL route and collector tests cover permissions, races, duplicates and history preservation.
 
 ## 2026-10-08 — Server power telemetry and history
 
