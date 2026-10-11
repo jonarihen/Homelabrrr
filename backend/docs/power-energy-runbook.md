@@ -173,13 +173,13 @@ PayPal support is optional and voluntary. It never changes access, quotas or pri
 
 ## 10. Member Energy & Budget dashboard and privacy
 
-> *Status note for the integration owner:* this section describes the dashboard as it exists now. #239 may extend it.
-
 - `/energy` (**Energy & Budget**) is visible to every signed-in member with an interactive session. `/support` hosts the optional PayPal support flow.
 - Members see aggregate server watts, kWh and fleet coverage, servers by generated alias (`Server 01`…), the observed and desired mode with a reason, the current price with its validity, the calculated cost (live estimate or finalized statement) and aggregate funding.
 - Responses never include node references, management addresses, serial numbers, meter IDs, household readings, credentials, contributor identities or merchant identifiers. All responses are `Cache-Control: private, no-store`.
 - Reading the page never triggers an upstream fetch or a hardware write.
-- Admins also see a *Setup & coverage* section linking iLO, energy data and PayPal setup.
+- Admins also see an admin panel with setup links, telemetry/meter/bill/PayPal health, the household-sharing toggle and exports, built only from stored state.
+- **Household-total sharing** is off by default. On `/energy` (admin panel) choose *invoiced* or *paid*; this needs identity confirmation and is audited. Members then see only that month's total, the bill kind and its paid status, taken from non-void settlement bills covering exactly that month (or advance bills if no settlement exists). It is labeled whole-household and is never added to the lab cost. Readings, meter/account IDs, references and notes are never shown. Turning it off hides the total on the next request.
+- **Exports.** Members: *Download this month as CSV* gives their summary as field/value rows. Admins: *Export budget records CSV* (from/to month, at most 120 months, reauthenticated and audited) gives every cost-statement and allocation revision with selected fields, live data only; use the PayPal page for the payment ledger. Text cells that look like spreadsheet formulas are neutralized.
 
 ## 11. Backup, restore and retention
 

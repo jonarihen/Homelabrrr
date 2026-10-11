@@ -47,10 +47,18 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - Monthly allocation credits net support against finalized electricity cost. A refund that leaves a month negative stays visible in that month as an owner-funded adjustment. Only positive credit carries forward, so later contributions never repay a loss.
 
 ### Energy & Budget dashboard
-<!-- Integration owner: extend this group with the final #239 dashboard notes. -->
 - The new Energy & Budget page for signed-in members shows current server power, integrated kWh and coverage, 24-hour and 7-day history, and per-server status under generated aliases.
 - The page also shows the current price with its validity, the calculated cost (live estimate or finalized statement) and aggregate funding figures.
 - Values without a verified source are shown as unknown. Hardware addresses, meter IDs, household readings and contributor identities never reach the page.
+- Funding progress is measured against the finalized lab cost, or a clearly labeled estimate for the current month, and never shows a misleading 100%.
+- Each part of the page loads on its own, so one failing source no longer blanks the whole page. Figures come from one consistent set of revisions, or the page says they don't.
+- Cost breakdown with component status, a separate forecast and provenance. Credit carried in is kept apart from new receipts; pending and disputed payments are shown but not counted.
+- Plain-language mode reasons, weekly baseline, next known change and a 24-hour schedule/price preview; periods after the last published price are marked unknown.
+- Monthly history, mode-change markers on the power chart and a member CSV export.
+- Retired servers keep their past energy, and server aliases no longer shift.
+- Optional sharing of the monthly household invoice or paid total, off by default.
+- Admin panel with setup links, source and payment health, and a reauthenticated export of budget records; a new admin screen records payments on, voids and revises household bills.
+- Payment pages are never cached.
 
 ### Safety & defaults
 - Every integration stays off until configured. iLO, ElOverblik and PayPal secrets are encrypted at rest and included in key rotation.
