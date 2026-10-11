@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverHardware, IloError, normalizeMode, validateManagementTarget } from './iloAdapter.ts';
+import { discoverHardware, IloError, normalizeMode, physicalSystemIdentity, validateManagementTarget } from './iloAdapter.ts';
 
 const config = { host: 'ilo.example.test', port: 443, username: 'reader', password: 'fixture-only', verifyTls: true };
 
@@ -45,4 +45,10 @@ test('management target allows private networks and rejects metadata/loopback', 
   for (const address of ['127.0.0.1', '169.254.169.254', '::1']) {
     await assert.rejects(validateManagementTarget(address), (err: unknown) => err instanceof IloError && err.code === 'invalid_target');
   }
+});
+
+test('physical identity normalizes vendor formatting and never invents an identity', () => {
+  assert.equal(physicalSystemIdentity({ uuid: '  ABCD-1234  ', serial: 'fallback' }), 'abcd-1234');
+  assert.equal(physicalSystemIdentity({ uuid: null, serial: '  SGH123  ' }), 'serial:sgh123');
+  assert.equal(physicalSystemIdentity({ uuid: ' ', serial: ' ' }), null);
 });

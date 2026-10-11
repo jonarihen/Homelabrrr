@@ -16,6 +16,15 @@ export type HardwareDiscovery = {
   sample: { watts: number | null; origin: string | null; unit: 'W'; observedAt: string };
 };
 
+// iLO firmware may vary UUID letter case or pad a serial with whitespace.
+// Persist one comparison form so identity checks survive those variations.
+export function physicalSystemIdentity(identity: { uuid: string | null; serial: string | null }): string | null {
+  const uuid = identity.uuid?.trim();
+  if (uuid) return uuid.toLowerCase();
+  const serial = identity.serial?.trim();
+  return serial ? `serial:${serial.toLowerCase()}` : null;
+}
+
 export class IloError extends Error {
   code: 'invalid_target' | 'unreachable' | 'authentication_failed' | 'tls_failed' | 'timeout' | 'malformed_response' | 'oversized_response' | 'missing_endpoint';
   constructor(code: IloError['code'], message: string) {
