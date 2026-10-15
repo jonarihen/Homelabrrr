@@ -2,7 +2,6 @@ import test, { before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import { EventEmitter } from 'node:events';
-import { Client as SSHClient } from 'ssh2';
 import express from 'express';
 import request from 'supertest';
 import { eq } from 'drizzle-orm';
@@ -10,6 +9,7 @@ import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts'
 import { users, pveHosts, provisionedVms, vmAssignments, vmLeases, vlans, userVlans, vmTemplates, cloudImages, notificationWebhooks } from '../db/schema/index.ts';
 import { provisionAllocation } from '../utils/provisionIntent.ts';
 import { operationPhase } from '../services/operationReconciliation.ts';
+import { encodeNodeRef } from '../utils/nodeRef.ts';
 
 let testDb: TestDatabase;
 let app: express.Express;
@@ -33,7 +33,11 @@ let constructionFailure = false;
 let preSendFailure: Error | null = null;
 let reusedSocket = false;
 let configUpdateFailure = false;
-let imageVirtualBytes = 20 * 1024 ** 3;
+let imageVirtualBytes: unknown = 20 * 1024 ** 3;
+let imageFormat: unknown = 'qcow2';
+let imageInfoFailure: Error | null = null;
+let imageInfoStatus = 200;
+const imageInfoRequests: string[] = [];
 let taskGate: Promise<void> | null = null;
 let onTaskRead: (() => void) | null = null;
 let configDescription = '';
@@ -41,6 +45,7 @@ let configLock = '';
 let postDescription = '';
 let withFreshVmid: typeof import('../proxmox.ts').withFreshVmid;
 const submittedVmids: number[] = [];
+const diskResizes: Record<string, unknown>[] = [];
 let getNextVmid: typeof import('../proxmox.ts').getNextVmid;
 let releaseVmid: typeof import('../proxmox.ts').releaseVmid;
 let reviewerId: number;
@@ -78,7 +83,6 @@ before(async () => {
   reviewerId = reviewer.id;
   const [host] = await testDb.db.insert(pveHosts).values({
     name: 'fake-create-pve', host: 'pve.example', token_id: 'test@pve!portal', token_secret: 'test-secret',
-    ssh_host: 'pve.example', ssh_user: 'root', ssh_secret: 'test-ssh-secret',
   }).returning({ id: pveHosts.id });
   node = `${host.id}~pve`;
   const [vlan] = await testDb.db.insert(vlans).values({ name: 'create-network', tag: 200 })
@@ -121,21 +125,18 @@ beforeEach(async t => {
   reusedSocket = false;
   configUpdateFailure = false;
   imageVirtualBytes = 20 * 1024 ** 3;
+  imageFormat = 'qcow2';
+  imageInfoFailure = null;
+  imageInfoStatus = 200;
+  imageInfoRequests.length = 0;
   taskGate = null;
   onTaskRead = null;
   configDescription = '';
   configLock = '';
   postDescription = '';
   submittedVmids.length = 0;
+  diskResizes.length = 0;
   await testDb.db.update(users).set({ max_cores: null, max_memory_gb: null, max_storage_gb: null }).where(eq(users.id, ownerId));
-  t.mock.method(SSHClient.prototype, 'connect', function () { queueMicrotask(() => this.emit('ready')); return this; });
-  t.mock.method(SSHClient.prototype, 'exec', function (_command: string, callback: any) {
-    const stream = Object.assign(new EventEmitter(), { stderr: new EventEmitter() });
-    callback(null, stream);
-    queueMicrotask(() => { stream.emit('data', JSON.stringify({ 'virtual-size': imageVirtualBytes })); stream.emit('close', 0); });
-    return this;
-  });
-  t.mock.method(SSHClient.prototype, 'end', function () { return this; });
   t.mock.method(https, 'request', (url: URL, options: any, callback: any) => {
     if (constructionFailure && options.method === 'POST') throw new Error('Local request construction failed');
     const outgoing = new EventEmitter();
@@ -152,8 +153,15 @@ beforeEach(async t => {
           if (preSendFailure && options.method === 'POST') { outgoing.emit('error', preSendFailure); return; }
           if (!reusedSocket) socket.emit('secureConnect');
           let data: unknown;
+          let statusCode = options.method === 'POST' ? submitStatus : 200;
           const path = url.pathname;
-          if (path === '/api2/json/cluster/resources') {
+          if (path.includes('/content/')) {
+            imageInfoRequests.push(path);
+            if (imageInfoFailure) { outgoing.emit('error', imageInfoFailure); return; }
+            data = { size: imageVirtualBytes, used: 1024, format: imageFormat };
+            statusCode = imageInfoStatus;
+          }
+          else if (path === '/api2/json/cluster/resources') {
             if (allocatorFailure) { outgoing.emit('error', new Error('Host unreachable')); return; }
             data = liveVms;
           }
@@ -170,13 +178,13 @@ beforeEach(async t => {
           }
           else if (path.includes('/tasks/')) { taskCalls += 1; onTaskRead?.(); if (taskGate) await taskGate; data = task; }
           else if (path.endsWith('/config') && options.method === 'GET') data = { name: configName, description: configDescription, lock: configLock, net0: 'virtio,bridge=vmbr0,tag=200', ...sourceDisks };
-          else if (path.endsWith('/resize') && options.method === 'PUT') { data = null; }
+          else if (path.endsWith('/resize') && options.method === 'PUT') { diskResizes.push(JSON.parse(body)); data = null; }
           else if (path.endsWith('/config') && options.method === 'PUT') {
             if (configUpdateFailure) { outgoing.emit('error', new Error('Config rejected')); return; }
             tagWrites.push(JSON.parse(body)); data = null;
           }
           else assert.fail(`Unexpected PVE request: ${options.method} ${url}`);
-          const incoming = Object.assign(new EventEmitter(), { statusCode: options.method === 'POST' ? submitStatus : 200 });
+          const incoming = Object.assign(new EventEmitter(), { statusCode });
           callback(incoming);
           incoming.emit('data', JSON.stringify({ data }));
           incoming.emit('end');
@@ -660,7 +668,56 @@ test('protected legacy timeout can recover through the same operation resolution
   assert.equal((await ownership(932)).assignments[0].user_id, ownerId);
 });
 
-test('cloud-image imports reserve virtual disk minimum for quota, pending usage and durable floor', async t => {
+test('cloud-image volume verification addresses the selected host, node and remapped source storage without SSH', async () => {
+  const { getCloudImageVirtualSizeGb, imageVirtualSizeGb } = await import('../utils/cloudImageSize.ts');
+  const [host] = await testDb.db.select().from(pveHosts);
+  assert.ok(!host.ssh_host);
+  assert.ok(!host.ssh_secret);
+  const peer = { ...host, id: 42, host: 'peer.example' };
+  const calls: string[] = [];
+  const dependencies = {
+    getHost: async (id: number) => { assert.equal(id, peer.id); return peer; },
+    hostGet: async (selected: typeof peer, path: string) => {
+      assert.equal(selected, peer);
+      calls.push(path);
+      return { size: 64.5 * 1024 ** 3, used: 1024, format: 'qcow2' };
+    },
+  };
+  const size = await getCloudImageVirtualSizeGb({ node: encodeNodeRef(peer.id, 'pve-peer'), volid: 'peer-nfs:import/ubuntu.qcow2' }, dependencies);
+  assert.equal(size, 64.5);
+  assert.deepEqual(calls, ['/nodes/pve-peer/storage/peer-nfs/content/peer-nfs%3Aimport%2Fubuntu.qcow2']);
+  for (const format of ['qcow2', 'raw', 'vmdk']) {
+    assert.equal(imageVirtualSizeGb({ size: 64.5 * 1024 ** 3, used: 1024, format }), 64.5);
+  }
+  for (const invalid of [null, undefined, [], 'invalid JSON', { used: 1024, format: 'qcow2' }]) {
+    assert.throws(() => imageVirtualSizeGb(invalid), /Cannot read/);
+  }
+});
+
+test('cloud-image volume verification rejects ambiguous hosts and unsafe paths before any lookup', async () => {
+  const { getCloudImageVirtualSizeGb } = await import('../utils/cloudImageSize.ts');
+  const dependencies = {
+    getHost: async () => { assert.fail('Invalid image must not resolve a host'); },
+    hostGet: async () => { assert.fail('Invalid image must not query Proxmox'); },
+  };
+  for (const image of [
+    { node: 'pve', volid: 'local:import/ubuntu.qcow2' },
+    { node: '1~../other', volid: 'local:import/ubuntu.qcow2' },
+    { node: '1~..', volid: 'local:import/ubuntu.qcow2' },
+    { node: '1~pve', volid: '..:import/ubuntu.qcow2' },
+    { node: '1~pve', volid: 'local:import/../ubuntu.qcow2' },
+    { node: '1~pve', volid: 'local:iso/ubuntu.iso' },
+    { node: '1~pve', volid: 'local:import/ubuntu.qcow2?other=1' },
+  ]) {
+    await assert.rejects(getCloudImageVirtualSizeGb(image, dependencies), /host-specific cloud image volume/);
+  }
+  await assert.rejects(getCloudImageVirtualSizeGb({ node: '1~pve', volid: 'local:import/ubuntu.qcow2' }, {
+    getHost: async () => undefined,
+    hostGet: dependencies.hostGet,
+  }), /Proxmox host.*not configured/);
+});
+
+test('cloud-image imports without host SSH reserve API virtual disk minimum for quota, pending usage and durable floor', async () => {
   const [image] = await testDb.db.insert(cloudImages).values({
     name: 'large-import-image', url: 'https://example.com/large.qcow2', node, storage: 'local',
     volid: 'local:import/large.qcow2', default_storage: 'local-lvm', status: 'ready', size: 1024,
@@ -685,14 +742,28 @@ test('cloud-image imports reserve virtual disk minimum for quota, pending usage 
   await waitForBackgroundWork();
   assert.equal((await ownership(successful.body.vmid)).assignments[0].resource_allocation!.diskGb, 64);
   assert.equal((await provision(successful.body.id)).status, 'ready');
-  const { imageVirtualSizeGb } = await import('../utils/cloudImageSize.ts');
-  assert.equal(imageVirtualSizeGb(JSON.stringify({ 'virtual-size': imageVirtualBytes })), 64);
-  assert.throws(() => imageVirtualSizeGb(JSON.stringify({ 'actual-size': 1024 })), /Cannot read/);
-  t.mock.method(SSHClient.prototype, 'exec', function (_command: string, callback: any) {
-    const stream = Object.assign(new EventEmitter(), { stderr: new EventEmitter() });
-    callback(null, stream); queueMicrotask(() => stream.emit('close', 1)); return this;
-  });
+  assert.deepEqual(diskResizes, [{ disk: 'scsi0', size: '64G' }]);
+  assert.ok(imageInfoRequests.length > 0);
+  assert.ok(imageInfoRequests.every(path => path === '/api2/json/nodes/pve/storage/local/content/local%3Aimport%2Flarge.qcow2'));
+  const submittedCount = submittedVmids.length;
+  for (const invalid of [undefined, null, 0, -1, 1.5, '68719476736', Number.MAX_SAFE_INTEGER + 1]) {
+    imageVirtualBytes = invalid;
+    assert.equal((await deploy()).status, 503);
+  }
+  imageVirtualBytes = 64 * 1024 ** 3;
+  for (const format of [undefined, null, 'iso', ['qcow2'], { format: 'qcow2' }]) {
+    imageFormat = format;
+    assert.equal((await deploy()).status, 503);
+  }
+  imageFormat = 'qcow2';
+  for (const status of [401, 403, 404, 500]) {
+    imageInfoStatus = status;
+    assert.equal((await deploy()).status, 503);
+  }
+  imageInfoStatus = 200;
+  imageInfoFailure = new Error('Proxmox request timeout');
   assert.equal((await deploy()).status, 503);
+  assert.equal(submittedVmids.length, submittedCount);
 });
 
 test('hardware success refreshes durable CPU/memory while preserving all-disk usage and failures leave it untouched', async () => {
