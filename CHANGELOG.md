@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-15 — Cloud-image deployment no longer requires host SSH
+
+- **Virtual disk size is verified through the Proxmox API instead of root SSH.** Cloud-image deployments work on API-only hosts while capacity checks, quota reservations, and disk resizing still account for the image's full virtual size, not its smaller downloaded file size.
+- **Unverifiable images still block deployment.** Missing or invalid volume metadata and failed API requests stop the import before a VM is submitted.
+
 ## 2026-10-11 — Pin the iLO certificate
 
 - iLO connections can now **pin the iLO's own certificate**, and this is the default for new connections. In Edit Host → Hardware / iLO, click **Fetch certificate**, compare the fingerprint with the iLO web interface and confirm it. This works with the self-signed certificates iLOs ship with and needs no `ALLOW_INSECURE_UPSTREAM_TLS`.

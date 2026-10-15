@@ -1,24 +1,29 @@
-import { getHost } from '../proxmox.ts';
-import { decodeNodeRef } from './nodeRef.ts';
-import { hostHasSsh, runNodeCommands } from './pveSsh.ts';
-import { httpError } from './httpError.ts';
+import { getHost, hostGet } from '../proxmox.ts';
+import { decodeNodeRef, isValidNodeName } from './nodeRef.ts';
+import { httpError, tagStatus } from './httpError.ts';
 
-export function imageVirtualSizeGb(output: string) {
-  let info;
-  try { info = JSON.parse(output); } catch { throw httpError(503, 'Cannot read the cloud image virtual disk size safely'); }
-  const size = info?.['virtual-size'];
-  if (!Number.isSafeInteger(size) || size <= 0) throw httpError(503, 'Cannot read the cloud image virtual disk size safely');
+export function imageVirtualSizeGb(info: unknown) {
+  const size = info && typeof info === 'object' && 'size' in info ? info.size : null;
+  const format = info && typeof info === 'object' && 'format' in info ? info.format : null;
+  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0 || typeof format !== 'string' || !['raw', 'qcow2', 'vmdk'].includes(format)) {
+    throw httpError(503, 'Cannot read the cloud image virtual disk size safely');
+  }
   return size / (1024 ** 3);
 }
 
-export async function getCloudImageVirtualSizeGb(image: { node: string; volid: string }, dependencies = { getHost, runNodeCommands }) {
-  const { hostId } = decodeNodeRef(image.node);
-  if (!hostId || !/^[a-zA-Z0-9._-]+:import\/[a-zA-Z0-9._-]+$/.test(image.volid)) {
+export async function getCloudImageVirtualSizeGb(image: { node: string; volid: string }, dependencies = { getHost, hostGet }) {
+  const { hostId, nodeName } = decodeNodeRef(image.node);
+  const volume = /^([a-zA-Z0-9][a-zA-Z0-9._-]*):import\/[a-zA-Z0-9._-]+$/.exec(image.volid);
+  if (!hostId || !isValidNodeName(nodeName) || !volume) {
     throw httpError(503, 'A host-specific cloud image volume is required for disk size verification');
   }
   const host = await dependencies.getHost(hostId);
-  if (!hostHasSsh(host)) throw httpError(503, 'Configure Proxmox host SSH to verify cloud image virtual disk size before import');
-  const results = await dependencies.runNodeCommands(host, [`qemu-img info --output=json -- "$(pvesm path '${image.volid}')"`]);
-  if (results[0]?.code !== 0) throw httpError(503, 'Cannot read the cloud image virtual disk size safely');
-  return imageVirtualSizeGb(results[0].output);
+  if (!host) throw httpError(503, 'The Proxmox host for this cloud image is not configured');
+  let info;
+  try {
+    info = await dependencies.hostGet(host, `/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(volume[1])}/content/${encodeURIComponent(image.volid)}`);
+  } catch (err) {
+    throw tagStatus(err, 503);
+  }
+  return imageVirtualSizeGb(info);
 }
