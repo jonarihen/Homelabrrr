@@ -162,13 +162,14 @@ test('a target that hangs up cleanly during the handshake rejects instead of han
 });
 
 test('a transport error after ready reaches the browser as an error frame', async () => {
-  let client;
+  const clients = [];
   const originalConnect = ssh2.Client.prototype.connect;
-  ssh2.Client.prototype.connect = function (...args) { client = this; return originalConnect.apply(this, args); };
+  ssh2.Client.prototype.connect = function (...args) { clients.push(this); return originalConnect.apply(this, args); };
   try {
     const ws = fakeClient();
     await proxySshShell(ws, session());
     assert.ok(ws.sent.some((m) => m.status === 'connected'));
+    const [client] = clients;
     client.emit('error', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
     assert.equal(ws.readyState, 3);
     assert.ok(ws.sent.some((m) => m.type === 'error' && typeof m.code === 'string'));
