@@ -8,7 +8,7 @@ import {
   sshKeys as sshKeysTable, users, userVlans,
 } from '../db/schema/index.ts';
 import {
-  getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
+  getVMStatus, vmAction, getVNCTicket, getVMConfig, getVMConfigCurrent, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType, resolveLegacyVmNode,
   getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
@@ -1364,7 +1364,8 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
     // sizes ("+10G") are the delta directly; absolute sizes are compared to
     // the disk's current size from the VM config. The growth is charged to
     // the VM's owner, not to an operator resizing someone else's VM.
-    const config = await getVMConfig(node, vmid);
+    // Uncached: a cached size from just before an earlier resize would inflate the delta.
+    const config = await getVMConfigCurrent(node, vmid);
     let addDiskGb = 0;
     if (size.startsWith('+')) {
       addDiskGb = sizeToGb(size.slice(1)) || 0;

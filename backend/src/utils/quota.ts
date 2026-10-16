@@ -121,13 +121,19 @@ export async function refreshHardwareAllocation(
   });
 }
 
-/** The user a VM's resources are charged to: its assigned owner, else the fallback (the caller). */
+/**
+ * The user a VM's resources are charged to: its assigned owner, else the
+ * fallback (the caller). Qualified and legacy bare-name rows that disagree on
+ * the owner fail closed, as in recordProvisionOwnership.
+ */
 export async function vmQuotaUserId(node: string, vmid: number, fallbackUserId: number): Promise<number> {
   const candidates = nodeLookupCandidates(node);
   if (!candidates.length) return fallbackUserId;
-  const [row] = await db.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
-    .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates))).limit(1);
-  return row?.user_id ?? fallbackUserId;
+  const rows = await db.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
+    .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
+  const owners = new Set(rows.map(row => row.user_id));
+  if (owners.size > 1) throw httpError(409, 'This VM has conflicting owner assignments; an administrator must resolve them');
+  return rows[0]?.user_id ?? fallbackUserId;
 }
 
 export async function getUserQuota(userId: number, database: DbOrTx = db): Promise<UserQuota | null> {

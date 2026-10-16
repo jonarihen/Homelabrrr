@@ -915,3 +915,26 @@ test('operator hardware edits and disk growth are charged to the VM owner and ke
   assert.equal((await request(app).put(`/vms/${node}/960/hardware`).send({ cores: 8 })).status, 403);
   await testDb.db.update(users).set({ can_edit_vm_hardware: false, can_operate_all_vms: false }).where(eq(users.id, otherId));
 });
+
+test('absolute resizes measure fresh sizes and conflicting owner aliases fail closed', async () => {
+  await testDb.db.update(users).set({ can_edit_vm_hardware: true, can_operate_all_vms: true }).where(eq(users.id, otherId));
+  await testDb.db.update(users).set({ max_storage_gb: 100 }).where(eq(users.id, ownerId));
+  await testDb.db.insert(vmAssignments).values({ user_id: ownerId, node, vmid: 961 });
+  sourceDisks = { scsi0: 'local-lvm:vm-961-disk-0,size=20G', scsi1: 'local-lvm:vm-961-disk-1,size=10G' };
+  isAdmin = false;
+  sessionUserId = otherId;
+  const resize = (vmid: number, size: string) => request(app).put(`/vms/${node}/${vmid}/resize-disk`).send({ disk: 'scsi1', size });
+  assert.equal((await resize(961, '30G')).status, 200);
+  sourceDisks = { ...sourceDisks, scsi1: 'local-lvm:vm-961-disk-1,size=30G' };
+  assert.equal((await resize(961, '40G')).status, 200);
+  // 30 GB of disks at the start plus 30 GB of growth, not a delta from a stale cached size.
+  assert.equal((await quota.getUserResourceUsage(ownerId, testDb.db, [])).diskGb, 60);
+
+  await testDb.db.insert(vmAssignments).values([
+    { user_id: ownerId, node, vmid: 962 },
+    { user_id: otherId, node: 'pve', vmid: 962 },
+  ]);
+  assert.equal((await resize(962, '+1G')).status, 409);
+  assert.equal(diskResizes.length, 2);
+  await testDb.db.update(users).set({ can_edit_vm_hardware: false, can_operate_all_vms: false }).where(eq(users.id, otherId));
+});
