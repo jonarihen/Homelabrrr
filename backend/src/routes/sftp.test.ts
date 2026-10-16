@@ -72,9 +72,11 @@ const hostFingerprint = `SHA256:${createHash('sha256')
 
 const server = new Server({ hostKeys: [hostKey.private] }, (client) => {
   liveConnections += 1;
-  client.on('close', () => { liveConnections -= 1; });
+  let closed = false;
+  client.on('close', () => { closed = true; liveConnections -= 1; });
   client.on('error', () => { /* the route hangs up mid-session on failure */ });
-  client.on('authentication', (ctx) => setTimeout(() => ctx.accept(), authDelayMs));
+  // Accepting on a connection the route already dropped arms ssh2's 60s keepalive timer.
+  client.on('authentication', (ctx) => setTimeout(() => { if (!closed) ctx.accept(); }, authDelayMs));
   client.on('ready', () => {
     client.on('session', (accept) => {
       const session = accept();
@@ -248,7 +250,8 @@ test('a cancelled download releases the SSH connection', async () => {
 });
 
 test('a download cancelled during the SSH handshake releases the connection', async () => {
-  authDelayMs = 300;
+  // Far longer than the test waits: only aborting the pending handshake passes.
+  authDelayMs = 5000;
   replies = {
     STAT: (sftp, id) => sftp.attrs(id, { mode: 0o100644, size: 64 * 1024 * 1024, uid: 0, gid: 0, atime: 0, mtime: 0 }),
     OPEN: (sftp, id) => sftp.handle(id, Buffer.from('h')),
@@ -266,9 +269,10 @@ test('a download cancelled during the SSH handshake releases the connection', as
     for (let attempt = 0; attempt < 100 && liveConnections === 0; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    const started = Date.now();
     req.destroy();
-    await new Promise((resolve) => setTimeout(resolve, authDelayMs + 200));
     await waitForConnectionsToClose();
+    assert.ok(Date.now() - started < 2000, 'the pending handshake was not aborted');
   } finally {
     authDelayMs = 0;
     replies = {};

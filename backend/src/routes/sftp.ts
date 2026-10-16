@@ -146,7 +146,9 @@ async function resolveSession(req, token, deny) {
 }
 
 /** Open an SSH connection and start the SFTP subsystem, returning both. */
-async function openSftp(sess) {
+// `signal` (optional) aborts the handshake and the subsystem request when the
+// caller's client goes away before the SFTP channel is ready.
+async function openSftp(sess, signal?: AbortSignal) {
   const conn = await createSshConnection({
     host: sess.host,
     port: sess.port,
@@ -154,7 +156,7 @@ async function openSftp(sess) {
     privateKey: sess.privateKey,
     passphrase: sess.passphrase,
     hostFingerprint: sess.hostFingerprint,
-  });
+  }, signal);
 
   return new Promise((resolve, reject) => {
     conn.sftp((err, sftp) => {
@@ -280,11 +282,14 @@ router.get('/download', async (req, res) => {
   const { token, path: filePath } = req.query;
   let conn, sftp, stream;
   let clientGone = false;
+  const opening = new AbortController();
   // A cancelled download pauses the read stream forever (neither 'end' nor
   // 'error' fires), so release the SSH connection when the response closes.
-  // Registered before the first await so a client that leaves early is seen.
+  // Registered before the first await so a client that leaves early is seen;
+  // the abort reaches the SSH client while openSftp is still pending.
   res.on('close', () => {
     clientGone = true;
+    opening.abort();
     stream?.destroy();
     conn?.end();
   });
@@ -294,7 +299,7 @@ router.get('/download', async (req, res) => {
   if (!filePath) return res.status(400).json({ error: 'path is required' });
 
   try {
-    ({ conn, sftp } = await openSftp(sess));
+    ({ conn, sftp } = await openSftp(sess, opening.signal));
     if (clientGone) {
       conn.end();
       return;
