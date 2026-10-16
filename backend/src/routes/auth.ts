@@ -153,6 +153,13 @@ async function clearTwoFactorAttempts(username: string): Promise<void> {
   await db.delete(twoFactorAttempts).where(eq(twoFactorAttempts.username, username));
 }
 
+// Signed-in credential confirmations (reauthenticate, change-password, 2FA
+// toggles) share one per-user failure budget so a session cookie alone cannot
+// brute-force the password or TOTP. Keyed by user id, not username: a rename
+// needs no confirmation and would otherwise reset the counter.
+const confirmationKey = (req: any) => `user:${req.session.userId}`;
+const CONFIRMATION_LOCKED = { error: 'Too many failed confirmation attempts. Try again in 10 minutes.', code: 'CONFIRMATION_LOCKED' };
+
 // ─── Login ────────────────────────────────────────────────────────────────────
 
 // Dummy hash compared against when the username doesn't exist, so unknown and
@@ -163,7 +170,7 @@ router.post('/login', loginLimiter, async (req, res, next) => {
   try { validateObject(req.body, { fields: ['username', 'password'], required: ['username', 'password'] }); }
   catch (err: any) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const { username, password } = req.body;
-  if (!username || !password) {
+  if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
   }
 
@@ -505,12 +512,12 @@ router.put('/change-username', requireAuth, requireInteractiveSession, async (re
   }
 });
 
-router.put('/change-password', requireAuth, requireInteractiveSession, async (req, res) => {
+router.put('/change-password', verifyTwoFactorLimiter, requireAuth, requireInteractiveSession, async (req, res) => {
   try { validateObject(req.body, { fields: ['currentPassword', 'newPassword'], required: ['currentPassword', 'newPassword'] }); }
   catch (err: any) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const { currentPassword } = req.body;
   let newPassword;
-  if (!currentPassword || !req.body?.newPassword) return res.status(400).json({ error: 'Current and new password required' });
+  if (typeof currentPassword !== 'string' || !currentPassword || !req.body?.newPassword) return res.status(400).json({ error: 'Current and new password required' });
   try { newPassword = validatePassword(req.body?.newPassword, 'newPassword'); }
   catch (err: any) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
 
@@ -518,17 +525,24 @@ router.put('/change-password', requireAuth, requireInteractiveSession, async (re
   if (!user) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
+  const key = confirmationKey(req);
+  if (await pruneAndCountTwoFactor(key) >= TWO_FACTOR_MAX) return res.status(423).json(CONFIRMATION_LOCKED);
   if (!bcrypt.compareSync(currentPassword, user.password)) {
+    await recordTwoFactorFailure(key);
     return res.status(403).json({ error: 'Current password is incorrect', code: CONFIRMATION_FAILED });
   }
+  await clearTwoFactorAttempts(key);
 
   const hash = bcrypt.hashSync(newPassword, 10);
   await db.update(users).set({ password: hash }).where(eq(users.id, req.session.userId));
   req.session.reauthenticatedAt = Date.now();
-  res.json({ ok: true });
+  // A changed password must end every other sign-in, or a stolen session outlives it.
+  const revoked = await revokeOtherStoredSessions(db, req.session.userId, req.sessionID);
+  await logAudit(req, 'password_changed', req.session.username, `revoked_sessions=${revoked}`);
+  res.json({ ok: true, revokedSessions: revoked });
 });
 
-router.post('/reauthenticate', requireAuth, requireInteractiveSession, async (req, res) => {
+router.post('/reauthenticate', verifyTwoFactorLimiter, requireAuth, requireInteractiveSession, async (req, res) => {
   try { validateObject(req.body, { fields: ['password', 'code'], required: ['password'] }); }
   catch (err: any) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const { password, code = '' } = req.body || {};
@@ -537,13 +551,20 @@ router.post('/reauthenticate', requireAuth, requireInteractiveSession, async (re
     .from(users)
     .where(eq(users.id, req.session.userId))
     .limit(1);
+  const key = confirmationKey(req);
+  if (await pruneAndCountTwoFactor(key) >= TWO_FACTOR_MAX) return res.status(423).json(CONFIRMATION_LOCKED);
   if (!user || !bcrypt.compareSync(String(password || ''), user.password)) {
+    await recordTwoFactorFailure(key);
     return res.status(403).json({ error: 'Password confirmation failed', code: CONFIRMATION_FAILED });
   }
   if (user.totp_enabled) {
     const valid = verifyTotp(code, decryptSecret(user.totp_secret));
-    if (!valid) return res.status(403).json({ error: 'Second-factor confirmation failed', code: CONFIRMATION_FAILED });
+    if (!valid) {
+      await recordTwoFactorFailure(key);
+      return res.status(403).json({ error: 'Second-factor confirmation failed', code: CONFIRMATION_FAILED });
+    }
   }
+  await clearTwoFactorAttempts(key);
   req.session.reauthenticatedAt = Date.now();
   await logAudit(req, 'session_reauthenticated', req.session.username, '');
   res.json({ ok: true, validForSeconds: 900 });
@@ -578,7 +599,7 @@ router.post('/2fa/setup', requireAuth, requireInteractiveSession, requireRecentR
 });
 
 // Verify code and activate 2FA
-router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
+router.post('/2fa/enable', verifyTwoFactorLimiter, requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
@@ -586,17 +607,24 @@ router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecent
   if (!user?.totp_secret) return res.status(400).json({ error: 'Run setup first' });
   if (user.totp_enabled) return res.status(400).json({ error: '2FA is already enabled' });
 
+  const key = confirmationKey(req);
+  if (await pruneAndCountTwoFactor(key) >= TWO_FACTOR_MAX) return res.status(423).json(CONFIRMATION_LOCKED);
   const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
-  if (!isValid) return res.status(400).json({ error: 'Invalid code — try again' });
+  if (!isValid) {
+    await recordTwoFactorFailure(key);
+    return res.status(400).json({ error: 'Invalid code — try again' });
+  }
+  await clearTwoFactorAttempts(key);
 
   await db.update(users).set({ totp_enabled: true }).where(eq(users.id, req.session.userId));
   req.session.twoFactorEnrollmentOnly = false;
-  await logAudit(req, '2fa_enabled', req.session.username, '');
-  res.json({ ok: true });
+  const revoked = await revokeOtherStoredSessions(db, req.session.userId, req.sessionID);
+  await logAudit(req, '2fa_enabled', req.session.username, `revoked_sessions=${revoked}`);
+  res.json({ ok: true, revokedSessions: revoked });
 });
 
 // Disable 2FA (requires current TOTP code to confirm)
-router.post('/2fa/disable', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
+router.post('/2fa/disable', verifyTwoFactorLimiter, requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
@@ -608,12 +636,19 @@ router.post('/2fa/disable', requireAuth, requireInteractiveSession, requireRecen
   if (!user?.totp_enabled) return res.status(400).json({ error: '2FA is not enabled' });
   if (user.require_2fa) return res.status(403).json({ error: 'Your account is required to keep 2FA enabled' });
 
+  const key = confirmationKey(req);
+  if (await pruneAndCountTwoFactor(key) >= TWO_FACTOR_MAX) return res.status(423).json(CONFIRMATION_LOCKED);
   const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
-  if (!isValid) return res.status(400).json({ error: 'Invalid code' });
+  if (!isValid) {
+    await recordTwoFactorFailure(key);
+    return res.status(400).json({ error: 'Invalid code' });
+  }
+  await clearTwoFactorAttempts(key);
 
   await db.update(users).set({ totp_enabled: false, totp_secret: null }).where(eq(users.id, req.session.userId));
-  await logAudit(req, '2fa_disabled', req.session.username, '');
-  res.json({ ok: true });
+  const revoked = await revokeOtherStoredSessions(db, req.session.userId, req.sessionID);
+  await logAudit(req, '2fa_disabled', req.session.username, `revoked_sessions=${revoked}`);
+  res.json({ ok: true, revokedSessions: revoked });
 });
 
 // ─── Passkeys, recovery codes, and active sessions ─────────────────────────
