@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { createHash } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import {
-  and, eq, ne, desc, inArray, sql, count, getTableColumns,
+  and, eq, ne, or, isNull, desc, inArray, sql, count, getTableColumns,
 } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import {
@@ -22,6 +22,7 @@ import {
   requireAuth, requireAdmin, requirePermission, requireInteractiveSession, requireRecentReauthentication,
 } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
+import { ipv4InCidr } from '../utils/ipPolicy.ts';
 import { sendError } from '../utils/httpError.ts';
 import { logAudit, logAuditTx } from '../utils/audit.ts';
 import { encryptSecret } from '../utils/secrets.ts';
@@ -46,7 +47,7 @@ import {
 } from '../utils/leases.ts';
 import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
-import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
+import { getWorkflowBundle, getWorkflowRow, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
 import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
 import { isArtifactGone } from '../workflows/engine.ts';
 import { deriveSubnet } from '../workflows/subnet.ts';
@@ -1730,9 +1731,14 @@ function managedVipCleanupSteps(pf, sync, rootVdom) {
 // cleanup succeeded, so a failed attempt keeps the record for a retry.
 // Returns the cleanup errors. `fw` carries the connection fields createClient
 // needs plus vdom/root_vdom.
-async function cleanupVlanPortForwards(firewallId, fw, vlanIfaceName) {
-  const portForwards = await db.select().from(managedVips)
-    .where(and(eq(managedVips.firewall_id, firewallId), eq(managedVips.vlan_interface, vlanIfaceName)));
+async function cleanupVlanPortForwards(firewallId, fw, vlanIfaceName, vlanTag) {
+  // Forwards from before dual-VDOM have an empty vlan_interface; match those
+  // by their mapped IP falling inside the VLAN's subnet on this firewall.
+  const subnet = deriveSubnet(vlanTag, workflowSettings(await getWorkflowRow(firewallId, 'vlan_provision')));
+  const portForwards = (await db.select().from(managedVips)
+    .where(and(eq(managedVips.firewall_id, firewallId),
+      or(eq(managedVips.vlan_interface, vlanIfaceName), eq(managedVips.vlan_interface, ''), isNull(managedVips.vlan_interface)))))
+    .filter(pf => pf.vlan_interface === vlanIfaceName || (subnet && ipv4InCidr(pf.mapped_ip, subnet.network)));
   const allErrors = [];
   if (portForwards.length === 0) return allErrors;
 
@@ -1788,7 +1794,7 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
   // 1. Clean up port forwards that target this VLAN's interface
   const portForwardErrors = new Map();
   for (const sync of syncs) {
-    portForwardErrors.set(sync.id, await cleanupVlanPortForwards(sync.fw_id, sync, sync.interface_name));
+    portForwardErrors.set(sync.id, await cleanupVlanPortForwards(sync.fw_id, sync, sync.interface_name, vlan.tag));
   }
 
   // 2. Deprovision VLAN from each synced firewall (interface, address obj, DHCP, routes, policies, switch)
@@ -2536,15 +2542,17 @@ async function handleVlanUnsync(req: any, res: any, vlanIdRaw: any, firewallIdRa
     policy_ids: firewallVlanSync.policy_ids,
     dhcp_server_id: firewallVlanSync.dhcp_server_id,
     artifacts: firewallVlanSync.artifacts,
+    vlan_tag: vlans.tag,
   }).from(firewallVlanSync)
     .innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id))
+    .innerJoin(vlans, eq(vlans.id, firewallVlanSync.vlan_id))
     .where(and(eq(firewallVlanSync.vlan_id, vlanId), eq(firewallVlanSync.firewall_id, firewallId)))
     .limit(1);
   if (!sync) return res.status(404).json({ error: 'Sync record not found' });
 
   try {
     // Port forwards into this VLAN would otherwise be orphaned (and still open) on the FortiGate.
-    let errors = await cleanupVlanPortForwards(firewallId, sync, sync.interface_name);
+    let errors = await cleanupVlanPortForwards(firewallId, sync, sync.interface_name, sync.vlan_tag);
     if (errors.length === 0) {
       const client = createClient(sync);
       const teardownRes = sync.artifacts
@@ -3601,8 +3609,9 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
         }
       } catch (e) { console.warn(`[vip-delete] Policy search warning:`, e.message); }
 
-      // Delete VIP
-      await client.deleteVip(vipName, rootVdom);
+      // Delete VIP — already gone upstream counts as deleted, so a stale record can be cleared.
+      try { await client.deleteVip(vipName, rootVdom); }
+      catch (e) { if (!isArtifactGone(e)) throw e; }
 
       if (managed.service_name) {
         try {
