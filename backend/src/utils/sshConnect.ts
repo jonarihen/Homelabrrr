@@ -31,6 +31,12 @@ export function createSshConnection({ host, port, username, privateKey, passphra
       reject(new Error(hostVerificationError || err.message));
     });
 
+    // A clean hang-up before ready emits close/end without an error; settle
+    // instead of waiting forever. (No-op once ready has resolved.)
+    const closedEarly = () => reject(new Error(hostVerificationError || 'SSH connection closed during handshake'));
+    conn.on('end', closedEarly);
+    conn.on('close', closedEarly);
+
     try {
       conn.connect({
         host,

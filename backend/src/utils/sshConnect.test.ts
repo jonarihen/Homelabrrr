@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import ssh2 from 'ssh2';
-import { proxySshShell } from './sshConnect.ts';
+import { createSshConnection, proxySshShell } from './sshConnect.ts';
 
 const { Server, utils } = ssh2;
 
@@ -140,5 +140,23 @@ test('a shell that cannot open because the transport dropped is reported, not th
     await waitForConnectionsToClose();
   } finally {
     ssh2.Client.prototype.shell = originalShell;
+  }
+});
+
+test('a target that hangs up cleanly during the handshake rejects instead of hanging', async () => {
+  // Completes the key exchange, then hangs up during auth: ssh2 emits only
+  // end/close here, never error.
+  const silent = new Server({ hostKeys: [hostKey.private] }, (client) => {
+    client.on('error', () => { /* hanging up is the point */ });
+    client.on('authentication', () => client.end());
+  });
+  await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', () => resolve()));
+  try {
+    const { port: silentPort } = silent.address() as { port: number };
+    const started = Date.now();
+    await assert.rejects(() => createSshConnection({ ...session(), port: silentPort }), /closed during handshake/);
+    assert.ok(Date.now() - started < 5000, 'settled before the ready timeout');
+  } finally {
+    silent.close();
   }
 });

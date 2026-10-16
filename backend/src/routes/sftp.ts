@@ -278,20 +278,21 @@ router.post('/ls', async (req, res) => {
 /** Download a remote file. */
 router.get('/download', async (req, res) => {
   const { token, path: filePath } = req.query;
-  const sess = await resolveSession(req, token, (status, body) => res.status(status).json(body));
-  if (!sess) return;
-  if (!filePath) return res.status(400).json({ error: 'path is required' });
-
   let conn, sftp, stream;
   let clientGone = false;
   // A cancelled download pauses the read stream forever (neither 'end' nor
   // 'error' fires), so release the SSH connection when the response closes.
-  // Registered before the handshake so a client that leaves mid-connect is seen.
+  // Registered before the first await so a client that leaves early is seen.
   res.on('close', () => {
     clientGone = true;
     stream?.destroy();
     conn?.end();
   });
+
+  const sess = await resolveSession(req, token, (status, body) => res.status(status).json(body));
+  if (!sess || clientGone) return;
+  if (!filePath) return res.status(400).json({ error: 'path is required' });
+
   try {
     ({ conn, sftp } = await openSftp(sess));
     if (clientGone) {
@@ -302,6 +303,10 @@ router.get('/download', async (req, res) => {
     const stat = await new Promise((resolve, reject) => {
       sftp.stat(filePath, (err, s) => (err ? reject(err) : resolve(s)));
     });
+    if (clientGone) {
+      conn.end();
+      return;
+    }
 
     // Remote filename is untrusted — strip quotes/control chars from the ASCII
     // fallback and carry the real name RFC5987-encoded in filename*.
