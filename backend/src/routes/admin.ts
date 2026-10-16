@@ -2112,14 +2112,14 @@ router.put('/pve-hosts/:id', pHosts, async (req, res) => {
   const existing = await getHost(parseInt(req.params.id));
   if (!existing) return res.status(404).json({ error: 'Host not found' });
 
-  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
+  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== false : !!verifyTls;
   if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {
     return res.status(400).json({ error: 'Disabling Proxmox TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
   }
   // A blank secret keeps the stored one only while the upstream target is
   // unchanged; otherwise the stored secret would be sent to the new address.
   const targetChanged = host !== existing.host || port !== Number(existing.port)
-    || tokenId !== existing.token_id || (!verifyTlsEnabled && !!existing.verify_tls);
+    || tokenId !== existing.token_id || (!verifyTlsEnabled && existing.verify_tls !== false);
   if (!tokenSecret && targetChanged) {
     return res.status(400).json({ error: 'Re-enter the API token secret when changing the address', field: 'tokenSecret' });
   }
@@ -2367,8 +2367,8 @@ router.put('/firewalls/:id', pFirewalls, async (req, res) => {
   if (!existing) return res.status(404).json({ error: 'Firewall not found' });
 
   // A blank API key keeps the stored one only while the upstream target is unchanged.
-  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
-  if (!apiKey && (String(host) !== existing.host || Number(port) !== Number(existing.port) || (!verifyTlsEnabled && !!existing.verify_tls))) {
+  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== false : !!verifyTls;
+  if (!apiKey && (String(host) !== existing.host || Number(port) !== Number(existing.port) || (!verifyTlsEnabled && existing.verify_tls !== false))) {
     return res.status(400).json({ error: 'Re-enter the API key when changing the address', field: 'apiKey' });
   }
   const key = apiKey ? encryptSecret(apiKey) : existing.api_key;

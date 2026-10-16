@@ -14,6 +14,8 @@ let closeDb: (() => Promise<void>) | undefined;
 let app: express.Express;
 let hostId: number;
 let fwId: number;
+let nullHostId: number;
+let nullFwId: number;
 
 const pveBody = (over = {}) => ({ name: 'pve', host: 'pve.lab', port: 8006, tokenId: 'root@pam!t', tokenSecret: '', ...over });
 const fwBody = (over = {}) => ({ name: 'fw', host: 'fw.lab', port: 443, apiKey: '', ...over });
@@ -24,6 +26,8 @@ before(async () => {
   testDb = await createTestDatabase();
   process.env.DATABASE_URL = testDb.url;
   process.env.SECRET_ENCRYPTION_KEY ||= '55'.repeat(32);
+  // Lets the tests reach the TLS-downgrade branch; read once when admin.ts loads.
+  process.env.ALLOW_INSECURE_UPSTREAM_TLS = 'true';
   ({ closeDb } = await import('../db/client.ts'));
   const [delegate] = await testDb.db.insert(users)
     .values({ username: 'hosts-delegate', password: 'x', can_manage_hosts: true, can_manage_firewalls: true })
@@ -33,6 +37,12 @@ before(async () => {
     ssh_host: 'pve.lab', ssh_port: 22, ssh_secret: 'enc-ssh',
   }).returning({ id: pveHosts.id });
   [{ id: fwId }] = await testDb.db.insert(firewalls).values({ name: 'fw', host: 'fw.lab', port: 443, api_key: 'enc-key' })
+    .returning({ id: firewalls.id });
+  // Legacy rows with NULL verify_tls; the upstream clients treat NULL as verified.
+  [{ id: nullHostId }] = await testDb.db.insert(pveHosts).values({
+    name: 'pve', host: 'pve.lab', port: 8006, token_id: 'root@pam!t', token_secret: 'enc-token', verify_tls: null,
+  }).returning({ id: pveHosts.id });
+  [{ id: nullFwId }] = await testDb.db.insert(firewalls).values({ name: 'fw', host: 'fw.lab', port: 443, api_key: 'enc-key', verify_tls: null })
     .returning({ id: firewalls.id });
 
   const adminRouter = (await import('./admin.ts')).default;
@@ -107,4 +117,23 @@ test('Firewall: blank API key is refused when host or port change, kept otherwis
   const row = await readFw();
   assert.equal(row.host, 'fw2.lab');
   assert.notEqual(row.api_key, 'enc-key');
+});
+
+test('NULL verify_tls counts as verified: switching it off needs the secret again', async () => {
+  const pve = await request(app).put(`/pve-hosts/${nullHostId}`).send(pveBody({ verifyTls: false }));
+  assert.equal(pve.status, 400);
+  assert.equal(pve.body.field, 'tokenSecret');
+  const fw = await request(app).put(`/firewalls/${nullFwId}`).send(fwBody({ verifyTls: false }));
+  assert.equal(fw.status, 400);
+  assert.equal(fw.body.field, 'apiKey');
+
+  // Omitting verifyTls keeps NULL rows verified and needs no secret.
+  assert.equal((await request(app).put(`/pve-hosts/${nullHostId}`).send(pveBody())).status, 200);
+  assert.equal((await request(app).put(`/firewalls/${nullFwId}`).send(fwBody())).status, 200);
+  const [host] = await testDb.db.select().from(pveHosts).where(eq(pveHosts.id, nullHostId));
+  const [fwRow] = await testDb.db.select().from(firewalls).where(eq(firewalls.id, nullFwId));
+  assert.equal(host.verify_tls, true);
+  assert.equal(fwRow.verify_tls, true);
+  assert.equal(host.token_secret, 'enc-token');
+  assert.equal(fwRow.api_key, 'enc-key');
 });
