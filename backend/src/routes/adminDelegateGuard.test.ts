@@ -20,6 +20,10 @@ let roleStrongerId: number;
 let adminId: number;
 let plainTokenId: number;
 let adminTokenId: number;
+let operatorApp: express.Express;
+let seerApp: express.Express;
+let seeTargetId: number;
+let operateTargetId: number;
 
 async function appFor(session) {
   const adminRouter = (await import('./admin.ts')).default;
@@ -54,6 +58,16 @@ before(async () => {
     { user_id: adminId, name: 'admin-token', token_hash: 'h2' },
   ]).returning({ id: apiTokens.id });
 
+  const [operator, seer] = await testDb.db.insert(users).values([
+    { username: 'operator-delegate', password: 'x', can_manage_users: true, can_operate_all_vms: true },
+    { username: 'seer-delegate', password: 'x', can_manage_users: true, see_all_vms: true },
+  ]).returning({ id: users.id });
+  [{ id: seeTargetId }, { id: operateTargetId }] = await testDb.db.insert(users).values([
+    { username: 'see-target', password: 'x', see_all_vms: true },
+    { username: 'operate-target', password: 'x', can_operate_all_vms: true },
+  ]).returning({ id: users.id });
+  operatorApp = await appFor({ userId: operator.id, isAdmin: false });
+  seerApp = await appFor({ userId: seer.id, isAdmin: false });
   delegateApp = await appFor({ userId: delegate.id, isAdmin: false });
   adminApp = await appFor({ userId: adminId, isAdmin: true });
 });
@@ -95,4 +109,10 @@ test('token revocation is guarded by the token owner', async () => {
   assert.equal((await testDb.db.select().from(apiTokens).where(eq(apiTokens.id, adminTokenId))).length, 1);
   assert.equal((await request(delegateApp).delete(`/tokens/${plainTokenId}`)).status, 200);
   assert.equal((await testDb.db.select().from(apiTokens).where(eq(apiTokens.id, plainTokenId))).length, 0);
+});
+
+test('implied permissions count for the caller, in one direction only', async () => {
+  // can_operate_all_vms implies see_all_vms.
+  assert.equal((await request(operatorApp).post(`/users/${seeTargetId}/unlock`)).status, 200);
+  assert.equal((await request(seerApp).post(`/users/${operateTargetId}/unlock`)).status, 403);
 });

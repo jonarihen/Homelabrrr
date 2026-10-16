@@ -36,7 +36,7 @@ import {
   syncVmTagsSafe, runFullTagSync, isTagSyncRunning, getTagSyncProgress,
   getTagSyncSettings, setTagSyncPaused, setTagSyncIntervalHours,
 } from '../utils/vmTags.ts';
-import { PERMISSION_KEYS, userHasPermission, effectivePermissions } from '../utils/permissions.ts';
+import { PERMISSION_KEYS, userHasPermission, effectivePermissions, withImpliedPermissions } from '../utils/permissions.ts';
 import { buildPortForwardTargets, blockedErrorText, blockedStatus } from '../utils/portForwardTargets.ts';
 import { evaluateReadiness, summarizeReadiness } from '../utils/readiness.ts';
 import { generateInviteToken, hashInviteToken, normalizeInvitePreset, summarizeInvitePreset, inviteStatus } from '../utils/invites.ts';
@@ -321,7 +321,8 @@ async function ensureCanManageTargetUser(req, res, userId) {
   }
   // A delegate may only manage users whose effective permissions are a subset of its own.
   const [caller] = await db.select().from(users).where(eq(users.id, Number(req.session.userId))).limit(1);
-  const [targetPerms, callerPerms] = await Promise.all([effectivePermissions(target), effectivePermissions(caller)]);
+  const [targetPerms, callerPerms] = (await Promise.all([effectivePermissions(target), effectivePermissions(caller)]))
+    .map(withImpliedPermissions);
   if (Object.keys(targetPerms).some((key) => targetPerms[key] && !callerPerms[key])) {
     res.status(403).json({ error: 'Only admins can manage users with permissions you do not have' });
     return false;
