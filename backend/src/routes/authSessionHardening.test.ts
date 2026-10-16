@@ -7,7 +7,7 @@ import express from 'express';
 import session from 'express-session';
 import request from 'supertest';
 import bcrypt from 'bcryptjs';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { generateSync } from 'otplib';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { sessions, twoFactorAttempts, users } from '../db/schema/index.ts';
@@ -263,4 +263,13 @@ test('a session authenticated before a credential change is rejected even if rev
   const fresh = request.agent(raceApp);
   assert.equal((await fresh.post('/login').send({ username: 'race-user', password: 'Race-correct-horse-3!' })).status, 200);
   assert.equal((await fresh.get('/sessions')).status, 200);
+});
+
+test('ordering is by credential generation, not time: a same-instant change still rejects the older login', async () => {
+  const stale = request.agent(raceApp);
+  assert.equal((await stale.post('/login').send({ username: 'race-user', password: 'Race-correct-horse-3!' })).status, 200);
+  // Bump the generation with no time passing at all (as a change committing in
+  // the same millisecond as the login would).
+  await testDb.db.update(users).set({ credentials_version: sql`${users.credentials_version} + 1` }).where(eq(users.username, 'race-user'));
+  assert.equal((await stale.get('/sessions')).status, 401);
 });

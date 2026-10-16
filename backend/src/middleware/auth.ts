@@ -14,8 +14,8 @@ function auditDenial(req, action: string, target: string, detail: string): void 
 }
 
 // Re-hydrates the cookie session from the live user row on every request, and
-// drops sessions whose user is gone or that were authenticated before the
-// user's last password/2FA change (closes the login-vs-credential-change race).
+// drops sessions whose user is gone or that were authenticated against an
+// older credentials_version (closes the login-vs-credential-change race).
 export async function loadSessionUser(req, res, next) {
   if (!req.session?.userId) return next();
   // Token auth already resolved the live user; don't re-hydrate (and never try
@@ -23,12 +23,12 @@ export async function loadSessionUser(req, res, next) {
   if (req.apiToken) return next();
 
   const [user] = await db
-    .select({ username: users.username, is_admin: users.is_admin, credentials_changed_at: users.credentials_changed_at })
+    .select({ username: users.username, is_admin: users.is_admin, credentials_version: users.credentials_version })
     .from(users)
     .where(eq(users.id, req.session.userId))
     .limit(1);
-  const authenticatedAt = Number(req.session.authenticatedAt ?? req.session.createdAt ?? 0);
-  if (!user || (user.credentials_changed_at && authenticatedAt < user.credentials_changed_at.getTime())) {
+  // Sessions from before credentials_version existed count as version 0.
+  if (!user || Number(req.session.credentialsVersion ?? 0) < user.credentials_version) {
     return req.session.destroy(() => next());
   }
 

@@ -1,5 +1,5 @@
 {
-  "id": "d52e3b60-106e-4959-bec6-a5a3810d3cb3",
+  "id": "92f1a4a4-dda4-4fc5-83c5-cdc864a8ea7c",
   "prevId": "0b7d739c-ec29-4123-bb38-ab050b50a648",
   "version": "7",
   "dialect": "postgresql",
@@ -1113,11 +1113,12 @@
           "primaryKey": false,
           "notNull": false
         },
-        "credentials_changed_at": {
-          "name": "credentials_changed_at",
-          "type": "timestamp with time zone",
+        "credentials_version": {
+          "name": "credentials_version",
+          "type": "integer",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true,
+          "default": 0
         }
       },
       "indexes": {

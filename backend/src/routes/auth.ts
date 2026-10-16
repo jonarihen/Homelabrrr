@@ -29,7 +29,7 @@ import { API_TOKEN_SCOPES } from '../utils/apiTokenScopes.ts';
 import { validateObject, validatePassword, validateUsername } from '../utils/validation.ts';
 import {
   consumeRecoveryCode, hashRecoveryCode, parseStoredSession, removeWebauthnCredential,
-  markCredentialsChanged, resolveWebauthnConfig, revokeOtherStoredSessions, revokeStoredSession,
+  changeCredentials, resolveWebauthnConfig, revokeOtherStoredSessions, revokeStoredSession,
 } from '../utils/accountSecurity.ts';
 
 const router = Router();
@@ -89,11 +89,11 @@ async function serializeUser(user: any) {
   };
 }
 
-// authenticatedAt is when the credential check began (before the user row was
-// read), so loadSessionUser can reject it if credentials changed meanwhile.
-function startUserSession(req: any, user: any, { twoFactorEnrollmentOnly = false, authenticatedAt = Date.now() } = {}) {
+// credentialsVersion must come from the same row read that verified the
+// password, so loadSessionUser rejects the session if credentials changed since.
+function startUserSession(req: any, user: any, { twoFactorEnrollmentOnly = false, credentialsVersion = user.credentials_version ?? 0 } = {}) {
   req.session.userId = user.id;
-  req.session.authenticatedAt = authenticatedAt;
+  req.session.credentialsVersion = credentialsVersion;
   req.session.username = user.username;
   req.session.isAdmin = !!user.is_admin;
   req.session.twoFactorEnrollmentOnly = twoFactorEnrollmentOnly;
@@ -108,7 +108,7 @@ function clearPendingAuth(req: any) {
   delete req.session.pendingUserId;
   delete req.session.pendingUsername;
   delete req.session.pendingIsAdmin;
-  delete req.session.pendingAuthAt;
+  delete req.session.pendingCredentialsVersion;
 }
 
 function regenerateSession(req: any): Promise<void> {
@@ -237,7 +237,6 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     return res.status(423).json({ error: 'Too many failed attempts for this account from your address. Try again in 10 minutes or contact an admin.' });
   }
 
-  const authStartedAt = Date.now();
   const [user] = await db.select().from(users).where(eq(users.username, username)).limit(1);
   const passwordOk = bcrypt.compareSync(password, user ? user.password : DUMMY_PASSWORD_HASH);
   if (!user || !passwordOk) {
@@ -271,7 +270,7 @@ router.post('/login', loginLimiter, async (req, res, next) => {
       req.session.pendingUserId = user.id;
       req.session.pendingUsername = user.username;
       req.session.pendingIsAdmin = !!user.is_admin;
-      req.session.pendingAuthAt = authStartedAt;
+      req.session.pendingCredentialsVersion = user.credentials_version;
       const [passkey] = await db
         .select({ id: webauthnCredentials.id })
         .from(webauthnCredentials)
@@ -282,7 +281,7 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     }
 
     if (user.require_2fa) {
-      startUserSession(req, user, { twoFactorEnrollmentOnly: true, authenticatedAt: authStartedAt });
+      startUserSession(req, user, { twoFactorEnrollmentOnly: true });
       await logAudit(req, 'login', user.username, '2FA setup required');
       return res.json({
         ...(await serializeUser(user)),
@@ -290,7 +289,7 @@ router.post('/login', loginLimiter, async (req, res, next) => {
       });
     }
 
-    startUserSession(req, user, { authenticatedAt: authStartedAt });
+    startUserSession(req, user);
     await logAudit(req, 'login', user.username, '');
     return res.json(await serializeUser(user));
   } catch (err) {
@@ -334,9 +333,9 @@ router.post('/verify-2fa', verifyTwoFactorLimiter, async (req, res, next) => {
   await clearTwoFactorAttempts(pendingUsername);
 
   try {
-    const authenticatedAt = req.session.pendingAuthAt ?? 0;
+    const credentialsVersion = req.session.pendingCredentialsVersion ?? 0;
     await regenerateSession(req);
-    startUserSession(req, user, { authenticatedAt });
+    startUserSession(req, user, { credentialsVersion });
     await logAudit(req, 'login', user.username, '2FA verified');
     return res.json(await serializeUser(user));
   } catch (err) {
@@ -562,11 +561,10 @@ router.put('/change-password', requireAuth, requireInteractiveSession, async (re
   await clearTwoFactorAttempts(confirmationKey(req));
 
   const hash = bcrypt.hashSync(newPassword, 10);
-  await db.update(users).set({ password: hash }).where(eq(users.id, req.session.userId));
-  req.session.authenticatedAt = await markCredentialsChanged(db, req.session.userId);
-  req.session.reauthenticatedAt = Date.now();
   // A changed password must end every other sign-in, or a stolen session outlives it.
-  const revoked = await revokeOtherStoredSessions(db, req.session.userId, req.sessionID);
+  const { version, revoked } = await changeCredentials(db, req.session.userId, { password: hash }, req.sessionID);
+  req.session.credentialsVersion = version;
+  req.session.reauthenticatedAt = Date.now();
   await logAudit(req, 'password_changed', req.session.username, `revoked_sessions=${revoked}`);
   res.json({ ok: true, revokedSessions: revoked });
 });
@@ -637,10 +635,9 @@ router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecent
   // No budget reset here: this code is for a factor the caller just enrolled,
   // which proves nothing about the account's existing credentials.
 
-  await db.update(users).set({ totp_enabled: true }).where(eq(users.id, req.session.userId));
-  req.session.authenticatedAt = await markCredentialsChanged(db, req.session.userId);
+  const { version, revoked } = await changeCredentials(db, req.session.userId, { totp_enabled: true }, req.sessionID);
+  req.session.credentialsVersion = version;
   req.session.twoFactorEnrollmentOnly = false;
-  const revoked = await revokeOtherStoredSessions(db, req.session.userId, req.sessionID);
   await logAudit(req, '2fa_enabled', req.session.username, `revoked_sessions=${revoked}`);
   res.json({ ok: true, revokedSessions: revoked });
 });
@@ -663,9 +660,8 @@ router.post('/2fa/disable', requireAuth, requireInteractiveSession, requireRecen
   if (!isValid) return res.status(400).json({ error: 'Invalid code' });
   // No budget reset either: a session could have enrolled this factor itself.
 
-  await db.update(users).set({ totp_enabled: false, totp_secret: null }).where(eq(users.id, req.session.userId));
-  req.session.authenticatedAt = await markCredentialsChanged(db, req.session.userId);
-  const revoked = await revokeOtherStoredSessions(db, req.session.userId, req.sessionID);
+  const { version, revoked } = await changeCredentials(db, req.session.userId, { totp_enabled: false, totp_secret: null }, req.sessionID);
+  req.session.credentialsVersion = version;
   await logAudit(req, '2fa_disabled', req.session.username, `revoked_sessions=${revoked}`);
   res.json({ ok: true, revokedSessions: revoked });
 });
@@ -827,9 +823,9 @@ router.post('/passkeys/authentication/verify', verifyTwoFactorLimiter, async (re
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (req.session.pendingUserId) {
     try {
-      const authenticatedAt = req.session.pendingAuthAt ?? 0;
+      const credentialsVersion = req.session.pendingCredentialsVersion ?? 0;
       await regenerateSession(req);
-      startUserSession(req, user, { authenticatedAt });
+      startUserSession(req, user, { credentialsVersion });
       await logAudit(req, 'login', user.username, 'passkey verified');
       return res.json(await serializeUser(user));
     } catch (err) { return next(err); }
@@ -872,9 +868,9 @@ router.post('/verify-recovery-code', verifyTwoFactorLimiter, async (req, res, ne
   if (!(await consumeRecoveryCode(db, userId, hash))) return res.status(401).json({ error: 'Invalid or already-used recovery code' });
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   try {
-    const authenticatedAt = req.session.pendingAuthAt ?? 0;
+    const credentialsVersion = req.session.pendingCredentialsVersion ?? 0;
     await regenerateSession(req);
-    startUserSession(req, user, { authenticatedAt });
+    startUserSession(req, user, { credentialsVersion });
     await logAudit(req, 'login', user.username, 'recovery code used');
     return res.json(await serializeUser(user));
   } catch (err) { return next(err); }
