@@ -1,10 +1,8 @@
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
-import { sql } from 'drizzle-orm';
 import assert from 'node:assert/strict';
 import { userVlanCidrs, vlanRowCidr, vlanRowsToCidrs } from './vlanSubnets.ts';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, vlans, userVlans, firewalls, firewallVlanSync, workflows, workflowRuns } from '../db/schema/index.ts';
+import { users, vlans, userVlans, firewalls, firewallVlanSync, workflows } from '../db/schema/index.ts';
 
 test('a managed VLAN derives its network from the tag, not from subnet_cidr', () => {
   // Managed VLANs are stored with an empty subnet_cidr on purpose — reading
@@ -89,41 +87,6 @@ test('userVlanCidrs uses the recorded sync subnet, not the current workflow sett
       { user_id: user.id, vlan_id: unsynced.id },
     ]);
     assert.deepEqual((await userVlanCidrs(testDb.db, user.id)).sort(), ['10.10.12.0/24', '172.11.26.0/24']);
-  } finally {
-    await testDb.drop();
-  }
-});
-
-const routeLog = (dst: unknown) => [{ stepKey: 'route', calls: [{ method: 'POST', path: 'cmdb/router/static', body: { dst } }] }];
-
-test('migration 0020 backfills only from the recorded route, never current settings', async () => {
-  const testDb = await createTestDatabase();
-  try {
-    const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw', host: 'h', api_key: 'k' }).returning({ id: firewalls.id });
-    // Changed to 192 after provisioning on 172; a non-numeric value must not break the migration either.
-    await testDb.db.insert(workflows).values({ firewall_id: fw.id, trigger: 'vlan_provision', name: 'p', settings: { subnet: { firstOctet: 192 } } });
-    const [fw2] = await testDb.db.insert(firewalls).values({ name: 'fw2', host: 'h2', api_key: 'k' }).returning({ id: firewalls.id });
-    await testDb.db.insert(workflows).values({ firewall_id: fw2.id, trigger: 'vlan_provision', name: 'q', settings: { subnet: { firstOctet: 'abc' } } });
-    const [okRun] = await testDb.db.insert(workflowRuns).values({ firewall_id: fw.id, log: routeLog('172.11.26.0 255.255.255.0') }).returning({ id: workflowRuns.id });
-    const [junkRun] = await testDb.db.insert(workflowRuns).values({ firewall_id: fw.id, log: { not: 'an array' } }).returning({ id: workflowRuns.id });
-    const [oddRun] = await testDb.db.insert(workflowRuns).values({ firewall_id: fw.id, log: [{ calls: 'x' }, ...routeLog(42), ...routeLog('10.0.0.0 255.0.0.0')] }).returning({ id: workflowRuns.id });
-    const mk = async (tag: number) => (await testDb.db.insert(vlans).values({ name: `v${tag}`, tag, mode: 'managed' }).returning({ id: vlans.id }))[0].id;
-    const [a, b, c, d] = [await mk(1126), await mk(1127), await mk(1128), await mk(1129)];
-    await testDb.db.insert(firewallVlanSync).values([
-      { firewall_id: fw.id, vlan_id: a, interface_name: 'vlan1126', workflow_run_id: okRun.id, artifacts: [] },
-      { firewall_id: fw.id, vlan_id: b, interface_name: 'vlan1127', workflow_run_id: junkRun.id, artifacts: [] },
-      { firewall_id: fw.id, vlan_id: c, interface_name: 'vlan1128', workflow_run_id: oddRun.id, artifacts: [] },
-      { firewall_id: fw.id, vlan_id: d, interface_name: 'vlan1129' },
-    ]);
-    const migration = await readFile(new URL('../../drizzle/0020_sync_subnet_cidr.sql', import.meta.url), 'utf8');
-    await testDb.db.execute(sql.raw(migration.split('--> statement-breakpoint')[1]));
-    const rows = await testDb.db.select({ vlan_id: firewallVlanSync.vlan_id, cidr: firewallVlanSync.subnet_cidr }).from(firewallVlanSync);
-    const byVlan = Object.fromEntries(rows.map(r => [r.vlan_id, r.cidr]));
-    assert.equal(byVlan[a], '172.11.26.0/24');
-    // No usable record → NULL (readers use the legacy 10.x default).
-    assert.equal(byVlan[b], null);
-    assert.equal(byVlan[c], null);
-    assert.equal(byVlan[d], null);
   } finally {
     await testDb.drop();
   }

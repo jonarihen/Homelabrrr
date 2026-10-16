@@ -276,17 +276,20 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
 
   // Each firewall may use its own subnet scheme: preview what each target would provision.
   const [fwSubnets, setFwSubnets] = useState([]);
+  const previewTag = parseInt(form.tag, 10);
+  const previewTargets = firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
   useEffect(() => {
-    const tag = parseInt(form.tag, 10);
-    const targets = firewalls.filter(fw => tag >= fw.vlan_range_start && tag <= fw.vlan_range_end);
-    if (isTaggedOnly || !subnet || targets.length === 0) { setFwSubnets([]); return undefined; }
+    const targets = firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
+    setFwSubnets([]);
+    if (isTaggedOnly || !subnet || targets.length === 0) return undefined;
     let cancelled = false;
-    Promise.all(targets.map(fw => api.get(`/admin/vlans/subnet/${tag}`, { params: { firewallId: fw.id } })
-      .then(r => ({ id: fw.id, name: fw.name, network: r.data.network, gateway: r.data.gateway }))))
-      .then(list => { if (!cancelled) setFwSubnets(list); })
-      .catch(() => { if (!cancelled) setFwSubnets([]); });
+    // A failed lookup stays visible as unavailable; never fall back to the default silently.
+    Promise.all(targets.map(fw => api.get(`/admin/vlans/subnet/${previewTag}`, { params: { firewallId: fw.id } })
+      .then(r => ({ id: fw.id, name: fw.name, network: r.data.network, gateway: r.data.gateway }))
+      .catch(() => ({ id: fw.id, name: fw.name, network: null }))))
+      .then(list => { if (!cancelled) setFwSubnets(list); });
     return () => { cancelled = true; };
-  }, [form.tag, isTaggedOnly, subnet, firewalls]);
+  }, [previewTag, isTaggedOnly, subnet, firewalls]);
 
   useEffect(() => {
     if (isTaggedOnly) {
@@ -413,11 +416,17 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
           )}
           {!isTaggedOnly && subnet && (
             <div className="mt-2 bg-blue-900/20 border border-blue-800/30 rounded-lg px-3 py-2 text-xs space-y-0.5">
-              {fwSubnets.length > 0 ? fwSubnets.map(f => (
-                <p key={f.id} className="text-blue-400">
-                  {f.name}: <span className="font-mono">{f.network}</span>
-                  <span className="text-gray-500"> · gateway <span className="font-mono text-gray-400">{f.gateway}</span></span>
-                </p>
+              {previewTargets.length > 0 && fwSubnets.length === 0 ? (
+                <p className="text-gray-500">Loading subnet preview…</p>
+              ) : fwSubnets.length > 0 ? fwSubnets.map(f => (
+                f.network ? (
+                  <p key={f.id} className="text-blue-400">
+                    {f.name}: <span className="font-mono">{f.network}</span>
+                    <span className="text-gray-500"> · gateway <span className="font-mono text-gray-400">{f.gateway}</span></span>
+                  </p>
+                ) : (
+                  <p key={f.id} className="text-amber-400">{f.name}: subnet preview unavailable</p>
+                )
               )) : (
                 <>
                   <p className="text-blue-400">Auto subnet: <span className="font-mono">{subnet.network}</span></p>

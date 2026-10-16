@@ -2,6 +2,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { users, firewalls, vlans, firewallVlanSync, workflows } from '../db/schema/index.ts';
 import { FortiGateAPI } from '../fortigate.ts';
@@ -112,4 +113,21 @@ test('PUT /vlans/:id refuses a tag change while the VLAN is synced', async () =>
   const res = await request(app).put(`/vlans/${src.id}`).send({ name: src.name, tag: 1200 });
   assert.equal(res.status, 400);
   assert.match(res.body.error, /Unsync/);
+});
+
+test('VLAN sync records the subnet it provisioned in firewall_vlan_sync.subnet_cidr', async () => {
+  const [fw] = await testDb.db.insert(firewalls)
+    .values({ name: 'fw-sync', host: '192.168.100.3', api_key: 'k', vdom: 'lab', verify_tls: false })
+    .returning({ id: firewalls.id });
+  // A step-less workflow keeps FortiGate out of the test; the subnet comes from its settings.
+  await testDb.db.insert(workflows).values({
+    firewall_id: fw.id, trigger: 'vlan_provision', name: 'VLAN provision', settings: { subnet: { firstOctet: 172 } },
+  });
+  const [vlan] = await testDb.db.insert(vlans).values({ name: 'new', tag: 1301, mode: 'managed' }).returning({ id: vlans.id });
+
+  const res = await request(app).post(`/vlans/${vlan.id}/sync`).send({ firewallId: fw.id });
+  assert.equal(res.status, 200);
+  assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
+  const [sync] = await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.vlan_id, vlan.id));
+  assert.equal(sync.subnet_cidr, '172.13.1.0/24');
 });

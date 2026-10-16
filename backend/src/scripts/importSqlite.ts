@@ -19,7 +19,6 @@
 // production image, which is what lets initDatabase() auto-import on first boot.
 
 import { pathToFileURL } from 'node:url';
-import { readFile } from 'node:fs/promises';
 import { openSqliteReadonly, type SqliteReader } from './sqliteReader.ts';
 import pg from 'pg';
 import { is, getTableName } from 'drizzle-orm';
@@ -558,11 +557,6 @@ export async function importDatabase(options: ImportOptions): Promise<ImportResu
           orphanRefsNulled += outcome.orphanRefsNulled;
           log(`  ${name}: ${outcome.rows} row(s)${outcome.orphanRefsNulled > 0 ? ` (${outcome.orphanRefsNulled} orphaned reference(s) set to NULL)` : ''}`);
         }
-
-        // Legacy sync rows have no subnet_cidr, and migration 0020's backfill
-        // ran before they existed: apply the same backfill to the imported rows.
-        const syncSubnetMigration = await readFile(new URL('../../drizzle/0020_sync_subnet_cidr.sql', import.meta.url), 'utf8');
-        await client.query(syncSubnetMigration.split('--> statement-breakpoint')[1]);
 
         // 7. Move every identity sequence past the imported ids.
         await resetSequences(client, metas, order);
