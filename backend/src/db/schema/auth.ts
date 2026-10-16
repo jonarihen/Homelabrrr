@@ -72,6 +72,8 @@ export const users = pgTable(
     max_cores: integer('max_cores'),
     max_memory_gb: integer('max_memory_gb'),
     max_storage_gb: integer('max_storage_gb'),
+    // Bumped on password/2FA changes; sessions authenticated before it are rejected.
+    credentials_changed_at: timestamp('credentials_changed_at', { withTimezone: true, mode: 'date' }),
   },
   (t) => [index('idx_users_role').on(t.role_id)]
 );

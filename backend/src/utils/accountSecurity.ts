@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client.ts';
-import { recoveryCodes, sessions, webauthnCredentials } from '../db/schema/index.ts';
+import { recoveryCodes, sessions, users, webauthnCredentials } from '../db/schema/index.ts';
 import { revokeSftpSession } from './sftpSessions.ts';
 
 interface WebauthnConfigOptions {
@@ -90,6 +90,16 @@ export async function revokeStoredSession(database: DbOrTx, userId: number, sess
   await database.delete(sessions).where(eq(sessions.sid, row.sid));
   revokeSftpSession(row.sid);
   return { ok: true, session: parsed };
+}
+
+// Call AFTER the credential update has committed: a login that verified the old
+// credential read the row before that commit, so it started before this stamp
+// and its session is rejected by loadSessionUser. Returns the stamp (epoch ms)
+// for the caller to refresh its own session's authenticatedAt.
+export async function markCredentialsChanged(database: DbOrTx, userId: number): Promise<number> {
+  const changedAt = new Date();
+  await database.update(users).set({ credentials_changed_at: changedAt }).where(eq(users.id, userId));
+  return changedAt.getTime();
 }
 
 export async function revokeOtherStoredSessions(database: DbOrTx, userId: number, currentSid: string): Promise<number> {

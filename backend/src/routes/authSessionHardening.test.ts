@@ -23,6 +23,7 @@ let encryptSecret: typeof import('../utils/secrets.ts').encryptSecret;
 let userId: number;
 let otherUserId: number;
 let adminApp: express.Express;
+let raceApp: express.Express;
 
 before(async () => {
   testDb = await createTestDatabase();
@@ -72,6 +73,14 @@ before(async () => {
     next();
   });
   adminApp.use('/', adminRouter);
+
+  await testDb.db.insert(users).values({ username: 'race-user', password: bcrypt.hashSync(PASSWORD, 10) });
+  const { loadSessionUser } = await import('../middleware/auth.ts');
+  raceApp = express();
+  raceApp.use(express.json());
+  raceApp.use(session({ secret: 'hardening-test-secret', resave: false, saveUninitialized: false }));
+  raceApp.use(loadSessionUser);
+  raceApp.use('/', router);
 });
 
 after(async () => {
@@ -235,4 +244,23 @@ test('admin password and 2FA resets revoke the target\'s sessions', async () => 
   const totp = await request(adminApp).post(`/users/${userId}/reset-2fa`).send({});
   assert.equal(totp.status, 200);
   assert.deepEqual(await remainingSids(), ['theirs']);
+});
+
+test('a session authenticated before a credential change is rejected even if revocation missed it', async () => {
+  // MemoryStore sessions are invisible to the stored-session revocation, which
+  // is exactly the case of a login that raced the change.
+  const stale = request.agent(raceApp);
+  const changer = request.agent(raceApp);
+  assert.equal((await stale.post('/login').send({ username: 'race-user', password: PASSWORD })).status, 200);
+  assert.equal((await changer.post('/login').send({ username: 'race-user', password: PASSWORD })).status, 200);
+  assert.equal((await stale.get('/sessions')).status, 200);
+
+  const changed = await changer.put('/change-password').send({ currentPassword: PASSWORD, newPassword: 'Race-correct-horse-3!' });
+  assert.equal(changed.status, 200);
+
+  assert.equal((await stale.get('/sessions')).status, 401, 'pre-change session must be dropped');
+  assert.equal((await changer.get('/sessions')).status, 200, 'the session that made the change stays valid');
+  const fresh = request.agent(raceApp);
+  assert.equal((await fresh.post('/login').send({ username: 'race-user', password: 'Race-correct-horse-3!' })).status, 200);
+  assert.equal((await fresh.get('/sessions')).status, 200);
 });

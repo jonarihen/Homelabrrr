@@ -52,7 +52,7 @@ import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
-import { revokeOtherStoredSessions } from '../utils/accountSecurity.ts';
+import { markCredentialsChanged, revokeOtherStoredSessions } from '../utils/accountSecurity.ts';
 import { assertUserCanBeDeleted } from '../services/provisionOwnership.ts';
 import { cancelSubscriptionsBeforeUserDeletion } from '../services/paypal.ts';
 import { PayPalError } from '../services/paypalClient.ts';
@@ -393,6 +393,8 @@ router.post('/users/:id/reset-2fa', requireAdmin, async (req, res) => {
   if (!user) return res.status(404).json({ error: 'User not found' });
   await db.update(users).set({ totp_enabled: false, totp_secret: null }).where(eq(users.id, Number(req.params.id)));
   // Credential reset ends the target's sessions (the admin's own is kept if self-targeted).
+  const changedAt = await markCredentialsChanged(db, user.id);
+  if (user.id === req.session.userId) req.session.authenticatedAt = changedAt;
   const revoked = await revokeOtherStoredSessions(db, user.id, req.sessionID);
   await logAudit(req, 'admin_reset_2fa', req.params.id, `revoked_sessions=${revoked}`);
   res.json({ ok: true });
@@ -475,6 +477,8 @@ router.put('/users/:id/password', pUsers, async (req, res) => {
   catch (err) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const hash = bcrypt.hashSync(password, 10);
   await db.update(users).set({ password: hash }).where(eq(users.id, Number(req.params.id)));
+  const changedAt = await markCredentialsChanged(db, Number(req.params.id));
+  if (Number(req.params.id) === req.session.userId) req.session.authenticatedAt = changedAt;
   const revoked = await revokeOtherStoredSessions(db, Number(req.params.id), req.sessionID);
   await logAudit(req, 'admin_reset_password', req.params.id, `revoked_sessions=${revoked}`);
   res.json({ ok: true });
