@@ -158,7 +158,12 @@ export default function VLANsPage() {
                   <td className="px-4 py-3">
                     {v.subnet ? (
                       <div className="space-y-1">
-                        <span className="font-mono text-xs text-gray-400">{v.subnet.network}</span>
+                        <span className="font-mono text-xs text-gray-400">
+                          {/* One network per synced firewall; they differ when firewalls use different schemes. */}
+                          {v.firewallSync.length > 0
+                            ? [...new Set(v.firewallSync.map(s => s.subnet || v.subnet.network))].join(', ')
+                            : v.subnet.network}
+                        </span>
                         {v.mode === 'tagged_only' && (
                           <p className="text-[11px] text-fuchsia-300/80">Custom tagged subnet</p>
                         )}
@@ -504,7 +509,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
       onSaved();
       // Refresh sync state
       const syncRes = await api.get(`/admin/vlans/${vlan.id}/sync`);
-      setSyncs(syncRes.data.map(s => ({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name })));
+      setSyncs(syncRes.data.map(s => ({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name, subnet: s.subnet_cidr || '' })));
     } catch (e) {
       setError(e.response?.data?.error || 'Sync failed');
     } finally { setSyncing(false); }
@@ -541,6 +546,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
                     <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
                     <span className="text-sm text-white">{s.firewallName}</span>
                     <span className="text-xs text-gray-500 font-mono">{s.interfaceName}</span>
+                    {s.subnet && <span className="text-xs text-gray-500 font-mono">{s.subnet}</span>}
                   </div>
                   <button
                     onClick={() => removeSync(s.firewallId)}

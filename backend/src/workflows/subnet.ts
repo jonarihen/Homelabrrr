@@ -11,6 +11,15 @@ import { vlanTagToSubnet } from '../fortigate.ts';
  *
  * settings shape: { subnet: { firstOctet: 10 } }
  */
+/**
+ * The subnet a firewall sync provisioned, rebuilt from its recorded network
+ * (firewall_vlan_sync.subnet_cidr). A row without a record gets the default.
+ */
+export function syncedSubnet(tag, syncedCidr) {
+  const firstOctet = Number(String(syncedCidr || '').split('.')[0]);
+  return deriveSubnet(tag, syncedCidr ? { subnet: { firstOctet } } : {});
+}
+
 export function deriveSubnet(tag, settings) {
   const firstOctet = Number(settings?.subnet?.firstOctet);
   if (!Number.isInteger(firstOctet) || firstOctet < 0 || firstOctet > 255 || firstOctet === 10) {

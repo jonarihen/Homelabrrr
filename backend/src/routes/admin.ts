@@ -11,7 +11,7 @@ import {
   vlans, userVlans, firewalls, pveHosts,
   firewallVlanSync, managedVips, publicIps, publicIpPools, publicIpAssignments,
   caddyServers, caddySites, notificationWebhooks, vmTemplates, cloudImages,
-  vmLeases, auditLog, settings, loginAttempts, workflows,
+  vmLeases, auditLog, settings, loginAttempts,
 } from '../db/schema/index.ts';
 import { isUniqueViolation, isForeignKeyViolation } from '../db/errors.ts';
 import { setSetting } from '../db/settings.ts';
@@ -48,7 +48,7 @@ import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
 import { getWorkflowBundle, getWorkflowRow, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
 import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
-import { deriveSubnet } from '../workflows/subnet.ts';
+import { deriveSubnet, syncedSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
@@ -1556,7 +1556,8 @@ async function firewallSubnetSettings(firewallId) {
   return workflowSettings(await getWorkflowRow(firewallId, 'vlan_provision'));
 }
 
-function serializeVlanSubnet(vlan, subnetSettings) {
+// syncedCidr: the network a firewall sync recorded (firewall_vlan_sync.subnet_cidr).
+function serializeVlanSubnet(vlan, syncedCidr) {
   if (vlan.mode === 'tagged_only') {
     if (!vlan.subnet_cidr) return null;
     return {
@@ -1566,7 +1567,7 @@ function serializeVlanSubnet(vlan, subnetSettings) {
       custom: true,
     };
   }
-  return deriveSubnet(vlan.tag, subnetSettings);
+  return syncedSubnet(vlan.tag, syncedCidr);
 }
 
 // VLANs read also needed by policies page and assignments page
@@ -1585,21 +1586,26 @@ router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies'
   const syncs = await db.select({
     vlan_id: firewallVlanSync.vlan_id, firewall_id: firewallVlanSync.firewall_id,
     interface_name: firewallVlanSync.interface_name, firewall_name: firewalls.name,
-  }).from(firewallVlanSync).innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id));
+    subnet_cidr: firewallVlanSync.subnet_cidr,
+  }).from(firewallVlanSync).innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id))
+    .orderBy(firewallVlanSync.firewall_id);
   const syncMap = {};
   syncs.forEach(s => {
     if (!syncMap[s.vlan_id]) syncMap[s.vlan_id] = [];
-    syncMap[s.vlan_id].push({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name });
+    syncMap[s.vlan_id].push(s);
   });
   const fwRanges = await db.select({
     id: firewalls.id, name: firewalls.name, vlan_range_start: firewalls.vlan_range_start, vlan_range_end: firewalls.vlan_range_end,
   }).from(firewalls);
-  // A VLAN's displayed subnet follows the first firewall it is synced to; unsynced → default scheme.
-  const provisionSettings = new Map((await db.select({ firewall_id: workflows.firewall_id, settings: workflows.settings })
-    .from(workflows).where(eq(workflows.trigger, 'vlan_provision'))).map(w => [w.firewall_id, workflowSettings(w)]));
+  // Each sync carries the subnet it provisioned; the VLAN-level subnet is the
+  // lowest-id firewall's (unsynced → default scheme).
   res.json(vlanRows.map(v => ({
-    ...v, firewallSync: syncMap[v.id] || [],
-    subnet: serializeVlanSubnet(v, provisionSettings.get(syncMap[v.id]?.[0]?.firewallId)),
+    ...v,
+    firewallSync: (syncMap[v.id] || []).map(s => ({
+      firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name,
+      subnet: serializeVlanSubnet(v, s.subnet_cidr)?.network || '',
+    })),
+    subnet: serializeVlanSubnet(v, syncMap[v.id]?.[0]?.subnet_cidr),
     firewallRanges: fwRanges,
   })));
 });
@@ -2492,6 +2498,7 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         await db.insert(firewallVlanSync).values({
           firewall_id: fw.id, vlan_id: vlan.id, interface_name: interfaceName,
           policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
+          subnet_cidr: subnet.network,
         });
         await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
         results.push({ firewall: fw.name, status: 'ok', ...result });
@@ -2671,7 +2678,9 @@ router.post('/policies', pPolicies, async (req, res) => {
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   // Resolve VLANs
-  const vlanWithIfaceCols = { ...getTableColumns(vlans), interface_name: firewallVlanSync.interface_name };
+  const vlanWithIfaceCols = {
+    ...getTableColumns(vlans), interface_name: firewallVlanSync.interface_name, synced_cidr: firewallVlanSync.subnet_cidr,
+  };
   const [srcVlan] = await db.select(vlanWithIfaceCols).from(vlans)
     .innerJoin(firewallVlanSync, eq(firewallVlanSync.vlan_id, vlans.id))
     .where(and(eq(vlans.tag, Number(srcVlanTag)), eq(firewallVlanSync.firewall_id, Number(firewallId)))).limit(1);
@@ -2689,9 +2698,9 @@ router.post('/policies', pPolicies, async (req, res) => {
     if (!hasDst) return res.status(403).json({ error: `You do not have access to destination VLAN ${dstVlanTag}` });
   }
 
-  const subnetSettings = await firewallSubnetSettings(fw.id);
-  const srcSubnet = deriveSubnet(Number(srcVlanTag), subnetSettings);
-  const dstSubnet = deriveSubnet(Number(dstVlanTag), subnetSettings);
+  // Address the networks these syncs actually provisioned on this firewall.
+  const srcSubnet = syncedSubnet(srcVlan.tag, srcVlan.synced_cidr);
+  const dstSubnet = syncedSubnet(dstVlan.tag, dstVlan.synced_cidr);
   if (!srcSubnet || !dstSubnet) return res.status(400).json({ error: 'Cannot derive subnets from VLAN tags' });
 
   const srcAddrName = `NET-${srcSubnet.networkIp}_24`;

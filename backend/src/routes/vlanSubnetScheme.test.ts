@@ -6,13 +6,15 @@ import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts'
 import { users, firewalls, vlans, firewallVlanSync, workflows } from '../db/schema/index.ts';
 import { FortiGateAPI } from '../fortigate.ts';
 
-// #315: policies, the VLAN list and the subnet helper must follow the
-// firewall's configurable subnet first octet, like VLAN sync does.
+// #315: policies and the VLAN list must use the subnet each firewall sync
+// actually provisioned (recorded in firewall_vlan_sync.subnet_cidr), and the
+// subnet helper previews the firewall's configured first octet.
 
 let testDb: TestDatabase;
 let app: express.Express;
 let closeDb: (() => Promise<void>) | undefined;
 let firewallId: number;
+let legacyFirewallId: number;
 
 before(async () => {
   testDb = await createTestDatabase();
@@ -28,14 +30,21 @@ before(async () => {
     .returning({ id: firewalls.id });
   firewallId = fw.id;
   await testDb.db.insert(workflows).values({
-    firewall_id: firewallId, trigger: 'vlan_provision', name: 'VLAN provision', settings: { subnet: { firstOctet: 172 } },
+    // Changed after the VLANs below were provisioned on 172: must not move them.
+    firewall_id: firewallId, trigger: 'vlan_provision', name: 'VLAN provision', settings: { subnet: { firstOctet: 192 } },
   });
+  const [legacyFw] = await testDb.db.insert(firewalls)
+    .values({ name: 'fw-legacy', host: '192.168.100.2', api_key: 'k', vdom: 'lab', verify_tls: false })
+    .returning({ id: firewalls.id });
+  legacyFirewallId = legacyFw.id;
   const [src] = await testDb.db.insert(vlans).values({ name: 'src', tag: 1126, mode: 'managed' }).returning({ id: vlans.id });
   const [dst] = await testDb.db.insert(vlans).values({ name: 'dst', tag: 1127, mode: 'managed' }).returning({ id: vlans.id });
   await testDb.db.insert(vlans).values({ name: 'unsynced', tag: 1128, mode: 'managed' });
   await testDb.db.insert(firewallVlanSync).values([
-    { firewall_id: firewallId, vlan_id: src.id, interface_name: 'vlan1126' },
-    { firewall_id: firewallId, vlan_id: dst.id, interface_name: 'vlan1127' },
+    { firewall_id: firewallId, vlan_id: src.id, interface_name: 'vlan1126', subnet_cidr: '172.11.26.0/24' },
+    { firewall_id: firewallId, vlan_id: dst.id, interface_name: 'vlan1127', subnet_cidr: '172.11.27.0/24' },
+    // Synced before the subnet was recorded → default scheme.
+    { firewall_id: legacyFirewallId, vlan_id: src.id, interface_name: 'vlan1126' },
   ]);
 
   const adminRouter = (await import('./admin.ts')).default;
@@ -53,7 +62,7 @@ after(async () => {
   await testDb.drop();
 });
 
-test('POST /policies builds address objects on the firewall subnet scheme', async (t) => {
+test('POST /policies builds address objects for the provisioned subnets', async (t) => {
   const created: string[] = [];
   t.mock.method(FortiGateAPI.prototype, 'getAddressObject', async () => null);
   t.mock.method(FortiGateAPI.prototype, 'createAddressObject', async (name: string, subnet: string) => {
@@ -72,15 +81,20 @@ test('POST /policies builds address objects on the firewall subnet scheme', asyn
   ]);
 });
 
-test('GET /vlans shows synced VLANs on their firewall scheme and unsynced on the default', async () => {
+test('GET /vlans returns the provisioned subnet per synced firewall', async () => {
   const res = await request(app).get('/vlans');
   assert.equal(res.status, 200);
-  const byTag = Object.fromEntries(res.body.map((v: any) => [v.tag, v.subnet?.network]));
-  assert.equal(byTag[1126], '172.11.26.0/24');
-  assert.equal(byTag[1128], '10.11.28.0/24');
+  const byTag = Object.fromEntries(res.body.map((v: any) => [v.tag, v]));
+  assert.deepEqual(byTag[1126].firewallSync.map((s: any) => [s.firewallId, s.subnet]), [
+    [firewallId, '172.11.26.0/24'],
+    [legacyFirewallId, '10.11.26.0/24'],
+  ]);
+  assert.equal(byTag[1126].subnet.network, '172.11.26.0/24');
+  assert.equal(byTag[1126].subnet.gateway, '172.11.26.1');
+  assert.equal(byTag[1128].subnet.network, '10.11.28.0/24');
 });
 
-test('GET /vlans/subnet/:tag honours an optional firewallId', async () => {
+test('GET /vlans/subnet/:tag previews the firewall scheme with an optional firewallId', async () => {
   assert.equal((await request(app).get('/vlans/subnet/1126')).body.network, '10.11.26.0/24');
-  assert.equal((await request(app).get(`/vlans/subnet/1126?firewallId=${firewallId}`)).body.network, '172.11.26.0/24');
+  assert.equal((await request(app).get(`/vlans/subnet/1126?firewallId=${firewallId}`)).body.network, '192.11.26.0/24');
 });

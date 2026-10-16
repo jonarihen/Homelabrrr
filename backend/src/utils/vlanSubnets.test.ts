@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { sql } from 'drizzle-orm';
 import assert from 'node:assert/strict';
 import { userVlanCidrs, vlanRowCidr, vlanRowsToCidrs } from './vlanSubnets.ts';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
@@ -66,25 +68,49 @@ test('userVlanCidrs reads the assigned rows through the passed db handle', async
   }
 });
 
-test('a managed VLAN follows the configured subnet first octet', () => {
-  assert.equal(vlanRowCidr({ tag: 1126, mode: 'managed', settings: { subnet: { firstOctet: 172 } } }), '172.11.26.0/24');
-  assert.equal(vlanRowCidr({ tag: 1126, mode: 'managed', settings: {} }), '10.11.26.0/24');
+test('a managed VLAN covers the subnet its sync recorded', () => {
+  assert.equal(vlanRowCidr({ tag: 1126, mode: 'managed', synced_cidr: '172.11.26.0/24' }), '172.11.26.0/24');
+  assert.equal(vlanRowCidr({ tag: 1126, mode: 'managed', synced_cidr: null }), '10.11.26.0/24');
+  assert.equal(vlanRowCidr({ tag: 1126, mode: 'tagged_only', synced_cidr: '172.11.26.0/24' }), '');
 });
 
-test('userVlanCidrs uses the scheme of the firewall each VLAN is synced to', async () => {
+test('userVlanCidrs uses the recorded sync subnet, not the current workflow setting', async () => {
   const testDb = await createTestDatabase();
   try {
     const [user] = await testDb.db.insert(users).values({ username: 'vlan-octet-user', password: 'x' }).returning({ id: users.id });
     const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw', host: 'h', api_key: 'k' }).returning({ id: firewalls.id });
-    await testDb.db.insert(workflows).values({ firewall_id: fw.id, trigger: 'vlan_provision', name: 'p', settings: { subnet: { firstOctet: 172 } } });
+    // Setting changed after provisioning; must not move the access range.
+    await testDb.db.insert(workflows).values({ firewall_id: fw.id, trigger: 'vlan_provision', name: 'p', settings: { subnet: { firstOctet: 192 } } });
     const [synced] = await testDb.db.insert(vlans).values({ name: 's', tag: 1126, mode: 'managed' }).returning({ id: vlans.id });
     const [unsynced] = await testDb.db.insert(vlans).values({ name: 'u', tag: 1012, mode: 'managed' }).returning({ id: vlans.id });
-    await testDb.db.insert(firewallVlanSync).values({ firewall_id: fw.id, vlan_id: synced.id, interface_name: 'vlan1126' });
+    await testDb.db.insert(firewallVlanSync).values({ firewall_id: fw.id, vlan_id: synced.id, interface_name: 'vlan1126', subnet_cidr: '172.11.26.0/24' });
     await testDb.db.insert(userVlans).values([
       { user_id: user.id, vlan_id: synced.id },
       { user_id: user.id, vlan_id: unsynced.id },
     ]);
     assert.deepEqual((await userVlanCidrs(testDb.db, user.id)).sort(), ['10.10.12.0/24', '172.11.26.0/24']);
+  } finally {
+    await testDb.drop();
+  }
+});
+
+test('migration 0020 backfills the subnet existing syncs provisioned', async () => {
+  const testDb = await createTestDatabase();
+  try {
+    const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw', host: 'h', api_key: 'k' }).returning({ id: firewalls.id });
+    await testDb.db.insert(workflows).values({ firewall_id: fw.id, trigger: 'vlan_provision', name: 'p', settings: { subnet: { firstOctet: 172 } } });
+    const [wf] = await testDb.db.insert(vlans).values({ name: 'w', tag: 1126, mode: 'managed' }).returning({ id: vlans.id });
+    const [legacy] = await testDb.db.insert(vlans).values({ name: 'l', tag: 1005, mode: 'managed' }).returning({ id: vlans.id });
+    await testDb.db.insert(firewallVlanSync).values([
+      { firewall_id: fw.id, vlan_id: wf.id, interface_name: 'vlan1126', artifacts: [{ type: 'interface', name: 'vlan1126' }] },
+      { firewall_id: fw.id, vlan_id: legacy.id, interface_name: 'vlan1005' },
+    ]);
+    const migration = await readFile(new URL('../../drizzle/0020_sync_subnet_cidr.sql', import.meta.url), 'utf8');
+    await testDb.db.execute(sql.raw(migration.split('--> statement-breakpoint')[1]));
+    const rows = await testDb.db.select({ vlan_id: firewallVlanSync.vlan_id, cidr: firewallVlanSync.subnet_cidr }).from(firewallVlanSync);
+    const byVlan = Object.fromEntries(rows.map(r => [r.vlan_id, r.cidr]));
+    assert.equal(byVlan[wf.id], '172.11.26.0/24');
+    assert.equal(byVlan[legacy.id], '10.10.5.0/24');
   } finally {
     await testDb.drop();
   }
