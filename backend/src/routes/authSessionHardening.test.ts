@@ -22,6 +22,7 @@ let closeDb: (() => Promise<void>) | undefined;
 let encryptSecret: typeof import('../utils/secrets.ts').encryptSecret;
 let userId: number;
 let otherUserId: number;
+let adminApp: express.Express;
 
 before(async () => {
   testDb = await createTestDatabase();
@@ -54,6 +55,23 @@ before(async () => {
     next();
   });
   app.use('/', router);
+
+  const [admin] = await testDb.db
+    .insert(users)
+    .values({ username: 'harden-admin', password: 'x', is_admin: true })
+    .returning({ id: users.id });
+  const adminRouter = (await import('./admin.ts')).default;
+  adminApp = express();
+  adminApp.use(express.json());
+  adminApp.use(session({ secret: 'hardening-test-secret', resave: false, saveUninitialized: false }));
+  adminApp.use((req, _res, next) => {
+    req.session.userId = admin.id;
+    req.session.username = 'harden-admin';
+    req.session.isAdmin = true;
+    req.session.reauthenticatedAt = Date.now();
+    next();
+  });
+  adminApp.use('/', adminRouter);
 });
 
 after(async () => {
@@ -157,4 +175,16 @@ test('non-string credentials are a 400, not a 500', async () => {
   }
   const res = await request(app).put('/change-password').send({ currentPassword: 1, newPassword: 'Another-correct-horse-9!' });
   assert.equal(res.status, 400);
+});
+
+test('admin password and 2FA resets revoke the target\'s sessions', async () => {
+  const pw = await request(adminApp).put(`/users/${userId}/password`).send({ password: 'Admin-reset-horse-7!' });
+  assert.equal(pw.status, 200);
+  assert.deepEqual(await remainingSids(), ['theirs']);
+
+  await testDb.db.insert(sessions).values({ sid: 'mine-again', sess: { userId }, expire: EXPIRE });
+  await testDb.db.update(users).set({ totp_enabled: true, totp_secret: encryptSecret(SECRET) }).where(eq(users.id, userId));
+  const totp = await request(adminApp).post(`/users/${userId}/reset-2fa`).send({});
+  assert.equal(totp.status, 200);
+  assert.deepEqual(await remainingSids(), ['theirs']);
 });
