@@ -1713,12 +1713,19 @@ router.put('/vlans/:id', pVlans, async (req, res) => {
 async function trackProvisioned(client, artifacts, insert) {
   try { await insert(); }
   catch (err) {
-    if (isForeignKeyViolation(err) || err instanceof VlanSyncGoneError) throw await teardownForGoneTarget(client, artifacts);
+    if (isForeignKeyViolation(err) || err instanceof TrackingTargetGoneError) throw await teardownForGoneTarget(client, artifacts);
     throw err;
   }
 }
 
-class VlanSyncGoneError extends Error {}
+class TrackingTargetGoneError extends Error {}
+
+// Lock the firewall row for the tracking-row insert so DELETE /firewalls/:id
+// (which takes it FOR UPDATE, checks dependents, then deletes) cannot slip in.
+async function lockFirewallForTracking(tx, firewallId) {
+  const [live] = await tx.select({ id: firewalls.id }).from(firewalls).where(eq(firewalls.id, firewallId)).for('share');
+  if (!live) throw new TrackingTargetGoneError('Firewall was deleted during provisioning');
+}
 
 // Port-forward creation and VLAN unsync race on the sync row: the creator
 // inserts its managed_vips row while holding the sync row FOR SHARE (and
@@ -1727,11 +1734,12 @@ class VlanSyncGoneError extends Error {}
 // these DB statements, never across FortiGate calls.
 async function insertForwardIfVlanSynced(firewallId, vlanInterface, row) {
   await db.transaction(async (tx) => {
+    await lockFirewallForTracking(tx, firewallId);
     if (vlanInterface) {
       const [live] = await tx.select({ id: firewallVlanSync.id }).from(firewallVlanSync)
         .where(and(eq(firewallVlanSync.firewall_id, firewallId), eq(firewallVlanSync.interface_name, vlanInterface)))
         .for('share');
-      if (!live) throw new VlanSyncGoneError('VLAN was unsynced during provisioning');
+      if (!live) throw new TrackingTargetGoneError('VLAN was unsynced during provisioning');
     }
     await tx.insert(managedVips).values(row);
   });
@@ -1744,11 +1752,11 @@ async function deleteSyncUnlessForwarded(firewallId, vlanId, vlanInterface) {
       await tx.delete(firewallVlanSync).where(and(eq(firewallVlanSync.firewall_id, firewallId), eq(firewallVlanSync.vlan_id, vlanId)));
       const [pf] = await tx.select({ id: managedVips.id }).from(managedVips)
         .where(and(eq(managedVips.firewall_id, firewallId), eq(managedVips.vlan_interface, vlanInterface))).limit(1);
-      if (pf) throw new VlanSyncGoneError('port forward created during unsync');
+      if (pf) throw new TrackingTargetGoneError('port forward created during unsync');
     });
     return true;
   } catch (err) {
-    if (err instanceof VlanSyncGoneError) return false;
+    if (err instanceof TrackingTargetGoneError) return false;
     throw err;
   }
 }
@@ -1783,18 +1791,10 @@ function managedVipCleanupSteps(pf, sync, rootVdom) {
 // cleanup succeeded, so a failed attempt keeps the record for a retry.
 // Returns the cleanup errors. `fw` carries the connection fields createClient
 // needs plus vdom/root_vdom.
-async function cleanupVlanPortForwards(firewallId, fw, vlanIfaceName, vlanTag) {
-  // Forwards from before dual-VDOM (no vlan_interface, no recorded artifacts
-  // or workflow run) belong to the hard-coded 10.x era: match those by their
-  // mapped IP inside the VLAN's legacy subnet. Modern rows never use this.
-  const legacySubnet = vlanTagToSubnet(vlanTag);
-  const portForwards = (await db.select().from(managedVips)
-    .where(and(eq(managedVips.firewall_id, firewallId), or(
-      eq(managedVips.vlan_interface, vlanIfaceName),
-      and(or(eq(managedVips.vlan_interface, ''), isNull(managedVips.vlan_interface)),
-        isNull(managedVips.artifacts), isNull(managedVips.workflow_run_id)),
-    ))))
-    .filter(pf => pf.vlan_interface === vlanIfaceName || (legacySubnet && ipv4InCidr(pf.mapped_ip, legacySubnet.network)));
+async function cleanupVlanPortForwards(firewallId, fw, vlanIfaceName) {
+  // Only forwards explicitly linked to this VLAN; see legacyForwardsNeedingReview.
+  const portForwards = await db.select().from(managedVips)
+    .where(and(eq(managedVips.firewall_id, firewallId), eq(managedVips.vlan_interface, vlanIfaceName)));
   const allErrors = [];
   if (portForwards.length === 0) return allErrors;
 
@@ -1821,6 +1821,27 @@ async function cleanupVlanPortForwards(firewallId, fw, vlanIfaceName, vlanTag) {
     console.log(`[delete-vlan] Cleaned up port forward "${pf.vip_name}"`);
   }
   return allErrors;
+}
+
+// Pre-dual-VDOM forwards (no vlan_interface, artifacts or run) whose mapped IP
+// lies in the VLAN's legacy 10.x subnet. An IP overlap does not prove they
+// belong to the VLAN, so they are never removed here — only reported, for an
+// admin to review and delete through the VIP endpoint.
+async function legacyForwardsNeedingReview(firewallId, vlanTag) {
+  const legacySubnet = vlanTagToSubnet(vlanTag);
+  if (!legacySubnet) return [];
+  const rows = await db.select({ vip_name: managedVips.vip_name, mapped_ip: managedVips.mapped_ip }).from(managedVips)
+    .where(and(eq(managedVips.firewall_id, firewallId),
+      or(eq(managedVips.vlan_interface, ''), isNull(managedVips.vlan_interface)),
+      isNull(managedVips.artifacts), isNull(managedVips.workflow_run_id)));
+  return rows.filter(r => ipv4InCidr(r.mapped_ip, legacySubnet.network))
+    .map(r => ({ firewallId, name: r.vip_name, mapped_ip: r.mapped_ip }));
+}
+
+function legacyReviewNote(rows) {
+  return rows.length
+    ? `; WARNING legacy port forwards in this VLAN's subnet were not removed, review them: ${rows.map(r => `${r.name} (${r.mapped_ip})`).join(', ')}`
+    : '';
 }
 
 router.delete('/vlans/:id', pVlans, async (req, res) => {
@@ -1850,7 +1871,7 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
   // 1. Clean up port forwards that target this VLAN's interface
   const portForwardErrors = new Map();
   for (const sync of syncs) {
-    portForwardErrors.set(sync.id, await cleanupVlanPortForwards(sync.fw_id, sync, sync.interface_name, vlan.tag));
+    portForwardErrors.set(sync.id, await cleanupVlanPortForwards(sync.fw_id, sync, sync.interface_name));
   }
 
   // 2. Deprovision VLAN from each synced firewall (interface, address obj, DHCP, routes, policies, switch)
@@ -1910,10 +1931,13 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
     });
   }
 
+  const legacyForwards = (await Promise.all(syncs.map(sync => legacyForwardsNeedingReview(sync.fw_id, vlan.tag)))).flat();
+
   // 3. Delete the VLAN from DB (CASCADE removes user_vlans and firewall_vlan_sync)
   await db.delete(vlans).where(eq(vlans.id, Number(req.params.id)));
-  await logAudit(req, 'admin_delete_vlan', `VLAN ${vlan.tag}`, fwResults.length ? `FW cleanup: ${fwResults.map(r => `${r.firewall}=${r.status}`).join(', ')}` : '');
-  res.json({ ok: true, firewallCleanup: fwResults });
+  await logAudit(req, 'admin_delete_vlan', `VLAN ${vlan.tag}`,
+    (fwResults.length ? `FW cleanup: ${fwResults.map(r => `${r.firewall}=${r.status}`).join(', ')}` : '') + legacyReviewNote(legacyForwards));
+  res.json({ ok: true, firewallCleanup: fwResults, legacyForwardsNeedingReview: legacyForwards });
 });
 
 // ─── User VLAN assignments ────────────────────────────────────────────────────
@@ -2468,16 +2492,23 @@ router.put('/firewalls/:id', pFirewalls, async (req, res) => {
 
 router.delete('/firewalls/:id', pFirewalls, async (req, res) => {
   const firewallId = Number(req.params.id);
-  const [fw] = await db.select({ name: firewalls.name }).from(firewalls).where(eq(firewalls.id, firewallId)).limit(1);
-  // The FK cascade would drop these records while their FortiGate objects stay live and unmanageable.
-  const [syncRow] = await db.select({ id: firewallVlanSync.id }).from(firewallVlanSync)
-    .where(eq(firewallVlanSync.firewall_id, firewallId)).limit(1);
-  const [vipRow] = await db.select({ id: managedVips.id }).from(managedVips)
-    .where(eq(managedVips.firewall_id, firewallId)).limit(1);
-  if (syncRow || vipRow) {
+  // One transaction: lock the firewall row (creators take it FOR SHARE before
+  // inserting tracking rows), check dependents, delete. The FK cascade would
+  // otherwise drop records whose FortiGate objects stay live and unmanageable.
+  const outcome = await db.transaction(async (tx) => {
+    const [fw] = await tx.select({ name: firewalls.name }).from(firewalls).where(eq(firewalls.id, firewallId)).for('update');
+    const [syncRow] = await tx.select({ id: firewallVlanSync.id }).from(firewallVlanSync)
+      .where(eq(firewallVlanSync.firewall_id, firewallId)).limit(1);
+    const [vipRow] = await tx.select({ id: managedVips.id }).from(managedVips)
+      .where(eq(managedVips.firewall_id, firewallId)).limit(1);
+    if (syncRow || vipRow) return { blocked: true };
+    await tx.delete(firewalls).where(eq(firewalls.id, firewallId));
+    return { blocked: false, fw };
+  });
+  if (outcome.blocked) {
     return res.status(409).json({ error: 'Firewall still has synced VLANs or port forwards; unsync and remove them first' });
   }
-  await db.delete(firewalls).where(eq(firewalls.id, Number(req.params.id)));
+  const { fw } = outcome;
   await logAudit(req, 'admin_delete_firewall', fw?.name || req.params.id, '');
   res.json({ ok: true });
 });
@@ -2567,9 +2598,12 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet };
         console.log(`[sync] Success:`, JSON.stringify(result));
         // policy_ids and artifacts are jsonb columns — pass objects directly.
-        await trackProvisioned(client, artifacts, () => db.insert(firewallVlanSync).values({
-          firewall_id: fw.id, vlan_id: vlan.id, interface_name: interfaceName,
-          policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
+        await trackProvisioned(client, artifacts, () => db.transaction(async (tx) => {
+          await lockFirewallForTracking(tx, fw.id);
+          await tx.insert(firewallVlanSync).values({
+            firewall_id: fw.id, vlan_id: vlan.id, interface_name: interfaceName,
+            policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
+          });
         }));
         await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
         results.push({ firewall: fw.name, status: 'ok', ...result });
@@ -2611,7 +2645,7 @@ async function handleVlanUnsync(req: any, res: any, vlanIdRaw: any, firewallIdRa
 
   try {
     // Port forwards into this VLAN would otherwise be orphaned (and still open) on the FortiGate.
-    let errors = await cleanupVlanPortForwards(firewallId, sync, sync.interface_name, sync.vlan_tag);
+    let errors = await cleanupVlanPortForwards(firewallId, sync, sync.interface_name);
     if (errors.length === 0) {
       const client = createClient(sync);
       const teardownRes = sync.artifacts
@@ -2645,8 +2679,9 @@ async function handleVlanUnsync(req: any, res: any, vlanIdRaw: any, firewallIdRa
   if (!await deleteSyncUnlessForwarded(firewallId, vlanId, sync.interface_name)) {
     return res.status(409).json({ error: 'A port forward into this VLAN was created during the unsync; retry to remove it' });
   }
-  await logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${vlanId}`, `Firewall ${firewallId}`);
-  res.json({ ok: true });
+  const legacyForwards = await legacyForwardsNeedingReview(firewallId, sync.vlan_tag);
+  await logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${vlanId}`, `Firewall ${firewallId}${legacyReviewNote(legacyForwards)}`);
+  res.json({ ok: true, legacyForwardsNeedingReview: legacyForwards });
 }
 
 router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
