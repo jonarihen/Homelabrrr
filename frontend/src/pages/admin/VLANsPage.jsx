@@ -158,7 +158,12 @@ export default function VLANsPage() {
                   <td className="px-4 py-3">
                     {v.subnet ? (
                       <div className="space-y-1">
-                        <span className="font-mono text-xs text-gray-400">{v.subnet.network}</span>
+                        <span className="font-mono text-xs text-gray-400">
+                          {/* One network per synced firewall; they differ when firewalls use different schemes. */}
+                          {v.firewallSync.length > 0
+                            ? [...new Set(v.firewallSync.map(s => s.subnet || v.subnet.network))].join(', ')
+                            : v.subnet.network}
+                        </span>
                         {v.mode === 'tagged_only' && (
                           <p className="text-[11px] text-fuchsia-300/80">Custom tagged subnet</p>
                         )}
@@ -268,6 +273,26 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
     }
     setSubnet(buildManagedSubnet(form.tag));
   }, [form.tag, form.mode, form.subnetCidr, isTaggedOnly]);
+
+  // Each firewall may use its own subnet scheme: on create, preview what each
+  // target would provision; on edit, show what each sync recorded (edits never reprovision).
+  const recordedSubnets = (vlan?.firewallSync || [])
+    .map(s => ({ id: s.firewallId, name: s.firewallName, network: s.subnet }));
+  const [fwSubnets, setFwSubnets] = useState([]);
+  const previewTag = parseInt(form.tag, 10);
+  const previewTargets = vlan ? [] : firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
+  useEffect(() => {
+    const targets = vlan ? [] : firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
+    setFwSubnets([]);
+    if (isTaggedOnly || !subnet || targets.length === 0) return undefined;
+    let cancelled = false;
+    // A failed lookup stays visible as unavailable; never fall back to the default silently.
+    Promise.all(targets.map(fw => api.get(`/admin/vlans/subnet/${previewTag}`, { params: { firewallId: fw.id } })
+      .then(r => ({ id: fw.id, name: fw.name, network: r.data.network, gateway: r.data.gateway }))
+      .catch(() => ({ id: fw.id, name: fw.name, network: null }))))
+      .then(list => { if (!cancelled) setFwSubnets(list); });
+    return () => { cancelled = true; };
+  }, [previewTag, isTaggedOnly, subnet, firewalls, vlan]);
 
   useEffect(() => {
     if (isTaggedOnly) {
@@ -394,9 +419,26 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
           )}
           {!isTaggedOnly && subnet && (
             <div className="mt-2 bg-blue-900/20 border border-blue-800/30 rounded-lg px-3 py-2 text-xs space-y-0.5">
-              <p className="text-blue-400">Auto subnet: <span className="font-mono">{subnet.network}</span></p>
-              <p className="text-gray-500">Gateway: <span className="font-mono text-gray-400">{subnet.gateway}</span></p>
-              <p className="text-gray-500">DHCP range: <span className="font-mono text-gray-400">{subnet.dhcp}</span></p>
+              {recordedSubnets.length > 0 ? recordedSubnets.map(f => (
+                <p key={f.id} className="text-blue-400">{f.name}: <span className="font-mono">{f.network}</span></p>
+              )) : previewTargets.length > 0 && fwSubnets.length === 0 ? (
+                <p className="text-gray-500">Loading subnet preview…</p>
+              ) : fwSubnets.length > 0 ? fwSubnets.map(f => (
+                f.network ? (
+                  <p key={f.id} className="text-blue-400">
+                    {f.name}: <span className="font-mono">{f.network}</span>
+                    <span className="text-gray-500"> · gateway <span className="font-mono text-gray-400">{f.gateway}</span></span>
+                  </p>
+                ) : (
+                  <p key={f.id} className="text-amber-400">{f.name}: subnet preview unavailable</p>
+                )
+              )) : (
+                <>
+                  <p className="text-blue-400">Auto subnet: <span className="font-mono">{subnet.network}</span></p>
+                  <p className="text-gray-500">Gateway: <span className="font-mono text-gray-400">{subnet.gateway}</span></p>
+                  <p className="text-gray-500">DHCP range: <span className="font-mono text-gray-400">{subnet.dhcp}</span></p>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -504,7 +546,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
       onSaved();
       // Refresh sync state
       const syncRes = await api.get(`/admin/vlans/${vlan.id}/sync`);
-      setSyncs(syncRes.data.map(s => ({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name })));
+      setSyncs(syncRes.data.map(s => ({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name, subnet: s.subnet_cidr || '' })));
     } catch (e) {
       setError(e.response?.data?.error || 'Sync failed');
     } finally { setSyncing(false); }
@@ -541,6 +583,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
                     <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
                     <span className="text-sm text-white">{s.firewallName}</span>
                     <span className="text-xs text-gray-500 font-mono">{s.interfaceName}</span>
+                    {s.subnet && <span className="text-xs text-gray-500 font-mono">{s.subnet}</span>}
                   </div>
                   <button
                     onClick={() => removeSync(s.firewallId)}
@@ -593,7 +636,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
           <div className="space-y-1">
             {results.map((r, i) => (
               <div key={i} className={`text-xs rounded px-3 py-2 ${r.status === 'ok' ? 'bg-green-900/20 text-green-400' : r.status === 'already_synced' ? 'bg-gray-800 text-gray-400' : 'bg-red-900/20 text-red-400'}`}>
-                <span className="font-medium">{r.firewall}:</span> {r.status === 'ok' ? `Created ${r.interfaceName} (${r.subnet?.network})` : r.status === 'already_synced' ? 'Already synced' : r.error}
+                <span className="font-medium">{r.firewall}:</span> {r.status === 'ok' ? `Created ${r.interfaceName} (${r.subnet?.network}${r.subnetRecorded ? '' : ', default, not recorded'})` : r.status === 'already_synced' ? 'Already synced' : r.error}
               </div>
             ))}
           </div>

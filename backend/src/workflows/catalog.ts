@@ -92,14 +92,17 @@ export const ACTIONS = {
       if (p.skipIfExists !== false) {
         const existing = await client.getInterface(name);
         if (existing) {
-          return { skipped: true, output: { interfaceName: name }, artifacts: [], calls: [{ method: 'GET', path: `cmdb/system/interface/${name}`, scope: client.vdom, summary: `Interface ${name} already exists — skipped` }] };
+          // Report the existing interface's address so the sync can record the subnet it really has.
+          const [ip, netmask] = String(existing.ip || '').trim().split(/\s+/);
+          return { skipped: true, output: { interfaceName: name, vlanId: Number(p.vlanId), ip, netmask }, artifacts: [], calls: [{ method: 'GET', path: `cmdb/system/interface/${name}`, scope: client.vdom, summary: `Interface ${name} already exists — skipped` }] };
         }
       }
       const body = this._body(p, client);
       await client.request('POST', 'cmdb/system/interface', body, 'global');
       return {
         skipped: false,
-        output: { interfaceName: name },
+        // ip/netmask as actually sent: the sync records the provisioned subnet from them.
+        output: { interfaceName: name, vlanId: Number(p.vlanId), ip: String(p.ip), netmask: String(p.netmask) },
         artifacts: [{ type: 'interface', name }],
         calls: [{ method: 'POST', path: 'cmdb/system/interface', scope: 'global', body, summary: `Created VLAN interface ${name}` }],
       };

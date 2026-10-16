@@ -23,7 +23,10 @@ export function deriveSubnet(tag, settings) {
   const oct2 = parseInt(s.substring(0, 2), 10);
   const oct3 = parseInt(s.substring(2, 4), 10);
   if (oct2 > 255 || oct3 > 255) return null;
-  const base = `${firstOctet}.${oct2}.${oct3}`;
+  return subnetFromBase(`${firstOctet}.${oct2}.${oct3}`);
+}
+
+function subnetFromBase(base) {
   return {
     ip: `${base}.1`,
     netmask: '255.255.255.0',
@@ -33,4 +36,14 @@ export function deriveSubnet(tag, settings) {
     dhcpEnd: `${base}.254`,
     gateway: `${base}.1`,
   };
+}
+
+/**
+ * The subnet a firewall sync provisioned, rebuilt from its full recorded /24
+ * (firewall_vlan_sync.subnet_cidr) — independent of the VLAN's current tag or
+ * the workflow setting. A row without a record gets the default scheme.
+ */
+export function syncedSubnet(tag, syncedCidr) {
+  const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.0\/24$/.exec(String(syncedCidr || '').trim());
+  return m ? subnetFromBase(m[1]) : deriveSubnet(tag, {});
 }
