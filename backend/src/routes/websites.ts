@@ -464,8 +464,12 @@ async function siteUpstreamAllowed(site) {
 // every tick retries it until it succeeds and the detail becomes REVOKED_DETAIL.
 const REVOKING_DETAIL = 'Being unpublished: this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
 
+// Claimed by a finishRevocations pass that is removing its route/slot right now.
+const CLEANING_DETAIL = 'Being unpublished (cleaning up): this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
+const PENDING_DETAILS = [REVOKING_DETAIL, CLEANING_DETAIL];
+
 const isRevoked = (site) => site.status === 'error'
-  && (site.status_detail === REVOKED_DETAIL || site.status_detail === REVOKING_DETAIL);
+  && [REVOKED_DETAIL, ...PENDING_DETAILS].includes(site.status_detail);
 
 // A site published under an older, looser upstream policy (or whose owner has
 // since lost the VLAN/IP, or was deleted) must not stay reachable. 'error' rows
@@ -513,23 +517,41 @@ export async function markSitesUnpublished(sites) {
 export async function finishRevocations(server) {
   const pending = await db.select().from(caddySites)
     .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
-      eq(caddySites.status, 'error'), eq(caddySites.status_detail, REVOKING_DETAIL)));
+      eq(caddySites.status, 'error'), inArray(caddySites.status_detail, PENDING_DETAILS)));
   if (pending.length === 0) return;
+  // Claim each row right before its side effects: a save that cleared the
+  // revocation since `pending` was read makes the claim miss, and the site's
+  // new route and certificate are left alone. A crash mid-cleanup leaves the
+  // row CLEANING, which the next pass claims again.
+  const claim = async (site) => (await db.update(caddySites).set({ status_detail: CLEANING_DETAIL })
+    .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), inArray(caddySites.status_detail, PENDING_DETAILS)))
+    .returning())[0];
+  const claimed = [];
   if (sshConfigured(server)) {
-    await syncServerSnippet(server);
+    for (const site of pending) {
+      const row = await claim(site);
+      if (row) claimed.push(row);
+    }
+    // Renders from DB state, so only rows still parked are left out.
+    if (claimed.length) await syncServerSnippet(server);
   } else {
     const caddy = createCaddyClient(server);
     const liveIds = new Set(await caddy.listManagedRouteIds());
     for (const site of pending) {
-      if (liveIds.has(managedRouteId(site.id))) await caddy.deleteRoute(site.id);
+      const row = await claim(site);
+      if (!row) continue;
+      claimed.push(row);
+      if (liveIds.has(managedRouteId(row.id))) await caddy.deleteRoute(row.id);
     }
   }
-  for (const site of pending) {
+  for (const site of claimed) {
     if (!(await releaseInspectionSlot(site, null))) continue;
     await db.update(caddySites).set({ status_detail: REVOKED_DETAIL })
-      .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, REVOKING_DETAIL)));
+      .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, CLEANING_DETAIL)));
   }
-  console.warn(`[websites] unpublished ${pending.length} site(s) on "${server.name}" whose upstream the owner may no longer use: ${pending.map((site) => site.domain).join(', ')}`);
+  if (claimed.length) {
+    console.warn(`[websites] unpublished ${claimed.length} site(s) on "${server.name}" whose upstream the owner may no longer use: ${claimed.map((site) => site.domain).join(', ')}`);
+  }
 }
 
 async function unpublishDisallowedSites(server) {

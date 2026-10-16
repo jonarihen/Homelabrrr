@@ -211,3 +211,35 @@ test('a site whose owner loses access before its publish flow starts is revoked 
     caddyProto.deleteRoute = originals.del;
   }
 });
+
+test('a site saved between the revocation load and its cleanup keeps its new route', async () => {
+  const { createCaddyClient, managedRouteId } = await import('../utils/caddy.ts');
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'race-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'race.example.test', upstream_host: '192.168.5.5', upstream_port: 80,
+    owner_user_id: ownerId, managed: true, status: 'live',
+  }).returning();
+  await websites.markSitesUnpublished(await websites.findDisallowedSites(apiServer.id));
+
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { list: caddyProto.listManagedRouteIds, del: caddyProto.deleteRoute };
+  const deleted = [];
+  // Runs after finishRevocations loaded its pending rows: the owner repoints the
+  // site (as PUT /sites/:id does) and the new route is already live.
+  caddyProto.listManagedRouteIds = async () => {
+    await testDb.db.update(caddySites).set({ upstream_host: '10.10.10.44', status: 'pushing', status_detail: '' })
+      .where(eq(caddySites.id, row.id));
+    return [managedRouteId(row.id)];
+  };
+  caddyProto.deleteRoute = async (id) => { deleted.push(id); };
+  try {
+    await websites.finishRevocations(apiServer);
+    assert.deepEqual(deleted, [], 'the repointed site\'s route was deleted');
+    const [after] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.equal(after.status, 'pushing');
+    assert.equal(after.status_detail, '');
+  } finally {
+    caddyProto.listManagedRouteIds = originals.list;
+    caddyProto.deleteRoute = originals.del;
+  }
+});
