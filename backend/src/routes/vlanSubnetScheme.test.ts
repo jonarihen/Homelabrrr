@@ -158,3 +158,41 @@ test('VLAN sync records the subnet from the interface step output, not the setti
   assert.equal(res.body[0].subnet.network, '192.168.50.0/24');
   assert.equal(res.body[0].subnetRecorded, true);
 });
+
+async function syncWithSteps(t: any, name: string, tag: number, steps: unknown[], existingInterface: unknown = null) {
+  const [fw] = await testDb.db.insert(firewalls)
+    .values({ name, host: `${name}.example`, api_key: 'k', vdom: 'lab', verify_tls: false })
+    .returning({ id: firewalls.id });
+  const [wf] = await testDb.db.insert(workflows).values({ firewall_id: fw.id, trigger: 'vlan_provision', name: 'p' }).returning({ id: workflows.id });
+  await testDb.db.insert(workflowSteps).values(steps.map((params, position) => ({
+    workflow_id: wf.id, position, step_key: `iface${position}`, action: 'create_vlan_interface', params,
+  })) as any);
+  t.mock.method(FortiGateAPI.prototype, 'getInterface', async () => existingInterface);
+  t.mock.method(FortiGateAPI.prototype, 'request', async () => ({}));
+  const [vlan] = await testDb.db.insert(vlans).values({ name, tag, mode: 'managed' }).returning({ id: vlans.id });
+  const res = await request(app).post(`/vlans/${vlan.id}/sync`).send({ firewallId: fw.id });
+  const [sync] = await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.vlan_id, vlan.id));
+  return { res, sync };
+}
+
+const ifaceStep = (vlanId: string, ip: string) => ({ name: `vlan${vlanId}`, vlanId, parentInterface: 'fortilink', ip, netmask: '255.255.255.0' });
+
+test('VLAN sync records the subnet of the subject VLAN interface, not an auxiliary one', async (t) => {
+  // An auxiliary interface step runs first; only the step for this VLAN's tag counts.
+  const { res, sync } = await syncWithSteps(t, 'fw-two-ifaces', 1303, [ifaceStep('3999', '172.20.30.1'), ifaceStep('{{tag}}', '10.13.3.1')]);
+  assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
+  assert.equal(sync.subnet_cidr, '10.13.3.0/24');
+});
+
+test('VLAN sync records the subnet of an existing interface the step skipped', async (t) => {
+  const { res, sync } = await syncWithSteps(t, 'fw-existing', 1304, [ifaceStep('{{tag}}', '10.13.4.1')], { name: 'vlan1304', ip: '172.13.4.1 255.255.255.0' });
+  assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
+  assert.equal(sync.subnet_cidr, '172.13.4.0/24');
+});
+
+test('VLAN sync records NULL with a warning when the existing interface address is unreadable', async (t) => {
+  const { res, sync } = await syncWithSteps(t, 'fw-unreadable', 1305, [ifaceStep('{{tag}}', '10.13.5.1')], { name: 'vlan1305' });
+  assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
+  assert.equal(sync.subnet_cidr, null);
+  assert.match(res.body[0].warning, /Could not determine the subnet/);
+});

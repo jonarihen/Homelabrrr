@@ -2496,15 +2496,21 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const policyIds = outVals.map((o) => o?.policyId).filter((v) => v !== undefined && v !== null);
         const dhcpServerId = outVals.find((o) => o?.dhcpServerId)?.dhcpServerId ?? null;
         const staticRouteId = outVals.find((o) => o?.routeId)?.routeId ?? null;
-        // Record only the /24 the run's interface step actually configured; no
-        // such output (step disabled/skipped/customised away) → NULL = legacy default.
-        const ifaceOut = outVals.find((o) => o?.ip && o?.netmask);
+        // Record only the /24 of this VLAN's own interface (the interface step
+        // whose vlanId is this tag), as configured or as found when the step
+        // skipped an existing interface. Anything else → NULL = legacy default.
+        const ifaceOut = outVals.find((o) => o?.interfaceName && Number(o.vlanId) === Number(vlan.tag));
         const ifaceNet = ifaceOut?.netmask === '255.255.255.0'
           && /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(ifaceOut.ip);
         const provisionedCidr = ifaceNet ? `${ifaceNet[1]}.0/24` : null;
         // Report what was recorded; with no record readers use the legacy default, so show that, labelled.
         const recordedSubnet = syncedSubnet(vlan.tag, provisionedCidr);
-        const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet: recordedSubnet, subnetRecorded: !!provisionedCidr };
+        const result = {
+          interfaceName, policyIds, dhcpServerId, staticRouteId, subnet: recordedSubnet, subnetRecorded: !!provisionedCidr,
+          ...(provisionedCidr ? {} : {
+            warning: `Could not determine the subnet of VLAN ${vlan.tag}'s interface; none recorded, so policies use the legacy default ${recordedSubnet?.network}`,
+          }),
+        };
         console.log(`[sync] Success:`, JSON.stringify(result));
         // policy_ids and artifacts are jsonb columns — pass objects directly.
         await db.insert(firewallVlanSync).values({
