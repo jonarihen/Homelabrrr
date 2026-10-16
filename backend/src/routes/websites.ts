@@ -11,6 +11,7 @@ import { encryptSecret } from '../utils/secrets.ts';
 import { createClient } from '../fortigate.ts';
 import { certNameToSubject, certWildcardCovers, stripCertDateSuffix, SERVER_CERT_MAX } from '../utils/certSlots.ts';
 import { createCaddyClient, managedRouteId, hostCoveredByWildcard } from '../utils/caddy.ts';
+import { nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { probeSite, probeAddressFor, PROBE_PORT } from '../utils/caddyProbe.ts';
 import { sshConfigured, deploySnippet, isSafeRemotePath } from '../utils/caddySnippet.ts';
 import {
@@ -392,8 +393,9 @@ async function managedSitesForSnippet(serverId) {
 }
 
 // Regenerate + push the snippet, pinning the SSH host key on first use.
-async function syncServerSnippet(server) {
-  const result = await deploySnippet(server, await managedSitesForSnippet(server.id));
+async function syncServerSnippet(server, excludeIds = new Set()) {
+  const sites = (await managedSitesForSnippet(server.id)).filter((site) => !excludeIds.has(site.id));
+  const result = await deploySnippet(server, sites);
   if (!server.ssh_host_key && result.fingerprint) {
     await db.update(caddyServers).set({ ssh_host_key: result.fingerprint }).where(eq(caddyServers.id, server.id));
   }
@@ -444,6 +446,53 @@ async function reconcileManagedRoutes(server) {
   return { repaired, conflicted };
 }
 
+// A site published under an older, looser upstream policy (or whose owner has
+// since lost the VLAN/IP) must not stay reachable. Admin-owned sites are
+// exempt, matching userCanReachUpstream.
+export async function findDisallowedSites(serverId) {
+  const sites = await db.select({
+    id: caddySites.id, domain: caddySites.domain, upstream_host: caddySites.upstream_host,
+    owner_user_id: caddySites.owner_user_id, owner_is_admin: users.is_admin,
+  }).from(caddySites)
+    .innerJoin(users, eq(users.id, caddySites.owner_user_id))
+    .where(and(eq(caddySites.server_id, serverId), eq(caddySites.managed, true), ne(caddySites.status, 'error')));
+  const disallowed = [];
+  for (const site of sites) {
+    if (site.owner_is_admin) continue;
+    if (!(await userCanReachUpstream(site.owner_user_id, site.upstream_host, false)).ok) disallowed.push(site);
+  }
+  return disallowed;
+}
+
+// Park unpublished sites in 'error', which every render and reconcile skips.
+// The row and its settings are kept so the owner can repoint and save it.
+export async function markSitesUnpublished(sites) {
+  for (const site of sites) {
+    await setSiteStatus(site.id, 'error', 'Unpublished: this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.');
+    await logAuditEntry({
+      action: 'website_upstream_revoked',
+      target: site.domain,
+      detail: `site ${site.id} unpublished: upstream not allowed for owner user ${site.owner_user_id}`,
+      targetRef: String(site.id),
+    });
+  }
+}
+
+// Remove disallowed routes from Caddy first and only then mark them, so a
+// Caddy outage leaves them to be retried on the next tick.
+async function unpublishDisallowedSites(server) {
+  const disallowed = await findDisallowedSites(server.id);
+  if (disallowed.length === 0) return;
+  if (sshConfigured(server)) {
+    await syncServerSnippet(server, new Set(disallowed.map((site) => site.id)));
+  } else {
+    const caddy = createCaddyClient(server);
+    for (const site of disallowed) await caddy.deleteRoute(site.id);
+  }
+  await markSitesUnpublished(disallowed);
+  console.warn(`[websites] unpublished ${disallowed.length} site(s) on "${server.name}" whose upstream the owner may no longer use: ${disallowed.map((site) => site.domain).join(', ')}`);
+}
+
 // Re-probe published sites so breakage surfaces here rather than in a user's
 // bug report. Only the two probe-owned states move: a live site that stops
 // serving drops to warning, and a site warned about by a previous probe returns
@@ -489,6 +538,7 @@ async function websiteMaintenanceTick() {
   try { servers = await db.select().from(caddyServers); } catch { return; }
   for (const server of servers) {
     try {
+      await unpublishDisallowedSites(server);
       if (!sshConfigured(server)) {
         const { repaired, conflicted } = await reconcileManagedRoutes(server);
         if (repaired.length) console.log(`[websites] re-pushed ${repaired.length} Caddy route(s) on "${server.name}" after a config reload: ${repaired.join(', ')}`);
@@ -1108,17 +1158,17 @@ router.get('/upstream-options', async (req, res) => {
   // Enrich the raw IPs with the assigned VM identity for a friendlier picker.
   const assignments = await db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
     .from(vmAssignments).where(eq(vmAssignments.user_id, req.session.userId));
-  // Batch the SSH-config lookup (one IN-list keyed by vmid, not a query per VM).
+  // Batch the SSH-config lookup (one IN-list keyed by vmid, not a query per VM),
+  // then match on node too: the same VMID can exist on another cluster.
   const vmids = [...new Set(assignments.map((a) => a.vmid))];
-  const hostByVmid = new Map();
-  if (vmids.length) {
-    const cfgs = await db.select({ vmid: vmSshConfigs.vmid, host: vmSshConfigs.host })
-      .from(vmSshConfigs).where(inArray(vmSshConfigs.vmid, vmids));
-    for (const c of cfgs) if (!hostByVmid.has(c.vmid)) hostByVmid.set(c.vmid, c.host);
-  }
+  const cfgs = vmids.length
+    ? await db.select({ node: vmSshConfigs.node, vmid: vmSshConfigs.vmid, host: vmSshConfigs.host })
+      .from(vmSshConfigs).where(inArray(vmSshConfigs.vmid, vmids))
+    : [];
   const vms = [];
   for (const a of assignments) {
-    const host = hostByVmid.get(a.vmid);
+    const candidates = nodeLookupCandidates(a.node);
+    const host = cfgs.find((c) => c.vmid === a.vmid && candidates.includes(c.node))?.host;
     // Display only: the SSH host is user-editable, so list it just when the
     // allow-list already admits it (userCanReachUpstream is the real gate).
     if (host && (vmIps.includes(host) || subnets.some((cidr) => ipv4InCidr(host, cidr)))) {
