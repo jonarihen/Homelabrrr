@@ -4,7 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq, and } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, firewalls, vlans, firewallVlanSync, managedVips } from '../db/schema/index.ts';
+import { users, firewalls, vlans, firewallVlanSync, managedVips, workflows } from '../db/schema/index.ts';
 import { FortiGateAPI } from '../fortigate.ts';
 
 let testDb: TestDatabase;
@@ -277,19 +277,25 @@ test('VLAN unsync keeps the port forward and sync records when port-forward clea
   await testDb.db.delete(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
 });
 
-test('VLAN unsync also cleans legacy forwards (empty vlan_interface) whose IP is in the VLAN subnet', async (t) => {
+test('VLAN unsync cleans only genuinely legacy forwards (no artifacts), on the 10.x scheme', async (t) => {
   t.mock.method(FortiGateAPI.prototype, 'deleteInterface', async () => {});
   const deletedVips: string[] = [];
   t.mock.method(FortiGateAPI.prototype, 'deleteVip', async (name: string) => { deletedVips.push(name); });
   t.mock.method(FortiGateAPI.prototype, 'deleteAddressObject', async () => {});
+  // The scheme changed after the legacy forward was created: it still lives on 10.10.99.0/24.
+  await testDb.db.insert(workflows).values({
+    firewall_id: firewallId, trigger: 'vlan_provision', name: 'p', settings: { subnet: { firstOctet: 172 } },
+  });
   await testDb.db.insert(firewallVlanSync).values({
     firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099',
     artifacts: [{ type: 'interface', name: 'vlan1099' }],
   });
-  // Tag 1099 → 10.10.99.0/24 on the default scheme.
   await testDb.db.insert(managedVips).values([
     { firewall_id: firewallId, vip_name: 'pf-legacy-in', ext_port: 9010, mapped_ip: '10.10.99.30', mapped_port: 22, vlan_interface: '' },
     { firewall_id: firewallId, vip_name: 'pf-legacy-out', ext_port: 9011, mapped_ip: '192.168.1.5', mapped_port: 22, vlan_interface: '' },
+    // Modern forward with no VLAN association: never matched by IP.
+    { firewall_id: firewallId, vip_name: 'pf-modern-unassoc', ext_port: 9013, mapped_ip: '10.10.99.32', mapped_port: 22, vlan_interface: '',
+      artifacts: [{ type: 'vip', name: 'pf-modern-unassoc', vdom: 'root' }] },
   ]);
 
   const res = await request(app).delete(`/vlans/${vlanId}/sync/${firewallId}`);
@@ -297,8 +303,30 @@ test('VLAN unsync also cleans legacy forwards (empty vlan_interface) whose IP is
   assert.deepEqual(deletedVips, ['pf-legacy-in']);
   const remaining = await testDb.db.select({ vip_name: managedVips.vip_name }).from(managedVips)
     .where(eq(managedVips.firewall_id, firewallId));
-  assert.deepEqual(remaining.map(r => r.vip_name), ['pf-legacy-out']);
+  assert.deepEqual(remaining.map(r => r.vip_name).sort(), ['pf-legacy-out', 'pf-modern-unassoc']);
   await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
+  await testDb.db.delete(workflows).where(eq(workflows.firewall_id, firewallId));
+});
+
+test('VLAN unsync keeps the sync row when a matched legacy forward fails to clean', async (t) => {
+  const deleteInterface = t.mock.method(FortiGateAPI.prototype, 'deleteInterface', async () => {});
+  t.mock.method(FortiGateAPI.prototype, 'deleteVip', async () => { throw new Error('Connection reset'); });
+  t.mock.method(FortiGateAPI.prototype, 'deleteAddressObject', async () => {});
+  await testDb.db.insert(firewallVlanSync).values({
+    firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099',
+    artifacts: [{ type: 'interface', name: 'vlan1099' }],
+  });
+  await testDb.db.insert(managedVips).values({
+    firewall_id: firewallId, vip_name: 'pf-legacy-fail', ext_port: 9014, mapped_ip: '10.10.99.33', mapped_port: 22, vlan_interface: '',
+  });
+
+  const res = await request(app).delete(`/vlans/${vlanId}/sync/${firewallId}`);
+  assert.equal(res.status, 502);
+  assert.equal(deleteInterface.mock.callCount(), 0);
+  assert.ok((await testDb.db.select().from(managedVips).where(eq(managedVips.vip_name, 'pf-legacy-fail')))[0]);
+  assert.ok((await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId)))[0]);
+  await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
+  await testDb.db.delete(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
 });
 
 test('legacy VIP delete clears the record when the VIP is already gone upstream', async (t) => {

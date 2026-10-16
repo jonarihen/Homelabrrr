@@ -47,7 +47,7 @@ import {
 } from '../utils/leases.ts';
 import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
-import { getWorkflowBundle, getWorkflowRow, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
+import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
 import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
 import { isArtifactGone } from '../workflows/engine.ts';
 import { deriveSubnet } from '../workflows/subnet.ts';
@@ -1732,13 +1732,17 @@ function managedVipCleanupSteps(pf, sync, rootVdom) {
 // Returns the cleanup errors. `fw` carries the connection fields createClient
 // needs plus vdom/root_vdom.
 async function cleanupVlanPortForwards(firewallId, fw, vlanIfaceName, vlanTag) {
-  // Forwards from before dual-VDOM have an empty vlan_interface; match those
-  // by their mapped IP falling inside the VLAN's subnet on this firewall.
-  const subnet = deriveSubnet(vlanTag, workflowSettings(await getWorkflowRow(firewallId, 'vlan_provision')));
+  // Forwards from before dual-VDOM (no vlan_interface, no recorded artifacts
+  // or workflow run) belong to the hard-coded 10.x era: match those by their
+  // mapped IP inside the VLAN's legacy subnet. Modern rows never use this.
+  const legacySubnet = vlanTagToSubnet(vlanTag);
   const portForwards = (await db.select().from(managedVips)
-    .where(and(eq(managedVips.firewall_id, firewallId),
-      or(eq(managedVips.vlan_interface, vlanIfaceName), eq(managedVips.vlan_interface, ''), isNull(managedVips.vlan_interface)))))
-    .filter(pf => pf.vlan_interface === vlanIfaceName || (subnet && ipv4InCidr(pf.mapped_ip, subnet.network)));
+    .where(and(eq(managedVips.firewall_id, firewallId), or(
+      eq(managedVips.vlan_interface, vlanIfaceName),
+      and(or(eq(managedVips.vlan_interface, ''), isNull(managedVips.vlan_interface)),
+        isNull(managedVips.artifacts), isNull(managedVips.workflow_run_id)),
+    ))))
+    .filter(pf => pf.vlan_interface === vlanIfaceName || (legacySubnet && ipv4InCidr(pf.mapped_ip, legacySubnet.network)));
   const allErrors = [];
   if (portForwards.length === 0) return allErrors;
 
