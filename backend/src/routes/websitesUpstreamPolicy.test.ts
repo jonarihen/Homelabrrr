@@ -5,7 +5,7 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import {
-  auditLog, caddyServers, caddySites, users, userVlans, vlans, vmAssignments, vmSshConfigs,
+  auditLog, caddyServers, firewalls, caddySites, users, userVlans, vlans, vmAssignments, vmSshConfigs,
 } from '../db/schema/index.ts';
 
 let testDb: TestDatabase;
@@ -49,8 +49,10 @@ test('sites whose upstream the owner may no longer use are unpublished, not dele
   const idOf = (domain: string) => rows.find((r) => r.domain === domain)!.id;
 
   const disallowed = await websites.findDisallowedSites(serverId);
-  // An ownerless site has nobody left to authorize it, even with an in-VLAN upstream.
-  assert.deepEqual(disallowed.map((s) => s.domain).sort(), ['orphan.example.test', 'stale.example.test']);
+  // An ownerless site has nobody left to authorize it, even with an in-VLAN
+  // upstream; an 'error' row is scanned too (its route may still be live).
+  const revoked = ['orphan.example.test', 'parked.example.test', 'stale.example.test'];
+  assert.deepEqual(disallowed.map((s) => s.domain).sort(), revoked);
 
   await websites.markSitesUnpublished(disallowed);
   const [stale] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, idOf('stale.example.test')));
@@ -59,9 +61,11 @@ test('sites whose upstream the owner may no longer use are unpublished, not dele
   const [ok] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, idOf('ok.example.test')));
   assert.equal(ok.status, 'live');
   const audits = await testDb.db.select().from(auditLog).where(eq(auditLog.action, 'website_upstream_revoked'));
-  assert.deepEqual(audits.map((a) => a.target).sort(), ['orphan.example.test', 'stale.example.test']);
+  assert.deepEqual(audits.map((a) => a.target).sort(), revoked);
 
-  assert.deepEqual(await websites.findDisallowedSites(serverId), [], 'a parked site is not unpublished twice');
+  // The next tick still sees them, but parking and auditing happen only once.
+  await websites.markSitesUnpublished(await websites.findDisallowedSites(serverId));
+  assert.equal((await testDb.db.select().from(auditLog).where(eq(auditLog.action, 'website_upstream_revoked'))).length, 3);
 
   // The owner cannot bring a revoked site back with a retry.
   const app = express();
@@ -91,4 +95,20 @@ test('the upstream picker matches SSH hosts on node and VMID', async () => {
   const res = await request(app).get('/upstream-options');
   assert.equal(res.status, 200);
   assert.deepEqual(res.body.vms, [{ vmid: 101, node: '1~pve-a', ip: '10.10.10.7' }]);
+});
+
+test('revoked siblings sharing a certificate do not keep its inspection slot in use', async () => {
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw', host: 'fw.test', api_key: 'x' }).returning({ id: firewalls.id });
+  const shared = { server_id: serverId, upstream_port: 80, owner_user_id: ownerId, managed: true, fortigate_id: fw.id, inspection_profile: 'deep', cert_name: 'wild.example.test_2026-01-01' };
+  const rows = await testDb.db.insert(caddySites).values([
+    { ...shared, domain: 'a.wild.example.test', upstream_host: '192.168.2.1', status: 'live' },
+    { ...shared, domain: 'b.wild.example.test', upstream_host: '192.168.2.2', status: 'live' },
+  ]).returning();
+  await websites.markSitesUnpublished(rows);
+  const parked = await testDb.db.select().from(caddySites).where(eq(caddySites.cert_name, shared.cert_name));
+  for (const row of parked) assert.equal(await websites.certStillInUse(row), false);
+
+  // A sibling that is still published keeps the slot.
+  await testDb.db.insert(caddySites).values({ ...shared, domain: 'c.wild.example.test', upstream_host: '10.10.10.9', status: 'live' });
+  assert.equal(await websites.certStillInUse(parked[0]), true);
 });

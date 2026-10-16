@@ -48,6 +48,16 @@ test('website upstreams come from admin-set data, never the user-editable SSH ho
   });
   assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps, ['172.16.5.20']);
 
+  // A legacy row with a bare node name but a known Proxmox host must not match
+  // the same VMID on another host whose node has that name.
+  const [ip3] = await testDb.db.insert(publicIps).values({ pool_id: pool.id, firewall_id: fw.id, address: '203.0.113.11' }).returning({ id: publicIps.id });
+  await testDb.db.insert(publicIpAssignments).values({
+    public_ip_id: ip3.id, firewall_id: fw.id, user_id: user.id, proxmox_host_id: 2, node: 'pve', vmid: 101, private_ip: '172.16.7.7',
+  });
+  assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps, ['172.16.5.20']);
+  await testDb.db.insert(vmAssignments).values({ user_id: user.id, node: '2~pve', vmid: 101 });
+  assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps.sort(), ['172.16.5.20', '172.16.7.7', '172.16.9.9']);
+
   // Unassigning the VM leaves the public-IP row behind; it must stop counting.
   await testDb.db.delete(vmAssignments).where(eq(vmAssignments.user_id, user.id));
   assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps, []);

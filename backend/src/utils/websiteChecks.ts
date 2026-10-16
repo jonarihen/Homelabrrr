@@ -3,7 +3,7 @@ import dns from 'dns/promises';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { publicIpAssignments, vmAssignments } from '../db/schema/index.ts';
-import { nodeLookupCandidates } from './nodeRef.ts';
+import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
 
 // ─── Field validation ─────────────────────────────────────────────────────────
@@ -166,15 +166,24 @@ export function ipv4InCidr(ip, cidr) {
  */
 export async function getUserAllowedUpstreams(userId) {
   const [rows, assignments] = await Promise.all([
-    db.select({ ip: publicIpAssignments.private_ip, node: publicIpAssignments.node, vmid: publicIpAssignments.vmid })
+    db.select({
+      ip: publicIpAssignments.private_ip, node: publicIpAssignments.node, vmid: publicIpAssignments.vmid,
+      hostId: publicIpAssignments.proxmox_host_id,
+    })
       .from(publicIpAssignments).where(eq(publicIpAssignments.user_id, userId)),
     db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
       .from(vmAssignments).where(eq(vmAssignments.user_id, userId)),
   ]);
   // An IP only counts while its VM is still assigned to this user: unassigning
   // a VM leaves the public-IP row behind. Legacy rows may store the bare node name.
-  const stillAssigned = (row) => assignments.some((a) => a.vmid === row.vmid
-    && (nodeLookupCandidates(a.node).includes(row.node) || nodeLookupCandidates(row.node).includes(a.node)));
+  // When both sides know their Proxmox host, it must agree: a bare `pve` row
+  // must not match `2~pve` on another cluster.
+  const stillAssigned = (row) => assignments.some((a) => {
+    if (a.vmid !== row.vmid) return false;
+    const { hostId } = decodeNodeRef(a.node);
+    if (row.hostId != null && hostId != null && String(row.hostId) !== String(hostId)) return false;
+    return nodeLookupCandidates(a.node).includes(row.node) || nodeLookupCandidates(row.node).includes(a.node);
+  });
   const vmIps = [...new Set(rows.filter(stillAssigned).map((r) => r.ip).filter((ip) => isIP(ip)))];
   return { vmIps, subnets: await userVlanCidrs(db, userId) };
 }
