@@ -626,7 +626,8 @@ router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecent
   if (!await reserveConfirmationAttempt(req)) return res.status(423).json(CONFIRMATION_LOCKED);
   const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
   if (!isValid) return res.status(400).json({ error: 'Invalid code — try again' });
-  await clearTwoFactorAttempts(confirmationKey(req));
+  // No budget reset here: this code is for a factor the caller just enrolled,
+  // which proves nothing about the account's existing credentials.
 
   await db.update(users).set({ totp_enabled: true }).where(eq(users.id, req.session.userId));
   req.session.twoFactorEnrollmentOnly = false;

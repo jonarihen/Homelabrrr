@@ -193,6 +193,15 @@ test('unauthenticated hits from the same address do not exhaust a signed-in user
   assert.equal(res.status, 200);
 });
 
+test('enabling a freshly enrolled factor does not reset the failure budget', async () => {
+  for (let i = 0; i < 5; i++) await request(app).post('/reauthenticate').send({ password: 'wrong-guess' });
+  await testDb.db.update(users).set({ totp_secret: encryptSecret(SECRET) }).where(eq(users.id, userId));
+  const enable = await request(app).post('/2fa/enable').send({ code: generateSync({ secret: SECRET }) });
+  assert.equal(enable.status, 200);
+  const res = await request(app).post('/reauthenticate').send({ password: PASSWORD, code: generateSync({ secret: SECRET }) });
+  assert.equal(res.status, 423);
+});
+
 test('a successful reauthentication clears the failure budget', async () => {
   for (let i = 0; i < 5; i++) await request(app).post('/reauthenticate').send({ password: 'wrong-guess' });
   assert.equal((await request(app).post('/reauthenticate').send({ password: PASSWORD })).status, 200);
