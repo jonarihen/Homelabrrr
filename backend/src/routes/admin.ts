@@ -310,13 +310,20 @@ const LOCKOUT_MAX = 10;
 async function ensureCanManageTargetUser(req, res, userId) {
   if (req.session.isAdmin) return true;
 
-  const [target] = await db.select({ is_admin: users.is_admin }).from(users).where(eq(users.id, Number(userId))).limit(1);
+  const [target] = await db.select().from(users).where(eq(users.id, Number(userId))).limit(1);
   if (!target) {
     res.status(404).json({ error: 'User not found' });
     return false;
   }
   if (target.is_admin) {
     res.status(403).json({ error: 'Only admins can modify admin accounts' });
+    return false;
+  }
+  // A delegate may only manage users whose effective permissions are a subset of its own.
+  const [caller] = await db.select().from(users).where(eq(users.id, Number(req.session.userId))).limit(1);
+  const [targetPerms, callerPerms] = await Promise.all([effectivePermissions(target), effectivePermissions(caller)]);
+  if (Object.keys(targetPerms).some((key) => targetPerms[key] && !callerPerms[key])) {
+    res.status(403).json({ error: 'Only admins can manage users with permissions you do not have' });
     return false;
   }
   return true;
@@ -396,10 +403,11 @@ router.post('/users/:id/reset-2fa', requireAdmin, async (req, res) => {
 });
 
 // ─── API tokens (admin oversight) ─────────────────────────────────────────────
-// Admins (or can_manage_users delegates) can list and revoke any user's personal
-// API tokens. Token secrets/hashes are never exposed. Interactive-session only.
+// Admins (or can_manage_users delegates, within ensureCanManageTargetUser) can
+// list and revoke a user's personal API tokens. Token secrets/hashes are never exposed. Interactive-session only.
 
 router.get('/users/:id/tokens', requireInteractiveSession, pUsers, async (req, res) => {
+  if (!await ensureCanManageTargetUser(req, res, req.params.id)) return;
   const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, Number(req.params.id))).limit(1);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const rows = await db.select({
@@ -418,11 +426,12 @@ router.get('/users/:id/tokens', requireInteractiveSession, pUsers, async (req, r
 });
 
 router.delete('/tokens/:id', requireInteractiveSession, pUsers, async (req, res) => {
-  const [token] = await db.select({ id: apiTokens.id, name: apiTokens.name, username: users.username })
+  const [token] = await db.select({ id: apiTokens.id, name: apiTokens.name, userId: apiTokens.user_id, username: users.username })
     .from(apiTokens)
     .innerJoin(users, eq(users.id, apiTokens.user_id))
     .where(eq(apiTokens.id, Number(req.params.id))).limit(1);
   if (!token) return res.status(404).json({ error: 'Token not found' });
+  if (!await ensureCanManageTargetUser(req, res, token.userId)) return;
   await db.delete(apiTokens).where(eq(apiTokens.id, token.id));
   await logAudit(req, 'admin_revoke_api_token', token.name, `owner: ${token.username}`);
   res.json({ ok: true });
