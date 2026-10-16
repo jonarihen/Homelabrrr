@@ -1,9 +1,8 @@
 import { isIP } from 'net';
 import dns from 'dns/promises';
-import { and, eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { vmAssignments, vmSshConfigs } from '../db/schema/index.ts';
-import { nodeLookupCandidates } from './nodeRef.ts';
+import { publicIpAssignments } from '../db/schema/index.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
 
 // ─── Field validation ─────────────────────────────────────────────────────────
@@ -134,8 +133,8 @@ export async function validateDomainDns(domain, wanIp) {
 }
 
 // ─── Upstream ownership ────────────────────────────────────────────────────────
-// A non-admin may only proxy to targets they own: an IP of a VM assigned to
-// them, or an IP inside one of their own VLAN subnets. Otherwise anyone could
+// A non-admin may only proxy to targets they own: a private IP an admin
+// assigned to them, or an IP inside one of their own VLAN subnets. Otherwise anyone could
 // publish an internal admin service to the internet under their own domain.
 
 function ipv4ToInt(ip) {
@@ -158,29 +157,18 @@ export function ipv4InCidr(ip, cidr) {
 
 /**
  * The concrete set of upstream targets a user is allowed to proxy to:
- *  - vmIps: IPs of VMs assigned to them (from vm_ssh_configs.host)
+ *  - vmIps: private IPs an admin assigned to them (public_ip_assignments)
  *  - subnets: CIDRs of the VLANs assigned to them (see utils/vlanSubnets.js)
+ * Never read user- or guest-editable data (vm_ssh_configs.host, guest-agent
+ * IPs) here: that would let a user publish an arbitrary internal address.
  */
 export async function getUserAllowedUpstreams(userId) {
-  const vmIps = new Set();
-  const assignments = await db
-    .select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
-    .from(vmAssignments)
-    .where(eq(vmAssignments.user_id, userId));
-  for (const a of assignments) {
-    // Legacy rows may store the bare node name — match on every candidate.
-    const candidates = nodeLookupCandidates(a.node);
-    if (candidates.length === 0) continue;
-    const cfgs = await db
-      .select({ host: vmSshConfigs.host })
-      .from(vmSshConfigs)
-      .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, a.vmid)));
-    for (const cfg of cfgs) {
-      if (cfg?.host && isIP(cfg.host)) { vmIps.add(cfg.host); break; }
-    }
-  }
-
-  return { vmIps: [...vmIps], subnets: await userVlanCidrs(db, userId) };
+  const rows = await db
+    .select({ ip: publicIpAssignments.private_ip })
+    .from(publicIpAssignments)
+    .where(eq(publicIpAssignments.user_id, userId));
+  const vmIps = [...new Set(rows.map((r) => r.ip).filter((ip) => isIP(ip)))];
+  return { vmIps, subnets: await userVlanCidrs(db, userId) };
 }
 
 /**

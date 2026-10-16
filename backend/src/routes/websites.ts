@@ -15,7 +15,7 @@ import { probeSite, probeAddressFor, PROBE_PORT } from '../utils/caddyProbe.ts';
 import { sshConfigured, deploySnippet, isSafeRemotePath } from '../utils/caddySnippet.ts';
 import {
   normalizeDomain, isValidDomain, isValidUpstreamHost, parsePort,
-  validateDomainDns, userCanReachUpstream, getUserAllowedUpstreams,
+  validateDomainDns, userCanReachUpstream, getUserAllowedUpstreams, ipv4InCidr,
 } from '../utils/websiteChecks.ts';
 
 const router = Router();
@@ -1119,7 +1119,9 @@ router.get('/upstream-options', async (req, res) => {
   const vms = [];
   for (const a of assignments) {
     const host = hostByVmid.get(a.vmid);
-    if (host && vmIps.includes(host)) {
+    // Display only: the SSH host is user-editable, so list it just when the
+    // allow-list already admits it (userCanReachUpstream is the real gate).
+    if (host && (vmIps.includes(host) || subnets.some((cidr) => ipv4InCidr(host, cidr)))) {
       vms.push({ vmid: a.vmid, node: a.node, ip: host });
     }
   }

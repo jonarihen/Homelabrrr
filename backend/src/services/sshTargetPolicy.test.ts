@@ -35,6 +35,21 @@ test('hostname resolution pins only names whose every address passes policy', ()
   assert.deepEqual(allowedResolvedSshAddresses(['2001:db8::40'], { exactAddresses: ['2001:db8::40'] }), ['2001:db8::40']);
 });
 
+test('guest-claimed addresses count only inside the VLAN the VM is attached to', async () => {
+  // The pure helpers never query; the pool only needs a URL to construct.
+  process.env.DATABASE_URL ??= 'postgres://unused:unused@127.0.0.1:1/unused';
+  const { vlanTagsFromConfig, addressesInsideNetworks } = await import('./sshTargetPolicy.ts');
+  assert.deepEqual(vlanTagsFromConfig({
+    net0: 'virtio=BC:24:11:00:00:01,bridge=vmbr0,tag=1010',
+    net1: 'virtio=BC:24:11:00:00:02,bridge=vmbr1',
+    ipconfig0: 'ip=10.10.10.5/24,tag=99',
+  }), [1010]);
+  assert.deepEqual(vlanTagsFromConfig(undefined), []);
+  // A management address added inside the guest is dropped; the VLAN one stays.
+  assert.deepEqual(addressesInsideNetworks(['10.10.10.5', '192.168.1.5', '2001:db8::5'], ['10.10.10.0/24']), ['10.10.10.5']);
+  assert.deepEqual(addressesInsideNetworks(['10.10.10.5'], []), []);
+});
+
 test('connection limits persist in PostgreSQL and the explicit admin override still validates ports', async () => {
   const testDb = await createTestDatabase();
   // Unconverted transitive imports (proxmox.ts → the legacy db.ts singleton)

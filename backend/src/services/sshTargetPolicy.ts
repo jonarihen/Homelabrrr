@@ -2,12 +2,13 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import { and, count, eq, gt, inArray, lt } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { publicIpAssignments, sshConnectionAttempts } from '../db/schema/index.ts';
+import { publicIpAssignments, sshConnectionAttempts, vlans } from '../db/schema/index.ts';
 import { validateHost, validatePort } from '../utils/validation.ts';
 import { getLXCConfig, getVMAgentInterfaces, getVMConfig } from '../proxmox.ts';
 import { parseIpConfig0 } from '../utils/detectedIps.ts';
 import { allowedResolvedSshAddresses } from '../utils/sshTargetAuthorization.ts';
-import { userVlanCidrs } from '../utils/vlanSubnets.ts';
+import { userVlanCidrs, vlanRowsToCidrs } from '../utils/vlanSubnets.ts';
+import { ipv4InCidr } from '../utils/ipPolicy.ts';
 
 const ATTEMPT_WINDOW_MS = 60_000;
 
@@ -75,18 +76,45 @@ function addressesFromConfig(config) {
   return addresses;
 }
 
+/** VLAN tags on the VM's NICs (`netN: ...,tag=1010`), set by the portal, not the guest. */
+export function vlanTagsFromConfig(config): number[] {
+  const tags = new Set<number>();
+  for (const [key, value] of Object.entries(config || {})) {
+    if (!/^net\d+$/.test(key)) continue;
+    const tag = Number(/(?:^|,)tag=(\d+)/.exec(String(value || ''))?.[1]);
+    if (Number.isInteger(tag) && tag > 0) tags.add(tag);
+  }
+  return [...tags];
+}
+
+/**
+ * Guest-agent and cloud-init addresses are chosen inside the guest or at
+ * deploy time, so a VM could claim a management address. Only trust the ones
+ * that sit inside the VLAN networks the VM is actually attached to.
+ */
+export function addressesInsideNetworks(addresses: Iterable<string>, cidrs: string[]): string[] {
+  return [...addresses].filter((address) => cidrs.some((cidr) => ipv4InCidr(address, cidr)));
+}
+
 async function detectedVmAddresses(node: string, vmid: number | string): Promise<Set<string>> {
-  const addresses = new Set<string>();
+  const claimed = new Set<string>();
+  let config;
   try {
-    let config;
     try { config = await getVMConfig(node, vmid); }
     catch { config = await getLXCConfig(node, vmid); }
-    for (const address of addressesFromConfig(config)) addresses.add(address);
+    for (const address of addressesFromConfig(config)) claimed.add(address);
   } catch { /* a stopped/unreachable VM can still be authorized by its VLAN */ }
   try {
-    for (const address of addressesFromAgent(await getVMAgentInterfaces(node, vmid))) addresses.add(address);
+    for (const address of addressesFromAgent(await getVMAgentInterfaces(node, vmid))) claimed.add(address);
   } catch { /* guest agent is optional */ }
-  return addresses;
+
+  const tags = vlanTagsFromConfig(config);
+  if (!claimed.size || !tags.length) return new Set();
+  const rows = await db
+    .select({ tag: vlans.tag, mode: vlans.mode, subnet_cidr: vlans.subnet_cidr })
+    .from(vlans)
+    .where(inArray(vlans.tag, tags));
+  return new Set(addressesInsideNetworks(claimed, vlanRowsToCidrs(rows)));
 }
 
 export async function authorizeSshTarget({ userId, isAdmin, node, vmid, host, port }) {
