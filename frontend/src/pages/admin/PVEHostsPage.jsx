@@ -377,7 +377,7 @@ export default function PVEHostsPage() {
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                  API Token Secret {editId && <span className="text-gray-600">(leave empty to keep current)</span>}
+                  API Token Secret {editId && <span className="text-gray-600">(leave empty to keep current; required if the address changes)</span>}
                 </label>
                 <input
                   type="password" required={!editId} value={form.tokenSecret}
@@ -447,7 +447,7 @@ export default function PVEHostsPage() {
                 <div>
                   <label className="block text-xs text-gray-400 mb-1.5 font-medium">
                     {form.sshAuthType === 'password' ? 'Password' : 'Private key'}
-                    {form.hasSsh && <span className="text-gray-600"> (leave empty to keep current)</span>}
+                    {form.hasSsh && <span className="text-gray-600"> (leave empty to keep current; required if the address changes)</span>}
                   </label>
                   {form.sshAuthType === 'password' ? (
                     <input
