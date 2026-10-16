@@ -952,3 +952,19 @@ test('admin resize and hardware edit with conflicting owner aliases answer 409 a
   const rows = await testDb.db.select().from(vmAssignments).where(eq(vmAssignments.vmid, 963));
   assert.deepEqual(rows.map(row => row.resource_allocation?.diskGb), [30, 30]);
 });
+
+test('disk growth is checked against every existing disk, not just the boot disk', async () => {
+  await testDb.db.update(users).set({ can_edit_vm_hardware: true }).where(eq(users.id, ownerId));
+  await testDb.db.update(users).set({ max_storage_gb: 100 }).where(eq(users.id, ownerId));
+  await testDb.db.insert(vmAssignments).values({ user_id: ownerId, node, vmid: 964 });
+  sourceDisks = { scsi0: 'local-lvm:vm-964-disk-0,size=20G', scsi1: 'local-lvm:vm-964-disk-1,size=70G' };
+  liveVms = [{ vmid: 964, node: 'pve', type: 'qemu', maxcpu: 2, maxmem: 2 * 1024 ** 3, maxdisk: 20 * 1024 ** 3 }];
+  isAdmin = false;
+  const resize = (size: string) => request(app).put(`/vms/${node}/964/resize-disk`).send({ disk: 'scsi1', size });
+  assert.equal((await resize('+20G')).status, 403);
+  assert.equal(diskResizes.length, 0);
+  assert.equal((await testDb.db.select().from(vmAssignments).where(eq(vmAssignments.vmid, 964)))[0].resource_allocation, null);
+  assert.equal((await resize('+10G')).status, 200);
+  assert.equal((await quota.getUserResourceUsage(ownerId, testDb.db, [])).diskGb, 100);
+  await testDb.db.update(users).set({ can_edit_vm_hardware: false }).where(eq(users.id, ownerId));
+});

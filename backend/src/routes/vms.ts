@@ -24,7 +24,7 @@ import { notify, portalLink } from '../utils/notify.ts';
 import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.ts';
 import { checkVlanAssignment, parseVlanTag, parseNetInterface } from '../utils/vlanAccess.ts';
 import { summarizeLease, renewLease } from '../utils/leases.ts';
-import { assertUserQuota, refreshHardwareAllocation, sizeToGb, vmQuotaUserId } from '../utils/quota.ts';
+import { assertUserQuota, configDiskGb, refreshHardwareAllocation, sizeToGb, vmQuotaUserId } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
 import {
@@ -1378,7 +1378,8 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
       addDiskGb = Math.max(0, (sizeToGb(size) || 0) - currentGb);
     }
     if (!req.session.isAdmin && addDiskGb > 0) {
-      await assertUserQuota(quotaUserId, { addDiskGb });
+      // Count every existing disk from config, the same measure the post-resize floor uses.
+      await assertUserQuota(quotaUserId, { addDiskGb }, undefined, undefined, { vmid: Number(vmid), diskGb: configDiskGb(config) });
     }
 
     await resizeVMDisk(node, vmid, disk, size);
