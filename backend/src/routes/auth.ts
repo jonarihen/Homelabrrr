@@ -8,7 +8,7 @@ import {
   generateAuthenticationOptions, generateRegistrationOptions,
   verifyAuthenticationResponse, verifyRegistrationResponse,
 } from '@simplewebauthn/server';
-import { and, count, desc, eq, gt, isNull, lt, max } from 'drizzle-orm';
+import { and, count, desc, eq, gt, isNull, lt, max, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import {
   apiTokens, invites, loginAttempts, recoveryCodes, sessions, twoFactorAttempts,
@@ -158,6 +158,27 @@ async function clearTwoFactorAttempts(username: string): Promise<void> {
 // brute-force the password or TOTP. Keyed by user id, not username: a rename
 // needs no confirmation and would otherwise reset the counter.
 const confirmationKey = (req: any) => `user:${req.session.userId}`;
+
+// Reserve one attempt from the budget *before* checking the credential; a
+// success clears it. The per-user advisory lock serializes count+insert so
+// parallel requests cannot all observe a count under the limit.
+async function reserveConfirmationAttempt(req: any): Promise<boolean> {
+  const key = confirmationKey(req);
+  const now = Date.now();
+  const windowStart = now - TWO_FACTOR_WINDOW_MS;
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(209, ${Number(req.session.userId)})`);
+    await tx.delete(twoFactorAttempts).where(lt(twoFactorAttempts.attempted_at, windowStart));
+    const [{ c }] = await tx
+      .select({ c: count() })
+      .from(twoFactorAttempts)
+      .where(and(eq(twoFactorAttempts.username, key), gt(twoFactorAttempts.attempted_at, windowStart)));
+    if (c >= TWO_FACTOR_MAX) return false;
+    await tx.insert(twoFactorAttempts).values({ username: key, attempted_at: now });
+    return true;
+  });
+}
+
 const CONFIRMATION_LOCKED = { error: 'Too many failed confirmation attempts. Try again in 10 minutes.', code: 'CONFIRMATION_LOCKED' };
 
 // ─── Login ────────────────────────────────────────────────────────────────────
@@ -525,13 +546,11 @@ router.put('/change-password', verifyTwoFactorLimiter, requireAuth, requireInter
   if (!user) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  const key = confirmationKey(req);
-  if (await pruneAndCountTwoFactor(key) >= TWO_FACTOR_MAX) return res.status(423).json(CONFIRMATION_LOCKED);
+  if (!await reserveConfirmationAttempt(req)) return res.status(423).json(CONFIRMATION_LOCKED);
   if (!bcrypt.compareSync(currentPassword, user.password)) {
-    await recordTwoFactorFailure(key);
     return res.status(403).json({ error: 'Current password is incorrect', code: CONFIRMATION_FAILED });
   }
-  await clearTwoFactorAttempts(key);
+  await clearTwoFactorAttempts(confirmationKey(req));
 
   const hash = bcrypt.hashSync(newPassword, 10);
   await db.update(users).set({ password: hash }).where(eq(users.id, req.session.userId));
@@ -551,20 +570,15 @@ router.post('/reauthenticate', verifyTwoFactorLimiter, requireAuth, requireInter
     .from(users)
     .where(eq(users.id, req.session.userId))
     .limit(1);
-  const key = confirmationKey(req);
-  if (await pruneAndCountTwoFactor(key) >= TWO_FACTOR_MAX) return res.status(423).json(CONFIRMATION_LOCKED);
+  if (!await reserveConfirmationAttempt(req)) return res.status(423).json(CONFIRMATION_LOCKED);
   if (!user || !bcrypt.compareSync(String(password || ''), user.password)) {
-    await recordTwoFactorFailure(key);
     return res.status(403).json({ error: 'Password confirmation failed', code: CONFIRMATION_FAILED });
   }
   if (user.totp_enabled) {
     const valid = verifyTotp(code, decryptSecret(user.totp_secret));
-    if (!valid) {
-      await recordTwoFactorFailure(key);
-      return res.status(403).json({ error: 'Second-factor confirmation failed', code: CONFIRMATION_FAILED });
-    }
+    if (!valid) return res.status(403).json({ error: 'Second-factor confirmation failed', code: CONFIRMATION_FAILED });
   }
-  await clearTwoFactorAttempts(key);
+  await clearTwoFactorAttempts(confirmationKey(req));
   req.session.reauthenticatedAt = Date.now();
   await logAudit(req, 'session_reauthenticated', req.session.username, '');
   res.json({ ok: true, validForSeconds: 900 });
@@ -607,14 +621,10 @@ router.post('/2fa/enable', verifyTwoFactorLimiter, requireAuth, requireInteracti
   if (!user?.totp_secret) return res.status(400).json({ error: 'Run setup first' });
   if (user.totp_enabled) return res.status(400).json({ error: '2FA is already enabled' });
 
-  const key = confirmationKey(req);
-  if (await pruneAndCountTwoFactor(key) >= TWO_FACTOR_MAX) return res.status(423).json(CONFIRMATION_LOCKED);
+  if (!await reserveConfirmationAttempt(req)) return res.status(423).json(CONFIRMATION_LOCKED);
   const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
-  if (!isValid) {
-    await recordTwoFactorFailure(key);
-    return res.status(400).json({ error: 'Invalid code — try again' });
-  }
-  await clearTwoFactorAttempts(key);
+  if (!isValid) return res.status(400).json({ error: 'Invalid code — try again' });
+  await clearTwoFactorAttempts(confirmationKey(req));
 
   await db.update(users).set({ totp_enabled: true }).where(eq(users.id, req.session.userId));
   req.session.twoFactorEnrollmentOnly = false;
@@ -636,14 +646,10 @@ router.post('/2fa/disable', verifyTwoFactorLimiter, requireAuth, requireInteract
   if (!user?.totp_enabled) return res.status(400).json({ error: '2FA is not enabled' });
   if (user.require_2fa) return res.status(403).json({ error: 'Your account is required to keep 2FA enabled' });
 
-  const key = confirmationKey(req);
-  if (await pruneAndCountTwoFactor(key) >= TWO_FACTOR_MAX) return res.status(423).json(CONFIRMATION_LOCKED);
+  if (!await reserveConfirmationAttempt(req)) return res.status(423).json(CONFIRMATION_LOCKED);
   const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
-  if (!isValid) {
-    await recordTwoFactorFailure(key);
-    return res.status(400).json({ error: 'Invalid code' });
-  }
-  await clearTwoFactorAttempts(key);
+  if (!isValid) return res.status(400).json({ error: 'Invalid code' });
+  await clearTwoFactorAttempts(confirmationKey(req));
 
   await db.update(users).set({ totp_enabled: false, totp_secret: null }).where(eq(users.id, req.session.userId));
   const revoked = await revokeOtherStoredSessions(db, req.session.userId, req.sessionID);

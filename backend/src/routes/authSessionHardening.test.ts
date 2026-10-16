@@ -116,6 +116,15 @@ test('reauthenticate locks out after repeated failures, even with the right pass
   assert.equal(disable.status, 423);
 });
 
+test('parallel reauthentication guesses cannot exceed the budget', async () => {
+  const results = await Promise.all(
+    Array.from({ length: 10 }, () => request(app).post('/reauthenticate').send({ password: 'wrong-guess' })),
+  );
+  const statuses = results.map((r) => r.status);
+  assert.equal(statuses.filter((s) => s === 403).length, 6, statuses.join(','));
+  assert.equal(statuses.filter((s) => s === 423).length, 4, statuses.join(','));
+});
+
 test('a successful reauthentication clears the failure budget', async () => {
   for (let i = 0; i < 5; i++) await request(app).post('/reauthenticate').send({ password: 'wrong-guess' });
   assert.equal((await request(app).post('/reauthenticate').send({ password: PASSWORD })).status, 200);
