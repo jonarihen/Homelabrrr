@@ -4,8 +4,6 @@ import { and, count, eq, gt, inArray, lt } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { publicIpAssignments, sshConnectionAttempts } from '../db/schema/index.ts';
 import { validateHost, validatePort } from '../utils/validation.ts';
-import { getLXCConfig, getVMAgentInterfaces, getVMConfig } from '../proxmox.ts';
-import { parseIpConfig0 } from '../utils/detectedIps.ts';
 import { allowedResolvedSshAddresses } from '../utils/sshTargetAuthorization.ts';
 import { userVlanCidrs } from '../utils/vlanSubnets.ts';
 
@@ -54,41 +52,6 @@ async function explicitlyAssignedAddresses(userId: number, node: string, vmid: n
   return rows.map((row) => row.ip);
 }
 
-function addressesFromAgent(payload) {
-  const interfaces = Array.isArray(payload) ? payload : Array.isArray(payload?.result) ? payload.result : [];
-  return interfaces.flatMap((entry) => Array.isArray(entry?.['ip-addresses']) ? entry['ip-addresses'] : [])
-    .map((entry) => String(entry?.['ip-address'] || '').split('/')[0])
-    .filter((address) => net.isIP(address) && !['127.0.0.1', '::1'].includes(address));
-}
-
-function addressesFromConfig(config) {
-  const addresses: string[] = [];
-  for (const [key, value] of Object.entries(config || {})) {
-    if (!/^ipconfig\d+$/.test(key) && !/^net\d+$/.test(key)) continue;
-    const parsed = parseIpConfig0(String(value || ''));
-    if (parsed?.ip) addresses.push(parsed.ip);
-    for (const match of String(value || '').matchAll(/(?:^|,)ip6?=([^,]+)/g)) {
-      const address = match[1].split('/')[0];
-      if (net.isIP(address)) addresses.push(address);
-    }
-  }
-  return addresses;
-}
-
-async function detectedVmAddresses(node: string, vmid: number | string): Promise<Set<string>> {
-  const addresses = new Set<string>();
-  try {
-    let config;
-    try { config = await getVMConfig(node, vmid); }
-    catch { config = await getLXCConfig(node, vmid); }
-    for (const address of addressesFromConfig(config)) addresses.add(address);
-  } catch { /* a stopped/unreachable VM can still be authorized by its VLAN */ }
-  try {
-    for (const address of addressesFromAgent(await getVMAgentInterfaces(node, vmid))) addresses.add(address);
-  } catch { /* guest agent is optional */ }
-  return addresses;
-}
-
 export async function authorizeSshTarget({ userId, isAdmin, node, vmid, host, port }) {
   const checkedHost = validateHost(host);
   const checkedPort = validatePort(port ?? 22);
@@ -104,13 +67,14 @@ export async function authorizeSshTarget({ userId, isAdmin, node, vmid, host, po
     }
   }
 
-  const [networks, explicit, detected] = await Promise.all([
+  // Guest-agent and cloud-init addresses are chosen inside the guest or at
+  // deploy time, so they never grant access on their own: a non-admin reaches
+  // only their assigned VLAN networks and admin-assigned addresses.
+  const [networks, explicit] = await Promise.all([
     assignedNetworks(userId),
     explicitlyAssignedAddresses(userId, node, vmid),
-    detectedVmAddresses(node, vmid),
   ]);
-  const exact = new Set([...explicit, ...detected]);
-  const allowed = allowedResolvedSshAddresses(addresses, { exactAddresses: [...exact], networks });
+  const allowed = allowedResolvedSshAddresses(addresses, { exactAddresses: explicit, networks });
   if (!allowed.length) {
     throw Object.assign(
       new Error('SSH/SFTP target is outside the VM addresses or networks assigned to you'),

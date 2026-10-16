@@ -1,10 +1,11 @@
 import { isIP } from 'net';
 import dns from 'dns/promises';
-import { and, eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { vmAssignments, vmSshConfigs } from '../db/schema/index.ts';
-import { nodeLookupCandidates } from './nodeRef.ts';
+import { publicIpAssignments, vmAssignments } from '../db/schema/index.ts';
+import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
+import { hostForNode } from '../proxmox.ts';
 
 // ─── Field validation ─────────────────────────────────────────────────────────
 // Everything a user submits is validated here before it is ever built into a
@@ -134,8 +135,8 @@ export async function validateDomainDns(domain, wanIp) {
 }
 
 // ─── Upstream ownership ────────────────────────────────────────────────────────
-// A non-admin may only proxy to targets they own: an IP of a VM assigned to
-// them, or an IP inside one of their own VLAN subnets. Otherwise anyone could
+// A non-admin may only proxy to targets they own: a private IP an admin
+// assigned to them, or an IP inside one of their own VLAN subnets. Otherwise anyone could
 // publish an internal admin service to the internet under their own domain.
 
 function ipv4ToInt(ip) {
@@ -158,29 +159,44 @@ export function ipv4InCidr(ip, cidr) {
 
 /**
  * The concrete set of upstream targets a user is allowed to proxy to:
- *  - vmIps: IPs of VMs assigned to them (from vm_ssh_configs.host)
+ *  - vmIps: private IPs an admin assigned to them (public_ip_assignments) for
+ *    VMs that are still assigned to them
  *  - subnets: CIDRs of the VLANs assigned to them (see utils/vlanSubnets.js)
+ * Never read user- or guest-editable data (vm_ssh_configs.host, guest-agent
+ * IPs) here: that would let a user publish an arbitrary internal address.
  */
 export async function getUserAllowedUpstreams(userId) {
-  const vmIps = new Set();
-  const assignments = await db
-    .select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
-    .from(vmAssignments)
-    .where(eq(vmAssignments.user_id, userId));
-  for (const a of assignments) {
-    // Legacy rows may store the bare node name — match on every candidate.
-    const candidates = nodeLookupCandidates(a.node);
-    if (candidates.length === 0) continue;
-    const cfgs = await db
-      .select({ host: vmSshConfigs.host })
-      .from(vmSshConfigs)
-      .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, a.vmid)));
-    for (const cfg of cfgs) {
-      if (cfg?.host && isIP(cfg.host)) { vmIps.add(cfg.host); break; }
+  const [rows, assignments] = await Promise.all([
+    db.select({
+      ip: publicIpAssignments.private_ip, node: publicIpAssignments.node, vmid: publicIpAssignments.vmid,
+      hostId: publicIpAssignments.proxmox_host_id,
+    })
+      .from(publicIpAssignments).where(eq(publicIpAssignments.user_id, userId)),
+    db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
+      .from(vmAssignments).where(eq(vmAssignments.user_id, userId)),
+  ]);
+  // An IP only counts while its VM is still assigned to this user: unassigning
+  // a VM leaves the public-IP row behind. Legacy rows may store the bare node
+  // name, so a node-name match alone is not enough when the row records its
+  // Proxmox host: the assignment must resolve to that same host (`pve` must not
+  // match `2~pve` on another cluster, in either direction).
+  const sameHost = async (a, row) => {
+    if (row.hostId == null) return true;
+    const { hostId } = decodeNodeRef(a.node);
+    if (hostId != null) return String(hostId) === String(row.hostId);
+    const host = await hostForNode(a.node, { vmid: a.vmid }).catch(() => null);
+    return host != null && String(host.id) === String(row.hostId);
+  };
+  const vmIps = [];
+  for (const row of rows) {
+    if (!isIP(row.ip) || vmIps.includes(row.ip)) continue;
+    for (const a of assignments) {
+      if (a.vmid !== row.vmid) continue;
+      if (!nodeLookupCandidates(a.node).includes(row.node) && !nodeLookupCandidates(row.node).includes(a.node)) continue;
+      if (await sameHost(a, row)) { vmIps.push(row.ip); break; }
     }
   }
-
-  return { vmIps: [...vmIps], subnets: await userVlanCidrs(db, userId) };
+  return { vmIps, subnets: await userVlanCidrs(db, userId) };
 }
 
 /**
