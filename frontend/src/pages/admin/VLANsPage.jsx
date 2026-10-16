@@ -636,7 +636,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
           <div className="space-y-1">
             {results.map((r, i) => (
               <div key={i} className={`text-xs rounded px-3 py-2 ${r.status === 'ok' ? 'bg-green-900/20 text-green-400' : r.status === 'already_synced' ? 'bg-gray-800 text-gray-400' : 'bg-red-900/20 text-red-400'}`}>
-                <span className="font-medium">{r.firewall}:</span> {r.status === 'ok' ? `Created ${r.interfaceName} (${r.subnet?.network})` : r.status === 'already_synced' ? 'Already synced' : r.error}
+                <span className="font-medium">{r.firewall}:</span> {r.status === 'ok' ? `Created ${r.interfaceName} (${r.subnet?.network}${r.subnetRecorded ? '' : ', default, not recorded'})` : r.status === 'already_synced' ? 'Already synced' : r.error}
               </div>
             ))}
           </div>

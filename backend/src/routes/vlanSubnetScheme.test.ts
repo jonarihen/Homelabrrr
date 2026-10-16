@@ -129,6 +129,9 @@ test('VLAN sync records no subnet when no interface step configured one', async 
   assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
   const [sync] = await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.vlan_id, vlan.id));
   assert.equal(sync.subnet_cidr, null);
+  // Nothing recorded: the response shows the legacy default readers use, labelled as such.
+  assert.equal(res.body[0].subnet.network, '10.13.1.0/24');
+  assert.equal(res.body[0].subnetRecorded, false);
 });
 
 test('VLAN sync records the subnet from the interface step output, not the setting', async (t) => {
@@ -151,4 +154,7 @@ test('VLAN sync records the subnet from the interface step output, not the setti
   assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
   const [sync] = await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.vlan_id, vlan.id));
   assert.equal(sync.subnet_cidr, '192.168.50.0/24');
+  // The response reports the recorded network, not the 172 setting.
+  assert.equal(res.body[0].subnet.network, '192.168.50.0/24');
+  assert.equal(res.body[0].subnetRecorded, true);
 });

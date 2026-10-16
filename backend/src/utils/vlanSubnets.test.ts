@@ -91,3 +91,21 @@ test('userVlanCidrs uses the recorded sync subnet, not the current workflow sett
     await testDb.drop();
   }
 });
+
+test('a managed VLAN with a stale explicit CIDR covers its recorded sync CIDR instead', () => {
+  assert.equal(vlanRowCidr({ tag: 1126, mode: 'managed', subnet_cidr: '10.99.0.0/16', synced_cidr: '172.11.26.0/24' }), '172.11.26.0/24');
+});
+
+test('userVlanCidrs follows the sync CIDR over a stale explicit subnet_cidr', async () => {
+  const testDb = await createTestDatabase();
+  try {
+    const [user] = await testDb.db.insert(users).values({ username: 'stale-explicit', password: 'x' }).returning({ id: users.id });
+    const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw', host: 'h', api_key: 'k' }).returning({ id: firewalls.id });
+    const [v] = await testDb.db.insert(vlans).values({ name: 's', tag: 1126, mode: 'managed', subnet_cidr: '10.99.0.0/16' }).returning({ id: vlans.id });
+    await testDb.db.insert(firewallVlanSync).values({ firewall_id: fw.id, vlan_id: v.id, interface_name: 'vlan1126', subnet_cidr: '172.11.26.0/24' });
+    await testDb.db.insert(userVlans).values({ user_id: user.id, vlan_id: v.id });
+    assert.deepEqual(await userVlanCidrs(testDb.db, user.id), ['172.11.26.0/24']);
+  } finally {
+    await testDb.drop();
+  }
+});

@@ -2502,7 +2502,9 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const ifaceNet = ifaceOut?.netmask === '255.255.255.0'
           && /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(ifaceOut.ip);
         const provisionedCidr = ifaceNet ? `${ifaceNet[1]}.0/24` : null;
-        const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet };
+        // Report what was recorded; with no record readers use the legacy default, so show that, labelled.
+        const recordedSubnet = syncedSubnet(vlan.tag, provisionedCidr);
+        const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet: recordedSubnet, subnetRecorded: !!provisionedCidr };
         console.log(`[sync] Success:`, JSON.stringify(result));
         // policy_ids and artifacts are jsonb columns — pass objects directly.
         await db.insert(firewallVlanSync).values({
@@ -2510,7 +2512,7 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
           policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
           subnet_cidr: provisionedCidr,
         });
-        await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
+        await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${provisionedCidr || `no subnet recorded; default ${recordedSubnet?.network}`})`);
         results.push({ firewall: fw.name, status: 'ok', ...result });
       } catch (err) {
         console.error(`[sync] Error provisioning VLAN ${vlan.tag} on ${fw.name}:`, err.message);

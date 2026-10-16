@@ -30,15 +30,16 @@ interface VlanRow {
 
 /**
  * The network a single `vlans` row covers, or '' when it covers none.
- * An explicit CIDR always wins; a tagged-only VLAN without one is not something
- * we can infer an address range for, so it grants nothing.
+ * A tagged-only VLAN covers only its explicit CIDR (none → nothing). A managed
+ * VLAN covers what its sync recorded as provisioned; a stale explicit CIDR
+ * never overrides that, and only applies when nothing was recorded.
  */
 export function vlanRowCidr(row: VlanRow): string {
   const explicit = String(row?.subnet_cidr || '').trim();
-  if (CIDR_RE.test(explicit)) return explicit;
-  if (row?.mode === 'tagged_only') return '';
+  if (row?.mode === 'tagged_only') return CIDR_RE.test(explicit) ? explicit : '';
   const synced = String(row?.synced_cidr || '').trim();
   if (CIDR_RE.test(synced)) return synced;
+  if (CIDR_RE.test(explicit)) return explicit;
   // Unsynced, or synced before the subnet was recorded: the default scheme.
   return vlanTagToSubnet(row?.tag)?.network || '';
 }
