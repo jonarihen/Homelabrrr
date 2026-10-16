@@ -337,7 +337,7 @@ router.post('/:id/template', async (req, res) => {
   }
   // Both land in PVE property strings — strict identifiers only.
   for (const [field, value] of Object.entries({ storage, bridge })) {
-    if (!/^[a-zA-Z0-9._-]+$/.test(String(value))) {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(value)) {
       return res.status(400).json({ error: `Invalid ${field}` });
     }
   }

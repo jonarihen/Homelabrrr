@@ -784,13 +784,13 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
   // /from-image and /clone. (`name` is not one of them: it is a DNS label, not
   // an identifier, and is validated by toPveVmName above.)
   for (const [field, value] of Object.entries({ storage, bridge, ostype, bios, scsihw })) {
-    if (!/^[a-zA-Z0-9._-]+$/.test(String(value))) {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(value)) {
       return res.status(400).json({ error: `Invalid ${field}` });
     }
   }
   // Only an ISO volume ("<storage>:iso/<file>"); no other volume type and no
   // extra property-string options.
-  const isoMatch = iso ? /^([a-zA-Z0-9._-]+):iso\/[^,]+$/.exec(String(iso)) : null;
+  const isoMatch = typeof iso === 'string' ? /^([a-zA-Z0-9._-]+):iso\/[^,]+$/.exec(iso) : null;
   if (iso && !isoMatch) {
     return res.status(400).json({ error: 'Invalid iso' });
   }

@@ -1558,7 +1558,7 @@ router.post('/:node/:vmid/backup', async (req, res) => {
   const { nodeName } = decodeNodeRef(node);
   const vmLabel = `#${vmid}${nodeName ? ` on ${nodeName}` : ''}`;
   try {
-    await assertStorageExposed(node, storage, { isAdmin: req.session.isAdmin });
+    await assertStorageExposed(node, storage, { isAdmin: req.session.isAdmin }, vmid);
     const upid = await createVMBackup(node, vmid, { mode, compress, storage, notes });
     await logAudit(req, 'backup_create', `${node}/${vmid}`, storage || '');
     // Track the task so the UI can mark the archive as in progress instead of
@@ -1629,7 +1629,7 @@ router.post('/:node/:vmid/restore', async (req, res) => {
   // unknown — a fresh VMID has no guest to probe, and an unrecognised volid
   // shape tells us nothing — but if both are, refuse rather than assume qemu.
   try {
-    await assertStorageExposed(node, storage, { isAdmin: req.session.isAdmin });
+    await assertStorageExposed(node, storage, { isAdmin: req.session.isAdmin }, vmid);
     const detected = await getGuestType(node, vmid);
     const guest = resolveRestoreGuestType({ volid: archive, detected, vmid });
     if (guest.error) return res.status(guest.status).json({ error: guest.error });
