@@ -4,7 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq, and } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, firewalls, vlans, firewallVlanSync, managedVips, workflows, workflowSteps } from '../db/schema/index.ts';
+import { users, firewalls, vlans, userVlans, firewallVlanSync, managedVips, workflows, workflowSteps } from '../db/schema/index.ts';
 import { FortiGateAPI } from '../fortigate.ts';
 
 let testDb: TestDatabase;
@@ -296,10 +296,63 @@ test('VLAN unsync never deletes unlinked legacy forwards, but reports those in i
   assert.equal(res.status, 200);
   assert.equal(deleteVip.mock.callCount(), 0);
   assert.deepEqual(res.body.legacyForwardsNeedingReview, [{ firewallId, name: 'pf-legacy-in', mapped_ip: '10.10.99.30' }]);
+  assert.equal(res.body.legacyForwardsNeedingReviewCount, 1);
   const remaining = await testDb.db.select({ vip_name: managedVips.vip_name }).from(managedVips)
     .where(eq(managedVips.firewall_id, firewallId));
   assert.equal(remaining.length, 3);
   await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
+});
+
+test('a VLAN-only delegate gets just the count of legacy forwards needing review', async (t) => {
+  t.mock.method(FortiGateAPI.prototype, 'deleteInterface', async () => {});
+  const [delegate] = await testDb.db.insert(users)
+    .values({ username: 'vlan-delegate', password: 'x', can_manage_vlans: true }).returning({ id: users.id });
+  await testDb.db.insert(userVlans).values({ user_id: delegate.id, vlan_id: vlanId });
+  await testDb.db.insert(firewallVlanSync).values({
+    firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099', artifacts: [{ type: 'interface', name: 'vlan1099' }],
+  });
+  await testDb.db.insert(managedVips).values({
+    firewall_id: firewallId, vip_name: 'pf-legacy-hidden', ext_port: 9015, mapped_ip: '10.10.99.35', mapped_port: 22, vlan_interface: '',
+  });
+  const adminRouter = (await import('./admin.ts')).default;
+  const delegateApp = express();
+  delegateApp.use(express.json());
+  delegateApp.use((req, _res, next) => {
+    req.session = { userId: delegate.id, username: 'vlan-delegate', isAdmin: false, reauthenticatedAt: Date.now() } as never;
+    next();
+  });
+  delegateApp.use('/', adminRouter);
+
+  const res = await request(delegateApp).delete(`/vlans/${vlanId}/sync/${firewallId}`);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.legacyForwardsNeedingReviewCount, 1);
+  assert.equal(res.body.legacyForwardsNeedingReview, undefined);
+  await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
+  await testDb.db.delete(userVlans).where(eq(userVlans.user_id, delegate.id));
+});
+
+test('VLAN delete refuses when a sync commits while it runs', async () => {
+  const [late] = await testDb.db.insert(vlans).values({ name: 'late', tag: 1096, mode: 'managed' }).returning({ id: vlans.id });
+  let locked!: () => void;
+  const lockedP = new Promise<void>(r => { locked = r; });
+  let release!: () => void;
+  const held = new Promise<void>(r => { release = r; });
+  // Simulates a sync's tracking transaction: VLAN row FOR SHARE, then insert.
+  const tx = testDb.db.transaction(async (t) => {
+    await t.select({ id: vlans.id }).from(vlans).where(eq(vlans.id, late.id)).for('share');
+    await t.insert(firewallVlanSync).values({ firewall_id: firewallId, vlan_id: late.id, interface_name: 'vlan1096' });
+    locked();
+    await held;
+  });
+  await lockedP;
+  const del = request(app).delete(`/vlans/${late.id}`).then(r => r);
+  await new Promise(r => setTimeout(r, 200));
+  release();
+  await tx;
+  const res = await del;
+  assert.equal(res.status, 409);
+  assert.ok((await testDb.db.select().from(vlans).where(eq(vlans.id, late.id)))[0]);
+  await testDb.db.delete(vlans).where(eq(vlans.id, late.id));
 });
 
 test('PUT /vlans/:id refuses a tag change while the VLAN is synced', async () => {

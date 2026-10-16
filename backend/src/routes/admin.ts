@@ -1838,6 +1838,14 @@ async function legacyForwardsNeedingReview(firewallId, vlanTag) {
     .map(r => ({ firewallId, name: r.vip_name, mapped_ip: r.mapped_ip }));
 }
 
+// Names and IPs only for those who may see every port forward; others get a count.
+async function legacyReviewPayload(req, rows) {
+  return {
+    legacyForwardsNeedingReviewCount: rows.length,
+    ...(await canManageAllPortForwards(req) ? { legacyForwardsNeedingReview: rows } : {}),
+  };
+}
+
 function legacyReviewNote(rows) {
   return rows.length
     ? `; WARNING legacy port forwards in this VLAN's subnet were not removed, review them: ${rows.map(r => `${r.name} (${r.mapped_ip})`).join(', ')}`
@@ -1933,11 +1941,23 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
 
   const legacyForwards = (await Promise.all(syncs.map(sync => legacyForwardsNeedingReview(sync.fw_id, vlan.tag)))).flat();
 
-  // 3. Delete the VLAN from DB (CASCADE removes user_vlans and firewall_vlan_sync)
-  await db.delete(vlans).where(eq(vlans.id, Number(req.params.id)));
+  // 3. Delete the VLAN from DB (CASCADE removes user_vlans and firewall_vlan_sync).
+  // Lock the VLAN row (sync creators take it FOR SHARE before inserting their
+  // tracking row) and refuse if a sync was committed since `syncs` was read.
+  const deleted = await db.transaction(async (tx) => {
+    await tx.select({ id: vlans.id }).from(vlans).where(eq(vlans.id, vlan.id)).for('update');
+    const [lateSync] = await tx.select({ id: firewallVlanSync.id }).from(firewallVlanSync)
+      .where(eq(firewallVlanSync.vlan_id, vlan.id)).limit(1);
+    if (lateSync) return false;
+    await tx.delete(vlans).where(eq(vlans.id, vlan.id));
+    return true;
+  });
+  if (!deleted) {
+    return res.status(409).json({ error: 'The VLAN was synced to a firewall during the delete; retry to remove it there too' });
+  }
   await logAudit(req, 'admin_delete_vlan', `VLAN ${vlan.tag}`,
     (fwResults.length ? `FW cleanup: ${fwResults.map(r => `${r.firewall}=${r.status}`).join(', ')}` : '') + legacyReviewNote(legacyForwards));
-  res.json({ ok: true, firewallCleanup: fwResults, legacyForwardsNeedingReview: legacyForwards });
+  res.json({ ok: true, firewallCleanup: fwResults, ...await legacyReviewPayload(req, legacyForwards) });
 });
 
 // ─── User VLAN assignments ────────────────────────────────────────────────────
@@ -2600,6 +2620,9 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         // policy_ids and artifacts are jsonb columns — pass objects directly.
         await trackProvisioned(client, artifacts, () => db.transaction(async (tx) => {
           await lockFirewallForTracking(tx, fw.id);
+          // DELETE /vlans/:id takes this row FOR UPDATE before its final re-check.
+          const [liveVlan] = await tx.select({ id: vlans.id }).from(vlans).where(eq(vlans.id, vlan.id)).for('share');
+          if (!liveVlan) throw new TrackingTargetGoneError('VLAN was deleted during provisioning');
           await tx.insert(firewallVlanSync).values({
             firewall_id: fw.id, vlan_id: vlan.id, interface_name: interfaceName,
             policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
@@ -2681,7 +2704,7 @@ async function handleVlanUnsync(req: any, res: any, vlanIdRaw: any, firewallIdRa
   }
   const legacyForwards = await legacyForwardsNeedingReview(firewallId, sync.vlan_tag);
   await logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${vlanId}`, `Firewall ${firewallId}${legacyReviewNote(legacyForwards)}`);
-  res.json({ ok: true, legacyForwardsNeedingReview: legacyForwards });
+  res.json({ ok: true, ...await legacyReviewPayload(req, legacyForwards) });
 }
 
 router.delete('/vlans/:id/sync/:firewallId', pVlans, async (req, res) => {
