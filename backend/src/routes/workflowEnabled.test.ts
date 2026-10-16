@@ -64,10 +64,12 @@ test('workflow listing hides legacy rows for the removed delete triggers', async
   assert.deepEqual(catalog.body.triggers.map((t: any) => t.trigger), ['vlan_provision', 'port_forward_create', 'policy_create']);
 });
 
-test('POST /policies answers 409 and creates no policy when policy_create is disabled', async (t) => {
+test('POST /policies answers 409 and touches nothing when policy_create is disabled', async (t) => {
   await testDb.db.update(workflows).set({ enabled: false })
     .where(and(eq(workflows.firewall_id, firewallId), eq(workflows.trigger, 'policy_create')));
-  t.mock.method(FortiGateAPI.prototype, 'getAddressObject', async () => ({ name: 'exists' }));
+  // Missing address objects must not be created for a refused request.
+  t.mock.method(FortiGateAPI.prototype, 'getAddressObject', async () => null);
+  const createAddress = t.mock.method(FortiGateAPI.prototype, 'createAddressObject', async () => ({}));
   t.mock.method(FortiGateAPI.prototype, 'getPolicies', async () => []);
   const createPolicy = t.mock.method(FortiGateAPI.prototype, 'createPolicy', async () => ({ mkey: 1 }));
 
@@ -75,4 +77,5 @@ test('POST /policies answers 409 and creates no policy when policy_create is dis
   assert.equal(res.status, 409);
   assert.match(res.body.error, /disabled/);
   assert.equal(createPolicy.mock.callCount(), 0);
+  assert.equal(createAddress.mock.callCount(), 0);
 });
