@@ -24,7 +24,7 @@ import { notify, portalLink } from '../utils/notify.ts';
 import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.ts';
 import { checkVlanAssignment, parseVlanTag, parseNetInterface } from '../utils/vlanAccess.ts';
 import { summarizeLease, renewLease } from '../utils/leases.ts';
-import { assertUserQuota, refreshHardwareAllocation, sizeToGb } from '../utils/quota.ts';
+import { assertUserQuota, refreshHardwareAllocation, sizeToGb, vmQuotaUserId } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
 import {
@@ -1316,7 +1316,7 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
       const addCores = Math.max(0, newCores - curCores);
       const addMemoryMb = Math.max(0, newMemMb - curMemMb);
       if (addCores > 0 || addMemoryMb > 0) {
-        await assertUserQuota(req.session.userId, { addCores, addMemoryMb });
+        await assertUserQuota(await vmQuotaUserId(node, Number(vmid), req.session.userId), { addCores, addMemoryMb });
       }
     }
 
@@ -1362,22 +1362,22 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
   try {
     // Quota: count only the growth (PVE resize can never shrink). Relative
     // sizes ("+10G") are the delta directly; absolute sizes are compared to
-    // the disk's current size from the VM config.
-    if (!req.session.isAdmin) {
-      let addDiskGb = 0;
-      if (size.startsWith('+')) {
-        addDiskGb = sizeToGb(size.slice(1)) || 0;
-      } else {
-        const config = await getVMConfig(node, vmid);
-        const currentGb = sizeToGb(String(config?.[disk] || '').match(/(?:^|,)size=(\d+[MGT])/)?.[1]) || 0;
-        addDiskGb = Math.max(0, (sizeToGb(size) || 0) - currentGb);
-      }
-      if (addDiskGb > 0) {
-        await assertUserQuota(req.session.userId, { addDiskGb });
-      }
+    // the disk's current size from the VM config. The growth is charged to
+    // the VM's owner, not to an operator resizing someone else's VM.
+    const config = await getVMConfig(node, vmid);
+    let addDiskGb = 0;
+    if (size.startsWith('+')) {
+      addDiskGb = sizeToGb(size.slice(1)) || 0;
+    } else {
+      const currentGb = sizeToGb(String(config?.[disk] || '').match(/(?:^|,)size=(\d+[MGT])/)?.[1]) || 0;
+      addDiskGb = Math.max(0, (sizeToGb(size) || 0) - currentGb);
+    }
+    if (!req.session.isAdmin && addDiskGb > 0) {
+      await assertUserQuota(await vmQuotaUserId(node, Number(vmid), req.session.userId), { addDiskGb });
     }
 
     await resizeVMDisk(node, vmid, disk, size);
+    await refreshHardwareAllocation(node, Number(vmid), { addDiskGb, config });
     await logAudit(req, 'vm_disk_resize', `${node}/${vmid}`, `${disk}=${size}`);
     res.json({ ok: true });
   } catch (err) {

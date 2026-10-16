@@ -84,9 +84,19 @@ export async function getUserResourceUsage(userId: number, database: DbOrTx = db
  * user doesn't exist. Per metric: an explicit per-user value overrides the
  * role's default; otherwise the role's value applies (if any role is set).
  */
-export async function refreshHardwareAllocation(node: string, vmid: number, updates: { cores?: number; memoryMb?: number }) {
+export async function refreshHardwareAllocation(
+  node: string, vmid: number,
+  updates: { cores?: number; memoryMb?: number; addDiskGb?: number; config?: Record<string, any> },
+) {
   const candidates = nodeLookupCandidates(node);
   if (!candidates.length) return;
+  const addDiskGb = updates.addDiskGb && updates.addDiskGb > 0 ? updates.addDiskGb : 0;
+  // PVE maxdisk only reflects the boot disk, so growth of any disk is kept in
+  // the allocation floor instead; it is measured against every disk in config.
+  let configDiskGb = 0;
+  if (addDiskGb && updates.config) {
+    try { configDiskGb = cloneDiskAllocation(updates.config, 1).diskGb; } catch { /* unmeasurable: keep the stored floor */ }
+  }
   await db.transaction(async tx => {
     const owners = await tx.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
       .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
@@ -94,13 +104,30 @@ export async function refreshHardwareAllocation(node: string, vmid: number, upda
     const rows = await tx.select().from(vmAssignments)
       .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates))).for('update');
     for (const row of rows) {
-      if (!row.resource_allocation) continue;
-      await tx.update(vmAssignments).set({ resource_allocation: { ...row.resource_allocation,
+      const prev = row.resource_allocation;
+      if (!prev && !addDiskGb) continue;
+      // VMs assigned without an allocation get one seeded from their config.
+      const base = prev ?? {
+        cores: (Number(updates.config?.sockets) || 1) * (Number(updates.config?.cores) || 1),
+        memoryMb: parseInt(String(updates.config?.memory ?? ''), 10) || 0,
+        diskGb: 0,
+      };
+      await tx.update(vmAssignments).set({ resource_allocation: { ...base,
         ...(updates.cores !== undefined ? { cores: updates.cores } : {}),
         ...(updates.memoryMb !== undefined ? { memoryMb: updates.memoryMb } : {}),
+        ...(addDiskGb ? { diskGb: Math.max(base.diskGb, configDiskGb) + addDiskGb } : {}),
       } }).where(eq(vmAssignments.id, row.id));
     }
   });
+}
+
+/** The user a VM's resources are charged to: its assigned owner, else the fallback (the caller). */
+export async function vmQuotaUserId(node: string, vmid: number, fallbackUserId: number): Promise<number> {
+  const candidates = nodeLookupCandidates(node);
+  if (!candidates.length) return fallbackUserId;
+  const [row] = await db.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
+    .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates))).limit(1);
+  return row?.user_id ?? fallbackUserId;
 }
 
 export async function getUserQuota(userId: number, database: DbOrTx = db): Promise<UserQuota | null> {
