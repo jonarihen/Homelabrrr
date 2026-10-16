@@ -282,9 +282,15 @@ router.get('/download', async (req, res) => {
   if (!sess) return;
   if (!filePath) return res.status(400).json({ error: 'path is required' });
 
-  let conn, sftp;
+  let conn, sftp, stream;
   try {
     ({ conn, sftp } = await openSftp(sess));
+    // A cancelled download pauses the read stream forever (neither 'end' nor
+    // 'error' fires), so release the SSH connection when the response closes.
+    res.on('close', () => {
+      stream?.destroy();
+      conn.end();
+    });
 
     const stat = await new Promise((resolve, reject) => {
       sftp.stat(filePath, (err, s) => (err ? reject(err) : resolve(s)));
@@ -300,7 +306,7 @@ router.get('/download', async (req, res) => {
     res.setHeader('Content-Type', 'application/octet-stream');
     if (stat.size != null) res.setHeader('Content-Length', stat.size);
 
-    const stream = sftp.createReadStream(filePath);
+    stream = sftp.createReadStream(filePath);
     stream.pipe(res);
 
     stream.on('error', (err) => {

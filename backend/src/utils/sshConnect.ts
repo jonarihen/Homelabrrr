@@ -1,5 +1,7 @@
 import { Client as SSHClient } from 'ssh2';
 import { normalizeSshHostFingerprint, sshHostFingerprint } from './sshHostKey.ts';
+import { sshClientError } from './sshError.ts';
+import { log } from './logger.ts';
 
 /**
  * Create an authenticated SSH connection with host key verification.
@@ -39,5 +41,83 @@ export function createSshConnection({ host, port, username, privateKey, passphra
     } catch (err) {
       reject(err);
     }
+  });
+}
+
+/**
+ * Bridge a browser WebSocket (the `/api/ssh` console) to an interactive shell
+ * on the target. The client's close handler is registered before the
+ * handshake, so a tab closed mid-connect still ends the SSH session.
+ */
+export async function proxySshShell(clientWs, sshSession) {
+  const { requestId, node, vmid, port } = sshSession;
+  let conn = null;
+  let clientGone = false;
+  clientWs.on('close', () => {
+    clientGone = true;
+    conn?.end();
+  });
+
+  try {
+    conn = await createSshConnection(sshSession);
+  } catch (err) {
+    const clientError = sshClientError(err);
+    log('error', 'ssh_connection_failed', { requestId, node, vmid, code: clientError.code, errorName: err?.name || 'Error' });
+    if (clientWs.readyState === 1) {
+      clientWs.send(JSON.stringify({ type: 'error', ...clientError }));
+      clientWs.close();
+    }
+    return;
+  }
+
+  if (clientGone) {
+    conn.end();
+    return;
+  }
+
+  log('info', 'ssh_connected', { requestId, node, vmid, port });
+  clientWs.send(JSON.stringify({ type: 'status', status: 'connected' }));
+
+  conn.on('close', () => {
+    if (clientWs.readyState === 1) clientWs.close();
+  });
+
+  conn.shell({ term: 'xterm-256color' }, (err, stream) => {
+    if (err) {
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: 'error', ...sshClientError(err) }));
+        clientWs.close();
+      }
+      conn.end();
+      return;
+    }
+
+    const forward = (data) => {
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: 'data', data: data.toString('base64') }));
+      }
+    };
+    stream.on('data', forward);
+    stream.stderr.on('data', forward);
+
+    stream.on('close', () => {
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: 'status', status: 'disconnected' }));
+        clientWs.close();
+      }
+    });
+
+    clientWs.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw);
+        if (msg.type === 'data') {
+          stream.write(Buffer.from(msg.data, 'base64'));
+        } else if (msg.type === 'resize' && msg.cols && msg.rows) {
+          stream.setWindow(msg.rows, msg.cols, 0, 0);
+        }
+      } catch { /* ignore bad messages */ }
+    });
+
+    clientWs.on('close', () => stream.close());
   });
 }
