@@ -8,6 +8,8 @@ import {
 } from '../proxmox.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
+import { sendError } from '../utils/httpError.ts';
+import { assertStorageExposed } from '../utils/storageVisibility.ts';
 import { logAudit } from '../utils/audit.ts';
 import { decodeNodeRef } from '../utils/nodeRef.ts';
 import { assertPublicDownloadUrl } from '../utils/urlGuard.ts';
@@ -332,6 +334,17 @@ router.post('/:id/template', async (req, res) => {
   } = req.body;
   if (!name || !storage) {
     return res.status(400).json({ error: 'Template name and target storage are required' });
+  }
+  // Both land in PVE property strings — strict identifiers only.
+  for (const [field, value] of Object.entries({ storage, bridge })) {
+    if (!/^[a-zA-Z0-9._-]+$/.test(String(value))) {
+      return res.status(400).json({ error: `Invalid ${field}` });
+    }
+  }
+  try {
+    await assertStorageExposed(image.node, storage, { isAdmin: req.session.isAdmin });
+  } catch (err) {
+    return sendError(res, err);
   }
   const baseDiskGb = parseInt(diskGb, 10);
   const memoryMb = Math.round(parseFloat(memoryGb) * 1024);

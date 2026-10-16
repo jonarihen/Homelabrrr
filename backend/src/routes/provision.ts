@@ -788,7 +788,10 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
       return res.status(400).json({ error: `Invalid ${field}` });
     }
   }
-  if (iso && !/^[a-zA-Z0-9._/:-]+$/.test(String(iso))) {
+  // Only an ISO volume ("<storage>:iso/<file>"); no other volume type and no
+  // extra property-string options.
+  const isoMatch = iso ? /^([a-zA-Z0-9._-]+):iso\/[^,]+$/.exec(String(iso)) : null;
+  if (iso && !isoMatch) {
     return res.status(400).json({ error: 'Invalid iso' });
   }
 
@@ -803,6 +806,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
   // even by naming it directly.
   try {
     await assertStorageExposed(node, storage, { isAdmin });
+    if (isoMatch) await assertStorageExposed(node, isoMatch[1], { isAdmin });
   } catch (err) {
     if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
