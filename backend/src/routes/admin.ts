@@ -1713,7 +1713,42 @@ router.put('/vlans/:id', pVlans, async (req, res) => {
 async function trackProvisioned(client, artifacts, insert) {
   try { await insert(); }
   catch (err) {
-    if (isForeignKeyViolation(err)) throw await teardownForGoneTarget(client, artifacts);
+    if (isForeignKeyViolation(err) || err instanceof VlanSyncGoneError) throw await teardownForGoneTarget(client, artifacts);
+    throw err;
+  }
+}
+
+class VlanSyncGoneError extends Error {}
+
+// Port-forward creation and VLAN unsync race on the sync row: the creator
+// inserts its managed_vips row while holding the sync row FOR SHARE (and
+// fails if it is gone); unsync deletes the sync row (waiting on that lock)
+// and then re-checks for forwards created meanwhile. Locks are only held for
+// these DB statements, never across FortiGate calls.
+async function insertForwardIfVlanSynced(firewallId, vlanInterface, row) {
+  await db.transaction(async (tx) => {
+    if (vlanInterface) {
+      const [live] = await tx.select({ id: firewallVlanSync.id }).from(firewallVlanSync)
+        .where(and(eq(firewallVlanSync.firewall_id, firewallId), eq(firewallVlanSync.interface_name, vlanInterface)))
+        .for('share');
+      if (!live) throw new VlanSyncGoneError('VLAN was unsynced during provisioning');
+    }
+    await tx.insert(managedVips).values(row);
+  });
+}
+
+// Returns false (and keeps the sync row) when a forward into the VLAN appeared.
+async function deleteSyncUnlessForwarded(firewallId, vlanId, vlanInterface) {
+  try {
+    await db.transaction(async (tx) => {
+      await tx.delete(firewallVlanSync).where(and(eq(firewallVlanSync.firewall_id, firewallId), eq(firewallVlanSync.vlan_id, vlanId)));
+      const [pf] = await tx.select({ id: managedVips.id }).from(managedVips)
+        .where(and(eq(managedVips.firewall_id, firewallId), eq(managedVips.vlan_interface, vlanInterface))).limit(1);
+      if (pf) throw new VlanSyncGoneError('port forward created during unsync');
+    });
+    return true;
+  } catch (err) {
+    if (err instanceof VlanSyncGoneError) return false;
     throw err;
   }
 }
@@ -1849,8 +1884,11 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
         fwResults.push({ firewall: sync.fw_name, status: 'partial', errors });
       } else {
         console.log(`[delete-vlan] Successfully removed from ${sync.fw_name}`);
-        await db.delete(firewallVlanSync).where(and(eq(firewallVlanSync.firewall_id, sync.firewall_id), eq(firewallVlanSync.vlan_id, vlan.id)));
-        fwResults.push({ firewall: sync.fw_name, status: 'ok' });
+        if (await deleteSyncUnlessForwarded(sync.firewall_id, vlan.id, sync.interface_name)) {
+          fwResults.push({ firewall: sync.fw_name, status: 'ok' });
+        } else {
+          fwResults.push({ firewall: sync.fw_name, status: 'partial', errors: ['A port forward into this VLAN was created during the delete; retry'] });
+        }
       }
     } catch (err) {
       console.error(`[delete-vlan] Failed to deprovision from ${sync.fw_name}:`, err.message);
@@ -2604,7 +2642,9 @@ async function handleVlanUnsync(req: any, res: any, vlanIdRaw: any, firewallIdRa
     return res.status(502).json({ error: sanitizeError(err.message) });
   }
 
-  await db.delete(firewallVlanSync).where(and(eq(firewallVlanSync.vlan_id, vlanId), eq(firewallVlanSync.firewall_id, firewallId)));
+  if (!await deleteSyncUnlessForwarded(firewallId, vlanId, sync.interface_name)) {
+    return res.status(409).json({ error: 'A port forward into this VLAN was created during the unsync; retry to remove it' });
+  }
   await logAudit(req, 'admin_unsync_vlan_firewall', `VLAN ${vlanId}`, `Firewall ${firewallId}`);
   res.json({ ok: true });
 }
@@ -3540,7 +3580,7 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
 
     // Track in DB (with recorded artifacts for artifact-based teardown on delete).
     // artifacts is a jsonb column — pass the object directly.
-    await trackProvisioned(client, artifacts, () => db.insert(managedVips).values({
+    await trackProvisioned(client, artifacts, () => insertForwardIfVlanSynced(fw.id, vlanInterface, {
       firewall_id: fw.id, vip_name: name, policy_id: policyId, service_name: serviceName, protocol,
       ext_port: extPort, mapped_ip: mappedIp, mapped_port: mappedPort, dst_interface: dstInterface,
       lab_policy_id: labPolicyId, vlan_interface: vlanInterface || '', artifacts, workflow_run_id: runId,

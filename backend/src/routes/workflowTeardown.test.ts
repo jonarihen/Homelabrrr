@@ -359,6 +359,51 @@ test('VLAN sync removes what it created when the VLAN is deleted mid-run', async
   await testDb.db.delete(workflows).where(eq(workflows.id, wf.id));
 });
 
+test('port-forward create tears down its objects when the VLAN is unsynced mid-run', async (t) => {
+  await testDb.db.update(firewalls).set({ external_ip: '203.0.113.10' }).where(eq(firewalls.id, firewallId));
+  await testDb.db.insert(firewallVlanSync).values({ firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099' });
+  const [wf] = await testDb.db.insert(workflows).values({ firewall_id: firewallId, trigger: 'port_forward_create', name: 'pf' }).returning({ id: workflows.id });
+  await testDb.db.insert(workflowSteps).values({
+    workflow_id: wf.id, position: 0, step_key: 'addr', action: 'create_address_object', params: { name: 'PF-race', subnet: '10.10.99.40 255.255.255.255' },
+  });
+  t.mock.method(FortiGateAPI.prototype, 'getVips', async () => []);
+  t.mock.method(FortiGateAPI.prototype, 'getServiceObject', async () => null);
+  t.mock.method(FortiGateAPI.prototype, 'getAddressObject', async () => null);
+  // A concurrent unsync removes the sync row while the FortiGate call runs.
+  t.mock.method(FortiGateAPI.prototype, 'createAddressObject', async () => {
+    await testDb.db.delete(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
+  });
+  const removed: string[] = [];
+  t.mock.method(FortiGateAPI.prototype, 'deleteAddressObject', async (name: string) => { removed.push(name); });
+
+  const res = await request(app).post(`/firewalls/${firewallId}/vips`).send({
+    name: 'race', extPort: 9020, mappedIp: '10.10.99.40', mappedPort: 22, dstInterface: 'lab-root1', vlanInterface: 'vlan1099',
+  });
+  assert.equal(res.status, 409, JSON.stringify(res.body));
+  assert.deepEqual(removed, ['PF-race']);
+  assert.equal((await testDb.db.select().from(managedVips).where(eq(managedVips.firewall_id, firewallId))).length, 0);
+  await testDb.db.delete(workflows).where(eq(workflows.id, wf.id));
+});
+
+test('unsync keeps the sync row when a port forward into the VLAN appears during it', async (t) => {
+  await testDb.db.insert(firewallVlanSync).values({
+    firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099', artifacts: [{ type: 'interface', name: 'vlan1099' }],
+  });
+  // The forward lands after unsync's cleanup query, while it tears down the VLAN.
+  t.mock.method(FortiGateAPI.prototype, 'deleteInterface', async () => {
+    await testDb.db.insert(managedVips).values({
+      firewall_id: firewallId, vip_name: 'pf-late', ext_port: 9021, mapped_ip: '10.10.99.41', mapped_port: 22, vlan_interface: 'vlan1099',
+      artifacts: [{ type: 'vip', name: 'pf-late', vdom: 'root' }],
+    });
+  });
+
+  const res = await request(app).delete(`/vlans/${vlanId}/sync/${firewallId}`);
+  assert.equal(res.status, 409);
+  assert.ok((await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId)))[0]);
+  await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
+  await testDb.db.delete(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
+});
+
 test('legacy VIP delete clears the record when the VIP is already gone upstream', async (t) => {
   t.mock.method(FortiGateAPI.prototype, 'getPolicies', async () => []);
   t.mock.method(FortiGateAPI.prototype, 'deleteVip', async () => {
