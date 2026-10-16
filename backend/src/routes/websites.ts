@@ -460,7 +460,12 @@ async function siteUpstreamAllowed(site) {
   return (await userCanReachUpstream(site.owner_user_id, site.upstream_host, false)).ok;
 }
 
-const isRevoked = (site) => site.status === 'error' && site.status_detail === REVOKED_DETAIL;
+// Parked, but the Caddy route / inspection slot cleanup is not confirmed yet;
+// every tick retries it until it succeeds and the detail becomes REVOKED_DETAIL.
+const REVOKING_DETAIL = 'Being unpublished: this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
+
+const isRevoked = (site) => site.status === 'error'
+  && (site.status_detail === REVOKED_DETAIL || site.status_detail === REVOKING_DETAIL);
 
 // A site published under an older, looser upstream policy (or whose owner has
 // since lost the VLAN/IP, or was deleted) must not stay reachable. 'error' rows
@@ -475,13 +480,22 @@ export async function findDisallowedSites(serverId) {
   return disallowed;
 }
 
-// Park unpublished sites in 'error', which every render and reconcile skips.
+// Park disallowed sites in 'error', which every render and reconcile skips.
 // The row and its settings are kept so the owner can repoint and save it.
-// Already-revoked rows are left alone so a tick never re-audits them.
+// `sites` is a snapshot, so each row is re-read and re-checked, and the park
+// only applies if the upstream is still the one that was evaluated: a site
+// repointed meanwhile is left for the next tick. Each site is audited once.
 export async function markSitesUnpublished(sites) {
   for (const site of sites) {
     if (isRevoked(site)) continue;
-    await setSiteStatus(site.id, 'error', REVOKED_DETAIL);
+    const [current] = await db.select().from(caddySites).where(eq(caddySites.id, site.id)).limit(1);
+    if (!current || isRevoked(current) || current.upstream_host !== site.upstream_host
+      || current.upstream_port !== site.upstream_port || await siteUpstreamAllowed(current)) continue;
+    const parked = await db.update(caddySites).set({ status: 'error', status_detail: REVOKING_DETAIL })
+      .where(and(eq(caddySites.id, site.id), eq(caddySites.upstream_host, site.upstream_host),
+        eq(caddySites.upstream_port, site.upstream_port)))
+      .returning({ id: caddySites.id });
+    if (parked.length === 0) continue;
     await logAuditEntry({
       action: 'website_upstream_revoked',
       target: site.domain,
@@ -491,30 +505,35 @@ export async function markSitesUnpublished(sites) {
   }
 }
 
-// Remove disallowed routes from Caddy first and only then mark them, so a
-// Caddy outage leaves them to be retried on the next tick.
-async function unpublishDisallowedSites(server) {
-  const disallowed = await findDisallowedSites(server.id);
-  const fresh = disallowed.filter((site) => !isRevoked(site));
+// Remove parked sites' routes and inspection slots. Runs from DB state, so only
+// rows actually parked are touched; a failure leaves them REVOKING for the next
+// tick. Slots are released after every row is parked so siblings sharing one
+// certificate don't keep each other's slot "in use" (see certStillInUse).
+export async function finishRevocations(server) {
+  const pending = await db.select().from(caddySites)
+    .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
+      eq(caddySites.status, 'error'), eq(caddySites.status_detail, REVOKING_DETAIL)));
+  if (pending.length === 0) return;
   if (sshConfigured(server)) {
-    // Revoked rows are already out of every snippet render; re-render only for new ones.
-    if (fresh.length === 0) return;
-    await syncServerSnippet(server, new Set(disallowed.map((site) => site.id)));
+    await syncServerSnippet(server);
   } else {
-    if (disallowed.length === 0) return;
-    // Delete only routes that are actually live, so revoked rows stay quiet.
     const caddy = createCaddyClient(server);
     const liveIds = new Set(await caddy.listManagedRouteIds());
-    for (const site of disallowed) {
+    for (const site of pending) {
       if (liveIds.has(managedRouteId(site.id))) await caddy.deleteRoute(site.id);
     }
   }
-  if (fresh.length === 0) return;
-  await markSitesUnpublished(fresh);
-  // Second pass, after every revoked row is parked, so siblings sharing one
-  // certificate don't keep each other's slot "in use" (see certStillInUse).
-  for (const site of fresh) await releaseInspectionSlot(site, null);
-  console.warn(`[websites] unpublished ${fresh.length} site(s) on "${server.name}" whose upstream the owner may no longer use: ${fresh.map((site) => site.domain).join(', ')}`);
+  for (const site of pending) {
+    if (!(await releaseInspectionSlot(site, null))) continue;
+    await db.update(caddySites).set({ status_detail: REVOKED_DETAIL })
+      .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, REVOKING_DETAIL)));
+  }
+  console.warn(`[websites] unpublished ${pending.length} site(s) on "${server.name}" whose upstream the owner may no longer use: ${pending.map((site) => site.domain).join(', ')}`);
+}
+
+async function unpublishDisallowedSites(server) {
+  await markSitesUnpublished(await findDisallowedSites(server.id));
+  await finishRevocations(server);
 }
 
 // Re-probe published sites so breakage surfaces here rather than in a user's
@@ -1445,16 +1464,17 @@ export async function certStillInUse(site) {
 // only delete a cert once nothing references it, which is exactly what
 // detaching here enables. Best-effort: a firewall that's unreachable at delete
 // time must not block removing the site.
+// Returns false only when a detach attempt failed, so callers can retry it.
 async function releaseInspectionSlot(site, req) {
-  if (!site.fortigate_id || !site.inspection_profile || !site.cert_name) return;
+  if (!site.fortigate_id || !site.inspection_profile || !site.cert_name) return true;
   // Never detach the shared inspection bundle: it covers every published
   // domain, so removing it because one site went away would break all of them.
   const server = await getServerRow(site.server_id);
   const bundleBase = String(server?.inspection_bundle_cert || '').trim().toLowerCase();
-  if (bundleBase && stripCertDateSuffix(site.cert_name).toLowerCase() === bundleBase) return;
-  if (await certStillInUse(site)) return;
+  if (bundleBase && stripCertDateSuffix(site.cert_name).toLowerCase() === bundleBase) return true;
+  if (await certStillInUse(site)) return true;
   const [fw] = await db.select().from(firewalls).where(eq(firewalls.id, site.fortigate_id)).limit(1);
-  if (!fw) return;
+  if (!fw) return true;
   try {
     const client = createClient(fw);
     const { removed, remaining, skipped } = await client.detachInspectionServerCert(
@@ -1462,16 +1482,18 @@ async function releaseInspectionSlot(site, req) {
     );
     if (skipped) {
       console.log(`[websites] left "${site.cert_name}" on inspection profile "${site.inspection_profile}" — detaching ${skipped}`);
-      return;
+      return true;
     }
-    if (removed.length === 0) return;
+    if (removed.length === 0) return true;
     if (req) {
       await logAudit(req, 'website_detach_inspection_cert', site.domain,
         `${removed.join(', ')} removed from "${site.inspection_profile}" — ${remaining.length}/${SERVER_CERT_MAX} slots used`);
     }
     console.log(`[websites] detached ${removed.join(', ')} from inspection profile "${site.inspection_profile}" (${remaining.length}/${SERVER_CERT_MAX} slots used)`);
+    return true;
   } catch (err) {
     console.warn(`[websites] could not detach cert "${site.cert_name}" from inspection profile "${site.inspection_profile}": ${err.message}`);
+    return false;
   }
 }
 

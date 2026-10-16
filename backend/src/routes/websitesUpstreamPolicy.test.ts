@@ -63,6 +63,7 @@ test('sites whose upstream the owner may no longer use are unpublished, not dele
   const audits = await testDb.db.select().from(auditLog).where(eq(auditLog.action, 'website_upstream_revoked'));
   assert.deepEqual(audits.map((a) => a.target).sort(), revoked);
 
+  assert.ok(stale.status_detail.startsWith('Being unpublished'), 'parked until route/slot cleanup is confirmed');
   // The next tick still sees them, but parking and auditing happen only once.
   await websites.markSitesUnpublished(await websites.findDisallowedSites(serverId));
   assert.equal((await testDb.db.select().from(auditLog).where(eq(auditLog.action, 'website_upstream_revoked'))).length, 3);
@@ -111,4 +112,64 @@ test('revoked siblings sharing a certificate do not keep its inspection slot in 
   // A sibling that is still published keeps the slot.
   await testDb.db.insert(caddySites).values({ ...shared, domain: 'c.wild.example.test', upstream_host: '10.10.10.9', status: 'live' });
   assert.equal(await websites.certStillInUse(parked[0]), true);
+});
+
+test('a site repointed after the scan is not parked from the stale snapshot', async () => {
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: serverId, domain: 'moved.example.test', upstream_host: '192.168.3.3', upstream_port: 80,
+    owner_user_id: ownerId, managed: true, status: 'live',
+  }).returning();
+  const snapshot = (await websites.findDisallowedSites(serverId)).filter((s) => s.id === row.id);
+  assert.equal(snapshot.length, 1);
+  // The owner repoints the site into their VLAN before the park runs.
+  await testDb.db.update(caddySites).set({ upstream_host: '10.10.10.33', status: 'pushing' }).where(eq(caddySites.id, row.id));
+  await websites.markSitesUnpublished(snapshot);
+  const [after] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+  assert.equal(after.status, 'pushing');
+  const audits = await testDb.db.select().from(auditLog).where(eq(auditLog.target, 'moved.example.test'));
+  assert.equal(audits.length, 0);
+});
+
+test('a failed inspection-slot release is retried on the next tick', async () => {
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  const { createClient } = await import('../fortigate.ts');
+  const { createCaddyClient } = await import('../utils/caddy.ts');
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-retry', host: '127.0.0.1', api_key: encryptSecret('k') }).returning();
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'api-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'slot.example.test', upstream_host: '192.168.4.4', upstream_port: 80,
+    owner_user_id: ownerId, managed: true, status: 'live',
+    fortigate_id: fw.id, inspection_profile: 'deep', cert_name: 'slot.example.test_2026-01-01',
+  }).returning();
+
+  const fortiProto = Object.getPrototypeOf(createClient(fw));
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { detach: fortiProto.detachInspectionServerCert, list: caddyProto.listManagedRouteIds, del: caddyProto.deleteRoute };
+  let detachCalls = 0;
+  fortiProto.detachInspectionServerCert = async () => {
+    detachCalls += 1;
+    if (detachCalls === 1) throw new Error('firewall unreachable');
+    return { removed: ['slot.example.test_2026-01-01'], remaining: ['other'] };
+  };
+  caddyProto.listManagedRouteIds = async () => [];
+  caddyProto.deleteRoute = async () => {};
+  try {
+    const tick = async () => {
+      await websites.markSitesUnpublished(await websites.findDisallowedSites(apiServer.id));
+      await websites.finishRevocations(apiServer);
+      return (await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id)))[0];
+    };
+    const first = await tick();
+    assert.equal(first.status, 'error');
+    assert.ok(first.status_detail.startsWith('Being unpublished'), 'stays pending after a failed release');
+    const second = await tick();
+    assert.equal(detachCalls, 2);
+    assert.ok(second.status_detail.startsWith('Unpublished'), 'finalized once the release succeeds');
+    await tick();
+    assert.equal(detachCalls, 2, 'a finalized site is not released again');
+  } finally {
+    fortiProto.detachInspectionServerCert = originals.detach;
+    caddyProto.listManagedRouteIds = originals.list;
+    caddyProto.deleteRoute = originals.del;
+  }
 });
