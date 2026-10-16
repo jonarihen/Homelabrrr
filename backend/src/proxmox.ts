@@ -133,7 +133,7 @@ async function findHostsForNodeName(nodeName, database: DbOrTx = db) {
   return matches;
 }
 
-async function hostForNode(nodeRef, opts = {}) {
+export async function hostForNode(nodeRef, opts = {}) {
   const { vmid = null, database = db } = opts;
   const { hostId, nodeName } = decodeNodeRef(nodeRef);
   if (!nodeName) throw new Error('Node is required');

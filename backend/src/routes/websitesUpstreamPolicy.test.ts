@@ -243,3 +243,33 @@ test('a site saved between the revocation load and its cleanup keeps its new rou
     caddyProto.deleteRoute = originals.del;
   }
 });
+
+test('a route Caddy fails to delete keeps the site claimable until it is gone', async () => {
+  const { createCaddyClient, managedRouteId } = await import('../utils/caddy.ts');
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'sticky-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'sticky.example.test', upstream_host: '192.168.6.6', upstream_port: 80,
+    owner_user_id: ownerId, managed: true, status: 'live',
+  }).returning();
+  await websites.markSitesUnpublished(await websites.findDisallowedSites(apiServer.id));
+
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { list: caddyProto.listManagedRouteIds, del: caddyProto.deleteRoute };
+  const live = new Set([managedRouteId(row.id)]);
+  let deleteWorks = false;
+  caddyProto.listManagedRouteIds = async () => [...live];
+  // Like a Caddy DELETE answering 500, which deleteRoute swallows.
+  caddyProto.deleteRoute = async (id) => { if (deleteWorks) live.delete(managedRouteId(id)); };
+  const detail = async () => (await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id)))[0].status_detail;
+  try {
+    await websites.finishRevocations(apiServer);
+    assert.ok((await detail()).startsWith('Being unpublished'), 'not finalized while the route is still live');
+    deleteWorks = true;
+    await websites.finishRevocations(apiServer);
+    assert.equal(live.size, 0);
+    assert.ok((await detail()).startsWith('Unpublished'));
+  } finally {
+    caddyProto.listManagedRouteIds = originals.list;
+    caddyProto.deleteRoute = originals.del;
+  }
+});

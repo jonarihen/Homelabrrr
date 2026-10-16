@@ -527,6 +527,7 @@ export async function finishRevocations(server) {
     .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), inArray(caddySites.status_detail, PENDING_DETAILS)))
     .returning())[0];
   const claimed = [];
+  let stillLive = new Set();
   if (sshConfigured(server)) {
     for (const site of pending) {
       const row = await claim(site);
@@ -543,8 +544,12 @@ export async function finishRevocations(server) {
       claimed.push(row);
       if (liveIds.has(managedRouteId(row.id))) await caddy.deleteRoute(row.id);
     }
+    // deleteRoute treats a 500 as "already gone", so confirm against the live
+    // config; a route still present keeps its row claimable for the next tick.
+    if (claimed.length) stillLive = new Set(await caddy.listManagedRouteIds());
   }
   for (const site of claimed) {
+    if (stillLive.has(managedRouteId(site.id))) continue;
     if (!(await releaseInspectionSlot(site, null))) continue;
     await db.update(caddySites).set({ status_detail: REVOKED_DETAIL })
       .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, CLEANING_DETAIL)));

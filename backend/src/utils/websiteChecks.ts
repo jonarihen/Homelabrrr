@@ -5,6 +5,7 @@ import { db } from '../db/client.ts';
 import { publicIpAssignments, vmAssignments } from '../db/schema/index.ts';
 import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
+import { hostForNode } from '../proxmox.ts';
 
 // ─── Field validation ─────────────────────────────────────────────────────────
 // Everything a user submits is validated here before it is ever built into a
@@ -175,16 +176,26 @@ export async function getUserAllowedUpstreams(userId) {
       .from(vmAssignments).where(eq(vmAssignments.user_id, userId)),
   ]);
   // An IP only counts while its VM is still assigned to this user: unassigning
-  // a VM leaves the public-IP row behind. Legacy rows may store the bare node name.
-  // When both sides know their Proxmox host, it must agree: a bare `pve` row
-  // must not match `2~pve` on another cluster.
-  const stillAssigned = (row) => assignments.some((a) => {
-    if (a.vmid !== row.vmid) return false;
+  // a VM leaves the public-IP row behind. Legacy rows may store the bare node
+  // name, so a node-name match alone is not enough when the row records its
+  // Proxmox host: the assignment must resolve to that same host (`pve` must not
+  // match `2~pve` on another cluster, in either direction).
+  const sameHost = async (a, row) => {
+    if (row.hostId == null) return true;
     const { hostId } = decodeNodeRef(a.node);
-    if (row.hostId != null && hostId != null && String(row.hostId) !== String(hostId)) return false;
-    return nodeLookupCandidates(a.node).includes(row.node) || nodeLookupCandidates(row.node).includes(a.node);
-  });
-  const vmIps = [...new Set(rows.filter(stillAssigned).map((r) => r.ip).filter((ip) => isIP(ip)))];
+    if (hostId != null) return String(hostId) === String(row.hostId);
+    const host = await hostForNode(a.node, { vmid: a.vmid }).catch(() => null);
+    return host != null && String(host.id) === String(row.hostId);
+  };
+  const vmIps = [];
+  for (const row of rows) {
+    if (!isIP(row.ip) || vmIps.includes(row.ip)) continue;
+    for (const a of assignments) {
+      if (a.vmid !== row.vmid) continue;
+      if (!nodeLookupCandidates(a.node).includes(row.node) && !nodeLookupCandidates(row.node).includes(a.node)) continue;
+      if (await sameHost(a, row)) { vmIps.push(row.ip); break; }
+    }
+  }
   return { vmIps, subnets: await userVlanCidrs(db, userId) };
 }
 
