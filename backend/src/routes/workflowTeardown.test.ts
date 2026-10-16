@@ -4,7 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq, and } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, firewalls, vlans, firewallVlanSync, managedVips, workflows } from '../db/schema/index.ts';
+import { users, firewalls, vlans, firewallVlanSync, managedVips, workflows, workflowSteps } from '../db/schema/index.ts';
 import { FortiGateAPI } from '../fortigate.ts';
 
 let testDb: TestDatabase;
@@ -327,6 +327,36 @@ test('VLAN unsync keeps the sync row when a matched legacy forward fails to clea
   assert.ok((await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId)))[0]);
   await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
   await testDb.db.delete(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
+});
+
+test('PUT /vlans/:id refuses a tag change while the VLAN is synced', async () => {
+  await testDb.db.insert(firewallVlanSync).values({ firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099' });
+  const res = await request(app).put(`/vlans/${vlanId}`).send({ name: 'vlan-test', tag: 1098 });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /Unsync/);
+  await testDb.db.delete(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
+});
+
+test('VLAN sync removes what it created when the VLAN is deleted mid-run', async (t) => {
+  const [doomed] = await testDb.db.insert(vlans).values({ name: 'doomed', tag: 1097, mode: 'managed' }).returning({ id: vlans.id });
+  const [wf] = await testDb.db.insert(workflows).values({ firewall_id: firewallId, trigger: 'vlan_provision', name: 'p' }).returning({ id: workflows.id });
+  await testDb.db.insert(workflowSteps).values({
+    workflow_id: wf.id, position: 0, step_key: 'addr', action: 'create_address_object', params: { name: 'NET-doomed', subnet: '10.10.97.0 255.255.255.0' },
+  });
+  t.mock.method(FortiGateAPI.prototype, 'getAddressObject', async () => null);
+  // Simulates a concurrent delete landing while the FortiGate call runs.
+  t.mock.method(FortiGateAPI.prototype, 'createAddressObject', async () => {
+    await testDb.db.delete(vlans).where(eq(vlans.id, doomed.id));
+  });
+  const removed: string[] = [];
+  t.mock.method(FortiGateAPI.prototype, 'deleteAddressObject', async (name: string) => { removed.push(name); });
+
+  const res = await request(app).post(`/vlans/${doomed.id}/sync`).send({ firewallId });
+  assert.equal(res.status, 200);
+  assert.equal(res.body[0].status, 'error');
+  assert.match(res.body[0].error, /deleted during provisioning/);
+  assert.deepEqual(removed, ['NET-doomed']);
+  await testDb.db.delete(workflows).where(eq(workflows.id, wf.id));
 });
 
 test('legacy VIP delete clears the record when the VIP is already gone upstream', async (t) => {

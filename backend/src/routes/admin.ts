@@ -48,7 +48,9 @@ import {
 import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
 import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
-import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
+import {
+  runBundle, buildFirewallContext, teardownArtifacts, teardownForGoneTarget, ProvisioningTargetGoneError,
+} from '../workflows/runner.ts';
 import { isArtifactGone } from '../workflows/engine.ts';
 import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
@@ -1677,6 +1679,10 @@ router.put('/vlans/:id', pVlans, async (req, res) => {
   if (syncCount > 0 && nextMode !== existing.mode) {
     return res.status(400).json({ error: 'Unsync this VLAN from firewalls before changing its type' });
   }
+  if (syncCount > 0 && requestedTag !== existing.tag) {
+    // The provisioned interface and subnet belong to the old tag.
+    return res.status(400).json({ error: 'Unsync this VLAN from firewalls before changing its tag' });
+  }
 
   const nextSubnetCidr = nextMode === 'tagged_only'
     ? String(subnetCidr ?? existing.subnet_cidr ?? '').trim()
@@ -1700,6 +1706,17 @@ router.put('/vlans/:id', pVlans, async (req, res) => {
     throw err;
   }
 });
+
+// Insert the tracking row for objects a workflow just created. If its firewall
+// or VLAN was deleted meanwhile the FK insert fails: remove those objects
+// instead of leaving them live with no record.
+async function trackProvisioned(client, artifacts, insert) {
+  try { await insert(); }
+  catch (err) {
+    if (isForeignKeyViolation(err)) throw await teardownForGoneTarget(client, artifacts);
+    throw err;
+  }
+}
 
 // Every FortiGate object a legacy managed VIP (no recorded artifacts) owns, in
 // teardown order. Each step is independent: a failure must not stop the rest
@@ -2512,10 +2529,10 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet };
         console.log(`[sync] Success:`, JSON.stringify(result));
         // policy_ids and artifacts are jsonb columns — pass objects directly.
-        await db.insert(firewallVlanSync).values({
+        await trackProvisioned(client, artifacts, () => db.insert(firewallVlanSync).values({
           firewall_id: fw.id, vlan_id: vlan.id, interface_name: interfaceName,
           policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
-        });
+        }));
         await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
         results.push({ firewall: fw.name, status: 'ok', ...result });
       } catch (err) {
@@ -3523,12 +3540,12 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
 
     // Track in DB (with recorded artifacts for artifact-based teardown on delete).
     // artifacts is a jsonb column — pass the object directly.
-    await db.insert(managedVips).values({
+    await trackProvisioned(client, artifacts, () => db.insert(managedVips).values({
       firewall_id: fw.id, vip_name: name, policy_id: policyId, service_name: serviceName, protocol,
       ext_port: extPort, mapped_ip: mappedIp, mapped_port: mappedPort, dst_interface: dstInterface,
       lab_policy_id: labPolicyId, vlan_interface: vlanInterface || '', artifacts, workflow_run_id: runId,
       public_ip_id: publicIp?.id ?? null,
-    });
+    }));
 
     await logAudit(req, 'admin_create_port_forward', name, `${protocol}/${externalIp}:${extPort} → ${mappedIp}:${mappedPort} via ${dstInterface}/${vlanInterface}`);
     res.json({
@@ -3543,6 +3560,7 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
         : null,
     });
   } catch (err) {
+    if (err instanceof ProvisioningTargetGoneError) return res.status(err.status).json({ error: sanitizeError(err.message) });
     // The engine already rolled back anything it created on failure.
     res.status(500).json({ error: sanitizeError(err.message) });
   }
