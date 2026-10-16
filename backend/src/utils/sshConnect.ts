@@ -97,6 +97,16 @@ export async function proxySshShell(clientWs, sshSession) {
   log('info', 'ssh_connected', { requestId, node, vmid, port });
   clientWs.send(JSON.stringify({ type: 'status', status: 'connected' }));
 
+  // createSshConnection's own error listener only settles the handshake; a
+  // transport failure after ready (e.g. ECONNRESET) is reported here.
+  conn.on('error', (err) => {
+    const clientError = sshClientError(err);
+    log('error', 'ssh_connection_failed', { requestId, node, vmid, code: clientError.code, errorName: err?.name || 'Error' });
+    if (clientWs.readyState === 1) {
+      clientWs.send(JSON.stringify({ type: 'error', ...clientError }));
+      clientWs.close();
+    }
+  });
   conn.on('close', () => {
     if (clientWs.readyState === 1) clientWs.close();
   });
