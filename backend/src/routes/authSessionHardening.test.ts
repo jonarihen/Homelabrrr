@@ -87,6 +87,25 @@ test('changing the password revokes the user\'s other sessions only', async () =
   assert.deepEqual(await remainingSids(), ['theirs']);
 });
 
+test('a revoked session is not resurrected by an in-flight save', async () => {
+  const { DrizzleSessionStore } = await import('../db/sessionStore.ts');
+  const store = new DrizzleSessionStore();
+  const sid = 'in-flight-elsewhere';
+  const sess = { userId, cookie: { maxAge: 60_000 } } as any;
+  await new Promise<void>((resolve, reject) => store.set(sid, sess, (err) => (err ? reject(err) : resolve())));
+
+  const res = await request(app)
+    .put('/change-password')
+    .send({ currentPassword: PASSWORD, newPassword: 'Another-correct-horse-9!' });
+  assert.equal(res.status, 200);
+
+  // The stolen session's request finishes after the revocation and saves.
+  await new Promise<void>((resolve, reject) => store.set(sid, { ...sess, lastSeenAt: Date.now() }, (err) => (err ? reject(err) : resolve())));
+  assert.deepEqual(await remainingSids(), ['theirs']);
+  const loaded = await new Promise((resolve, reject) => store.get(sid, (err, s) => (err ? reject(err) : resolve(s))));
+  assert.equal(loaded, null);
+});
+
 test('enabling 2FA revokes the user\'s other sessions', async () => {
   await testDb.db.update(users).set({ totp_secret: encryptSecret(SECRET) }).where(eq(users.id, userId));
   const res = await request(app).post('/2fa/enable').send({ code: generateSync({ secret: SECRET }) });

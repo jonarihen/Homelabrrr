@@ -4,6 +4,7 @@ import { db } from './client.ts';
 import { sessions } from './schema/index.ts';
 import { log } from '../utils/logger.ts';
 import { revokeSftpSession } from '../utils/sftpSessions.ts';
+import { isSessionRevoked, markSessionsRevoked } from '../utils/revokedSessions.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 15 * 60 * 1000;
@@ -25,6 +26,8 @@ export class DrizzleSessionStore extends session.Store {
   }
 
   get(sid: string, cb: Callback): void {
+    // Also checked here: a save racing the revoking DELETE could still land a row.
+    if (isSessionRevoked(sid)) { cb(null, null); return; }
     db.select({ sess: sessions.sess, expire: sessions.expire })
       .from(sessions)
       .where(eq(sessions.sid, sid))
@@ -40,6 +43,8 @@ export class DrizzleSessionStore extends session.Store {
   }
 
   set(sid: string, sess: session.SessionData, cb?: (err?: unknown) => void): void {
+    // Never resurrect a revoked session from a request that was in flight.
+    if (isSessionRevoked(sid)) { cb?.(); return; }
     const expire = this.expiryFor(sess);
     db.insert(sessions)
       .values({ sid, sess: sess as object, expire })
@@ -49,6 +54,7 @@ export class DrizzleSessionStore extends session.Store {
 
   destroy(sid: string, cb?: (err?: unknown) => void): void {
     revokeSftpSession(sid);
+    markSessionsRevoked([sid]);
     db.delete(sessions).where(eq(sessions.sid, sid)).then(() => cb?.(), (err) => cb?.(err));
   }
 
