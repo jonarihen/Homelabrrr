@@ -968,3 +968,19 @@ test('disk growth is checked against every existing disk, not just the boot disk
   assert.equal((await quota.getUserResourceUsage(ownerId, testDb.db, [])).diskGb, 100);
   await testDb.db.update(users).set({ can_edit_vm_hardware: false }).where(eq(users.id, ownerId));
 });
+
+test('a disk without a readable size blocks member growth but admins still record the measurable total', async () => {
+  await testDb.db.update(users).set({ can_edit_vm_hardware: true }).where(eq(users.id, ownerId));
+  await testDb.db.update(users).set({ max_storage_gb: 1000 }).where(eq(users.id, ownerId));
+  await testDb.db.insert(vmAssignments).values({ user_id: ownerId, node, vmid: 965 });
+  sourceDisks = { scsi0: 'local-lvm:vm-965-disk-0,size=20G', scsi1: '/dev/disk/by-id/ata-passthrough' };
+  isAdmin = false;
+  const resize = () => request(app).put(`/vms/${node}/965/resize-disk`).send({ disk: 'scsi0', size: '+10G' });
+  assert.equal((await resize()).status, 409);
+  assert.equal(diskResizes.length, 0);
+  assert.equal((await testDb.db.select().from(vmAssignments).where(eq(vmAssignments.vmid, 965)))[0].resource_allocation, null);
+  isAdmin = true;
+  assert.equal((await resize()).status, 200);
+  assert.equal((await quota.getUserResourceUsage(ownerId, testDb.db, [])).diskGb, 30);
+  await testDb.db.update(users).set({ can_edit_vm_hardware: false }).where(eq(users.id, ownerId));
+});

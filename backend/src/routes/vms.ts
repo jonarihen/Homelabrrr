@@ -1379,7 +1379,10 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
     }
     if (!req.session.isAdmin && addDiskGb > 0) {
       // Count every existing disk from config, the same measure the post-resize floor uses.
-      await assertUserQuota(quotaUserId, { addDiskGb }, undefined, undefined, { vmid: Number(vmid), diskGb: configDiskGb(config) });
+      // A disk without a readable size (e.g. passthrough) would hide usage, so fail closed.
+      const measured = configDiskGb(config);
+      if (!measured.complete) throw httpError(409, 'Cannot verify disk usage for this VM; ask an administrator to resize it');
+      await assertUserQuota(quotaUserId, { addDiskGb }, undefined, undefined, { vmid: Number(vmid), diskGb: measured.diskGb });
     }
 
     await resizeVMDisk(node, vmid, disk, size);

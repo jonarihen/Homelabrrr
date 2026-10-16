@@ -104,7 +104,7 @@ export async function refreshHardwareAllocation(
   const addDiskGb = updates.addDiskGb && updates.addDiskGb > 0 ? updates.addDiskGb : 0;
   // PVE maxdisk only reflects the boot disk, so growth of any disk is kept in
   // the allocation floor instead; it is measured against every disk in config.
-  const measuredDiskGb = addDiskGb && updates.config ? configDiskGb(updates.config) : 0;
+  const measuredDiskGb = addDiskGb && updates.config ? configDiskGb(updates.config).diskGb : 0;
   await db.transaction(async tx => {
     const owners = await tx.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
       .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
@@ -209,16 +209,8 @@ export async function assertUserQuota(
 
 export function cloneDiskAllocation(config: Record<string, unknown>, requestedGb: number) {
   if (!Number.isFinite(requestedGb) || requestedGb <= 0) throw httpError(400, 'Invalid clone disk size');
-  const disks = new Map<string, number>();
-  for (const [key, value] of Object.entries(config)) {
-    if (!/^(?:(?:scsi|virtio|sata|ide|efidisk|tpmstate)\d+)$/.test(key) || typeof value !== 'string') continue;
-    const volume = value.split(',')[0];
-    if (volume === 'none' || volume.includes('cloudinit') || value.split(',').includes('media=cdrom')) continue;
-    const size = value.split(',').find(option => option.startsWith('size='))?.slice(5);
-    const gb = sizeToGb(size);
-    if (gb === null || gb <= 0) throw httpError(503, 'Cannot determine the template disk size safely');
-    disks.set(key, gb);
-  }
+  const { disks, unmeasured } = measureConfigDisks(config);
+  if (unmeasured > 0) throw httpError(503, 'Cannot determine the template disk size safely');
   if (disks.size === 0) throw httpError(503, 'The template has no measurable clone disks');
   const primary = disks.has('scsi0') ? 'scsi0' : disks.has('virtio0') ? 'virtio0' : null;
   const total = [...disks.values()].reduce((sum, size) => sum + size, 0);
@@ -226,9 +218,25 @@ export function cloneDiskAllocation(config: Record<string, unknown>, requestedGb
   return { diskGb: total + growthGb, resizeDisk: growthGb > 0 ? primary : null };
 }
 
-/** Total GB of every measurable disk in a VM config; 0 when it can't be measured safely. */
-export function configDiskGb(config: Record<string, unknown>): number {
-  try { return cloneDiskAllocation(config, 1).diskGb; } catch { return 0; }
+/** Sizes of a VM's real disks (no CD-ROM / cloud-init / empty slots), plus how many lack a usable size. */
+function measureConfigDisks(config: Record<string, unknown>) {
+  const disks = new Map<string, number>();
+  let unmeasured = 0;
+  for (const [key, value] of Object.entries(config)) {
+    if (!/^(?:(?:scsi|virtio|sata|ide|efidisk|tpmstate)\d+)$/.test(key) || typeof value !== 'string') continue;
+    const volume = value.split(',')[0];
+    if (volume === 'none' || volume.includes('cloudinit') || value.split(',').includes('media=cdrom')) continue;
+    const gb = sizeToGb(value.split(',').find(option => option.startsWith('size='))?.slice(5));
+    if (gb === null || gb <= 0) unmeasured += 1;
+    else disks.set(key, gb);
+  }
+  return { disks, unmeasured };
+}
+
+/** Total GB of every measurable disk in a VM config; `complete` is false when some real disk has no usable size. */
+export function configDiskGb(config: Record<string, unknown>): { diskGb: number; complete: boolean } {
+  const { disks, unmeasured } = measureConfigDisks(config);
+  return { diskGb: [...disks.values()].reduce((sum, size) => sum + size, 0), complete: unmeasured === 0 };
 }
 
 /** Parse a PVE disk size string ("32G", "512M", "1T") to GB. */
