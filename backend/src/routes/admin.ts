@@ -1728,6 +1728,34 @@ async function bestEffort(label, run) {
   catch (e) { console.warn(`[delete-vlan] ${label} cleanup:`, e.message); }
 }
 
+// Remove every managed port forward that targets a VLAN interface on one
+// firewall (FortiGate objects best-effort, then the DB row). `fw` carries the
+// connection fields createClient needs plus vdom/root_vdom.
+async function cleanupVlanPortForwards(firewallId, fw, vlanIfaceName) {
+  const portForwards = await db.select().from(managedVips)
+    .where(and(eq(managedVips.firewall_id, firewallId), eq(managedVips.vlan_interface, vlanIfaceName)));
+  if (portForwards.length === 0) return;
+
+  console.log(`[delete-vlan] Cleaning up ${portForwards.length} port forward(s) on firewall ${firewallId} for ${vlanIfaceName}`);
+  const client = createClient(fw);
+  const rootVdom = fw.root_vdom || 'root';
+
+  for (const pf of portForwards) {
+    try {
+      for (const step of managedVipCleanupSteps(pf, fw, rootVdom)) {
+        await bestEffort(step.label, () => step.run(client));
+      }
+      // Remove DB record
+      await db.delete(managedVips).where(eq(managedVips.id, pf.id));
+      console.log(`[delete-vlan] Cleaned up port forward "${pf.vip_name}"`);
+    } catch (e) {
+      console.warn(`[delete-vlan] Failed to fully clean port forward "${pf.vip_name}":`, e.message);
+      // Still remove from DB — the FortiGate objects are best-effort
+      await db.delete(managedVips).where(eq(managedVips.id, pf.id));
+    }
+  }
+}
+
 router.delete('/vlans/:id', pVlans, async (req, res) => {
   const [vlan] = await db.select().from(vlans).where(eq(vlans.id, Number(req.params.id))).limit(1);
   if (!vlan) return res.status(404).json({ error: 'VLAN not found' });
@@ -1754,30 +1782,7 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
 
   // 1. Clean up port forwards that target this VLAN's interface
   for (const sync of syncs) {
-    const vlanIfaceName = sync.interface_name; // e.g. vlan1008
-    const portForwards = await db.select().from(managedVips)
-      .where(and(eq(managedVips.firewall_id, sync.fw_id), eq(managedVips.vlan_interface, vlanIfaceName)));
-
-    if (portForwards.length > 0) {
-      console.log(`[delete-vlan] Cleaning up ${portForwards.length} port forward(s) on ${sync.fw_name} for ${vlanIfaceName}`);
-      const client = createClient(sync);
-      const rootVdom = sync.root_vdom || 'root';
-
-      for (const pf of portForwards) {
-        try {
-          for (const step of managedVipCleanupSteps(pf, sync, rootVdom)) {
-            await bestEffort(step.label, () => step.run(client));
-          }
-          // Remove DB record
-          await db.delete(managedVips).where(eq(managedVips.id, pf.id));
-          console.log(`[delete-vlan] Cleaned up port forward "${pf.vip_name}"`);
-        } catch (e) {
-          console.warn(`[delete-vlan] Failed to fully clean port forward "${pf.vip_name}":`, e.message);
-          // Still remove from DB — the FortiGate objects are best-effort
-          await db.delete(managedVips).where(eq(managedVips.id, pf.id));
-        }
-      }
-    }
+    await cleanupVlanPortForwards(sync.fw_id, sync, sync.interface_name);
   }
 
   // 2. Deprovision VLAN from each synced firewall (interface, address obj, DHCP, routes, policies, switch)
@@ -2385,7 +2390,16 @@ router.put('/firewalls/:id', pFirewalls, async (req, res) => {
 });
 
 router.delete('/firewalls/:id', pFirewalls, async (req, res) => {
-  const [fw] = await db.select({ name: firewalls.name }).from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1);
+  const firewallId = Number(req.params.id);
+  const [fw] = await db.select({ name: firewalls.name }).from(firewalls).where(eq(firewalls.id, firewallId)).limit(1);
+  // The FK cascade would drop these records while their FortiGate objects stay live and unmanageable.
+  const [syncRow] = await db.select({ id: firewallVlanSync.id }).from(firewallVlanSync)
+    .where(eq(firewallVlanSync.firewall_id, firewallId)).limit(1);
+  const [vipRow] = await db.select({ id: managedVips.id }).from(managedVips)
+    .where(eq(managedVips.firewall_id, firewallId)).limit(1);
+  if (syncRow || vipRow) {
+    return res.status(409).json({ error: 'Firewall still has synced VLANs or port forwards; unsync and remove them first' });
+  }
   await db.delete(firewalls).where(eq(firewalls.id, Number(req.params.id)));
   await logAudit(req, 'admin_delete_firewall', fw?.name || req.params.id, '');
   res.json({ ok: true });
@@ -2517,6 +2531,8 @@ async function handleVlanUnsync(req: any, res: any, vlanIdRaw: any, firewallIdRa
   if (!sync) return res.status(404).json({ error: 'Sync record not found' });
 
   try {
+    // Port forwards into this VLAN would otherwise be orphaned (and still open) on the FortiGate.
+    await cleanupVlanPortForwards(firewallId, sync, sync.interface_name);
     const client = createClient(sync);
     if (sync.artifacts) {
       const teardownRes = await teardownArtifacts(client, sync.artifacts);

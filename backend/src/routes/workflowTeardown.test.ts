@@ -223,3 +223,41 @@ test('VLAN unsync via POST /firewalls/:id/vlans/:vlanId/unsync also returns 502 
     .where(and(eq(firewallVlanSync.vlan_id, vlanId), eq(firewallVlanSync.firewall_id, firewallId))).limit(1);
   assert.equal(afterRetry, undefined);
 });
+
+test('VLAN unsync removes port forwards targeting that VLAN interface only', async (t) => {
+  t.mock.method(FortiGateAPI.prototype, 'deleteInterface', async () => {});
+  t.mock.method(FortiGateAPI.prototype, 'deleteVip', async () => {});
+  t.mock.method(FortiGateAPI.prototype, 'deleteAddressObject', async () => {});
+  await testDb.db.insert(firewallVlanSync).values({
+    firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099',
+    artifacts: [{ type: 'interface', name: 'vlan1099' }],
+  });
+  await testDb.db.insert(managedVips).values([
+    { firewall_id: firewallId, vip_name: 'pf-in-vlan', ext_port: 9001, mapped_ip: '10.99.0.20', mapped_port: 22, vlan_interface: 'vlan1099' },
+    { firewall_id: firewallId, vip_name: 'pf-other-vlan', ext_port: 9002, mapped_ip: '10.98.0.20', mapped_port: 22, vlan_interface: 'vlan1098' },
+  ]);
+
+  const res = await request(app).delete(`/vlans/${vlanId}/sync/${firewallId}`);
+  assert.equal(res.status, 200);
+
+  const remaining = await testDb.db.select({ vip_name: managedVips.vip_name }).from(managedVips)
+    .where(eq(managedVips.firewall_id, firewallId));
+  assert.deepEqual(remaining.map(r => r.vip_name), ['pf-other-vlan']);
+});
+
+test('firewall delete returns 409 while sync or port-forward records exist', async () => {
+  const blocked = await request(app).delete(`/firewalls/${firewallId}`);
+  assert.equal(blocked.status, 409);
+  const [stillThere] = await testDb.db.select().from(firewalls).where(eq(firewalls.id, firewallId));
+  assert.ok(stillThere);
+
+  await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
+  await testDb.db.insert(firewallVlanSync).values({ firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099' });
+  assert.equal((await request(app).delete(`/firewalls/${firewallId}`)).status, 409);
+
+  await testDb.db.delete(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
+  const ok = await request(app).delete(`/firewalls/${firewallId}`);
+  assert.equal(ok.status, 200);
+  const [gone] = await testDb.db.select().from(firewalls).where(eq(firewalls.id, firewallId));
+  assert.equal(gone, undefined);
+});
