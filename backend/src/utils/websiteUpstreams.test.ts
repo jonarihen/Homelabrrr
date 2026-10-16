@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { eq } from 'drizzle-orm';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
 import {
   firewalls, publicIpAssignments, publicIpPools, publicIps, users, userVlans, vlans, vmAssignments, vmSshConfigs,
@@ -38,4 +39,17 @@ test('website upstreams come from admin-set data, never the user-editable SSH ho
   assert.equal((await userCanReachUpstream(user.id, '192.168.1.5', false)).ok, false);
   assert.equal((await userCanReachUpstream(user.id, '172.16.5.20', false)).ok, true);
   assert.equal((await userCanReachUpstream(user.id, '10.10.10.40', false)).ok, true);
+
+  // The same VMID on another cluster carries a second public-IP row; it is not
+  // this user's VM, so its private IP grants nothing.
+  const [ip2] = await testDb.db.insert(publicIps).values({ pool_id: pool.id, firewall_id: fw.id, address: '203.0.113.10' }).returning({ id: publicIps.id });
+  await testDb.db.insert(publicIpAssignments).values({
+    public_ip_id: ip2.id, firewall_id: fw.id, user_id: user.id, node: '2~pve', vmid: 101, private_ip: '172.16.9.9',
+  });
+  assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps, ['172.16.5.20']);
+
+  // Unassigning the VM leaves the public-IP row behind; it must stop counting.
+  await testDb.db.delete(vmAssignments).where(eq(vmAssignments.user_id, user.id));
+  assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps, []);
+  assert.equal((await userCanReachUpstream(user.id, '172.16.5.20', false)).ok, false);
 });

@@ -44,11 +44,13 @@ test('sites whose upstream the owner may no longer use are unpublished, not dele
     site('stale.example.test', '192.168.1.5', ownerId),
     site('admin.example.test', '192.168.1.6', admin.id),
     site('parked.example.test', '192.168.1.7', ownerId, 'error'),
+    { ...site('orphan.example.test', '10.10.10.8', ownerId), owner_user_id: null },
   ]).returning({ id: caddySites.id, domain: caddySites.domain });
   const idOf = (domain: string) => rows.find((r) => r.domain === domain)!.id;
 
   const disallowed = await websites.findDisallowedSites(serverId);
-  assert.deepEqual(disallowed.map((s) => s.domain), ['stale.example.test']);
+  // An ownerless site has nobody left to authorize it, even with an in-VLAN upstream.
+  assert.deepEqual(disallowed.map((s) => s.domain).sort(), ['orphan.example.test', 'stale.example.test']);
 
   await websites.markSitesUnpublished(disallowed);
   const [stale] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, idOf('stale.example.test')));
@@ -57,10 +59,21 @@ test('sites whose upstream the owner may no longer use are unpublished, not dele
   const [ok] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, idOf('ok.example.test')));
   assert.equal(ok.status, 'live');
   const audits = await testDb.db.select().from(auditLog).where(eq(auditLog.action, 'website_upstream_revoked'));
-  assert.equal(audits.length, 1);
-  assert.equal(audits[0].target, 'stale.example.test');
+  assert.deepEqual(audits.map((a) => a.target).sort(), ['orphan.example.test', 'stale.example.test']);
 
   assert.deepEqual(await websites.findDisallowedSites(serverId), [], 'a parked site is not unpublished twice');
+
+  // The owner cannot bring a revoked site back with a retry.
+  const app = express();
+  app.use((req, _res, next) => {
+    (req as express.Request & { session: unknown }).session = { userId: ownerId, username: 'site-owner', isAdmin: false };
+    next();
+  });
+  app.use('/', websites.default);
+  const retry = await request(app).post(`/sites/${idOf('stale.example.test')}/retry`);
+  assert.equal(retry.status, 403);
+  const [afterRetry] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, idOf('stale.example.test')));
+  assert.equal(afterRetry.status, 'error');
 });
 
 test('the upstream picker matches SSH hosts on node and VMID', async () => {

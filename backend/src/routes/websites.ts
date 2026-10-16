@@ -446,20 +446,28 @@ async function reconcileManagedRoutes(server) {
   return { repaired, conflicted };
 }
 
+const REVOKED_DETAIL = 'Unpublished: this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
+
+// Whether a managed site's upstream is still one its owner may publish.
+// Admin-owned sites are exempt, matching userCanReachUpstream. A site whose
+// owner was deleted has nobody left to authorize it, so it fails closed.
+async function siteUpstreamAllowed(site) {
+  if (site.owner_user_id == null) return false;
+  const [owner] = await db.select({ is_admin: users.is_admin }).from(users)
+    .where(eq(users.id, site.owner_user_id)).limit(1);
+  if (!owner) return false;
+  if (owner.is_admin) return true;
+  return (await userCanReachUpstream(site.owner_user_id, site.upstream_host, false)).ok;
+}
+
 // A site published under an older, looser upstream policy (or whose owner has
-// since lost the VLAN/IP) must not stay reachable. Admin-owned sites are
-// exempt, matching userCanReachUpstream.
+// since lost the VLAN/IP, or was deleted) must not stay reachable.
 export async function findDisallowedSites(serverId) {
-  const sites = await db.select({
-    id: caddySites.id, domain: caddySites.domain, upstream_host: caddySites.upstream_host,
-    owner_user_id: caddySites.owner_user_id, owner_is_admin: users.is_admin,
-  }).from(caddySites)
-    .innerJoin(users, eq(users.id, caddySites.owner_user_id))
+  const sites = await db.select().from(caddySites)
     .where(and(eq(caddySites.server_id, serverId), eq(caddySites.managed, true), ne(caddySites.status, 'error')));
   const disallowed = [];
   for (const site of sites) {
-    if (site.owner_is_admin) continue;
-    if (!(await userCanReachUpstream(site.owner_user_id, site.upstream_host, false)).ok) disallowed.push(site);
+    if (!(await siteUpstreamAllowed(site))) disallowed.push(site);
   }
   return disallowed;
 }
@@ -468,11 +476,11 @@ export async function findDisallowedSites(serverId) {
 // The row and its settings are kept so the owner can repoint and save it.
 export async function markSitesUnpublished(sites) {
   for (const site of sites) {
-    await setSiteStatus(site.id, 'error', 'Unpublished: this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.');
+    await setSiteStatus(site.id, 'error', REVOKED_DETAIL);
     await logAuditEntry({
       action: 'website_upstream_revoked',
       target: site.domain,
-      detail: `site ${site.id} unpublished: upstream not allowed for owner user ${site.owner_user_id}`,
+      detail: `site ${site.id} unpublished: upstream not allowed for owner user ${site.owner_user_id ?? '(deleted)'}`,
       targetRef: String(site.id),
     });
   }
@@ -489,6 +497,9 @@ async function unpublishDisallowedSites(server) {
     const caddy = createCaddyClient(server);
     for (const site of disallowed) await caddy.deleteRoute(site.id);
   }
+  // The route is gone, so its inspection-profile slot can go too (same shared
+  // bundle / shared cert guards as deleting a site).
+  for (const site of disallowed) await releaseInspectionSlot(site, null);
   await markSitesUnpublished(disallowed);
   console.warn(`[websites] unpublished ${disallowed.length} site(s) on "${server.name}" whose upstream the owner may no longer use: ${disallowed.map((site) => site.domain).join(', ')}`);
 }
@@ -577,6 +588,12 @@ async function runSiteFlow(siteId) {
   if (!site) return;
   // Imported sites mirror routes owned by the Caddyfile — never push for them.
   if (!site.managed) return;
+  // Every (re)publish re-checks the upstream, so a revoked site cannot be
+  // brought back by a retry between maintenance ticks.
+  if (!(await siteUpstreamAllowed(site))) {
+    await setSiteStatus(site.id, 'error', REVOKED_DETAIL);
+    return;
+  }
   const server = await getServerRow(site.server_id);
   if (!server) {
     await setSiteStep(siteId, 'push', 'error', 'Caddy server no longer registered');
@@ -1370,6 +1387,7 @@ router.post('/sites/:id/retry', dnsLimiter, async (req, res) => {
   if (!row) return res.status(404).json({ error: 'Site not found' });
   if (!owns) return res.status(403).json({ error: 'Forbidden' });
   if (!row.managed) return res.status(400).json({ error: 'This site was imported from Caddy and is managed in the Caddyfile — nothing to retry.' });
+  if (!(await siteUpstreamAllowed(row))) return res.status(403).json({ error: REVOKED_DETAIL });
 
   const steps = INITIAL_STEPS.map((s) => ({ ...s, status: s.key === 'dns' ? 'done' : 'pending' }));
   await db.update(caddySites).set({ steps: stepList(steps), status: 'pushing', status_detail: '' })

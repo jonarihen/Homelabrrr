@@ -2,7 +2,8 @@ import { isIP } from 'net';
 import dns from 'dns/promises';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { publicIpAssignments } from '../db/schema/index.ts';
+import { publicIpAssignments, vmAssignments } from '../db/schema/index.ts';
+import { nodeLookupCandidates } from './nodeRef.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
 
 // ─── Field validation ─────────────────────────────────────────────────────────
@@ -157,17 +158,24 @@ export function ipv4InCidr(ip, cidr) {
 
 /**
  * The concrete set of upstream targets a user is allowed to proxy to:
- *  - vmIps: private IPs an admin assigned to them (public_ip_assignments)
+ *  - vmIps: private IPs an admin assigned to them (public_ip_assignments) for
+ *    VMs that are still assigned to them
  *  - subnets: CIDRs of the VLANs assigned to them (see utils/vlanSubnets.js)
  * Never read user- or guest-editable data (vm_ssh_configs.host, guest-agent
  * IPs) here: that would let a user publish an arbitrary internal address.
  */
 export async function getUserAllowedUpstreams(userId) {
-  const rows = await db
-    .select({ ip: publicIpAssignments.private_ip })
-    .from(publicIpAssignments)
-    .where(eq(publicIpAssignments.user_id, userId));
-  const vmIps = [...new Set(rows.map((r) => r.ip).filter((ip) => isIP(ip)))];
+  const [rows, assignments] = await Promise.all([
+    db.select({ ip: publicIpAssignments.private_ip, node: publicIpAssignments.node, vmid: publicIpAssignments.vmid })
+      .from(publicIpAssignments).where(eq(publicIpAssignments.user_id, userId)),
+    db.select({ node: vmAssignments.node, vmid: vmAssignments.vmid })
+      .from(vmAssignments).where(eq(vmAssignments.user_id, userId)),
+  ]);
+  // An IP only counts while its VM is still assigned to this user: unassigning
+  // a VM leaves the public-IP row behind. Legacy rows may store the bare node name.
+  const stillAssigned = (row) => assignments.some((a) => a.vmid === row.vmid
+    && (nodeLookupCandidates(a.node).includes(row.node) || nodeLookupCandidates(row.node).includes(a.node)));
+  const vmIps = [...new Set(rows.filter(stillAssigned).map((r) => r.ip).filter((ip) => isIP(ip)))];
   return { vmIps, subnets: await userVlanCidrs(db, userId) };
 }
 
