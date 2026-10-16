@@ -780,7 +780,9 @@ export async function moveVmDisk(node, vmid, disk, opts = {}) {
 // Thrown errors carry `exitstatus` (the PVE exit status, or 'timeout').
 export async function waitForTask(node, upid, { timeoutMs = 4 * 60 * 60 * 1000, intervalMs = 4000, onPoll = null } = {}) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  for (;;) {
+    // Poll once more after the deadline so a task finishing in the last interval isn't reported as a timeout.
+    const expired = Date.now() >= deadline;
     let task = null;
     try {
       task = await getTaskStatus(node, upid);
@@ -792,6 +794,7 @@ export async function waitForTask(node, upid, { timeoutMs = 4 * 60 * 60 * 1000, 
       if (task.exitstatus !== 'OK') throw Object.assign(new Error(`Proxmox task failed: ${task.exitstatus}`), { exitstatus: task.exitstatus || '' });
       return;
     }
+    if (expired) break;
     await sleep(intervalMs);
   }
   throw Object.assign(new Error('Timed out waiting for Proxmox task to complete'), { exitstatus: 'timeout' });
