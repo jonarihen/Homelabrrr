@@ -236,7 +236,7 @@ export default function FirewallsPage() {
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                  API Key {editId && <span className="text-gray-600">(leave empty to keep current)</span>}
+                  API Key {editId && <span className="text-gray-600">(leave empty to keep current; required if the address changes)</span>}
                 </label>
                 <input type="password" required={!editId} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} className={inputCls} placeholder="REST API administrator token" />
                 <p className="text-xs text-gray-600 mt-1">Create in FortiGate: System &gt; Administrators &gt; REST API</p>
