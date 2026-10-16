@@ -27,9 +27,11 @@ let refuseShell = false;
 
 const server = new Server({ hostKeys: [hostKey.private] }, (client) => {
   liveConnections += 1;
-  client.on('close', () => { liveConnections -= 1; });
+  let closed = false;
+  client.on('close', () => { closed = true; liveConnections -= 1; });
   client.on('error', () => { /* the proxy hangs up mid-handshake on purpose */ });
-  client.on('authentication', (ctx) => setTimeout(() => ctx.accept(), authDelayMs));
+  // Accepting on a connection the proxy already dropped arms ssh2's 60s keepalive timer.
+  client.on('authentication', (ctx) => setTimeout(() => { if (!closed) ctx.accept(); }, authDelayMs));
   client.on('ready', () => {
     client.on('session', (accept) => {
       const session = accept();
@@ -123,4 +125,20 @@ test('a host key mismatch is reported without connecting', async () => {
   assert.equal(ws.readyState, 3);
   assert.ok(ws.sent.some((m) => m.type === 'error'));
   await waitForConnectionsToClose();
+});
+
+test('a shell that cannot open because the transport dropped is reported, not thrown', async () => {
+  // ssh2 throws synchronously ("Not connected") when the server hangs up right
+  // after ready; force that branch deterministically.
+  const originalShell = ssh2.Client.prototype.shell;
+  ssh2.Client.prototype.shell = function () { throw new Error('Not connected'); };
+  try {
+    const ws = fakeClient();
+    await proxySshShell(ws, session()); // must resolve, not reject
+    assert.equal(ws.readyState, 3);
+    assert.ok(ws.sent.some((m) => m.type === 'error' && typeof m.code === 'string'));
+    await waitForConnectionsToClose();
+  } finally {
+    ssh2.Client.prototype.shell = originalShell;
+  }
 });

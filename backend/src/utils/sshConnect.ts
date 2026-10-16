@@ -95,42 +95,51 @@ export async function proxySshShell(clientWs, sshSession) {
     if (clientWs.readyState === 1) clientWs.close();
   });
 
-  conn.shell({ term: 'xterm-256color' }, (err, stream) => {
-    if (err) {
-      if (clientWs.readyState === 1) {
-        clientWs.send(JSON.stringify({ type: 'error', ...sshClientError(err) }));
-        clientWs.close();
-      }
-      conn.end();
-      return;
+  const failShell = (err) => {
+    if (clientWs.readyState === 1) {
+      clientWs.send(JSON.stringify({ type: 'error', ...sshClientError(err) }));
+      clientWs.close();
     }
+    conn.end();
+  };
 
-    const forward = (data) => {
-      if (clientWs.readyState === 1) {
-        clientWs.send(JSON.stringify({ type: 'data', data: data.toString('base64') }));
+  // ssh2 throws "Not connected" synchronously if the transport dropped right after ready.
+  try {
+    conn.shell({ term: 'xterm-256color' }, (err, stream) => {
+      if (err) {
+        failShell(err);
+        return;
       }
-    };
-    stream.on('data', forward);
-    stream.stderr.on('data', forward);
 
-    stream.on('close', () => {
-      if (clientWs.readyState === 1) {
-        clientWs.send(JSON.stringify({ type: 'status', status: 'disconnected' }));
-        clientWs.close();
-      }
-    });
-
-    clientWs.on('message', (raw) => {
-      try {
-        const msg = JSON.parse(raw);
-        if (msg.type === 'data') {
-          stream.write(Buffer.from(msg.data, 'base64'));
-        } else if (msg.type === 'resize' && msg.cols && msg.rows) {
-          stream.setWindow(msg.rows, msg.cols, 0, 0);
+      const forward = (data) => {
+        if (clientWs.readyState === 1) {
+          clientWs.send(JSON.stringify({ type: 'data', data: data.toString('base64') }));
         }
-      } catch { /* ignore bad messages */ }
-    });
+      };
+      stream.on('data', forward);
+      stream.stderr.on('data', forward);
 
-    clientWs.on('close', () => stream.close());
-  });
+      stream.on('close', () => {
+        if (clientWs.readyState === 1) {
+          clientWs.send(JSON.stringify({ type: 'status', status: 'disconnected' }));
+          clientWs.close();
+        }
+      });
+
+      clientWs.on('message', (raw) => {
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.type === 'data') {
+            stream.write(Buffer.from(msg.data, 'base64'));
+          } else if (msg.type === 'resize' && msg.cols && msg.rows) {
+            stream.setWindow(msg.rows, msg.cols, 0, 0);
+          }
+        } catch { /* ignore bad messages */ }
+      });
+
+      clientWs.on('close', () => stream.close());
+    });
+  } catch (err) {
+    failShell(err);
+  }
 }

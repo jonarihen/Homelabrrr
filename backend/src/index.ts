@@ -510,7 +510,10 @@ vncWss.on('connection', async (clientWs, vncSession) => {
 // ─── SSH connection handler ──────────────────────────────────────────────────
 
 sshWss.on('connection', (clientWs, sshSession) => {
-  proxySshShell(clientWs, sshSession);
+  proxySshShell(clientWs, sshSession).catch((err) => {
+    log('error', 'ssh_proxy_failed', { errorName: err?.name || 'Error' });
+    try { clientWs.close(); } catch { /* already gone */ }
+  });
 });
 
 // ─── Migrate any stored PPK keys to OpenSSH at startup ───────────────────────
