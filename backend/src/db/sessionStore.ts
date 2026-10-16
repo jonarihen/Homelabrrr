@@ -35,7 +35,9 @@ export class DrizzleSessionStore extends session.Store {
           // Expired — remove lazily and report a miss.
           return db.delete(sessions).where(eq(sessions.sid, sid)).then(() => cb(null, null), () => cb(null, null));
         }
-        cb(null, row.sess as session.SessionData);
+        // A row in the store is persisted by definition (covers rows stored
+        // before the _persisted marker existed), so later saves stay UPDATE-only.
+        cb(null, { ...(row.sess as object), _persisted: true } as unknown as session.SessionData);
       }, (err) => cb(err));
   }
 
