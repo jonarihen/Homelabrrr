@@ -156,7 +156,9 @@ async function clearTwoFactorAttempts(username: string): Promise<void> {
 // Signed-in credential confirmations (reauthenticate, change-password, 2FA
 // toggles) share one per-user failure budget so a session cookie alone cannot
 // brute-force the password or TOTP. Keyed by user id, not username: a rename
-// needs no confirmation and would otherwise reset the counter.
+// needs no confirmation and would otherwise reset the counter. Deliberately
+// not behind the shared per-IP verifyTwoFactorLimiter: anonymous traffic from
+// the same address must not be able to lock signed-in users out.
 const confirmationKey = (req: any) => `user:${req.session.userId}`;
 
 // Reserve one attempt from the budget *before* checking the credential; a
@@ -533,7 +535,7 @@ router.put('/change-username', requireAuth, requireInteractiveSession, async (re
   }
 });
 
-router.put('/change-password', verifyTwoFactorLimiter, requireAuth, requireInteractiveSession, async (req, res) => {
+router.put('/change-password', requireAuth, requireInteractiveSession, async (req, res) => {
   try { validateObject(req.body, { fields: ['currentPassword', 'newPassword'], required: ['currentPassword', 'newPassword'] }); }
   catch (err: any) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const { currentPassword } = req.body;
@@ -561,7 +563,7 @@ router.put('/change-password', verifyTwoFactorLimiter, requireAuth, requireInter
   res.json({ ok: true, revokedSessions: revoked });
 });
 
-router.post('/reauthenticate', verifyTwoFactorLimiter, requireAuth, requireInteractiveSession, async (req, res) => {
+router.post('/reauthenticate', requireAuth, requireInteractiveSession, async (req, res) => {
   try { validateObject(req.body, { fields: ['password', 'code'], required: ['password'] }); }
   catch (err: any) { return res.status(400).json({ error: err.message, code: err.code, field: err.field }); }
   const { password, code = '' } = req.body || {};
@@ -613,7 +615,7 @@ router.post('/2fa/setup', requireAuth, requireInteractiveSession, requireRecentR
 });
 
 // Verify code and activate 2FA
-router.post('/2fa/enable', verifyTwoFactorLimiter, requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
+router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
@@ -634,7 +636,7 @@ router.post('/2fa/enable', verifyTwoFactorLimiter, requireAuth, requireInteracti
 });
 
 // Disable 2FA (requires current TOTP code to confirm)
-router.post('/2fa/disable', verifyTwoFactorLimiter, requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
+router.post('/2fa/disable', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 

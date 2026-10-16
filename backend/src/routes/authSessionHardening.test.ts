@@ -46,7 +46,7 @@ before(async () => {
   app.use(express.json());
   app.use(session({ secret: 'hardening-test-secret', resave: false, saveUninitialized: false }));
   app.use((req, _res, next) => {
-    if (req.path !== '/login') {
+    if (req.path !== '/login' && !req.get('x-anonymous')) {
       req.session.userId = userId;
       req.session.username = 'harden-user';
       req.session.isAdmin = false;
@@ -160,6 +160,15 @@ test('parallel reauthentication guesses cannot exceed the budget', async () => {
   const statuses = results.map((r) => r.status);
   assert.equal(statuses.filter((s) => s === 403).length, 6, statuses.join(','));
   assert.equal(statuses.filter((s) => s === 423).length, 4, statuses.join(','));
+});
+
+test('unauthenticated hits from the same address do not exhaust a signed-in user\'s budget', async () => {
+  for (let i = 0; i < 35; i++) {
+    const res = await request(app).post('/reauthenticate').set('x-anonymous', '1').send({ password: 'wrong-guess' });
+    assert.equal(res.status, 401);
+  }
+  const res = await request(app).post('/reauthenticate').send({ password: PASSWORD });
+  assert.equal(res.status, 200);
 });
 
 test('a successful reauthentication clears the failure budget', async () => {
