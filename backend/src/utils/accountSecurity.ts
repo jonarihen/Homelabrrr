@@ -3,7 +3,6 @@ import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client.ts';
 import { recoveryCodes, sessions, webauthnCredentials } from '../db/schema/index.ts';
 import { revokeSftpSession } from './sftpSessions.ts';
-import { markSessionsRevoked } from './revokedSessions.ts';
 
 interface WebauthnConfigOptions {
   configuredOrigin?: string;
@@ -88,7 +87,6 @@ export async function revokeStoredSession(database: DbOrTx, userId: number, sess
     .limit(1);
   const parsed = row && parseStoredSession(row, currentSid);
   if (!parsed || parsed.userId !== userId) return { ok: false, missing: true };
-  markSessionsRevoked([row.sid]);
   await database.delete(sessions).where(eq(sessions.sid, row.sid));
   revokeSftpSession(row.sid);
   return { ok: true, session: parsed };
@@ -106,7 +104,6 @@ export async function revokeOtherStoredSessions(database: DbOrTx, userId: number
       .filter((row) => parseStoredSession(row, currentSid)?.userId === userId)
       .map((row) => row.sid);
     if (sids.length === 0) return { revoked: 0, sids };
-    markSessionsRevoked(sids);
     const result = await tx.delete(sessions).where(inArray(sessions.sid, sids));
     return { revoked: result.rowCount ?? 0, sids };
   });

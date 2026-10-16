@@ -110,18 +110,24 @@ test('a revoked session is not resurrected by an in-flight save', async () => {
   const store = new DrizzleSessionStore();
   const sid = 'in-flight-elsewhere';
   const sess = { userId, cookie: { maxAge: 60_000 } } as any;
-  await new Promise<void>((resolve, reject) => store.set(sid, sess, (err) => (err ? reject(err) : resolve())));
+  await new Promise<void>((resolve, reject) => store.set(sid, { ...sess }, (err) => (err ? reject(err) : resolve())));
+  const inFlight: any = await new Promise((resolve, reject) => store.get(sid, (err, s) => (err ? reject(err) : resolve(s))));
 
   const res = await request(app)
     .put('/change-password')
     .send({ currentPassword: PASSWORD, newPassword: 'Another-correct-horse-9!' });
   assert.equal(res.status, 200);
 
-  // The stolen session's request finishes after the revocation and saves.
-  await new Promise<void>((resolve, reject) => store.set(sid, { ...sess, lastSeenAt: Date.now() }, (err) => (err ? reject(err) : resolve())));
+  // The stolen session's request loaded it before the revocation and saves after.
+  assert.equal(inFlight._persisted, true);
+  await new Promise<void>((resolve, reject) => store.set(sid, { ...inFlight, lastSeenAt: Date.now() }, (err) => (err ? reject(err) : resolve())));
   assert.deepEqual(await remainingSids(), ['theirs']);
   const loaded = await new Promise((resolve, reject) => store.get(sid, (err, s) => (err ? reject(err) : resolve(s))));
   assert.equal(loaded, null);
+
+  // A brand-new (never stored) session still saves, e.g. a fresh login.
+  await new Promise<void>((resolve, reject) => store.set('fresh-login', { ...sess }, (err) => (err ? reject(err) : resolve())));
+  assert.deepEqual(await remainingSids(), ['fresh-login', 'theirs']);
 });
 
 test('enabling 2FA revokes the user\'s other sessions', async () => {
