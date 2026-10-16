@@ -103,6 +103,8 @@ export async function refreshHardwareAllocation(
     for (const owner of owners) await tx.execute(sql`SELECT pg_advisory_xact_lock(208, ${owner.user_id})`);
     const rows = await tx.select().from(vmAssignments)
       .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates))).for('update');
+    // Conflicting owner aliases: charge nobody rather than both (routes 409 via vmQuotaUserId first).
+    if (new Set(rows.map(row => row.user_id)).size > 1) return;
     for (const row of rows) {
       const prev = row.resource_allocation;
       if (!prev && !addDiskGb) continue;

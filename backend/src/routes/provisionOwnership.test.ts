@@ -938,3 +938,17 @@ test('absolute resizes measure fresh sizes and conflicting owner aliases fail cl
   assert.equal(diskResizes.length, 2);
   await testDb.db.update(users).set({ can_edit_vm_hardware: false, can_operate_all_vms: false }).where(eq(users.id, otherId));
 });
+
+test('admin resize and hardware edit with conflicting owner aliases answer 409 and charge nobody', async () => {
+  await testDb.db.insert(vmAssignments).values([
+    { user_id: ownerId, node, vmid: 963, resource_allocation: { cores: 2, memoryMb: 2048, diskGb: 30 } },
+    { user_id: otherId, node: 'pve', vmid: 963, resource_allocation: { cores: 2, memoryMb: 2048, diskGb: 30 } },
+  ]);
+  sourceDisks = { scsi0: 'local-lvm:vm-963-disk-0,size=20G', scsi1: 'local-lvm:vm-963-disk-1,size=10G' };
+  assert.equal((await request(app).put(`/vms/${node}/963/resize-disk`).send({ disk: 'scsi1', size: '+10G' })).status, 409);
+  assert.equal((await request(app).put(`/vms/${node}/963/hardware`).send({ cores: 4 })).status, 409);
+  assert.equal(diskResizes.length, 0);
+  assert.equal(tagWrites.length, 0);
+  const rows = await testDb.db.select().from(vmAssignments).where(eq(vmAssignments.vmid, 963));
+  assert.deepEqual(rows.map(row => row.resource_allocation?.diskGb), [30, 30]);
+});

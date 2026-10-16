@@ -1306,7 +1306,9 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
     }
 
     // Quota: only the increase over the VM's current allocation counts —
-    // a user at their quota can still shrink resources
+    // a user at their quota can still shrink resources. The owner is resolved
+    // for admins too, so conflicting owner rows answer 409 before any change.
+    const quotaUserId = await vmQuotaUserId(node, Number(vmid), req.session.userId);
     if (!req.session.isAdmin) {
       const current = (await getAllVMs()).find((v) => Number(v.vmid) === Number(vmid));
       const curCores = current?.maxcpu || 0;
@@ -1316,7 +1318,7 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
       const addCores = Math.max(0, newCores - curCores);
       const addMemoryMb = Math.max(0, newMemMb - curMemMb);
       if (addCores > 0 || addMemoryMb > 0) {
-        await assertUserQuota(await vmQuotaUserId(node, Number(vmid), req.session.userId), { addCores, addMemoryMb });
+        await assertUserQuota(quotaUserId, { addCores, addMemoryMb });
       }
     }
 
@@ -1366,6 +1368,8 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
     // the VM's owner, not to an operator resizing someone else's VM.
     // Uncached: a cached size from just before an earlier resize would inflate the delta.
     const config = await getVMConfigCurrent(node, vmid);
+    // Resolved for admins too: conflicting owner rows answer 409 before the resize.
+    const quotaUserId = await vmQuotaUserId(node, Number(vmid), req.session.userId);
     let addDiskGb = 0;
     if (size.startsWith('+')) {
       addDiskGb = sizeToGb(size.slice(1)) || 0;
@@ -1374,7 +1378,7 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
       addDiskGb = Math.max(0, (sizeToGb(size) || 0) - currentGb);
     }
     if (!req.session.isAdmin && addDiskGb > 0) {
-      await assertUserQuota(await vmQuotaUserId(node, Number(vmid), req.session.userId), { addDiskGb });
+      await assertUserQuota(quotaUserId, { addDiskGb });
     }
 
     await resizeVMDisk(node, vmid, disk, size);
