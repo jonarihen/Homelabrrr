@@ -274,6 +274,20 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
     setSubnet(buildManagedSubnet(form.tag));
   }, [form.tag, form.mode, form.subnetCidr, isTaggedOnly]);
 
+  // Each firewall may use its own subnet scheme: preview what each target would provision.
+  const [fwSubnets, setFwSubnets] = useState([]);
+  useEffect(() => {
+    const tag = parseInt(form.tag, 10);
+    const targets = firewalls.filter(fw => tag >= fw.vlan_range_start && tag <= fw.vlan_range_end);
+    if (isTaggedOnly || !subnet || targets.length === 0) { setFwSubnets([]); return undefined; }
+    let cancelled = false;
+    Promise.all(targets.map(fw => api.get(`/admin/vlans/subnet/${tag}`, { params: { firewallId: fw.id } })
+      .then(r => ({ id: fw.id, name: fw.name, network: r.data.network, gateway: r.data.gateway }))))
+      .then(list => { if (!cancelled) setFwSubnets(list); })
+      .catch(() => { if (!cancelled) setFwSubnets([]); });
+    return () => { cancelled = true; };
+  }, [form.tag, isTaggedOnly, subnet, firewalls]);
+
   useEffect(() => {
     if (isTaggedOnly) {
       setSyncToFw(false);
@@ -399,9 +413,18 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
           )}
           {!isTaggedOnly && subnet && (
             <div className="mt-2 bg-blue-900/20 border border-blue-800/30 rounded-lg px-3 py-2 text-xs space-y-0.5">
-              <p className="text-blue-400">Auto subnet: <span className="font-mono">{subnet.network}</span></p>
-              <p className="text-gray-500">Gateway: <span className="font-mono text-gray-400">{subnet.gateway}</span></p>
-              <p className="text-gray-500">DHCP range: <span className="font-mono text-gray-400">{subnet.dhcp}</span></p>
+              {fwSubnets.length > 0 ? fwSubnets.map(f => (
+                <p key={f.id} className="text-blue-400">
+                  {f.name}: <span className="font-mono">{f.network}</span>
+                  <span className="text-gray-500"> · gateway <span className="font-mono text-gray-400">{f.gateway}</span></span>
+                </p>
+              )) : (
+                <>
+                  <p className="text-blue-400">Auto subnet: <span className="font-mono">{subnet.network}</span></p>
+                  <p className="text-gray-500">Gateway: <span className="font-mono text-gray-400">{subnet.gateway}</span></p>
+                  <p className="text-gray-500">DHCP range: <span className="font-mono text-gray-400">{subnet.dhcp}</span></p>
+                </>
+              )}
             </div>
           )}
         </div>

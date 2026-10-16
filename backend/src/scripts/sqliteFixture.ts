@@ -23,7 +23,11 @@ export const FIXTURE = {
   webauthnPublicKey: Buffer.from([1, 2, 3, 4, 5, 250, 251, 252]),
   webauthnTransports: ['usb'],
   webhookEventTypes: ['vm.created', 'vm.deleted'],
-  workflowRunLog: [{ step: 'create_interface', ok: true }],
+  workflowRunLog: [
+    { step: 'create_interface', ok: true },
+    // The provisioned route: the importer backfills subnet_cidr from it.
+    { stepKey: 'route', calls: [{ method: 'POST', path: 'cmdb/router/static', body: { dst: '172.1.0.0 255.255.255.0' } }] },
+  ],
   policyIds: [12, 13],
   scheduleSkipUntil: 1_767_222_000_000,
   scheduleLastActionAt: 1_755_500_000_000,
@@ -130,10 +134,10 @@ export function buildFixtureSqlite(path: string): void {
       INSERT INTO workflows (firewall_id, "trigger", name, enabled, is_default, settings)
       VALUES (?, 'vlan_sync', 'Default VLAN sync', 1, 1, '{"vlan_zone":"lab"}')
     `).run(firewallId).lastInsertRowid as number;
-    // A non-default subnet scheme: imported syncs must get it in subnet_cidr.
+    // Current setting differs from what was provisioned: the import must not use it.
     db.prepare(`
       INSERT INTO workflows (firewall_id, "trigger", name, enabled, is_default, settings)
-      VALUES (?, 'vlan_provision', 'Default VLAN provision', 1, 1, '{"subnet":{"firstOctet":172}}')
+      VALUES (?, 'vlan_provision', 'Default VLAN provision', 1, 1, '{"subnet":{"firstOctet":192}}')
     `).run(firewallId);
     db.prepare(`
       INSERT INTO workflow_steps (workflow_id, position, step_key, action, label, params, condition, enabled, continue_on_error)
