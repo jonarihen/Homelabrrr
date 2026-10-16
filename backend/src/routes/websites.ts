@@ -480,6 +480,7 @@ export async function findDisallowedSites(serverId) {
   return disallowed;
 }
 
+// The only way into revocation (sweep and publish flow both use it).
 // Park disallowed sites in 'error', which every render and reconcile skips.
 // The row and its settings are kept so the owner can repoint and save it.
 // `sites` is a snapshot, so each row is re-read and re-checked, and the park
@@ -615,15 +616,16 @@ export function stopWebsiteMaintenance() {
 const CERT_POLL_ATTEMPTS = 30;
 const CERT_POLL_MS = 6000;
 
-async function runSiteFlow(siteId) {
+export async function runSiteFlow(siteId) {
   const [site] = await db.select().from(caddySites).where(eq(caddySites.id, siteId)).limit(1);
   if (!site) return;
   // Imported sites mirror routes owned by the Caddyfile — never push for them.
   if (!site.managed) return;
   // Every (re)publish re-checks the upstream, so a revoked site cannot be
-  // brought back by a retry between maintenance ticks.
+  // brought back by a retry between maintenance ticks. It enters revocation
+  // the one way the sweep does, so finishRevocations removes any live route.
   if (!(await siteUpstreamAllowed(site))) {
-    await setSiteStatus(site.id, 'error', REVOKED_DETAIL);
+    await markSitesUnpublished([site]);
     return;
   }
   const server = await getServerRow(site.server_id);

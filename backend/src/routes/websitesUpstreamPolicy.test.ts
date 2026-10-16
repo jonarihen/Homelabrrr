@@ -173,3 +173,41 @@ test('a failed inspection-slot release is retried on the next tick', async () =>
     caddyProto.deleteRoute = originals.del;
   }
 });
+
+test('a site whose owner loses access before its publish flow starts is revoked and its route removed', async () => {
+  const { createCaddyClient, managedRouteId } = await import('../utils/caddy.ts');
+  const [user] = await testDb.db.insert(users).values({ username: 'flow-owner', password: 'unused' }).returning({ id: users.id });
+  const [vlan] = await testDb.db.insert(vlans).values({ name: 'flow', tag: 1030, mode: 'managed', subnet_cidr: '' }).returning({ id: vlans.id });
+  await testDb.db.insert(userVlans).values({ user_id: user.id, vlan_id: vlan.id });
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'flow-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'flow.example.test', upstream_host: '10.10.30.5', upstream_port: 80,
+    owner_user_id: user.id, managed: true, status: 'pushing',
+  }).returning();
+
+  // The retry check passed; access is lost before the flow runs.
+  await testDb.db.delete(userVlans).where(eq(userVlans.user_id, user.id));
+
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { list: caddyProto.listManagedRouteIds, del: caddyProto.deleteRoute };
+  const live = new Set([managedRouteId(row.id)]);
+  caddyProto.listManagedRouteIds = async () => [...live];
+  caddyProto.deleteRoute = async (id) => { live.delete(managedRouteId(id)); };
+  try {
+    await websites.runSiteFlow(row.id);
+    const [parked] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.equal(parked.status, 'error');
+    assert.ok(parked.status_detail.startsWith('Being unpublished'));
+    assert.equal(live.size, 1, 'the flow itself does not publish or remove anything');
+
+    await websites.finishRevocations(apiServer);
+    const [done] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.equal(live.size, 0, 'the live route was removed');
+    assert.ok(done.status_detail.startsWith('Unpublished'));
+    const audits = await testDb.db.select().from(auditLog).where(eq(auditLog.target, 'flow.example.test'));
+    assert.equal(audits.length, 1);
+  } finally {
+    caddyProto.listManagedRouteIds = originals.list;
+    caddyProto.deleteRoute = originals.del;
+  }
+});
