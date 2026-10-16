@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import http from 'node:http';
 import express from 'express';
 import request from 'supertest';
 import ssh2 from 'ssh2';
@@ -29,7 +30,10 @@ await testDb.db.insert(vmAssignments).values({ user_id: USER_ID, node: 'host1~pv
  * where the route's error callbacks run.
  */
 let plan: Record<string, { code: number; message?: string }> = {};
+/** Per-event replies that replace the status answer (used to serve real file data). */
+let replies: Record<string, (sftp: any, reqid: number, ...args: any[]) => void> = {};
 let liveConnections = 0;
+let authDelayMs = 0;
 let transportFailure: { category: string; name: string; code: string } | undefined;
 const originalConnect = ssh2.Client.prototype.connect;
 ssh2.Client.prototype.connect = function (...args) {
@@ -68,9 +72,11 @@ const hostFingerprint = `SHA256:${createHash('sha256')
 
 const server = new Server({ hostKeys: [hostKey.private] }, (client) => {
   liveConnections += 1;
-  client.on('close', () => { liveConnections -= 1; });
+  let closed = false;
+  client.on('close', () => { closed = true; liveConnections -= 1; });
   client.on('error', () => { /* the route hangs up mid-session on failure */ });
-  client.on('authentication', (ctx) => ctx.accept());
+  // Accepting on a connection the route already dropped arms ssh2's 60s keepalive timer.
+  client.on('authentication', (ctx) => setTimeout(() => { if (!closed) ctx.accept(); }, authDelayMs));
   client.on('ready', () => {
     client.on('session', (accept) => {
       const session = accept();
@@ -79,11 +85,12 @@ const server = new Server({ hostKeys: [hostKey.private] }, (client) => {
         // REALPATH always fails: the listing route deliberately swallows that
         // one and falls back to the requested path, which keeps this fixture
         // honest about which promise is under test.
-        const answer = (event: string) => (reqid: number) => {
+        const answer = (event: string) => (reqid: number, ...args: any[]) => {
+          if (replies[event]) return replies[event](sftp, reqid, ...args);
           const { code, message } = plan[event] || { code: STATUS_CODE.NO_SUCH_FILE };
           sftp.status(reqid, code, message);
         };
-        for (const event of ['REALPATH', 'OPENDIR', 'READDIR', 'STAT', 'LSTAT', 'OPEN', 'MKDIR', 'REMOVE', 'RMDIR']) {
+        for (const event of ['REALPATH', 'OPENDIR', 'READDIR', 'STAT', 'LSTAT', 'OPEN', 'MKDIR', 'REMOVE', 'RMDIR', 'READ', 'CLOSE']) {
           sftp.on(event, answer(event));
         }
       });
@@ -214,4 +221,61 @@ test('the SFTP routes keep serving after an upstream failure', async () => {
   // Same process, same session, a second time — a crash path would never get here.
   assert.equal((await request(app()).post('/api/sftp/ls').send({ token: TOKEN, path: REMOTE_PATH })).status, 404);
   await waitForConnectionsToClose();
+});
+
+test('a cancelled download releases the SSH connection', async () => {
+  replies = {
+    STAT: (sftp, id) => sftp.attrs(id, { mode: 0o100644, size: 64 * 1024 * 1024, uid: 0, gid: 0, atime: 0, mtime: 0 }),
+    OPEN: (sftp, id) => sftp.handle(id, Buffer.from('h')),
+    READ: (sftp, id, _handle, _offset, length) => sftp.data(id, Buffer.alloc(length)),
+    CLOSE: (sftp, id) => sftp.status(id, STATUS_CODE.OK),
+  };
+  const listener = app().listen(0, '127.0.0.1');
+  await new Promise((resolve) => listener.once('listening', resolve));
+  try {
+    const { port: appPort } = listener.address() as { port: number };
+    const url = `http://127.0.0.1:${appPort}/api/sftp/download?token=${TOKEN}&path=${encodeURIComponent('/srv/big.bin')}`;
+    await new Promise<void>((resolve, reject) => {
+      const req = http.get(url, (res) => {
+        assert.equal(res.statusCode, 200);
+        res.once('data', () => { req.destroy(); resolve(); });
+      });
+      req.on('error', (err) => { if (!req.destroyed) reject(err); });
+    });
+    await waitForConnectionsToClose();
+  } finally {
+    replies = {};
+    listener.close();
+  }
+});
+
+test('a download cancelled during the SSH handshake releases the connection', async () => {
+  // Far longer than the test waits: only aborting the pending handshake passes.
+  authDelayMs = 5000;
+  replies = {
+    STAT: (sftp, id) => sftp.attrs(id, { mode: 0o100644, size: 64 * 1024 * 1024, uid: 0, gid: 0, atime: 0, mtime: 0 }),
+    OPEN: (sftp, id) => sftp.handle(id, Buffer.from('h')),
+    READ: (sftp, id, _handle, _offset, length) => sftp.data(id, Buffer.alloc(length)),
+    CLOSE: (sftp, id) => sftp.status(id, STATUS_CODE.OK),
+  };
+  const listener = app().listen(0, '127.0.0.1');
+  await new Promise((resolve) => listener.once('listening', resolve));
+  try {
+    const { port: appPort } = listener.address() as { port: number };
+    const url = `http://127.0.0.1:${appPort}/api/sftp/download?token=${TOKEN}&path=${encodeURIComponent('/srv/big.bin')}`;
+    const req = http.get(url);
+    req.on('error', () => { /* destroyed on purpose */ });
+    // Wait until the route has started the SSH handshake, then leave.
+    for (let attempt = 0; attempt < 100 && liveConnections === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const started = Date.now();
+    req.destroy();
+    await waitForConnectionsToClose();
+    assert.ok(Date.now() - started < 2000, 'the pending handshake was not aborted');
+  } finally {
+    authDelayMs = 0;
+    replies = {};
+    listener.close();
+  }
 });
