@@ -652,7 +652,7 @@ router.post('/2fa/disable', requireAuth, requireInteractiveSession, requireRecen
   if (!await reserveConfirmationAttempt(req)) return res.status(423).json(CONFIRMATION_LOCKED);
   const isValid = verifyTotp(code, decryptSecret(user.totp_secret));
   if (!isValid) return res.status(400).json({ error: 'Invalid code' });
-  await clearTwoFactorAttempts(confirmationKey(req));
+  // No budget reset either: a session could have enrolled this factor itself.
 
   await db.update(users).set({ totp_enabled: false, totp_secret: null }).where(eq(users.id, req.session.userId));
   const revoked = await revokeOtherStoredSessions(db, req.session.userId, req.sessionID);

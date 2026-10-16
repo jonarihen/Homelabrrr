@@ -202,6 +202,14 @@ test('enabling a freshly enrolled factor does not reset the failure budget', asy
   assert.equal(res.status, 423);
 });
 
+test('disabling a self-enrolled factor does not reset the failure budget', async () => {
+  for (let i = 0; i < 5; i++) await request(app).post('/reauthenticate').send({ password: 'wrong-guess' });
+  await testDb.db.update(users).set({ totp_enabled: true, totp_secret: encryptSecret(SECRET) }).where(eq(users.id, userId));
+  const disable = await request(app).post('/2fa/disable').send({ code: generateSync({ secret: SECRET }) });
+  assert.equal(disable.status, 200);
+  assert.equal((await request(app).post('/reauthenticate').send({ password: PASSWORD })).status, 423);
+});
+
 test('a successful reauthentication clears the failure budget', async () => {
   for (let i = 0; i < 5; i++) await request(app).post('/reauthenticate').send({ password: 'wrong-guess' });
   assert.equal((await request(app).post('/reauthenticate').send({ password: PASSWORD })).status, 200);
