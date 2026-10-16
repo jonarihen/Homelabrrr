@@ -47,7 +47,7 @@ import {
 import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
 import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
-import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
+import { runBundle, buildFirewallContext, teardownArtifacts, WorkflowDisabledError } from '../workflows/runner.ts';
 import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
@@ -2744,6 +2744,7 @@ router.post('/policies', pPolicies, async (req, res) => {
     await logAudit(req, 'admin_create_policy', `${srcVlan.interface_name} → ${dstVlan.interface_name}`, `services: ${services.join(',')} action: ${action}${bidirectional ? ' (bidirectional)' : ''}`);
     res.json({ policyIds });
   } catch (err) {
+    if (err instanceof WorkflowDisabledError) return res.status(err.status).json({ error: err.message });
     res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
@@ -3517,6 +3518,7 @@ router.post('/firewalls/:id/vips', pPortForwards, async (req, res) => {
         : null,
     });
   } catch (err) {
+    if (err instanceof WorkflowDisabledError) return res.status(err.status).json({ error: err.message });
     // The engine already rolled back anything it created on failure.
     res.status(500).json({ error: sanitizeError(err.message) });
   }
