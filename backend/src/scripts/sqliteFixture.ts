@@ -130,6 +130,11 @@ export function buildFixtureSqlite(path: string): void {
       INSERT INTO workflows (firewall_id, "trigger", name, enabled, is_default, settings)
       VALUES (?, 'vlan_sync', 'Default VLAN sync', 1, 1, '{"vlan_zone":"lab"}')
     `).run(firewallId).lastInsertRowid as number;
+    // A non-default subnet scheme: imported syncs must get it in subnet_cidr.
+    db.prepare(`
+      INSERT INTO workflows (firewall_id, "trigger", name, enabled, is_default, settings)
+      VALUES (?, 'vlan_provision', 'Default VLAN provision', 1, 1, '{"subnet":{"firstOctet":172}}')
+    `).run(firewallId);
     db.prepare(`
       INSERT INTO workflow_steps (workflow_id, position, step_key, action, label, params, condition, enabled, continue_on_error)
       VALUES (?, 1, 'create-interface', 'create_interface', 'Create interface', '{"mtu":1500}', '', 1, 0)

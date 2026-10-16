@@ -1694,6 +1694,10 @@ router.put('/vlans/:id', pVlans, async (req, res) => {
   if (syncCount > 0 && nextMode !== existing.mode) {
     return res.status(400).json({ error: 'Unsync this VLAN from firewalls before changing its type' });
   }
+  if (syncCount > 0 && requestedTag !== existing.tag) {
+    // The provisioned interface and subnet belong to the old tag.
+    return res.status(400).json({ error: 'Unsync this VLAN from firewalls before changing its tag' });
+  }
 
   const nextSubnetCidr = nextMode === 'tagged_only'
     ? String(subnetCidr ?? existing.subnet_cidr ?? '').trim()

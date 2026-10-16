@@ -98,3 +98,18 @@ test('GET /vlans/subnet/:tag previews the firewall scheme with an optional firew
   assert.equal((await request(app).get('/vlans/subnet/1126')).body.network, '10.11.26.0/24');
   assert.equal((await request(app).get(`/vlans/subnet/1126?firewallId=${firewallId}`)).body.network, '192.11.26.0/24');
 });
+
+test('syncedSubnet rebuilds the full recorded /24, not one derived from the current tag', async () => {
+  const { syncedSubnet } = await import('../workflows/subnet.ts');
+  const subnet = syncedSubnet(1200, '172.11.26.0/24');
+  assert.equal(subnet.network, '172.11.26.0/24');
+  assert.equal(subnet.gateway, '172.11.26.1');
+  assert.equal(syncedSubnet(1126, null).network, '10.11.26.0/24');
+});
+
+test('PUT /vlans/:id refuses a tag change while the VLAN is synced', async () => {
+  const [src] = (await request(app).get('/vlans')).body.filter((v: any) => v.tag === 1126);
+  const res = await request(app).put(`/vlans/${src.id}`).send({ name: src.name, tag: 1200 });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /Unsync/);
+});

@@ -120,6 +120,8 @@ test('one-shot SQLite import round-trips into PostgreSQL', async () => {
     const [sync] = await tdb.db.select().from(firewallVlanSync);
     assert.deepEqual(sync.policy_ids, FIXTURE.policyIds);
     assert.equal(sync.workflow_run_id, run.id);
+    // subnet_cidr backfilled after the import from the firewall's vlan_provision setting.
+    assert.equal(sync.subnet_cidr, '172.1.0.0/24');
 
     // Provisioned VM: '' steps → NULL, cloud_image_id preserved (not an orphan).
     const [vm] = await tdb.db.select().from(provisionedVms);

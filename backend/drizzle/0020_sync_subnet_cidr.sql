@@ -14,4 +14,5 @@ SET "subnet_cidr" = concat(
   ), '10'),
   '.', v."tag" / 100, '.', v."tag" % 100, '.0/24')
 FROM "vlans" AS v
-WHERE v."id" = s."vlan_id" AND v."mode" <> 'tagged_only' AND v."tag" BETWEEN 0 AND 9999;
+WHERE v."id" = s."vlan_id" AND s."subnet_cidr" IS NULL
+  AND v."mode" <> 'tagged_only' AND v."tag" BETWEEN 0 AND 9999;
