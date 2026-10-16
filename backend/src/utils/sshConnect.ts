@@ -7,11 +7,21 @@ import { log } from './logger.ts';
  * Create an authenticated SSH connection with host key verification.
  *
  * @param {{host:string, port:number, username:string, privateKey:string, passphrase?:string, hostFingerprint:string}} opts
+ * @param {AbortSignal} [signal] ends the client if aborted before it is ready
  * @returns {Promise<import('ssh2').Client>}
  */
-export function createSshConnection({ host, port, username, privateKey, passphrase, hostFingerprint }) {
+export function createSshConnection({ host, port, username, privateKey, passphrase, hostFingerprint }, signal?: AbortSignal) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('SSH connection aborted'));
+      return;
+    }
     const conn = new SSHClient();
+    // Abort ends the in-progress handshake instead of waiting for ready/timeout.
+    signal?.addEventListener('abort', () => {
+      conn.end();
+      reject(new Error('SSH connection aborted'));
+    }, { once: true });
     const expectedFingerprint = normalizeSshHostFingerprint(hostFingerprint);
     let hostVerificationError = '';
 
@@ -53,14 +63,17 @@ export async function proxySshShell(clientWs, sshSession) {
   const { requestId, node, vmid, port } = sshSession;
   let conn = null;
   let clientGone = false;
+  const handshake = new AbortController();
   clientWs.on('close', () => {
     clientGone = true;
+    handshake.abort();
     conn?.end();
   });
 
   try {
-    conn = await createSshConnection(sshSession);
+    conn = await createSshConnection(sshSession, handshake.signal);
   } catch (err) {
+    if (clientGone) return;
     const clientError = sshClientError(err);
     log('error', 'ssh_connection_failed', { requestId, node, vmid, code: clientError.code, errorName: err?.name || 'Error' });
     if (clientWs.readyState === 1) {

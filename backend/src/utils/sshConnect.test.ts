@@ -83,6 +83,19 @@ test('a client that leaves during the SSH handshake does not leak the connection
   await waitForConnectionsToClose();
 });
 
+test('a client that leaves mid-handshake aborts it instead of waiting for ready', async () => {
+  authDelayMs = 5000;
+  const ws = fakeClient();
+  const started = Date.now();
+  const done = proxySshShell(ws, session());
+  setTimeout(() => ws.close(), 50);
+  await done;
+  await waitForConnectionsToClose();
+  authDelayMs = 0;
+  assert.ok(Date.now() - started < 2000, 'the pending handshake was not aborted');
+  assert.equal(ws.sent.length, 0);
+});
+
 test('a refused shell ends the SSH connection and reports an error', async () => {
   refuseShell = true;
   const ws = fakeClient();

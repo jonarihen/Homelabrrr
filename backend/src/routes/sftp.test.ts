@@ -33,6 +33,7 @@ let plan: Record<string, { code: number; message?: string }> = {};
 /** Per-event replies that replace the status answer (used to serve real file data). */
 let replies: Record<string, (sftp: any, reqid: number, ...args: any[]) => void> = {};
 let liveConnections = 0;
+let authDelayMs = 0;
 let transportFailure: { category: string; name: string; code: string } | undefined;
 const originalConnect = ssh2.Client.prototype.connect;
 ssh2.Client.prototype.connect = function (...args) {
@@ -73,7 +74,7 @@ const server = new Server({ hostKeys: [hostKey.private] }, (client) => {
   liveConnections += 1;
   client.on('close', () => { liveConnections -= 1; });
   client.on('error', () => { /* the route hangs up mid-session on failure */ });
-  client.on('authentication', (ctx) => ctx.accept());
+  client.on('authentication', (ctx) => setTimeout(() => ctx.accept(), authDelayMs));
   client.on('ready', () => {
     client.on('session', (accept) => {
       const session = accept();
@@ -241,6 +242,35 @@ test('a cancelled download releases the SSH connection', async () => {
     });
     await waitForConnectionsToClose();
   } finally {
+    replies = {};
+    listener.close();
+  }
+});
+
+test('a download cancelled during the SSH handshake releases the connection', async () => {
+  authDelayMs = 300;
+  replies = {
+    STAT: (sftp, id) => sftp.attrs(id, { mode: 0o100644, size: 64 * 1024 * 1024, uid: 0, gid: 0, atime: 0, mtime: 0 }),
+    OPEN: (sftp, id) => sftp.handle(id, Buffer.from('h')),
+    READ: (sftp, id, _handle, _offset, length) => sftp.data(id, Buffer.alloc(length)),
+    CLOSE: (sftp, id) => sftp.status(id, STATUS_CODE.OK),
+  };
+  const listener = app().listen(0, '127.0.0.1');
+  await new Promise((resolve) => listener.once('listening', resolve));
+  try {
+    const { port: appPort } = listener.address() as { port: number };
+    const url = `http://127.0.0.1:${appPort}/api/sftp/download?token=${TOKEN}&path=${encodeURIComponent('/srv/big.bin')}`;
+    const req = http.get(url);
+    req.on('error', () => { /* destroyed on purpose */ });
+    // Wait until the route has started the SSH handshake, then leave.
+    for (let attempt = 0; attempt < 100 && liveConnections === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    req.destroy();
+    await new Promise((resolve) => setTimeout(resolve, authDelayMs + 200));
+    await waitForConnectionsToClose();
+  } finally {
+    authDelayMs = 0;
     replies = {};
     listener.close();
   }
