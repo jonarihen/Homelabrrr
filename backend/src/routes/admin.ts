@@ -2496,13 +2496,19 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const policyIds = outVals.map((o) => o?.policyId).filter((v) => v !== undefined && v !== null);
         const dhcpServerId = outVals.find((o) => o?.dhcpServerId)?.dhcpServerId ?? null;
         const staticRouteId = outVals.find((o) => o?.routeId)?.routeId ?? null;
+        // Record only the /24 the run's interface step actually configured; no
+        // such output (step disabled/skipped/customised away) → NULL = legacy default.
+        const ifaceOut = outVals.find((o) => o?.ip && o?.netmask);
+        const ifaceNet = ifaceOut?.netmask === '255.255.255.0'
+          && /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(ifaceOut.ip);
+        const provisionedCidr = ifaceNet ? `${ifaceNet[1]}.0/24` : null;
         const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet };
         console.log(`[sync] Success:`, JSON.stringify(result));
         // policy_ids and artifacts are jsonb columns — pass objects directly.
         await db.insert(firewallVlanSync).values({
           firewall_id: fw.id, vlan_id: vlan.id, interface_name: interfaceName,
           policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
-          subnet_cidr: subnet.network,
+          subnet_cidr: provisionedCidr,
         });
         await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
         results.push({ firewall: fw.name, status: 'ok', ...result });

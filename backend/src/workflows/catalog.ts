@@ -99,7 +99,8 @@ export const ACTIONS = {
       await client.request('POST', 'cmdb/system/interface', body, 'global');
       return {
         skipped: false,
-        output: { interfaceName: name },
+        // ip/netmask as actually sent: the sync records the provisioned subnet from them.
+        output: { interfaceName: name, ip: String(p.ip), netmask: String(p.netmask) },
         artifacts: [{ type: 'interface', name }],
         calls: [{ method: 'POST', path: 'cmdb/system/interface', scope: 'global', body, summary: `Created VLAN interface ${name}` }],
       };

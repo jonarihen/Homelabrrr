@@ -4,7 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, firewalls, vlans, firewallVlanSync, workflows } from '../db/schema/index.ts';
+import { users, firewalls, vlans, firewallVlanSync, workflows, workflowSteps } from '../db/schema/index.ts';
 import { FortiGateAPI } from '../fortigate.ts';
 
 // #315: policies and the VLAN list must use the subnet each firewall sync
@@ -115,19 +115,40 @@ test('PUT /vlans/:id refuses a tag change while the VLAN is synced', async () =>
   assert.match(res.body.error, /Unsync/);
 });
 
-test('VLAN sync records the subnet it provisioned in firewall_vlan_sync.subnet_cidr', async () => {
+test('VLAN sync records no subnet when no interface step configured one', async () => {
   const [fw] = await testDb.db.insert(firewalls)
     .values({ name: 'fw-sync', host: '192.168.100.3', api_key: 'k', vdom: 'lab', verify_tls: false })
     .returning({ id: firewalls.id });
-  // A step-less workflow keeps FortiGate out of the test; the subnet comes from its settings.
+  // Step-less workflow: nothing was provisioned, so nothing may be recorded (readers → legacy default).
   await testDb.db.insert(workflows).values({
     firewall_id: fw.id, trigger: 'vlan_provision', name: 'VLAN provision', settings: { subnet: { firstOctet: 172 } },
   });
   const [vlan] = await testDb.db.insert(vlans).values({ name: 'new', tag: 1301, mode: 'managed' }).returning({ id: vlans.id });
 
   const res = await request(app).post(`/vlans/${vlan.id}/sync`).send({ firewallId: fw.id });
-  assert.equal(res.status, 200);
   assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
   const [sync] = await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.vlan_id, vlan.id));
-  assert.equal(sync.subnet_cidr, '172.13.1.0/24');
+  assert.equal(sync.subnet_cidr, null);
+});
+
+test('VLAN sync records the subnet from the interface step output, not the setting', async (t) => {
+  const [fw] = await testDb.db.insert(firewalls)
+    .values({ name: 'fw-iface', host: '192.168.100.4', api_key: 'k', vdom: 'lab', verify_tls: false })
+    .returning({ id: firewalls.id });
+  // Setting says 172, but the customised interface step configures 192.168.50.1/24.
+  const [wf] = await testDb.db.insert(workflows).values({
+    firewall_id: fw.id, trigger: 'vlan_provision', name: 'VLAN provision', settings: { subnet: { firstOctet: 172 } },
+  }).returning({ id: workflows.id });
+  await testDb.db.insert(workflowSteps).values({
+    workflow_id: wf.id, position: 0, step_key: 'iface', action: 'create_vlan_interface',
+    params: { name: 'vlan{{tag}}', vlanId: '{{tag}}', parentInterface: 'fortilink', ip: '192.168.50.1', netmask: '255.255.255.0' },
+  });
+  t.mock.method(FortiGateAPI.prototype, 'getInterface', async () => null);
+  t.mock.method(FortiGateAPI.prototype, 'request', async () => ({}));
+  const [vlan] = await testDb.db.insert(vlans).values({ name: 'iface', tag: 1302, mode: 'managed' }).returning({ id: vlans.id });
+
+  const res = await request(app).post(`/vlans/${vlan.id}/sync`).send({ firewallId: fw.id });
+  assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
+  const [sync] = await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.vlan_id, vlan.id));
+  assert.equal(sync.subnet_cidr, '192.168.50.0/24');
 });

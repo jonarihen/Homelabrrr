@@ -274,12 +274,15 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
     setSubnet(buildManagedSubnet(form.tag));
   }, [form.tag, form.mode, form.subnetCidr, isTaggedOnly]);
 
-  // Each firewall may use its own subnet scheme: preview what each target would provision.
+  // Each firewall may use its own subnet scheme: on create, preview what each
+  // target would provision; on edit, show what each sync recorded (edits never reprovision).
+  const recordedSubnets = (vlan?.firewallSync || [])
+    .map(s => ({ id: s.firewallId, name: s.firewallName, network: s.subnet }));
   const [fwSubnets, setFwSubnets] = useState([]);
   const previewTag = parseInt(form.tag, 10);
-  const previewTargets = firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
+  const previewTargets = vlan ? [] : firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
   useEffect(() => {
-    const targets = firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
+    const targets = vlan ? [] : firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
     setFwSubnets([]);
     if (isTaggedOnly || !subnet || targets.length === 0) return undefined;
     let cancelled = false;
@@ -289,7 +292,7 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
       .catch(() => ({ id: fw.id, name: fw.name, network: null }))))
       .then(list => { if (!cancelled) setFwSubnets(list); });
     return () => { cancelled = true; };
-  }, [previewTag, isTaggedOnly, subnet, firewalls]);
+  }, [previewTag, isTaggedOnly, subnet, firewalls, vlan]);
 
   useEffect(() => {
     if (isTaggedOnly) {
@@ -416,7 +419,9 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
           )}
           {!isTaggedOnly && subnet && (
             <div className="mt-2 bg-blue-900/20 border border-blue-800/30 rounded-lg px-3 py-2 text-xs space-y-0.5">
-              {previewTargets.length > 0 && fwSubnets.length === 0 ? (
+              {recordedSubnets.length > 0 ? recordedSubnets.map(f => (
+                <p key={f.id} className="text-blue-400">{f.name}: <span className="font-mono">{f.network}</span></p>
+              )) : previewTargets.length > 0 && fwSubnets.length === 0 ? (
                 <p className="text-gray-500">Loading subnet preview…</p>
               ) : fwSubnets.length > 0 ? fwSubnets.map(f => (
                 f.network ? (
