@@ -11,13 +11,13 @@ import {
   vlans, userVlans, firewalls, pveHosts,
   firewallVlanSync, managedVips, publicIps, publicIpPools, publicIpAssignments,
   caddyServers, caddySites, notificationWebhooks, vmTemplates, cloudImages,
-  vmLeases, auditLog, settings, loginAttempts,
+  vmLeases, auditLog, settings, loginAttempts, workflows,
 } from '../db/schema/index.ts';
 import { isUniqueViolation, isForeignKeyViolation } from '../db/errors.ts';
 import { setSetting } from '../db/settings.ts';
 import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools } from '../proxmox.ts';
 import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibility.ts';
-import { createClient, vlanTagToSubnet } from '../fortigate.ts';
+import { createClient } from '../fortigate.ts';
 import {
   requireAuth, requireAdmin, requirePermission, requireInteractiveSession, requireRecentReauthentication,
 } from '../middleware/auth.ts';
@@ -46,7 +46,7 @@ import {
 } from '../utils/leases.ts';
 import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
-import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
+import { getWorkflowBundle, getWorkflowRow, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
 import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
 import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
@@ -1550,7 +1550,13 @@ function isValidCidr(cidr = '') {
   return inRange(Number(prefix), 32);
 }
 
-function serializeVlanSubnet(vlan) {
+// The subnet a managed VLAN gets on a firewall comes from that firewall's
+// vlan_provision workflow settings (subnet.firstOctet); missing row → default.
+async function firewallSubnetSettings(firewallId) {
+  return workflowSettings(await getWorkflowRow(firewallId, 'vlan_provision'));
+}
+
+function serializeVlanSubnet(vlan, subnetSettings) {
   if (vlan.mode === 'tagged_only') {
     if (!vlan.subnet_cidr) return null;
     return {
@@ -1560,7 +1566,7 @@ function serializeVlanSubnet(vlan) {
       custom: true,
     };
   }
-  return vlanTagToSubnet(vlan.tag);
+  return deriveSubnet(vlan.tag, subnetSettings);
 }
 
 // VLANs read also needed by policies page and assignments page
@@ -1588,7 +1594,14 @@ router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies'
   const fwRanges = await db.select({
     id: firewalls.id, name: firewalls.name, vlan_range_start: firewalls.vlan_range_start, vlan_range_end: firewalls.vlan_range_end,
   }).from(firewalls);
-  res.json(vlanRows.map(v => ({ ...v, firewallSync: syncMap[v.id] || [], subnet: serializeVlanSubnet(v), firewallRanges: fwRanges })));
+  // A VLAN's displayed subnet follows the first firewall it is synced to; unsynced → default scheme.
+  const provisionSettings = new Map((await db.select({ firewall_id: workflows.firewall_id, settings: workflows.settings })
+    .from(workflows).where(eq(workflows.trigger, 'vlan_provision'))).map(w => [w.firewall_id, workflowSettings(w)]));
+  res.json(vlanRows.map(v => ({
+    ...v, firewallSync: syncMap[v.id] || [],
+    subnet: serializeVlanSubnet(v, provisionSettings.get(syncMap[v.id]?.[0]?.firewallId)),
+    firewallRanges: fwRanges,
+  })));
 });
 
 router.post('/vlans', pVlans, async (req, res) => {
@@ -2676,8 +2689,9 @@ router.post('/policies', pPolicies, async (req, res) => {
     if (!hasDst) return res.status(403).json({ error: `You do not have access to destination VLAN ${dstVlanTag}` });
   }
 
-  const srcSubnet = vlanTagToSubnet(srcVlanTag);
-  const dstSubnet = vlanTagToSubnet(dstVlanTag);
+  const subnetSettings = await firewallSubnetSettings(fw.id);
+  const srcSubnet = deriveSubnet(Number(srcVlanTag), subnetSettings);
+  const dstSubnet = deriveSubnet(Number(dstVlanTag), subnetSettings);
   if (!srcSubnet || !dstSubnet) return res.status(400).json({ error: 'Cannot derive subnets from VLAN tags' });
 
   const srcAddrName = `NET-${srcSubnet.networkIp}_24`;
@@ -3627,9 +3641,11 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
   }
 });
 
-// Helper: compute subnet for a VLAN tag
-router.get('/vlans/subnet/:tag', pVlans, (req, res) => {
-  const subnet = vlanTagToSubnet(parseInt(req.params.tag));
+// Helper: compute subnet for a VLAN tag (optionally on a given firewall's scheme)
+router.get('/vlans/subnet/:tag', pVlans, async (req, res) => {
+  const firewallId = Number(req.query.firewallId);
+  const subnetSettings = Number.isInteger(firewallId) && firewallId > 0 ? await firewallSubnetSettings(firewallId) : {};
+  const subnet = deriveSubnet(parseInt(req.params.tag), subnetSettings);
   if (!subnet) return res.status(400).json({ error: 'Invalid tag for auto IP scheme' });
   res.json(subnet);
 });
