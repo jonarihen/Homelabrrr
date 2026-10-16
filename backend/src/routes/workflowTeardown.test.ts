@@ -226,26 +226,61 @@ test('VLAN unsync via POST /firewalls/:id/vlans/:vlanId/unsync also returns 502 
 
 test('VLAN unsync removes port forwards targeting that VLAN interface only', async (t) => {
   t.mock.method(FortiGateAPI.prototype, 'deleteInterface', async () => {});
-  t.mock.method(FortiGateAPI.prototype, 'deleteVip', async () => {});
+  const deletedVips: string[] = [];
+  t.mock.method(FortiGateAPI.prototype, 'deleteVip', async (name: string) => { deletedVips.push(name); });
   t.mock.method(FortiGateAPI.prototype, 'deleteAddressObject', async () => {});
   await testDb.db.insert(firewallVlanSync).values({
     firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099',
     artifacts: [{ type: 'interface', name: 'vlan1099' }],
   });
   await testDb.db.insert(managedVips).values([
-    { firewall_id: firewallId, vip_name: 'pf-in-vlan', ext_port: 9001, mapped_ip: '10.99.0.20', mapped_port: 22, vlan_interface: 'vlan1099' },
+    // Workflow-created row: torn down from its recorded artifacts, not the legacy name scheme.
+    { firewall_id: firewallId, vip_name: 'pf-in-vlan', ext_port: 9001, mapped_ip: '10.99.0.20', mapped_port: 22, vlan_interface: 'vlan1099',
+      artifacts: [{ type: 'vip', name: 'custom-vip-name', vdom: 'root' }] },
     { firewall_id: firewallId, vip_name: 'pf-other-vlan', ext_port: 9002, mapped_ip: '10.98.0.20', mapped_port: 22, vlan_interface: 'vlan1098' },
   ]);
 
   const res = await request(app).delete(`/vlans/${vlanId}/sync/${firewallId}`);
   assert.equal(res.status, 200);
+  assert.deepEqual(deletedVips, ['custom-vip-name']);
 
   const remaining = await testDb.db.select({ vip_name: managedVips.vip_name }).from(managedVips)
     .where(eq(managedVips.firewall_id, firewallId));
   assert.deepEqual(remaining.map(r => r.vip_name), ['pf-other-vlan']);
+  await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
+});
+
+test('VLAN unsync keeps the port forward and sync records when port-forward cleanup fails', async (t) => {
+  const deleteInterface = t.mock.method(FortiGateAPI.prototype, 'deleteInterface', async () => {});
+  t.mock.method(FortiGateAPI.prototype, 'deleteVip', async () => { throw new Error('Connection reset'); });
+  t.mock.method(FortiGateAPI.prototype, 'deletePolicy', async () => {});
+  t.mock.method(FortiGateAPI.prototype, 'deleteAddressObject', async () => {});
+  t.mock.method(FortiGateAPI.prototype, 'deleteServiceObject', async () => {});
+  await testDb.db.insert(firewallVlanSync).values({
+    firewall_id: firewallId, vlan_id: vlanId, interface_name: 'vlan1099',
+    artifacts: [{ type: 'interface', name: 'vlan1099' }],
+  });
+  // Legacy row (no artifacts) goes through the fixed cleanup sequence.
+  await testDb.db.insert(managedVips).values({
+    firewall_id: firewallId, vip_name: 'pf-legacy', ext_port: 9003, mapped_ip: '10.99.0.21', mapped_port: 22, vlan_interface: 'vlan1099',
+  });
+
+  const res = await request(app).delete(`/vlans/${vlanId}/sync/${firewallId}`);
+  assert.equal(res.status, 502);
+  assert.match(res.body.error, /pf-legacy/);
+  assert.equal(deleteInterface.mock.callCount(), 0);
+  const [pf] = await testDb.db.select().from(managedVips).where(eq(managedVips.vip_name, 'pf-legacy'));
+  assert.ok(pf);
+  const [sync] = await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
+  assert.ok(sync);
+  await testDb.db.delete(managedVips).where(eq(managedVips.firewall_id, firewallId));
+  await testDb.db.delete(firewallVlanSync).where(eq(firewallVlanSync.firewall_id, firewallId));
 });
 
 test('firewall delete returns 409 while sync or port-forward records exist', async () => {
+  await testDb.db.insert(managedVips).values({
+    firewall_id: firewallId, vip_name: 'pf-blocker', ext_port: 9004, mapped_ip: '10.99.0.22', mapped_port: 22,
+  });
   const blocked = await request(app).delete(`/firewalls/${firewallId}`);
   assert.equal(blocked.status, 409);
   const [stillThere] = await testDb.db.select().from(firewalls).where(eq(firewalls.id, firewallId));

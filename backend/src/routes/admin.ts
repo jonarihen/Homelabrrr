@@ -48,6 +48,7 @@ import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
 import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
 import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
+import { isArtifactGone } from '../workflows/engine.ts';
 import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
@@ -1699,9 +1700,9 @@ router.put('/vlans/:id', pVlans, async (req, res) => {
   }
 });
 
-// Every FortiGate object a managed VIP owns, in teardown order. Each step is
-// independent and best-effort: an object already gone upstream must not stop
-// the rest of the cleanup.
+// Every FortiGate object a legacy managed VIP (no recorded artifacts) owns, in
+// teardown order. Each step is independent: a failure must not stop the rest
+// of the cleanup, and an object already gone upstream is not an error.
 function managedVipCleanupSteps(pf, sync, rootVdom) {
   const labVdom = sync.vdom || 'lab';
   const steps = [];
@@ -1723,37 +1724,41 @@ function managedVipCleanupSteps(pf, sync, rootVdom) {
   return steps;
 }
 
-async function bestEffort(label, run) {
-  try { await run(); }
-  catch (e) { console.warn(`[delete-vlan] ${label} cleanup:`, e.message); }
-}
-
 // Remove every managed port forward that targets a VLAN interface on one
-// firewall (FortiGate objects best-effort, then the DB row). `fw` carries the
-// connection fields createClient needs plus vdom/root_vdom.
+// firewall. Rows with recorded artifacts are torn down from them; legacy rows
+// use the fixed cleanup sequence. A row is only deleted once its FortiGate
+// cleanup succeeded, so a failed attempt keeps the record for a retry.
+// Returns the cleanup errors. `fw` carries the connection fields createClient
+// needs plus vdom/root_vdom.
 async function cleanupVlanPortForwards(firewallId, fw, vlanIfaceName) {
   const portForwards = await db.select().from(managedVips)
     .where(and(eq(managedVips.firewall_id, firewallId), eq(managedVips.vlan_interface, vlanIfaceName)));
-  if (portForwards.length === 0) return;
+  const allErrors = [];
+  if (portForwards.length === 0) return allErrors;
 
   console.log(`[delete-vlan] Cleaning up ${portForwards.length} port forward(s) on firewall ${firewallId} for ${vlanIfaceName}`);
   const client = createClient(fw);
   const rootVdom = fw.root_vdom || 'root';
 
   for (const pf of portForwards) {
-    try {
+    let errors = [];
+    if (pf.artifacts) {
+      ({ errors } = await teardownArtifacts(client, pf.artifacts));
+    } else {
       for (const step of managedVipCleanupSteps(pf, fw, rootVdom)) {
-        await bestEffort(step.label, () => step.run(client));
+        try { await step.run(client); }
+        catch (e) { if (!isArtifactGone(e)) errors.push(`${step.label}: ${e.message}`); }
       }
-      // Remove DB record
-      await db.delete(managedVips).where(eq(managedVips.id, pf.id));
-      console.log(`[delete-vlan] Cleaned up port forward "${pf.vip_name}"`);
-    } catch (e) {
-      console.warn(`[delete-vlan] Failed to fully clean port forward "${pf.vip_name}":`, e.message);
-      // Still remove from DB — the FortiGate objects are best-effort
-      await db.delete(managedVips).where(eq(managedVips.id, pf.id));
     }
+    if (errors.length > 0) {
+      console.warn(`[delete-vlan] Failed to fully clean port forward "${pf.vip_name}":`, errors);
+      allErrors.push(...errors.map(e => `port forward ${pf.vip_name}: ${e}`));
+      continue;
+    }
+    await db.delete(managedVips).where(eq(managedVips.id, pf.id));
+    console.log(`[delete-vlan] Cleaned up port forward "${pf.vip_name}"`);
   }
+  return allErrors;
 }
 
 router.delete('/vlans/:id', pVlans, async (req, res) => {
@@ -1781,12 +1786,19 @@ router.delete('/vlans/:id', pVlans, async (req, res) => {
   const fwResults = [];
 
   // 1. Clean up port forwards that target this VLAN's interface
+  const portForwardErrors = new Map();
   for (const sync of syncs) {
-    await cleanupVlanPortForwards(sync.fw_id, sync, sync.interface_name);
+    portForwardErrors.set(sync.id, await cleanupVlanPortForwards(sync.fw_id, sync, sync.interface_name));
   }
 
   // 2. Deprovision VLAN from each synced firewall (interface, address obj, DHCP, routes, policies, switch)
   for (const sync of syncs) {
+    const pfErrors = portForwardErrors.get(sync.id);
+    if (pfErrors.length > 0) {
+      // Keep the VLAN on this firewall while a port forward into it is still live.
+      fwResults.push({ firewall: sync.fw_name, status: 'partial', errors: pfErrors });
+      continue;
+    }
     console.log(`[delete-vlan] Deprovisioning VLAN ${vlan.tag} (${sync.interface_name}) from ${sync.fw_name}`);
     try {
       const client = createClient(sync);
@@ -2532,45 +2544,31 @@ async function handleVlanUnsync(req: any, res: any, vlanIdRaw: any, firewallIdRa
 
   try {
     // Port forwards into this VLAN would otherwise be orphaned (and still open) on the FortiGate.
-    await cleanupVlanPortForwards(firewallId, sync, sync.interface_name);
-    const client = createClient(sync);
-    if (sync.artifacts) {
-      const teardownRes = await teardownArtifacts(client, sync.artifacts);
-      if (teardownRes.errors && teardownRes.errors.length > 0) {
-        console.warn(`[unsync-vlan] Teardown incomplete for VLAN ${vlanId} on firewall ${firewallId}:`, teardownRes.errors);
-        await logAudit(
-          req,
-          'admin_unsync_vlan_firewall_failed',
-          `VLAN ${vlanId}`,
-          `Firewall ${firewallId} teardown failed: ${teardownRes.errors.join('; ')}`
-        );
-        return res.status(502).json({
-          error: `Failed to remove VLAN from firewall: ${teardownRes.errors.map(sanitizeError).join('; ')}`,
-          errors: teardownRes.errors.map(sanitizeError),
-          details: teardownRes.errors.map(sanitizeError),
+    let errors = await cleanupVlanPortForwards(firewallId, sync, sync.interface_name);
+    if (errors.length === 0) {
+      const client = createClient(sync);
+      const teardownRes = sync.artifacts
+        ? await teardownArtifacts(client, sync.artifacts)
+        : await client.deprovisionVlan(sync.interface_name, sync.policy_ids || [], sync.dhcp_server_id, {
+          rootVdom: sync.root_vdom || 'root',
+          trunkSwitchSerial: sync.trunk_switch_serial || '',
+          trunkSwitchPort:   sync.trunk_switch_port   || '',
         });
-      }
-    } else {
-      const policyIds = sync.policy_ids || [];
-      const legacyRes = await client.deprovisionVlan(sync.interface_name, policyIds, sync.dhcp_server_id, {
-        rootVdom: sync.root_vdom || 'root',
-        trunkSwitchSerial: sync.trunk_switch_serial || '',
-        trunkSwitchPort:   sync.trunk_switch_port   || '',
+      errors = teardownRes?.errors || [];
+    }
+    if (errors.length > 0) {
+      console.warn(`[unsync-vlan] Teardown incomplete for VLAN ${vlanId} on firewall ${firewallId}:`, errors);
+      await logAudit(
+        req,
+        'admin_unsync_vlan_firewall_failed',
+        `VLAN ${vlanId}`,
+        `Firewall ${firewallId} teardown failed: ${errors.join('; ')}`
+      );
+      return res.status(502).json({
+        error: `Failed to remove VLAN from firewall: ${errors.map(sanitizeError).join('; ')}`,
+        errors: errors.map(sanitizeError),
+        details: errors.map(sanitizeError),
       });
-      if (legacyRes?.errors && legacyRes.errors.length > 0) {
-        console.warn(`[unsync-vlan] Legacy deprovision incomplete for VLAN ${vlanId} on firewall ${firewallId}:`, legacyRes.errors);
-        await logAudit(
-          req,
-          'admin_unsync_vlan_firewall_failed',
-          `VLAN ${vlanId}`,
-          `Firewall ${firewallId} teardown failed: ${legacyRes.errors.join('; ')}`
-        );
-        return res.status(502).json({
-          error: `Failed to remove VLAN from firewall: ${legacyRes.errors.map(sanitizeError).join('; ')}`,
-          errors: legacyRes.errors.map(sanitizeError),
-          details: legacyRes.errors.map(sanitizeError),
-        });
-      }
     }
   } catch (err: any) {
     console.error('Deprovision error:', err.message);
