@@ -64,3 +64,28 @@ export function shortenVipName(name, limit = VIP_NAME_MAX) {
   // No usable separator, or the tail alone is too long: hard-truncate and tag.
   return `${trimmed.slice(0, limit - tag.length).replace(/[\s-]+$/, '')}${tag}`;
 }
+
+// Names of the FortiGate service/address objects created for a managed port
+// forward. Shared by the real admin flow and the workflow preview.
+export function buildManagedVipServiceName(vipName, protocol, extPort) {
+  const safeName = String(vipName || 'vip')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32) || 'vip';
+  return `VMM-PF-${String(protocol || 'tcp').toUpperCase()}-${extPort}-${safeName}`;
+}
+
+export function buildManagedVipAddressName(vipName, mappedIp) {
+  const safeName = String(vipName || 'vip')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24) || 'vip';
+  const safeIp = String(mappedIp || '')
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24) || 'host';
+  return `VMM-PF-HOST-${safeIp}-${safeName}`;
+}

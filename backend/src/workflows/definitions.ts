@@ -2,7 +2,7 @@
  * Built-in default workflow definitions.
  *
  * Each trigger's default steps reproduce the historical hardcoded FortiGate
- * sequence EXACTLY (see fortigate.js `provisionVlan` and the admin VIP/policy
+ * sequence EXACTLY (the since-removed `provisionVlan` and the admin VIP/policy
  * routes). Seeding these on migration keeps existing deployments byte-for-byte
  * identical; admins can then reorder / toggle / parametrize per firewall.
  *

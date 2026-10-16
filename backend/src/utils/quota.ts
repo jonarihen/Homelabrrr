@@ -182,6 +182,11 @@ export function cloneDiskAllocation(config: Record<string, unknown>, requestedGb
   return { diskGb: total + growthGb, resizeDisk: growthGb > 0 ? primary : null };
 }
 
+/** GB from a PVE disk config value ("local:vm-1-disk-0,size=32G"), or null. */
+export function diskSizeGb(value: unknown): number | null {
+  return sizeToGb(String(value ?? '').match(/(?:^|,)size=(\d+(?:\.\d+)?[MGT])(?:,|$)/i)?.[1]);
+}
+
 /** Parse a PVE disk size string ("32G", "512M", "1T") to GB. */
 export function sizeToGb(value: unknown): number | null {
   const m = String(value ?? '').match(/^(\d+(?:\.\d+)?)([MGT])$/i);
