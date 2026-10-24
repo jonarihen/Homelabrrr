@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PASSWORD_MIN_LENGTH, validateHost, validateHttpUrl, validateIp, validateObject,
+  PASSWORD_MIN_LENGTH, isValidUpstreamHost, validateHost, validateHttpUrl, validateIp, validateObject,
   validatePassword, validatePort, validateUsername, validateVlanTag, validateVmid,
 } from './validation.ts';
 
@@ -40,4 +40,12 @@ test('usernames and hosts are bounded and normalized', () => {
   assert.throws(() => validateUsername('../admin'));
   assert.equal(validateHost('VM-01.Example.COM'), 'vm-01.example.com');
   assert.throws(() => validateHost('https://example.com'));
+});
+
+test('upstream hosts reject non-canonical IPv4 spellings', () => {
+  for (const ok of ['127.0.0.1', '::1', 'pve.example.com', 'pve']) assert.equal(isValidUpstreamHost(ok), true, ok);
+  for (const bad of ['0127.0.0.1', '0x7f.0.0.1', '127.1', '\uff11\uff12\uff17.0.0.1', '0x7f', '[::1]', '', undefined]) {
+    assert.equal(isValidUpstreamHost(bad), false, String(bad));
+  }
+  assert.throws(() => validateHost('0127.0.0.1'));
 });

@@ -50,7 +50,7 @@ import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '.
 import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
 import { deriveSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
-import { boundedString, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
+import { boundedString, isValidUpstreamHost, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
 import { assertUserCanBeDeleted } from '../services/provisionOwnership.ts';
 import { cancelSubscriptionsBeforeUserDeletion } from '../services/paypal.ts';
@@ -2323,6 +2323,7 @@ router.post('/firewalls', pFirewalls, async (req, res) => {
   if (!name || !host || !apiKey) {
     return res.status(400).json({ error: 'Name, host, and API key are required' });
   }
+  if (!isValidUpstreamHost(host)) return res.status(400).json({ error: 'Host must be a valid IP address or DNS hostname' });
   if (!verifyTls && !ALLOW_INSECURE_UPSTREAM_TLS) {
     return res.status(400).json({ error: 'Disabling firewall TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
   }
@@ -2352,6 +2353,7 @@ router.put('/firewalls/:id', pFirewalls, async (req, res) => {
   if (!name || !host) {
     return res.status(400).json({ error: 'Name and host are required' });
   }
+  if (!isValidUpstreamHost(host)) return res.status(400).json({ error: 'Host must be a valid IP address or DNS hostname' });
   const existing = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!existing) return res.status(404).json({ error: 'Firewall not found' });
 
