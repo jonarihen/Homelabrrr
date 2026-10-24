@@ -418,7 +418,7 @@ npm run build
 npm run e2e
 ```
 
-CI (`.github/workflows/ci.yml`) repeats those checks against a `postgres:17-alpine` service container and builds both production images on every pull request. The supported runtime is Node.js 26. Production Docker bases are deliberately pinned to `node:26.5.1-alpine3.24` and `nginx:1.31.3-alpine3.24`; Dependabot proposes reviewed updates for npm, Docker, and GitHub Actions dependencies.
+CI (`.github/workflows/ci.yml`) repeats those checks against a `postgres:17-alpine` service container and builds both production images on every pull request. The supported runtime is Node.js 26. Production Docker bases are deliberately pinned to `node:26.12.1-alpine3.24` and `nginx:1.31.3-alpine3.24`; Dependabot proposes reviewed updates for npm, Docker, and GitHub Actions dependencies.
 
 ## Environment
 
