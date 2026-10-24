@@ -2066,6 +2066,7 @@ router.post('/pve-hosts', pHosts, async (req, res) => {
     name = boundedString(req.body?.name, { field: 'name', min: 1, max: 80 });
     host = validateHost(req.body?.host);
     port = validatePort(req.body?.port ?? 8006);
+    if (req.body?.sshHost) validateHost(req.body.sshHost);
   } catch (err) {
     return res.status(400).json({ error: err.message, code: err.code, field: err.field });
   }
