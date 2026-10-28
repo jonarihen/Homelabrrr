@@ -492,7 +492,7 @@ export default function Dashboard() {
               </svg>
             </div>
             <p className="text-gray-400 font-medium">No VMs assigned</p>
-            <p className="text-sm text-gray-600 mt-1">Contact an admin to get access to virtual machines.</p>
+            <p className="text-sm text-gray-400 mt-1">Contact an admin to get access to virtual machines.</p>
           </div>
         ) : filteredVms.length === 0 ? (
           <div className="text-center py-16">

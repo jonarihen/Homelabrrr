@@ -32,7 +32,7 @@ export default function Layout({ children }) {
             </div>
             <div className="min-w-0">
               <span className="aaris-display text-gray-100 text-sm block leading-none">VM Manager</span>
-              <p className="flex items-center gap-1.5 mt-1.5 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500 truncate">
+              <p className="flex items-center gap-1.5 mt-1.5 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500 truncate">
                 <span className="aaris-led aaris-led--ok" />{user?.username}
               </p>
             </div>
@@ -97,7 +97,7 @@ export default function Layout({ children }) {
               </span>
               <span className="text-gray-600 group-hover:text-orange-500 transition-colors">↗</span>
             </span>
-            <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500">
+            <span className="mt-1 block font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500">
               Maintenance + outage alerts
             </span>
           </a>
@@ -123,7 +123,7 @@ export default function Layout({ children }) {
 function NavSection({ label, children }) {
   return (
     <div className="pt-5">
-      <p className="px-3 pb-1.5 font-mono text-[9px] text-gray-600 uppercase tracking-[0.18em]">{label}</p>
+      <p className="px-3 pb-1.5 font-mono text-[11px] text-gray-400 uppercase tracking-[0.18em]">{label}</p>
       <div className="space-y-0.5">{children}</div>
     </div>
   );

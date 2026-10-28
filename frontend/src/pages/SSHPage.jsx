@@ -27,7 +27,7 @@ export default function SSHPage() {
 
         <span className="text-gray-400 text-sm">
           SSH &mdash; {vmName}
-          <span className="text-gray-600 font-mono ml-2">{displayNode(node)}/{vmid}</span>
+          <span className="text-gray-400 font-mono ml-2">{displayNode(node)}/{vmid}</span>
         </span>
 
         <div className="flex-1" />

@@ -91,7 +91,7 @@ export default function AcceptInvite() {
           <form onSubmit={submit} className="border border-gray-800 bg-gray-900 p-6 space-y-4">
             {/* Preset summary — what this invite grants */}
             <div className="border border-gray-800 bg-[#0b0d11] p-3 space-y-2">
-              <p className="text-[10px] font-mono uppercase tracking-[0.14em] text-gray-500">Access Preset</p>
+              <p className="text-[11px] font-mono uppercase tracking-[0.14em] text-gray-500">Access Preset</p>
               <div className="flex flex-wrap gap-1.5">
                 {preset.isAdmin && <Tag>Admin</Tag>}
                 <Tag>{preset.role ? `Role · ${preset.role.name}` : 'No role'}</Tag>
@@ -116,7 +116,7 @@ export default function AcceptInvite() {
                 </p>
               )}
               {invite.expiresAt && (
-                <p className="text-[11px] font-mono text-gray-600">
+                <p className="text-[11px] font-mono text-gray-400">
                   Expires {new Date(invite.expiresAt).toLocaleString()}
                 </p>
               )}

@@ -5,7 +5,7 @@ import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 
 // ── AARIS operator-console styling ────────────────────────────────────────────
 const panel = 'border border-gray-800 bg-gray-900/60';
-const label = 'font-mono text-[10px] uppercase tracking-[0.14em] text-gray-500';
+const label = 'font-mono text-[11px] uppercase tracking-[0.14em] text-gray-500';
 const input = 'w-full bg-gray-950 border border-gray-700 text-gray-100 text-sm px-2.5 py-1.5 focus:border-orange-600 focus:outline-none';
 const inputMono = `${input} font-mono`;
 const btnPrimary = 'border border-orange-600 bg-orange-600 px-4 py-2 font-mono text-xs font-semibold uppercase tracking-[0.12em] text-gray-950 transition-colors hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed';
@@ -107,7 +107,7 @@ function StepCard({ step, index, count, actionDef, actions, onChange, onMove, on
             {spec.type !== 'boolean' && (
               <label className={`${label} mb-1 block`}>
                 {spec.name}{spec.required && <span className="text-orange-500"> *</span>}
-                {spec.help && <span className="ml-1 lowercase tracking-normal text-gray-600">— {spec.help}</span>}
+                {spec.help && <span className="ml-1 lowercase tracking-normal text-gray-400">— {spec.help}</span>}
               </label>
             )}
             <ParamField spec={spec} value={step.params?.[spec.name]}
@@ -116,7 +116,7 @@ function StepCard({ step, index, count, actionDef, actions, onChange, onMove, on
           </div>
         ))}
         {(actionDef?.params || []).length === 0 && (
-          <p className="text-xs text-gray-600 sm:col-span-2">This action takes no parameters.</p>
+          <p className="text-xs text-gray-400 sm:col-span-2">This action takes no parameters.</p>
         )}
       </div>
 
@@ -157,10 +157,10 @@ function CallList({ calls }) {
           <div className="flex items-center gap-2">
             <span className="text-orange-500">{c.method}</span>
             <span className="text-gray-300">/api/v2/{c.path}</span>
-            {c.scope && <span className="text-gray-600">· {c.scope}</span>}
+            {c.scope && <span className="text-gray-400">· {c.scope}</span>}
           </div>
           {c.summary && <div className="mt-0.5 text-gray-500">{c.summary}</div>}
-          {c.body && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all text-[10px] text-gray-400">{JSON.stringify(c.body)}</pre>}
+          {c.body && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all text-[11px] text-gray-400">{JSON.stringify(c.body)}</pre>}
         </div>
       ))}
     </div>
@@ -390,7 +390,7 @@ export default function WorkflowsPage() {
                       <span className="font-mono text-[11px] uppercase tracking-wider">Enabled</span>
                     </label>
                   </div>
-                  <p className="mt-2 text-xs text-gray-600">{triggerMeta?.description}{workflow.is_default ? ' · Currently the built-in default.' : ' · Customized.'}</p>
+                  <p className="mt-2 text-xs text-gray-400">{triggerMeta?.description}{workflow.is_default ? ' · Currently the built-in default.' : ' · Customized.'}</p>
 
                   {/* Subnet derivation setting (VLAN provision only) */}
                   {trigger === 'vlan_provision' && (
@@ -401,7 +401,7 @@ export default function WorkflowsPage() {
                           value={settings.subnet?.firstOctet ?? ''}
                           onChange={(e) => setSetting((s, v) => ({ subnet: { ...(s.subnet || {}), firstOctet: v === '' ? undefined : parseInt(v, 10) } }), e.target.value)}
                           className={`${inputMono} w-32`} />
-                        <span className="text-xs text-gray-600">Tag 1126 → {(settings.subnet?.firstOctet ?? 10)}.11.26.0/24 · blank keeps the default 10.x.y formula</span>
+                        <span className="text-xs text-gray-400">Tag 1126 → {(settings.subnet?.firstOctet ?? 10)}.11.26.0/24 · blank keeps the default 10.x.y formula</span>
                       </div>
                     </div>
                   )}
@@ -432,7 +432,7 @@ export default function WorkflowsPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <button className={btnPrimary} disabled={!dirty || saving} onClick={save}>{saving ? 'Saving…' : dirty ? 'Save changes' : 'Saved'}</button>
                   <button className={btnGhost} onClick={() => setResetOpen(true)}>Reset to default</button>
-                  {dirty && <span className="font-mono text-[10px] uppercase tracking-wider text-orange-400">Unsaved changes</span>}
+                  {dirty && <span className="font-mono text-[11px] uppercase tracking-wider text-orange-400">Unsaved changes</span>}
                 </div>
               </div>
 
@@ -442,10 +442,10 @@ export default function WorkflowsPage() {
                 <div className={`${panel} p-4`}>
                   <h3 className={`${label} mb-2`}>Variables</h3>
                   {variables.length === 0 ? (
-                    <p className="text-xs text-gray-600">This trigger performs artifact-based teardown — no template variables.</p>
+                    <p className="text-xs text-gray-400">This trigger performs artifact-based teardown — no template variables.</p>
                   ) : (
                     <>
-                      <p className="mb-2 text-[11px] text-gray-600">Focus a field, then click to insert (or copy).</p>
+                      <p className="mb-2 text-[11px] text-gray-400">Focus a field, then click to insert (or copy).</p>
                       <div className="flex flex-wrap gap-1.5">
                         {variables.map((v) => (
                           <button key={v} onClick={() => insertVariable(v)}
@@ -470,7 +470,7 @@ export default function WorkflowsPage() {
                           <div className="flex items-center gap-2">
                             <span className={`aaris-led ${item.error ? 'aaris-led--error' : item.skipped ? 'aaris-led--off' : 'aaris-led--ok'}`} />
                             <span className="font-mono text-[11px] text-gray-300">{item.label}</span>
-                            {item.skipped && <span className="font-mono text-[10px] uppercase text-gray-600">{item.skipped}</span>}
+                            {item.skipped && <span className="font-mono text-[11px] uppercase text-gray-400">{item.skipped}</span>}
                           </div>
                           {item.error && <p className="mt-1 text-[11px] text-red-400">{item.error}</p>}
                           <CallList calls={item.calls} />
@@ -484,14 +484,14 @@ export default function WorkflowsPage() {
                 <div className={`${panel} p-4`}>
                   <h3 className={`${label} mb-2`}>Recent runs</h3>
                   {runs.length === 0 ? (
-                    <p className="text-xs text-gray-600">No runs recorded yet.</p>
+                    <p className="text-xs text-gray-400">No runs recorded yet.</p>
                   ) : (
                     <div className="space-y-1">
                       {runs.map((r) => (
                         <button key={r.id} onClick={() => viewRun(r.id)} className="flex w-full items-center gap-2 border border-gray-800 px-2 py-1.5 text-left hover:border-gray-600">
                           <span className={`aaris-led ${STATUS_LED[r.status] || 'aaris-led--off'}`} />
                           <span className="font-mono text-[11px] text-gray-300">{r.subject_label || r.subject_id || r.subject_type}</span>
-                          <span className="ml-auto font-mono text-[10px] uppercase text-gray-600">{r.status}</span>
+                          <span className="ml-auto font-mono text-[11px] uppercase text-gray-400">{r.status}</span>
                         </button>
                       ))}
                     </div>
@@ -535,16 +535,16 @@ export default function WorkflowsPage() {
                   <div className="flex items-center gap-2">
                     <span className={`aaris-led ${STATUS_LED[entry.status] || 'aaris-led--off'}`} />
                     <span className="font-mono text-[11px] text-gray-300">{entry.label || entry.action}</span>
-                    <span className="ml-auto font-mono text-[10px] uppercase text-gray-600">{entry.status}</span>
+                    <span className="ml-auto font-mono text-[11px] uppercase text-gray-400">{entry.status}</span>
                   </div>
                   {entry.summary && <p className="mt-1 text-xs text-gray-500">{entry.summary}</p>}
                   {entry.error && <p className="mt-1 text-xs text-red-400">{entry.error}</p>}
-                  {entry.artifacts?.length > 0 && <p className="mt-1 font-mono text-[10px] text-gray-600">created: {entry.artifacts.join(', ')}</p>}
+                  {entry.artifacts?.length > 0 && <p className="mt-1 font-mono text-[11px] text-gray-400">created: {entry.artifacts.join(', ')}</p>}
                   <CallList calls={entry.calls} />
                   {entry.reverted && (
                     <div className="mt-1 space-y-0.5">
                       {entry.reverted.map((rv, j) => (
-                        <p key={j} className={`font-mono text-[10px] ${rv.ok ? 'text-gray-500' : 'text-red-400'}`}>rollback: {rv.artifact} {rv.ok ? '✓' : `✗ ${rv.error}`}</p>
+                        <p key={j} className={`font-mono text-[11px] ${rv.ok ? 'text-gray-500' : 'text-red-400'}`}>rollback: {rv.artifact} {rv.ok ? '✓' : `✗ ${rv.error}`}</p>
                       ))}
                     </div>
                   )}
@@ -555,7 +555,7 @@ export default function WorkflowsPage() {
             {openRun.artifacts?.length > 0 && (
               <div>
                 <h4 className={`${label} mb-1`}>Recorded artifacts ({openRun.artifacts.length})</h4>
-                <pre className="overflow-x-auto border border-gray-800 bg-gray-950 p-2 font-mono text-[10px] text-gray-400">{JSON.stringify(openRun.artifacts, null, 2)}</pre>
+                <pre className="overflow-x-auto border border-gray-800 bg-gray-950 p-2 font-mono text-[11px] text-gray-400">{JSON.stringify(openRun.artifacts, null, 2)}</pre>
               </div>
             )}
           </div>
@@ -608,5 +608,5 @@ function DryRunInputs({ trigger, inputs, setInputs }) {
       </div>
     );
   }
-  return <p className="text-xs text-gray-600">No inputs for this trigger.</p>;
+  return <p className="text-xs text-gray-400">No inputs for this trigger.</p>;
 }

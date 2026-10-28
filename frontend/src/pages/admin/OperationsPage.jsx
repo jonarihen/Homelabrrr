@@ -145,7 +145,7 @@ export default function OperationsPage() {
                   <p className="text-sm text-white truncate">{operation.type} #{operation.id} · {operation.label || `${operation.node}/${operation.vmid}`}</p>
                   <p className="text-xs text-gray-500 mt-1">local {operation.status}{operation.phase ? ` / ${operation.phase}` : ''} · upstream {operation.upstream_status || 'not checked'}{operation.upstream_checked_at ? ` at ${operation.upstream_checked_at}` : ''}</p>
                   {operation.ownershipReview && <details className="text-xs text-yellow-400 mt-2"><summary>Ownership review before cleanup</summary><p>{operation.ownershipReview.detail}</p><pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify({ assignments: operation.ownershipReview.assignments, leases: operation.ownershipReview.leases, history: operation.ownershipReview.history }, null, 2)}</pre></details>}
-                  <p className="text-[11px] text-gray-600 mt-1">actor {operation.actor_username || (operation.actor_user_id ? `#${operation.actor_user_id}` : 'system')}{operation.request_id ? ` · request ${operation.request_id}` : ''}</p>
+                  <p className="text-[11px] text-gray-400 mt-1">actor {operation.actor_username || (operation.actor_user_id ? `#${operation.actor_user_id}` : 'system')}{operation.request_id ? ` · request ${operation.request_id}` : ''}</p>
                 </div>
                 {terminal && <button disabled={!!busy} onClick={() => cleanup(operation)} className="px-3 py-2 rounded-lg bg-gray-800 hover:bg-red-950 disabled:opacity-40 text-xs text-gray-300">Remove tracking only</button>}
               </div>

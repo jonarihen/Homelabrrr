@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-28 — Readable metadata text
+
+- Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.
+- Small uppercase labels, table headers and metadata are now at least 11px (the sidebar section labels were 9px). Compact status chips and badges stay at 10px.
+
 ## 2026-10-28 — Readable primary buttons and labelled form fields
 
 - Primary (orange) buttons and active tabs now use dark text instead of white, so their labels meet contrast guidelines. They also show a clear focus ring when reached by keyboard.

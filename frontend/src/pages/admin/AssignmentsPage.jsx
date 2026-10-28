@@ -138,7 +138,7 @@ function TagSyncCard() {
             <h2 className="font-mono text-[11px] uppercase tracking-[0.12em] text-gray-300">
               PVE Tag Auto-Sync
             </h2>
-            <span className={`font-mono text-[10px] uppercase tracking-[0.1em] ${stateColor}`}>{stateLabel}</span>
+            <span className={`font-mono text-[11px] uppercase tracking-[0.1em] ${stateColor}`}>{stateLabel}</span>
           </div>
           <p className="text-xs text-gray-500 mt-1">
             {paused
@@ -191,7 +191,7 @@ function TagSyncCard() {
       {/* Interval + last run */}
       <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <label className="block text-[10px] font-mono uppercase tracking-[0.1em] text-gray-600 mb-1">
+          <label className="block text-[11px] font-mono uppercase tracking-[0.1em] text-gray-400 mb-1">
             Interval (hours)
           </label>
           <div className="flex items-center gap-2">
@@ -214,11 +214,11 @@ function TagSyncCard() {
         </div>
 
         <div>
-          <div className="text-[10px] font-mono uppercase tracking-[0.1em] text-gray-600 mb-1">Last run</div>
+          <div className="text-[11px] font-mono uppercase tracking-[0.1em] text-gray-400 mb-1">Last run</div>
           {last ? (
             <div className="text-xs text-gray-400 font-mono">
               {formatWhen(last.time)} · {formatDuration(last.durationMs)}
-              <span className="text-gray-600"> · {last.trigger}</span>
+              <span className="text-gray-400"> · {last.trigger}</span>
               <div className="mt-0.5">
                 <span className="text-gray-300">{last.checked}</span> checked ·{' '}
                 <span className="text-blue-400">{last.updated}</span> updated ·{' '}
@@ -234,7 +234,7 @@ function TagSyncCard() {
               </div>
             </div>
           ) : (
-            <div className="text-xs text-gray-600 font-mono italic">No run recorded yet</div>
+            <div className="text-xs text-gray-400 font-mono italic">No run recorded yet</div>
           )}
         </div>
       </div>
@@ -244,7 +244,7 @@ function TagSyncCard() {
         <div className="mt-3 border border-gray-800 rounded-lg overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-gray-800 text-gray-600 uppercase tracking-wider">
+              <tr className="border-b border-gray-800 text-gray-400 uppercase tracking-wider">
                 <th className="text-left px-3 py-1.5 font-mono">Node / VMID</th>
                 <th className="text-left px-3 py-1.5 font-mono">Name</th>
                 <th className="text-left px-3 py-1.5 font-mono">Error</th>
@@ -504,7 +504,7 @@ export default function AssignmentsPage() {
                       <span className={`text-xs uppercase tracking-wider font-medium ${group.unassigned ? 'text-amber-500' : 'text-blue-400'}`}>
                         {group.label}
                       </span>
-                      <span className="text-xs text-gray-600 ml-2 font-mono">{group.count}</span>
+                      <span className="text-xs text-gray-400 ml-2 font-mono">{group.count}</span>
                     </td>
                   </tr>
                   {group.vms.map(vm => (
@@ -515,7 +515,7 @@ export default function AssignmentsPage() {
                       <td className="px-4 py-3">
                         {vm.assignment
                           ? <span className="text-blue-400">{vm.assignment.username}</span>
-                          : <span className="text-gray-600 italic">Unassigned</span>
+                          : <span className="text-gray-400 italic">Unassigned</span>
                         }
                       </td>
                       <td className="px-4 py-3 text-right whitespace-nowrap">

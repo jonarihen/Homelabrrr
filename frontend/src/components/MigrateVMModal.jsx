@@ -265,7 +265,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
           <div className="flex items-center justify-between font-mono text-xs">
             <span className="text-gray-400">{vm.hostName || displayNode(vm.node)} / {displayNode(vm.node)} / {vm.vmid}</span>
             <span className="text-gray-600">→</span>
-            <span className={targetNode ? 'text-blue-400' : 'text-gray-600'}>
+            <span className={targetNode ? 'text-blue-400' : 'text-gray-400'}>
               {targetNode ? `${targetHostName} / ${displayNode(targetNode)}` : 'select target'}
             </span>
           </div>
@@ -289,7 +289,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                         {s.status === 'done' ? '✓' : s.status === 'error' ? '✕' : s.status === 'active' ? '▸' : s.status === 'skipped' ? '–' : '·'}
                       </span>
                       <span className={s.status === 'active' ? 'text-gray-200' : 'text-gray-500'}>{s.label}</span>
-                      {s.note && <span className="text-gray-600 font-mono truncate">{s.note}</span>}
+                      {s.note && <span className="text-gray-400 font-mono truncate">{s.note}</span>}
                     </div>
                     {showProgress && s.status === 'active' && (
                       <TransferProgress percent={migration.progress} detail={migration.progress_detail} />
@@ -410,7 +410,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-gray-600 mt-1">
+              <p className="text-xs text-gray-400 mt-1">
                 {placeableDisks.length > 1
                   ? 'Applies to every disk — override a single one in the disk plan above.'
                   : 'Where the disks land on the target host.'}
@@ -429,7 +429,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                   <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` — ${b.comments}` : ''}</option>
                 ))}
               </select>
-              <p className="text-xs text-gray-600 mt-1">VLAN tags on the NIC are kept — only the bridge is remapped.</p>
+              <p className="text-xs text-gray-400 mt-1">VLAN tags on the NIC are kept — only the bridge is remapped.</p>
             </div>
 
             {blockedByRunning && (
@@ -458,7 +458,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                 />
                 <span>
                   Force full copy instead
-                  <span className="block text-xs text-gray-600">Copies every disk over the network with remote_migrate — only useful if the shared storage should not be reused.</span>
+                  <span className="block text-xs text-gray-400">Copies every disk over the network with remote_migrate — only useful if the shared storage should not be reused.</span>
                 </span>
               </label>
             )}
@@ -468,7 +468,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                 <input type="checkbox" checked={online} onChange={(e) => setOnline(e.target.checked)} className="mt-0.5" />
                 <span>
                   Live migrate (keep running)
-                  <span className="block text-xs text-gray-600">Needs compatible CPUs on both hosts. Uncheck and stop the VM first if the hardware differs a lot.</span>
+                  <span className="block text-xs text-gray-400">Needs compatible CPUs on both hosts. Uncheck and stop the VM first if the hardware differs a lot.</span>
                 </span>
               </label>
             )}
@@ -481,7 +481,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                 <input type="checkbox" checked={deleteSource} onChange={(e) => setDeleteSource(e.target.checked)} className="mt-0.5" />
                 <span>
                   Delete source VM after successful migration
-                  <span className="block text-xs text-gray-600">If unchecked, a stopped copy stays on the source host; the portal points at the migrated VM either way.</span>
+                  <span className="block text-xs text-gray-400">If unchecked, a stopped copy stays on the source host; the portal points at the migrated VM either way.</span>
                 </span>
               </label>
             )}
@@ -526,7 +526,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                 {starting ? 'Starting…' : adopt ? 'Start shared-storage migration' : 'Start migration'}
               </button>
             )}
-            <p className="text-xs text-gray-600">
+            <p className="text-xs text-gray-400">
               Assignments, SSH settings and templates for this VM follow it to the new host automatically.
             </p>
           </>

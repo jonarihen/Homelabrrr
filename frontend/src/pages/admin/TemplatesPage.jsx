@@ -70,7 +70,7 @@ export default function TemplatesPage() {
             </svg>
           </div>
           <p className="text-gray-400 font-medium">No templates registered</p>
-          <p className="text-sm text-gray-600 mt-1">Add a Proxmox VM template to allow users to clone VMs.</p>
+          <p className="text-sm text-gray-400 mt-1">Add a Proxmox VM template to allow users to clone VMs.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -114,7 +114,7 @@ export default function TemplatesPage() {
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375" /></svg>
                   {t.default_disk_gb} GB disk
                 </span>
-                <span className="text-gray-600">{t.default_storage}</span>
+                <span className="text-gray-400">{t.default_storage}</span>
               </div>
 
               <div className="flex gap-2">
@@ -308,7 +308,7 @@ function CloudImagesSection({ onTemplatesChanged }) {
                   </td>
                   <td className="px-4 py-3 text-gray-500 font-mono text-xs">
                     <div>{displayNode(img.node)} / {img.storage}</div>
-                    <div className="text-[11px] text-gray-600">
+                    <div className="text-[11px] text-gray-400">
                       {img.deployTargets?.length > 1
                         ? `targets: ${img.deployTargets.map(t => `${t.hostName || displayNode(t.node)}:${img.defaultStorageMap?.[t.hostId] || 'auto'}`).join(', ')}`
                         : `deploy target: ${img.default_storage || 'auto'}`}
@@ -449,7 +449,7 @@ function CloudImageDefaultStorageModal({ image, onClose, onSaved }) {
             </div>
           );
         })}
-        <p className="text-[11px] text-gray-600">Pre-selected as the disk target when someone deploys a VM directly from this image.</p>
+        <p className="text-[11px] text-gray-400">Pre-selected as the disk target when someone deploys a VM directly from this image.</p>
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
         <button type="submit" disabled={saving} className="w-full btn-primary rounded-xl py-2.5 text-sm font-semibold">
           {saving ? 'Saving...' : 'Save'}
@@ -538,7 +538,7 @@ function CloudImageFormModal({ onClose, onSaved }) {
             <option value="">Auto (choose when deploying)</option>
             {imageStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
           </select>
-          <p className="text-[11px] text-gray-600 mt-1">Default disk target for <span className="text-gray-500">{form.node ? displayNode(form.node) : 'this node'}</span>. If it's on shared storage, set the other hosts' defaults from the <span className="text-gray-500">Default storage</span> button after it downloads.</p>
+          <p className="text-[11px] text-gray-400 mt-1">Default disk target for <span className="text-gray-500">{form.node ? displayNode(form.node) : 'this node'}</span>. If it's on shared storage, set the other hosts' defaults from the <span className="text-gray-500">Default storage</span> button after it downloads.</p>
         </div>
 
         {form.node && importStorages.length === 0 && (

@@ -280,14 +280,14 @@ export default function AdminWebsitesPage() {
             </thead>
             <tbody>
               {sites.length === 0 ? (
-                <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-600">No sites published yet.</td></tr>
+                <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No sites published yet.</td></tr>
               ) : sites.map((site) => (
                 <tr key={site.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       <a href={site.url} target="_blank" rel="noreferrer" className="text-white hover:text-orange-400 transition-colors">{site.domain}</a>
-                      {site.managed === false && <span className="text-[9px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-1.5 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
-                      {site.wildcard && <span className="text-[9px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
+                      {site.managed === false && <span className="text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-1.5 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
+                      {site.wildcard && <span className="text-[10px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
                     </div>
                   </td>
                   <td className="px-4 py-3 text-gray-400 font-mono text-xs">
@@ -343,8 +343,8 @@ export default function AdminWebsitesPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm text-white font-mono truncate">{s.domain}</span>
-                      {s.wildcard && <span className="text-[9px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title="Covered by this wildcard certificate">{s.wildcard}</span>}
-                      {s.guarded && <span className="text-[9px] uppercase tracking-wider text-amber-300 bg-amber-500/10 ring-1 ring-amber-500/20 px-1.5 py-0.5 rounded-full" title="Access-restricted in Caddy (IP allowlist / basic auth)">restricted</span>}
+                      {s.wildcard && <span className="text-[10px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title="Covered by this wildcard certificate">{s.wildcard}</span>}
+                      {s.guarded && <span className="text-[10px] uppercase tracking-wider text-amber-300 bg-amber-500/10 ring-1 ring-amber-500/20 px-1.5 py-0.5 rounded-full" title="Access-restricted in Caddy (IP allowlist / basic auth)">restricted</span>}
                     </div>
                     <p className="text-[11px] text-gray-500 font-mono mt-0.5">
                       {s.kind === 'reverse_proxy' ? `→ ${s.upstreamTls ? 'https://' : ''}${s.upstreamHost}:${s.upstreamPort}` : s.kind}
@@ -387,7 +387,7 @@ export default function AdminWebsitesPage() {
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">Admin API URL</label>
                 <input type="text" required value={form.apiUrl} onChange={(e) => setForm((f) => ({ ...f, apiUrl: e.target.value }))} className={inputCls} placeholder="http://10.0.0.5:2019" />
-                <p className="text-xs text-gray-600 mt-1">The Caddy admin endpoint. Keep it on a network only Homelabrrr can reach.</p>
+                <p className="text-xs text-gray-400 mt-1">The Caddy admin endpoint. Keep it on a network only Homelabrrr can reach.</p>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -400,7 +400,7 @@ export default function AdminWebsitesPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Auth secret {editId && <span className="text-gray-600">(keep)</span>}</label>
+                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Auth secret {editId && <span className="text-gray-400">(keep)</span>}</label>
                   <input type="password" value={form.authSecret} onChange={(e) => setForm((f) => ({ ...f, authSecret: e.target.value }))} disabled={form.authType === 'none'} className={inputCls} placeholder={form.authType === 'none' ? '—' : 'token / credentials'} />
                 </div>
               </div>
@@ -412,7 +412,7 @@ export default function AdminWebsitesPage() {
                 </div>
               </label>
               <div>
-                <label className="block text-xs text-gray-400 mb-1.5 font-medium">Caddy HTTP server name <span className="text-gray-600">(optional)</span></label>
+                <label className="block text-xs text-gray-400 mb-1.5 font-medium">Caddy HTTP server name <span className="text-gray-400">(optional)</span></label>
                 <input type="text" value={form.serverName} onChange={(e) => setForm((f) => ({ ...f, serverName: e.target.value }))} className={inputCls} placeholder="auto-detect (e.g. srv0)" />
               </div>
 
@@ -424,7 +424,7 @@ export default function AdminWebsitesPage() {
                     <option value="">None</option>
                     {firewalls.map((fw) => <option key={fw.id} value={fw.id}>{fw.name}{fw.externalIp ? ` — ${fw.externalIp}` : ''}</option>)}
                   </select>
-                  <p className="text-xs text-gray-600 mt-1">Used to read the WAN IP and to attach synced certs to an inspection profile.</p>
+                  <p className="text-xs text-gray-400 mt-1">Used to read the WAN IP and to attach synced certs to an inspection profile.</p>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="col-span-2">
@@ -445,12 +445,12 @@ export default function AdminWebsitesPage() {
                   ) : (
                     <input type="text" value={form.inspectionProfile} onChange={(e) => setForm((f) => ({ ...f, inspectionProfile: e.target.value }))} className={inputCls} placeholder={editId ? 'e.g. custom-deep-inspection' : 'Save + link a FortiGate to pick from a list'} />
                   )}
-                  <p className="text-xs text-gray-600 mt-1">Synced Let’s Encrypt certs are attached here so inbound inspection presents the real cert.</p>
+                  <p className="text-xs text-gray-400 mt-1">Synced Let’s Encrypt certs are attached here so inbound inspection presents the real cert.</p>
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Inspection bundle certificate <span className="text-gray-600 font-normal">(optional)</span></label>
+                  <label className="block text-xs text-gray-400 mb-1.5 font-medium">Inspection bundle certificate <span className="text-gray-400 font-normal">(optional)</span></label>
                   <input type="text" value={form.inspectionBundleCert} onChange={(e) => setForm((f) => ({ ...f, inspectionBundleCert: e.target.value }))} className={inputCls} placeholder="e.g. homelabrrr_inspection" />
-                  <p className="text-xs text-gray-600 mt-1">
+                  <p className="text-xs text-gray-400 mt-1">
                     Base name of the single multi-SAN certificate <span className="font-mono text-gray-400">caddy-forticertsync</span> maintains in <span className="font-mono text-gray-400">inspection_bundle</span> mode (without the <span className="font-mono text-gray-400">_DDMMYYYY</span> date).
                     Set it and publishing stops waiting for a per-site certificate and stops writing to the profile — the bundle’s wildcard SANs already cover new hostnames, so a new site uses none of the profile’s 10 certificate slots.
                   </p>
@@ -458,8 +458,8 @@ export default function AdminWebsitesPage() {
               </div>
 
               <div className="pt-2 border-t border-gray-700/50 space-y-4">
-                <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Caddyfile sync <span className="normal-case text-gray-600">(recommended — sites survive reloads)</span></p>
-                <p className="text-xs text-gray-600 -mt-2">
+                <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Caddyfile sync <span className="normal-case text-gray-400">(recommended — sites survive reloads)</span></p>
+                <p className="text-xs text-gray-400 -mt-2">
                   Without this, sites are pushed through the admin API only and any <span className="font-mono">caddy reload</span> from the Caddyfile drops them (Homelabrrr re-pushes every 5 min).
                   With SSH configured, Homelabrrr writes published sites to a snippet file on the Caddy host and reloads Caddy — add
                   <span className="font-mono text-gray-400"> import {form.snippetPath || '/etc/caddy/homelabrrr.caddy'}</span> once at the end (top level) of your Caddyfile.
@@ -492,14 +492,14 @@ export default function AdminWebsitesPage() {
                     </div>
                     <div>
                       <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                        {form.sshAuthType === 'key' ? 'Private key (OpenSSH format, unencrypted)' : 'Password'} {editId && <span className="text-gray-600">(blank = keep current)</span>}
+                        {form.sshAuthType === 'key' ? 'Private key (OpenSSH format, unencrypted)' : 'Password'} {editId && <span className="text-gray-400">(blank = keep current)</span>}
                       </label>
                       {form.sshAuthType === 'key' ? (
                         <textarea rows={3} value={form.sshSecret} onChange={(e) => setForm((f) => ({ ...f, sshSecret: e.target.value }))} className={`${inputCls} font-mono text-xs`} placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----'} />
                       ) : (
                         <input type="password" value={form.sshSecret} onChange={(e) => setForm((f) => ({ ...f, sshSecret: e.target.value }))} className={inputCls} placeholder="••••••••" />
                       )}
-                      <p className="text-xs text-gray-600 mt-1">Stored encrypted. The user needs write access to the snippet path and must be able to run <span className="font-mono">caddy validate</span> / <span className="font-mono">caddy reload</span>. The host key is pinned on first connect.</p>
+                      <p className="text-xs text-gray-400 mt-1">Stored encrypted. The user needs write access to the snippet path and must be able to run <span className="font-mono">caddy validate</span> / <span className="font-mono">caddy reload</span>. The host key is pinned on first connect.</p>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div>

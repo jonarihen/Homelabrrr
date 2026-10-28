@@ -119,7 +119,7 @@ export default function VNCPage() {
 
         <span className="text-gray-400 text-sm">
           VNC — {vmName}
-          <span className="text-gray-600 font-mono ml-2">{displayNode(node)}/{vmid}</span>
+          <span className="text-gray-400 font-mono ml-2">{displayNode(node)}/{vmid}</span>
         </span>
 
         <span className={`text-xs px-2 py-0.5 rounded ml-1 ${

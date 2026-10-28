@@ -44,7 +44,7 @@ export default function PrereqCallout({
       ) : onAction ? (
         <button type="button" onClick={onAction} className={actionCls}>{actionLabel}</button>
       ) : fallback ? (
-        <p className="text-xs text-gray-600">{fallback}</p>
+        <p className="text-xs text-gray-400">{fallback}</p>
       ) : null}
     </div>
   );

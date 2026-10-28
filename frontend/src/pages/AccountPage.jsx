@@ -255,7 +255,7 @@ function ConnectionSection() {
       {loading ? (
         <div className="h-5 bg-gray-800/60 rounded animate-pulse" />
       ) : failed || !info ? (
-        <p className="text-xs text-gray-600 italic">Connection details are unavailable right now.</p>
+        <p className="text-xs text-gray-400 italic">Connection details are unavailable right now.</p>
       ) : (
         <>
           <p className="text-sm text-gray-400 flex flex-wrap items-center gap-x-2 gap-y-1.5">
@@ -647,7 +647,7 @@ function ApiTokensSection() {
             {[1, 2].map(i => <div key={i} className="h-12 bg-gray-800/60 rounded-lg animate-pulse" />)}
           </div>
         ) : tokens.length === 0 ? (
-          <p className="text-xs text-gray-600 italic">No API tokens yet.</p>
+          <p className="text-xs text-gray-400 italic">No API tokens yet.</p>
         ) : (
           <ul className="space-y-2">
             {tokens.map(t => (
@@ -660,7 +660,7 @@ function ApiTokensSection() {
                   <p className="text-[11px] text-gray-500 mt-0.5">
                     Created {fmtDate(t.createdAt)} · Expires {t.expiresAt ? fmtDate(t.expiresAt) : 'never'} · Last used {fmtDate(t.lastUsedAt)}
                   </p>
-                  <p className="text-[10px] text-blue-400 mt-1">{(t.scopes || ['read']).join(' · ')}</p>
+                  <p className="text-[11px] text-blue-400 mt-1">{(t.scopes || ['read']).join(' · ')}</p>
                 </div>
                 <button
                   onClick={() => revoke(t)}

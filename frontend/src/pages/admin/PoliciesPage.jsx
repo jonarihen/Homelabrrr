@@ -912,7 +912,7 @@ export default function PoliciesPage() {
 
             <div className="flex flex-col gap-3 sm:flex-row">
               <div className="rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm">
-                <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Selection</p>
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Selection</p>
                 <p className="mt-1 font-medium text-white">
                   {srcVlan ? srcVlan.name : 'No source selected'}
                 </p>
@@ -924,7 +924,7 @@ export default function PoliciesPage() {
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm">
-                <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Firewall</p>
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Firewall</p>
                 {firewalls.length > 1 ? (
                   <select
                     value={selectedFw || ''}
@@ -1258,7 +1258,7 @@ export default function PoliciesPage() {
                             </span>
                           ))}
                         </div>
-                        <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                        <p className="mt-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
                           {line.action === 'accept' ? 'Allowed traffic path' : 'Denied traffic path'}
                         </p>
                       </div>
@@ -1319,7 +1319,7 @@ export default function PoliciesPage() {
                             </span>
                           ))}
                         </div>
-                        <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                        <p className="mt-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
                           {line.action === 'accept' ? 'Allowed traffic path' : 'Denied traffic path'}
                         </p>
                         <button
@@ -1431,7 +1431,7 @@ export default function PoliciesPage() {
 
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="rounded-3xl border border-gray-800 bg-gray-900/90 p-5">
-            <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">How To Read It</p>
+            <p className="text-[11px] uppercase tracking-[0.24em] text-slate-500">How To Read It</p>
             <div className="mt-3 space-y-3 text-sm text-slate-300">
               <p>Pick a VLAN. It moves to the center.</p>
               <p>Existing neighbors pull into the inner ring so you can see what is already wired.</p>
@@ -1442,7 +1442,7 @@ export default function PoliciesPage() {
           </div>
 
           <div className="rounded-3xl border border-gray-800 bg-gray-900/90 p-5">
-            <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Current Focus</p>
+            <p className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Current Focus</p>
             {srcVlan ? (
               <div className="mt-3">
                 <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 px-4 py-3">
@@ -1483,7 +1483,7 @@ export default function PoliciesPage() {
               }`}
             >
               {tab.label}
-              {tab.count > 0 && <span className="ml-1.5 text-[10px] text-gray-500">({tab.count})</span>}
+              {tab.count > 0 && <span className="ml-1.5 text-[11px] text-gray-500">({tab.count})</span>}
               {activeTab === tab.id && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-cyan-400" />}
             </button>
           ))}
@@ -1758,7 +1758,7 @@ export default function PoliciesPage() {
                 <div className="text-center">
                   <p className="text-xs text-slate-500">Source</p>
                   <p className="text-sm font-medium text-cyan-300">{srcVlan.name}</p>
-                  <p className="text-[10px] font-mono text-slate-600">{vlanTagToSubnet(srcVlan.tag)}</p>
+                  <p className="text-[11px] font-mono text-slate-400">{vlanTagToSubnet(srcVlan.tag)}</p>
                 </div>
                 <svg className="h-8 w-8 text-slate-600" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
@@ -1766,7 +1766,7 @@ export default function PoliciesPage() {
                 <div className="text-center">
                   <p className="text-xs text-slate-500">Destination</p>
                   <p className="text-sm font-medium text-emerald-300">{dstVlan.name}</p>
-                  <p className="text-[10px] font-mono text-slate-600">{vlanTagToSubnet(dstVlan.tag)}</p>
+                  <p className="text-[11px] font-mono text-slate-400">{vlanTagToSubnet(dstVlan.tag)}</p>
                 </div>
               </div>
 
@@ -1794,7 +1794,7 @@ export default function PoliciesPage() {
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Policy Preview</p>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Policy Preview</p>
                 <p className="mt-2 text-sm text-slate-200">{policyPreviewText}</p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-cyan-200">
@@ -1812,7 +1812,7 @@ export default function PoliciesPage() {
                 </div>
                 <div>
                   <span className="text-sm text-slate-300 transition-colors group-hover:text-white">Bidirectional</span>
-                  <p className="text-[10px] text-slate-600">Also allow {dstVlan.name} to reach {srcVlan.name}</p>
+                  <p className="text-[11px] text-slate-400">Also allow {dstVlan.name} to reach {srcVlan.name}</p>
                 </div>
               </label>
 

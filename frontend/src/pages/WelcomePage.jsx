@@ -277,12 +277,12 @@ export default function WelcomePage() {
                         {status.maintenance.map(m => (
                           <div key={m.id} className="flex items-center gap-2.5 flex-wrap">
                             <span className="aaris-led aaris-led--warning" />
-                            <span className="border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] border-amber-500/40 text-amber-400">
+                            <span className="border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] border-amber-500/40 text-amber-400">
                               Maintenance
                             </span>
                             <span className="font-mono text-xs text-gray-200 uppercase tracking-[0.08em]">{m.node}</span>
                             {m.untilLabel && (
-                              <span className="font-mono text-[10px] text-gray-500 uppercase tracking-[0.1em]">until ~{m.untilLabel}</span>
+                              <span className="font-mono text-[11px] text-gray-500 uppercase tracking-[0.1em]">until ~{m.untilLabel}</span>
                             )}
                             {m.reason && <span className="text-xs text-gray-500 truncate">— {m.reason}</span>}
                           </div>
@@ -299,7 +299,7 @@ export default function WelcomePage() {
                             <span className="font-mono text-xs text-gray-200 uppercase tracking-[0.08em]">{h.name}</span>
                             {h.online ? (
                               <>
-                                <span className="font-mono text-[10px] text-gray-500 uppercase tracking-[0.1em]">PVE {h.version}</span>
+                                <span className="font-mono text-[11px] text-gray-500 uppercase tracking-[0.1em]">PVE {h.version}</span>
                                 <span className="ml-auto font-mono text-[11px] text-gray-400 uppercase tracking-[0.1em]">
                                   <span className="text-green-400">{h.runningVms}</span>/{h.vmCount} VMs running
                                 </span>
@@ -352,7 +352,7 @@ export default function WelcomePage() {
                       </div>
 
                       {visibleChecks.length === 0 ? (
-                        <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-600">
+                        <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">
                           Every prerequisite is satisfied — nothing is waiting on setup.
                         </p>
                       ) : (
@@ -364,7 +364,7 @@ export default function WelcomePage() {
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <span className="font-mono text-xs text-gray-200 uppercase tracking-[0.08em]">{check.label}</span>
-                                  <span className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] ${state.tag}`}>
+                                  <span className={`border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] ${state.tag}`}>
                                     {state.label}
                                   </span>
                                 </div>
@@ -373,7 +373,7 @@ export default function WelcomePage() {
                               {check.href && (
                                 <Link
                                   to={check.href}
-                                  className="shrink-0 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500 hover:text-orange-500 transition-colors"
+                                  className="shrink-0 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500 hover:text-orange-500 transition-colors"
                                 >
                                   Fix →
                                 </Link>
@@ -435,7 +435,7 @@ export default function WelcomePage() {
                 )}
 
                 {notices.length === 0 ? (
-                  <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-600">
+                  <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">
                     No notices — nothing planned, nothing broken.
                   </p>
                 ) : (
@@ -447,21 +447,21 @@ export default function WelcomePage() {
                         className={`px-4 py-3 border-l-2 ${level.accent} border-b border-gray-800/60 last:border-b-0 ${!n.active ? 'opacity-40' : ''}`}
                       >
                         <div className="flex items-center gap-2.5 flex-wrap">
-                          <span className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] ${level.tag}`}>
+                          <span className={`border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] ${level.tag}`}>
                             {level.label}
                           </span>
                           <span className="text-sm font-medium text-gray-100">{n.title}</span>
-                          <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                          <span className="ml-auto font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">
                             {(n.created_at || '').slice(0, 10)}
                           </span>
                         </div>
                         {n.body && <p className="text-sm text-gray-400 mt-1.5 whitespace-pre-wrap">{n.body}</p>}
                         {isAdmin && n.source === 'node_maintenance' ? (
-                          <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                          <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">
                             Auto-managed — closes when the node leaves maintenance (PVE Hosts)
                           </p>
                         ) : isAdmin && (
-                          <div className="flex gap-3 mt-2 font-mono text-[10px] uppercase tracking-[0.1em]">
+                          <div className="flex gap-3 mt-2 font-mono text-[11px] uppercase tracking-[0.1em]">
                             <button onClick={() => { setNoticeForm({ id: n.id, title: n.title, body: n.body, level: n.level }); setNoticeError(''); }} className="text-gray-500 hover:text-gray-200 transition-colors">Edit</button>
                             <button onClick={() => toggleNotice(n)} className="text-gray-500 hover:text-gray-200 transition-colors">
                               {n.active ? 'Deactivate' : 'Activate'}
@@ -490,7 +490,7 @@ export default function WelcomePage() {
                       <Stat value={stopped} label="Stopped" valueClass="text-gray-500" />
                     </div>
                     {vmList.length === 0 ? (
-                      <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-600">
+                      <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">
                         No VMs assigned — contact an admin.
                       </p>
                     ) : (
@@ -503,11 +503,11 @@ export default function WelcomePage() {
                           >
                             <span className={`aaris-led ${vm.status === 'running' ? 'aaris-led--ok' : vm.status === 'error' ? 'aaris-led--error' : 'aaris-led--off'}`} />
                             <span className="text-sm text-gray-200 truncate group-hover:text-gray-100">{vm.name || `VM ${vm.vmid}`}</span>
-                            <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.1em] text-gray-600">{vm.vmid}</span>
+                            <span className="ml-auto font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">{vm.vmid}</span>
                           </button>
                         ))}
                         {vms.length > vmList.length && (
-                          <p className="px-4 py-2 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                          <p className="px-4 py-2 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">
                             +{vms.length - vmList.length} more
                           </p>
                         )}
@@ -565,7 +565,7 @@ export default function WelcomePage() {
                 )}
 
                 {links.length === 0 ? (
-                  <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-600">
+                  <p className="px-4 py-4 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">
                     No links yet.
                   </p>
                 ) : (
@@ -581,7 +581,7 @@ export default function WelcomePage() {
                           {link.label}
                           <span className="text-gray-600 group-hover:text-orange-500 transition-colors">↗</span>
                         </span>
-                        <span className="block font-mono text-[10px] tracking-[0.02em] text-gray-600 truncate">
+                        <span className="block font-mono text-[11px] tracking-[0.02em] text-gray-400 truncate">
                           {link.description || link.url}
                         </span>
                       </a>
@@ -589,7 +589,7 @@ export default function WelcomePage() {
                         <button
                           onClick={() => deleteLink(link)}
                           title="Remove link"
-                          className="px-3 py-2.5 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-700 hover:text-red-400 transition-colors"
+                          className="px-3 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-700 hover:text-red-400 transition-colors"
                         >
                           ✕
                         </button>
@@ -610,7 +610,7 @@ function Panel({ label, action, children }) {
   return (
     <section className="bg-gray-900 border border-gray-800">
       <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800">
-        <h2 className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">{label}</h2>
+        <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">{label}</h2>
         {action}
       </div>
       {children}
@@ -647,7 +647,7 @@ function Meter({ label, pct, detail }) {
   const fill = clamped >= 90 ? 'bg-red-400' : clamped >= 70 ? 'bg-amber-400' : 'bg-green-400';
   return (
     <div className="flex items-center gap-3">
-      <span className="w-14 shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500">{label}</span>
+      <span className="w-14 shrink-0 font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500">{label}</span>
       <div
         className="flex-1 h-1.5 bg-gray-800"
         role="meter"
@@ -659,7 +659,7 @@ function Meter({ label, pct, detail }) {
         <div className={`h-full ${fill}`} style={{ width: `${clamped}%` }} />
       </div>
       <span className="w-12 shrink-0 text-right font-mono text-xs text-gray-200">{clamped.toFixed(0)}%</span>
-      <span className="w-28 shrink-0 text-right font-mono text-[10px] uppercase tracking-[0.08em] text-gray-600">{detail}</span>
+      <span className="w-28 shrink-0 text-right font-mono text-[11px] uppercase tracking-[0.08em] text-gray-400">{detail}</span>
     </div>
   );
 }
@@ -668,7 +668,7 @@ function Stat({ value, label, valueClass = 'text-gray-100' }) {
   return (
     <div className="px-4 py-3 border-r border-gray-800 last:border-r-0">
       <p className={`font-mono text-lg font-semibold ${valueClass}`}>{value}</p>
-      <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-gray-600">{label}</p>
+      <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-gray-400">{label}</p>
     </div>
   );
 }

@@ -79,7 +79,7 @@ export default function SupportPage() {
     finally { setBusy(''); }
   };
   return <Layout><div className="max-w-5xl p-6 lg:p-8 space-y-6">
-    <header><p className="font-mono text-[10px] uppercase tracking-[0.2em] text-orange-500">Private · Energy & Budget</p>
+    <header><p className="font-mono text-[11px] uppercase tracking-[0.2em] text-orange-500">Private · Energy & Budget</p>
       <h1 className="aaris-display text-2xl text-gray-100 mt-2">Support the lab</h1>
       <p className="text-sm text-gray-400 mt-2 max-w-2xl">Contributions are entirely voluntary. They never change your permissions, quotas, or service priority.</p></header>
     {error && <p role="alert" className="border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}

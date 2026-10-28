@@ -145,7 +145,7 @@ export default function UsersPage() {
                           : PERM_DEFS.filter(p => u[p.key]).length + (u.can_provision ? 1 : 0);
                         return count > 0
                           ? <span className="text-xs text-purple-400">{count} granted{role ? ' (role)' : ''}</span>
-                          : <span className="text-xs text-gray-600">None</span>;
+                          : <span className="text-xs text-gray-400">None</span>;
                       })()
                     }
                   </td>
@@ -188,7 +188,7 @@ export default function UsersPage() {
                           </button>
                         </>
                       ) : (
-                        <span className="text-xs text-gray-600">Admin only</span>
+                        <span className="text-xs text-gray-400">Admin only</span>
                       )}
                     </div>
                   </td>
@@ -786,9 +786,9 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                   </button>
                 </div>
               ) : canGrantPrivileges ? (
-                <p className="text-xs text-gray-600 italic">2FA is not enabled for this user.</p>
+                <p className="text-xs text-gray-400 italic">2FA is not enabled for this user.</p>
               ) : (
-                <p className="text-xs text-gray-600 italic">Only admins can reset another user's 2FA.</p>
+                <p className="text-xs text-gray-400 italic">Only admins can reset another user's 2FA.</p>
               )}
             </div>
 
@@ -894,7 +894,7 @@ function ReviewUserChangesModal({ user, state, draft, changes, allVMs, onBack, o
               {c.kind === 'grant' && <>+ {c.label}</>}
               {c.kind === 'revoke' && <>− {c.label}</>}
               {c.kind === 'field' && <>~ {c.label}: <span className="text-gray-500">{c.from}</span> → <span className="text-white">{c.to}</span></>}
-              {c.danger && <span className="ml-2 text-[10px] uppercase tracking-wider">high blast radius</span>}
+              {c.danger && <span className="ml-2 text-[11px] uppercase tracking-wider">high blast radius</span>}
             </li>
           ))}
         </ul>
@@ -1040,7 +1040,7 @@ function InvitesPanel({ invites, onChanged }) {
       </div>
       {error && <p className="text-red-400 text-sm mb-3 bg-red-900/20 rounded p-2">{error}</p>}
       {invites.length === 0 ? (
-        <p className="text-xs text-gray-600 italic border border-gray-800 bg-gray-900 rounded-xl px-4 py-6 text-center">
+        <p className="text-xs text-gray-400 italic border border-gray-800 bg-gray-900 rounded-xl px-4 py-6 text-center">
           No invites yet. Generate one to onboard a user without setting a password by hand.
         </p>
       ) : (
@@ -1390,7 +1390,7 @@ function Row({ label, sub, badge, action, staged = null }) {
       </div>
       <div className="flex items-center gap-2">
         {staged && (
-          <span className="text-[10px] uppercase tracking-wider text-amber-400">
+          <span className="text-[11px] uppercase tracking-wider text-amber-400">
             {staged === 'add' ? 'pending add' : 'pending remove'}
           </span>
         )}
@@ -1402,7 +1402,7 @@ function Row({ label, sub, badge, action, staged = null }) {
 }
 
 function Empty({ text }) {
-  return <p className="text-xs text-gray-600 italic py-2 px-3">{text}</p>;
+  return <p className="text-xs text-gray-400 italic py-2 px-3">{text}</p>;
 }
 
 // Compact per-user allocation, red per metric when at/over its effective
@@ -1462,8 +1462,8 @@ function PermToggle({ label, desc, checked, onChange, danger = false, staged = f
       <div>
         <p className="text-sm text-white">
           {label}
-          {danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
-          {staged && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">pending</span>}
+          {danger && <span className="ml-2 text-[11px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+          {staged && <span className="ml-2 text-[11px] uppercase tracking-wider text-amber-400">pending</span>}
         </p>
         {desc && <p className={`text-xs ${hot ? 'text-amber-300/80' : 'text-gray-500'}`}>{desc}</p>}
       </div>

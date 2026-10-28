@@ -380,7 +380,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
             <span className="truncate">
               Uploading <span className="text-gray-200">{uploadProgress.name}</span>
               {uploadProgress.total > 1 && (
-                <span className="text-gray-600"> ({uploadProgress.index}/{uploadProgress.total})</span>
+                <span className="text-gray-400"> ({uploadProgress.index}/{uploadProgress.total})</span>
               )}
             </span>
             {/* At 100% the browser is done sending but the backend is still

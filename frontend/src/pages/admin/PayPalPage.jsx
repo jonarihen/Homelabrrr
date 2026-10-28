@@ -63,7 +63,7 @@ export default function PayPalPage() {
   };
   return <div className="p-6 lg:p-8 max-w-6xl space-y-6">
     <RecentReauthDialog open={!!reauth} busy={reauthBusy} error={reauthError} onCancel={() => setReauth(null)} onConfirm={confirmReauth} />
-    <header><p className="font-mono text-[10px] uppercase tracking-[0.2em] text-orange-500">Restricted · Payments</p>
+    <header><p className="font-mono text-[11px] uppercase tracking-[0.2em] text-orange-500">Restricted · Payments</p>
       <h1 className="aaris-display text-2xl text-gray-100 mt-2">PayPal administration</h1>
       <p className="text-sm text-gray-400 mt-2">Checkout starts disabled. Configure sandbox separately from live. Secrets are write-only and encrypted at rest.</p></header>
     {error && <p role="alert" className="border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}

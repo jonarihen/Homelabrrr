@@ -144,7 +144,7 @@ export default function WebsitesPage() {
               {sites.length === 0 && !showForm && (
                 <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
                   <p className="text-gray-400 font-medium">No websites published yet</p>
-                  <p className="text-sm text-gray-600 mt-1">Point a domain’s A record at the homelab WAN IP, then publish it here.</p>
+                  <p className="text-sm text-gray-400 mt-1">Point a domain’s A record at the homelab WAN IP, then publish it here.</p>
                 </div>
               )}
               {/* Filtered-out cards stay mounted (just hidden) so an in-flight card keeps polling and an open edit keeps its draft. */}
@@ -227,7 +227,7 @@ function PublishForm({ servers, upstream, isAdmin, onClose, onPublished }) {
             {checking ? 'Checking…' : 'Check DNS'}
           </button>
         </div>
-        <p className="text-xs text-gray-600 mt-1">
+        <p className="text-xs text-gray-400 mt-1">
           Point an A record for this domain at the homelab WAN IP{server?.wanIp ? <> — <span className="font-mono text-orange-400">{server.wanIp}</span></> : ''} before publishing.
         </p>
         {dns && (
@@ -391,7 +391,7 @@ function SiteCard({ hidden, site: initial, servers, upstream, isAdmin, onChanged
             <p className="text-xs text-gray-500 font-mono mt-0.5">
               {site.kind && site.kind !== 'reverse_proxy' ? site.kind : `→ ${site.upstreamHost}:${site.upstreamPort}`}
             </p>
-            {site.ownerUsername && <p className="text-[10px] text-gray-600 font-mono mt-0.5">owner: {site.ownerUsername}</p>}
+            {site.ownerUsername && <p className="text-[11px] text-gray-400 font-mono mt-0.5">owner: {site.ownerUsername}</p>}
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {(isError || isWarning || isHeld) && (
@@ -525,7 +525,7 @@ function EditUpstreamForm({ site, upstream, isAdmin, serverHasInspection, onCanc
         </>
       )}
 
-      <p className="text-xs text-gray-600">Saving re-pushes the route to Caddy — the site goes back through the publish steps for a moment.</p>
+      <p className="text-xs text-gray-400">Saving re-pushes the route to Caddy — the site goes back through the publish steps for a moment.</p>
       {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
 
       <div className="flex gap-3">

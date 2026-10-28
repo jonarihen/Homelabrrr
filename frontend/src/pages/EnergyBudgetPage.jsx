@@ -12,7 +12,7 @@ import {
 
 function Tile({ label, value, detail, status }) {
   return <div className="border border-gray-700 bg-gray-900/80 p-4 min-h-28">
-    <div className="flex items-start justify-between gap-2"><h3 className="font-mono text-[11px] uppercase tracking-widest text-gray-400">{label}</h3>{status && <span className="font-mono text-[10px] uppercase text-amber-400">{status}</span>}</div>
+    <div className="flex items-start justify-between gap-2"><h3 className="font-mono text-[11px] uppercase tracking-widest text-gray-400">{label}</h3>{status && <span className="font-mono text-[11px] uppercase text-amber-400">{status}</span>}</div>
     <p className="mt-3 text-2xl font-semibold tabular-nums text-gray-100">{value}</p>
     {detail && <p className="mt-1 text-sm text-gray-400">{detail}</p>}
   </div>;
