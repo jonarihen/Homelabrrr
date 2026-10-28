@@ -832,6 +832,9 @@ export async function runSiteFlow(siteId) {
     await setSiteStep(siteId, 'inspect', 'active');
     await setSiteStatus(siteId, 'inspecting', '');
     const result = await client.setInspectionServerCert(profileName, certName, rootVdom, site.domain);
+    // A revocation cleaned up during the cert poll saw no cert_name and freed
+    // nothing; re-arm it so the next tick releases the slot just taken.
+    if (await rearmRevocation(siteId)) return;
     await setSiteStep(siteId, 'inspect', 'done', inspectNote(result, profileName));
     await finishLive(siteId, site, server, '');
   } catch (err) {

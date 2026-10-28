@@ -139,13 +139,17 @@ async function findHostsForNodeName(nodeName, database: DbOrTx = db, strict = fa
   return matches;
 }
 
+// A definite "no such host" answer, as opposed to a lookup that failed: only
+// these let a strict caller conclude the node is not where it was recorded.
+const notFound = (message) => Object.assign(new Error(message), { definite: true });
+
 export async function hostForNode(nodeRef, opts = {}) {
   // strict: when an unreachable host could change the answer, throw an
   // `indeterminate` error rather than resolving among the hosts that answered.
   const { vmid = null, database = db, strict = false } = opts;
   const { hostId, nodeName } = decodeNodeRef(nodeRef);
-  if (!nodeName) throw new Error('Node is required');
-  if (!isValidNodeName(nodeName)) throw new Error('Invalid node name');
+  if (!nodeName) throw notFound('Node is required');
+  if (!isValidNodeName(nodeName)) throw notFound('Invalid node name');
 
   if (hostId) return await getHostById(hostId, database);
 
@@ -167,17 +171,17 @@ export async function hostForNode(nodeRef, opts = {}) {
     }
     if (vmMatches.length === 1) return vmMatches[0];
     if (vmMatches.length > 1) {
-      throw new Error(`VM ${vmid} on node ${nodeName} exists on multiple configured hosts. Use a host-specific node reference.`);
+      throw notFound(`VM ${vmid} on node ${nodeName} exists on multiple configured hosts. Use a host-specific node reference.`);
     }
   }
 
   if (matches.length === 0) {
     const hosts = await getHosts(database);
     if (hosts.length === 1) return hosts[0];
-    throw new Error(`Node ${nodeName} was not found on any configured Proxmox host`);
+    throw notFound(`Node ${nodeName} was not found on any configured Proxmox host`);
   }
 
-  throw new Error(`Node ${nodeName} exists on multiple configured Proxmox hosts. Use a host-specific node reference.`);
+  throw notFound(`Node ${nodeName} exists on multiple configured Proxmox hosts. Use a host-specific node reference.`);
 }
 
 async function resolveNode(nodeRef, opts = {}) {

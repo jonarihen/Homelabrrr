@@ -185,7 +185,8 @@ export async function getUserAllowedUpstreams(userId) {
       const host = await hostForNode(a.node, { vmid: a.vmid, strict: true });
       return host != null && String(host.id) === String(row.hostId);
     } catch (err) {
-      return err?.indeterminate ? null : false;
+      // Only a definite lookup answer is a denial; an outage or DB error is not.
+      return err?.definite ? false : null;
     }
   };
   const vmIps = [];
