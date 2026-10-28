@@ -107,7 +107,7 @@ services:
     container_name: proxmox-frontend-ui
     restart: unless-stopped
     ports:
-      - target: 80
+      - target: 8080
         published: 8181
         protocol: tcp
         host_ip: ${FRONTEND_BIND_ADDRESS:-127.0.0.1}

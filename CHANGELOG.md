@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-28 — Frontend container runs without root
+
+- The frontend container now runs nginx as its unprivileged `nginx` user and listens on port 8080 inside the container. The published host port (8181) is unchanged. If you have a compose override that targets the container's port 80, change it to 8080.
+- The frontend container has its own health check.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
