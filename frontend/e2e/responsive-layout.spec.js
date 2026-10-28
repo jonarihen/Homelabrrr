@@ -58,3 +58,31 @@ test('an admin table page does not scroll horizontally at phone width', async ({
   await expect(page.getByRole('row', { name: /Operator/ })).toBeVisible();
   expect(await noHorizontalScroll(page)).toBe(true);
 });
+
+test('the drawer and its backdrop sit above console windows and below app modals', async ({ page }) => {
+  await page.route('**/api/vms/2~pve/101/status', (route) => route.fulfill({ json: { node: 'pve', nodeRef: '2~pve', vmid: 101, name: 'Test VM', status: 'running' } }));
+  await page.route('**/api/vms/2~pve/101/vnc-ticket', (route) => route.fulfill({ status: 503, json: { error: 'Test console offline' } }));
+  await page.goto('/vm/2~pve/101');
+  await page.getByRole('button', { name: 'VNC', exact: true }).click();
+  await expect(page.getByText('Test console offline')).toBeVisible();
+
+  const menu = page.getByRole('button', { name: 'Open navigation' });
+  await menu.click();
+  await expect(page.getByRole('dialog', { name: 'Navigation' })).toBeVisible();
+
+  const z = await page.evaluate(() => {
+    const drawer = document.getElementById('app-sidebar');
+    const backdrop = drawer.previousElementSibling;
+    return { drawer: getComputedStyle(drawer).zIndex, backdrop: getComputedStyle(backdrop).zIndex };
+  });
+  expect(Number(z.backdrop)).toBeGreaterThan(40); // console portal layer
+  expect(Number(z.drawer)).toBeGreaterThan(Number(z.backdrop));
+  expect(Number(z.drawer)).toBeLessThan(50); // app modals stay on top
+
+  // A tap on the console area must hit the backdrop and dismiss the drawer,
+  // not land on the console window behind it.
+  const box = await page.locator('div.pointer-events-auto').filter({ hasText: 'Test console offline' }).boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.getByRole('dialog', { name: 'Navigation' })).toHaveCount(0);
+  await expect(page.getByText('Test console offline')).toBeVisible();
+});

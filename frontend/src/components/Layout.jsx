@@ -58,7 +58,10 @@ export default function Layout({ children }) {
         <span className="aaris-display text-gray-100 text-sm leading-none">VM Manager</span>
       </header>
 
-      {drawerOpen && <div className="lg:hidden fixed inset-0 z-40 bg-black/70" aria-hidden="true" onClick={() => setDrawerPath(null)} />}
+      {/* Backdrop above the console layer (z-40) so console windows cannot
+          intercept taps meant to dismiss the drawer, and below app modals
+          (z-50) which stay on top of both. */}
+      {drawerOpen && <div className="lg:hidden fixed inset-0 z-[45] bg-black/70" aria-hidden="true" onClick={() => setDrawerPath(null)} />}
 
       {/* Sidebar — static column at lg+, off-canvas drawer below */}
       <aside
@@ -68,7 +71,7 @@ export default function Layout({ children }) {
         aria-modal={drawerOpen || undefined}
         aria-label={drawerOpen ? 'Navigation' : undefined}
         tabIndex={drawerOpen ? -1 : undefined}
-        className={`w-56 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-50 max-lg:motion-safe:duration-200 ${drawerOpen ? 'max-lg:motion-safe:transition-[translate]' : 'max-lg:motion-safe:transition-[translate,visibility] max-lg:-translate-x-full max-lg:invisible'}`}
+        className={`w-56 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-[48] max-lg:motion-safe:duration-200 ${drawerOpen ? 'max-lg:motion-safe:transition-[translate]' : 'max-lg:motion-safe:transition-[translate,visibility] max-lg:-translate-x-full max-lg:invisible'}`}
       >
         <div className="px-4 py-4 border-b border-gray-800">
           <div className="flex items-center gap-2.5">
