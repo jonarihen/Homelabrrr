@@ -736,6 +736,7 @@ function validateServerBody(body) {
   }
   const sshHost = String(body.sshHost ?? '').trim();
   if (sshHost) {
+    if (!isValidUpstreamHost(sshHost)) return 'SSH host must be a valid IP address or DNS hostname';
     if (!String(body.sshUser ?? '').trim()) return 'SSH user is required when Caddyfile sync is enabled';
     const sshPort = body.sshPort === undefined || body.sshPort === '' ? 22 : Number.parseInt(body.sshPort, 10);
     if (!Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65535) return 'SSH port must be between 1 and 65535';
