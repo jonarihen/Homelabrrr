@@ -40,3 +40,33 @@ test('plenty of viewport space still yields tiles above the minimum', () => {
     assert.ok(tile.width >= 320 && tile.height >= 240);
   }
 });
+
+test('side-by-side mode wraps onto extra rows instead of pushing windows past the viewport', () => {
+  for (const n of [3, 4, 5, 6]) {
+    const layout = computeTileLayout(vms(n), 'horizontal', { width: 1440, height: 900 });
+    assertNoOverlap(layout);
+    for (const tile of layout) {
+      assert.ok(tile.width >= 320 && tile.height >= 240);
+      assert.ok(tile.x + tile.width <= 1440, `${n} sessions: tile ${tile.id} exceeds the viewport`);
+      assert.ok(tile.y + tile.height <= 900 - 72, `${n} sessions: tile ${tile.id} covers the dock area`);
+    }
+  }
+});
+
+test('stacked mode wraps onto extra columns instead of pushing windows past the viewport', () => {
+  const layout = computeTileLayout(vms(4), 'vertical', { width: 1440, height: 900 });
+  assertNoOverlap(layout);
+  for (const tile of layout) {
+    assert.ok(tile.width >= 320 && tile.height >= 240);
+    assert.ok(tile.y + tile.height <= 900 - 72, `tile ${tile.id} covers the dock area`);
+  }
+});
+
+test('grid mode keeps every tile inside the viewport', () => {
+  const layout = computeTileLayout(vms(6), 'grid', { width: 1440, height: 900 });
+  assertNoOverlap(layout);
+  for (const tile of layout) {
+    assert.ok(tile.width >= 320 && tile.height >= 240);
+    assert.ok(tile.x + tile.width <= 1440 && tile.y + tile.height <= 900 - 72, `tile ${tile.id} exceeds the viewport`);
+  }
+});
