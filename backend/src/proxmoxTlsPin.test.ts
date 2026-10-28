@@ -15,7 +15,7 @@ process.env.SECRET_ENCRYPTION_KEY ||= '44'.repeat(32);
 delete process.env.ALLOW_INSECURE_UPSTREAM_TLS;
 
 const { encryptSecret } = await import('./utils/secrets.ts');
-const { agentForHost, classifyConnectionError, getHostCertFingerprint, testHostConnection } = await import('./proxmox.ts');
+const { agentForHost, classifyConnectionError, getHostCertFingerprint, hostDelete, testHostConnection } = await import('./proxmox.ts');
 
 const pinA = new X509Certificate(fixtureA.cert).fingerprint256;
 const pinB = new X509Certificate(fixtureB.cert).fingerprint256;
@@ -27,6 +27,7 @@ let port = 0;
 before(async () => {
   server = https.createServer({ key: fixtureA.key, cert: fixtureA.cert }, (req, res) => {
     seen.push(req.headers.authorization);
+    if (req.url?.endsWith('/drop')) { req.socket.destroy(); return; }
     const ok = req.headers.authorization === GOOD;
     res.writeHead(ok ? 200 : 401, { 'Content-Type': 'application/json' });
     res.end(ok ? '{"data":{"version":"8.2.4"}}' : '{"data":null}');
@@ -102,4 +103,11 @@ test('the noVNC websocket path honours the pin', async () => {
 test('remote-migrate fingerprint read checks the pin', async () => {
   assert.equal(await getHostCertFingerprint(host()), pinA);
   await assert.rejects(getHostCertFingerprint(host({ tls_fingerprint: pinB })), { code: 'PVE_TLS_PIN_MISMATCH' });
+});
+
+test('a request that reached a pinned host counts as submitted when the connection drops', async () => {
+  // Otherwise a create/clone that PVE already started would release its VMID.
+  const err = await hostDelete(host(), '/drop').then(() => null, (e) => e);
+  assert.ok(err, 'the dropped request fails');
+  assert.equal(err.submissionStarted, true);
 });

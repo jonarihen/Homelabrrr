@@ -69,6 +69,9 @@ export function agentForHost(host) {
         return;
       }
       socket.setTimeout(0);
+      // The handshake is already over when the request gets this socket, and
+      // `authorized` is false for a pinned self-signed cert: tell makeRequest.
+      (socket as unknown as { pinVerified: boolean }).pinVerified = true;
       finish(null);
     });
     return undefined;
@@ -143,7 +146,7 @@ function makeRequest(host, method, path, body) {
 
     req.on('socket', socket => {
       const ready = () => { submissionStarted = true; };
-      if (req.reusedSocket || (!socket.connecting && socket.encrypted && socket.authorized)) ready();
+      if (req.reusedSocket || socket.pinVerified || (!socket.connecting && socket.encrypted && socket.authorized)) ready();
       else socket.once('secureConnect', ready);
     });
     req.on('error', fail);

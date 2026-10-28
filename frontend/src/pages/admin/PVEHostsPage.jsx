@@ -74,7 +74,7 @@ export default function PVEHostsPage() {
   const setTarget = (patch) => { setForm(f => ({ ...f, ...patch })); setProbe(null); setPinConfirmed(false); setTestResult(null); };
 
   const fetchCertificate = async () => {
-    setBusy(true); setError(''); setProbe(null); setPinConfirmed(false);
+    setBusy('probe'); setError(''); setProbe(null); setPinConfirmed(false);
     try {
       const { data } = await api.post('/admin/pve-hosts/certificate-probe', { host: form.host, port: form.port });
       setProbe(data);
@@ -83,13 +83,17 @@ export default function PVEHostsPage() {
     } finally { setBusy(false); }
   };
 
+  // A result only describes the inputs it was run with; editing any of them hides it.
+  const testInputs = () => JSON.stringify([form, pinValue()]);
+
   const testConnection = async () => {
-    setBusy(true); setError(''); setTestResult(null);
+    setBusy('test'); setError(''); setTestResult(null);
+    const testedFor = testInputs();
     try {
       const { data } = await api.post('/admin/pve-hosts/test', { ...form, id: editId, tlsFingerprint: pinValue() });
-      setTestResult(data);
+      setTestResult({ ...data, testedFor });
     } catch (e) {
-      setTestResult({ ok: false, error: e.response?.data?.error || 'Connection test failed' });
+      setTestResult({ ok: false, error: e.response?.data?.error || 'Connection test failed', testedFor });
     } finally { setBusy(false); }
   };
 
@@ -528,7 +532,7 @@ export default function PVEHostsPage() {
                   )}
                 </div>
               </div>
-              {testResult && (
+              {testResult && testResult.testedFor === testInputs() && (
                 <div role="status" className={`text-xs rounded-xl p-3 border ${testResult.ok ? 'text-green-400 bg-green-900/20 border-green-800/30' : 'text-red-400 bg-red-900/20 border-red-800/30'}`}>
                   {testResult.ok ? `Connected${testResult.version ? ` — PVE ${testResult.version}` : ''}.` : testResult.error}
                   {testResult.presentedFingerprint && <p className="font-mono break-all mt-1">Presented SHA-256 {testResult.presentedFingerprint}</p>}
@@ -537,7 +541,7 @@ export default function PVEHostsPage() {
               {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
               <div className="flex gap-3 pt-1">
                 <button type="button" disabled={busy || !form.host || !form.tokenId} onClick={testConnection} className="flex-1 border border-gray-600 hover:border-blue-400 disabled:opacity-50 text-gray-200 rounded-xl py-2.5 text-sm transition-colors">
-                  {busy ? 'Working...' : 'Test connection'}
+                  {busy === 'test' ? 'Working...' : 'Test connection'}
                 </button>
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">
                   Cancel
