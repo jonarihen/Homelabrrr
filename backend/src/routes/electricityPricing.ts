@@ -12,7 +12,7 @@ import { createExtraLabLoad, listExtraLabLoads } from '../services/extraLabLoads
 
 const router = Router();
 router.use(requireAuth, requireAdmin, requireInteractiveSession);
-const rate = (value: unknown) => { if (typeof value !== 'string') throw new Error('INVALID_RATE'); parseDkkPerKwh(value); return value; };
+const rate = (value: unknown) => { if (typeof value !== 'string') throw new Error('INVALID_RATE'); try { parseDkkPerKwh(value); } catch { throw new Error('INVALID_RATE'); } return value; };
 const instant = (value: unknown) => { const date = new Date(String(value)); if (!Number.isFinite(date.getTime())) throw new Error('INVALID_DATE'); return date; };
 const fail = (res: any, err: unknown) => {
   const known = err instanceof Error && (/^(INVALID_|OVERLAPPING_|MISSING_|FINALIZED_|EXTRA_LOAD_LIMIT)/.test(err.message) || ['Cannot finalize an open month', 'Incomplete calculation cannot be finalized', 'Recalculation reason required', 'Invalid billing month', 'Invalid statement input', 'Month has not started', 'Calculation inputs changed; preview again', 'Contract not found'].includes(err.message));

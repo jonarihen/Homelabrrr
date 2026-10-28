@@ -179,8 +179,10 @@ test('fixed plus tariffs contracts require a fixed rate, VAT and valid component
   assert.equal((await post({ requiredComponents: undefined })).body.error, 'INVALID_COMPONENTS');
   assert.equal((await post({ requiredComponents: ['network', 'network'] })).body.error, 'INVALID_COMPONENTS');
   assert.equal((await post({ requiredComponents: ['spot'] })).body.error, 'INVALID_COMPONENTS');
-  // A malformed optional margin is still rejected (shared parser error, as for spot).
-  assert.notEqual((await post({ spotMarginDkkPerKwh: 'abc' })).status, 201);
+  // A malformed rate is a 400 validation error, not a 500.
+  const malformed = await post({ spotMarginDkkPerKwh: 'abc' });
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.body.error, 'INVALID_RATE');
   const created = await post({ spotMarginDkkPerKwh: '' });
   assert.equal(created.status, 201, JSON.stringify(created.body));
   assert.equal(created.body.kind, 'fixed_plus_tariffs');
