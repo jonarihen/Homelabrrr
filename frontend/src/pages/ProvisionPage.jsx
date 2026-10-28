@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import PrereqCallout from '../components/PrereqCallout.jsx';
@@ -366,6 +366,7 @@ function StepIcon({ status }) {
 // Non-admins must deploy onto one of their VLANs (the backend rejects them otherwise),
 // so say so up front instead of after submit, and preselect when there is only one.
 function VlanField({ vlans, isAdmin, value, onChange }) {
+  const selectId = useId();
   const onlyTag = !isAdmin && vlans?.length === 1 ? String(vlans[0].tag) : '';
   useEffect(() => {
     if (onlyTag && !value) onChange(onlyTag);
@@ -385,8 +386,8 @@ function VlanField({ vlans, isAdmin, value, onChange }) {
   }
   return (
     <div>
-      <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
-      <select value={value} onChange={e => onChange(e.target.value)} className={inputCls} required={!isAdmin}>
+      <label htmlFor={selectId} className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
+      <select id={selectId} value={value} onChange={e => onChange(e.target.value)} className={inputCls} required={!isAdmin}>
         {isAdmin
           ? <option value="">No VLAN (untagged)</option>
           : <option value="" disabled>Select a VLAN…</option>}

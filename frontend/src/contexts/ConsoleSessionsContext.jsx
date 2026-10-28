@@ -324,7 +324,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
   return (
     <div
       ref={windowRef}
-      className={`${session.minimized ? 'hidden' : 'flex'} pointer-events-auto fixed flex-col overflow-hidden resize min-w-[320px] min-h-[240px] border border-gray-700 bg-gray-900`}
+      className={`${session.minimized ? 'hidden' : 'flex'} pointer-events-auto fixed flex-col overflow-hidden resize border border-gray-700 bg-gray-900`}
       style={{
         left: `${session.x}px`,
         top: `${session.y}px`,
@@ -339,6 +339,8 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
         onPointerDown={startDrag}
         onKeyDown={handleMoveKey}
         tabIndex={0}
+        role="group"
+        aria-roledescription="movable window"
         aria-label={`Move ${consoleTitle(session)} window (arrow keys, Shift for larger steps)`}
       >
         <div className="min-w-0">
