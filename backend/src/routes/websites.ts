@@ -822,6 +822,21 @@ router.put('/servers/:id', pWebsites, async (req, res) => {
   const snippetPath = merged.snippetPath || '/etc/caddy/homelabrrr.caddy';
   const caddyfilePath = merged.caddyfilePath || '/etc/caddy/Caddyfile';
 
+  // Leaving Caddyfile mode: snippet routes carry no managed @id, so API-mode
+  // cleanup can't see them and every Caddyfile reload would restore them.
+  // Empty the snippet first, and refuse the switch if that can't be done.
+  // Without a stored credential Homelabrrr never deployed a snippet there.
+  const leavingSnippetMode = sshConfigured(existing) && !sshConfigured({ ssh_host: sshHost, ssh_user: sshUser });
+  if (leavingSnippetMode && existing.ssh_secret) {
+    try {
+      await deploySnippet(existing, []);
+    } catch (e) {
+      return res.status(409).json({
+        error: `Could not clear the Homelabrrr snippet on the Caddy host, so the server was left in Caddyfile mode: ${sanitizeError(e.message)}`,
+      });
+    }
+  }
+
   await db.update(caddyServers).set({
     name, api_url: apiUrl, auth_type: authType, auth_secret: authSecret, server_name: serverName,
     verify_tls: !!verifyTls, wan_ip: wanIp, fortigate_id: fortigateId, inspection_profile: inspectionProfile,
@@ -836,6 +851,11 @@ router.put('/servers/:id', pWebsites, async (req, res) => {
   if (sshConfigured(updated)) {
     try { await syncServerSnippet(updated); }
     catch (e) { syncWarning = `Saved, but the Caddyfile sync failed: ${sanitizeError(e.message)}`; }
+  } else if (leavingSnippetMode) {
+    // The emptied snippet took the sites down; bring them back as API routes now
+    // rather than on the next maintenance pass.
+    try { await reconcileManagedRoutes(updated); }
+    catch (e) { syncWarning = `Saved, but re-publishing the sites through the Caddy API failed: ${sanitizeError(e.message)}`; }
   }
   res.json({ ok: true, syncWarning });
 });
