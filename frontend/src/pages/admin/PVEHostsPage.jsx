@@ -47,7 +47,7 @@ export default function PVEHostsPage() {
   const openEdit = (h) => {
     setEditId(h.id);
     setForm({
-      name: h.name, host: h.host, port: h.port, tokenId: h.token_id, tokenSecret: '', verifyTls: !!h.verify_tls,
+      name: h.name, host: h.host, port: h.port, tokenId: h.token_id, tokenSecret: '', verifyTls: h.verify_tls !== false,
       sshHost: h.ssh_host || '', sshPort: h.ssh_port || 22, sshUser: h.ssh_user || 'root',
       sshAuthType: h.ssh_auth_type || 'key', sshSecret: '', hasSsh: !!h.has_ssh,
     });
@@ -203,7 +203,7 @@ export default function PVEHostsPage() {
                       <div>
                         <h3 className="text-white font-semibold">{h.name}</h3>
                         <p className="text-xs text-gray-500 font-mono">{h.host}:{h.port}</p>
-                        <p className="text-[10px] text-gray-600 mt-0.5">{h.verify_tls ? 'TLS verification on' : 'TLS verification off'}</p>
+                        <p className="text-[10px] text-gray-600 mt-0.5">{h.verify_tls !== false ? 'TLS verification on' : 'TLS verification off'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
