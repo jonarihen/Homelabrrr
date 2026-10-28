@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-28 — Failed background deploy steps no longer leave a VM stuck "in progress"
+
+- If background work after a deploy fails unexpectedly (for example recording ownership or tagging), the VM moves to **needs review** with the cause shown, instead of staying in "creating" indefinitely with the error only in the server log. A more specific status already recorded by a deploy step is kept.
+- Deploy failures, VLAN-tag failures and auto-placement skips are now structured log events (`provision_*_background_failed`, `provision_vlan_tag_failed`, `placement_node_skipped`) with the provision ID and VMID.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
