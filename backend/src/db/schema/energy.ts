@@ -77,7 +77,7 @@ export const eloverblikChargeObservations = pgTable('eloverblik_charge_observati
 export const electricityContracts = pgTable('electricity_contracts', {
   id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
   label: text('label').notNull(),
-  kind: text('kind').notNull(), // spot or fixed_all_in
+  kind: text('kind').notNull(), // spot, fixed_all_in or fixed_plus_tariffs
   area: text('area').notNull(), // DK1 or DK2
   valid_from: timestamp('valid_from', { withTimezone: true, mode: 'date' }).notNull(),
   valid_to: timestamp('valid_to', { withTimezone: true, mode: 'date' }),

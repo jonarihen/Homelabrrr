@@ -37,14 +37,16 @@ router.get('/contracts/:id/tariffs', async (req, res) => {
   res.json(await db.select().from(electricityTariffs).where(eq(electricityTariffs.contract_id, id)).orderBy(electricityTariffs.valid_from).limit(500));
 });
 function parseContractBody(b: any) {
-  if (!['spot', 'fixed_all_in'].includes(b.kind) || !['DK1', 'DK2'].includes(b.area) || typeof b.label !== 'string' || !b.label.trim() || typeof b.provenance !== 'string' || !b.provenance.trim()) throw new Error('INVALID_CONTRACT');
+  if (!['spot', 'fixed_all_in', 'fixed_plus_tariffs'].includes(b.kind) || !['DK1', 'DK2'].includes(b.area) || typeof b.label !== 'string' || !b.label.trim() || typeof b.provenance !== 'string' || !b.provenance.trim()) throw new Error('INVALID_CONTRACT');
   const from = instant(b.validFrom); const to = b.validTo ? instant(b.validTo) : null;
   if (to && to <= from) throw new Error('INVALID_CONTRACT');
-  const fixed = b.kind === 'fixed_all_in' ? rate(b.fixedDkkPerKwh) : null;
-  const margin = b.kind === 'spot' ? rate(b.spotMarginDkkPerKwh) : null;
-  const vat = b.kind === 'spot' ? rate(b.vatRate) : null;
+  // fixed_plus_tariffs: fixed energy rate excl. VAT, plus tariffs and VAT like spot; margin optional.
+  const tariffed = b.kind !== 'fixed_all_in';
+  const fixed = b.kind !== 'spot' ? rate(b.fixedDkkPerKwh) : null;
+  const margin = b.kind === 'spot' || (b.kind === 'fixed_plus_tariffs' && b.spotMarginDkkPerKwh != null && b.spotMarginDkkPerKwh !== '') ? rate(b.spotMarginDkkPerKwh) : null;
+  const vat = tariffed ? rate(b.vatRate) : null;
   if (vat && (parseDkkPerKwh(vat) < 0n || parseDkkPerKwh(vat) > 1_000_000n)) throw new Error('INVALID_VAT');
-  if (b.kind === 'spot' && (!Array.isArray(b.requiredComponents) || b.requiredComponents.some((x: unknown) => !['network', 'system', 'tax', 'retailer'].includes(String(x))) || new Set(b.requiredComponents).size !== b.requiredComponents.length)) throw new Error('INVALID_COMPONENTS');
+  if (tariffed && (!Array.isArray(b.requiredComponents) || b.requiredComponents.some((x: unknown) => !['network', 'system', 'tax', 'retailer'].includes(String(x))) || new Set(b.requiredComponents).size !== b.requiredComponents.length)) throw new Error('INVALID_COMPONENTS');
   const monthly = b.fixedMonthlyOre == null ? null : Number(b.fixedMonthlyOre);
   if (monthly != null && (!Number.isSafeInteger(monthly) || monthly < 0)) throw new Error('INVALID_FIXED_FEE');
   const feePolicy = b.fixedFeeAllocation || 'none';
@@ -52,7 +54,7 @@ function parseContractBody(b: any) {
   const feeShare = feePolicy === 'manual_share' ? rate(b.fixedFeeManualShare) : null;
   if (feeShare && (parseDkkPerKwh(feeShare) < 0n || parseDkkPerKwh(feeShare) > 1_000_000n)) throw new Error('INVALID_FIXED_FEE_SHARE');
   return { label: b.label.trim(), kind: b.kind, area: b.area, valid_from: from, valid_to: to, fixed_dkk_per_kwh: fixed, spot_margin_dkk_per_kwh: margin, vat_rate: vat,
-    required_components: b.kind === 'spot' ? b.requiredComponents : null, fixed_monthly_ore: monthly, fixed_fee_allocation: feePolicy, fixed_fee_manual_share: feeShare, provenance: b.provenance.trim() };
+    required_components: tariffed ? b.requiredComponents : null, fixed_monthly_ore: monthly, fixed_fee_allocation: feePolicy, fixed_fee_manual_share: feeShare, provenance: b.provenance.trim() };
 }
 type ContractValues = ReturnType<typeof parseContractBody>;
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
