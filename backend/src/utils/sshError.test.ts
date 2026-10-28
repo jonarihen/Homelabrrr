@@ -8,3 +8,9 @@ test('SSH errors are stable and do not expose fingerprints or hosts', () => {
   assert.equal(JSON.stringify(payload).includes('secret'), false);
   assert.equal(JSON.stringify(payload).includes('10.0.0.2'), false);
 });
+
+test('an auth failure says what to check instead of the raw ssh2 text', () => {
+  const payload = sshClientError(new Error('All configured authentication methods failed'));
+  assert.equal(payload.code, 'SSH_AUTHENTICATION_FAILED');
+  assert.match(payload.error, /username/);
+});

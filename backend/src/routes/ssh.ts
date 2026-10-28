@@ -19,6 +19,7 @@ import { authorizeSshTarget, sshConnectionRateLimited } from '../services/sshTar
 import { sshClientError } from '../utils/sshError.ts';
 import { log } from '../utils/logger.ts';
 import { withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
+import { getVMConfig } from '../proxmox.ts';
 
 // Convert a PPK key (any version) to OpenSSH PEM using puttygen.
 // passphrase is the PPK decryption passphrase (empty string if unencrypted).
@@ -222,12 +223,15 @@ router.get('/config/:node/:vmid', async (req, res) => {
   }
   const global = await getGlobalSshConfig(node, vmid);
   const userRow = await getUserSshConfig(req.session.userId, node, vmid);
-  if (!global && !userRow) return res.json(null);
+  // No saved login yet: suggest the cloud-init user the VM was deployed with,
+  // since that is the account its SSH key went to (#288).
+  const ciuser = userRow?.username ? '' : await getVMConfig(node, vmid).then((c) => String(c?.ciuser || ''), () => '');
+  if (!global && !userRow && !ciuser) return res.json(null);
   res.json({
     host: global?.host || null,
     port: global?.port || 22,
     hostFingerprint: global?.host_fingerprint || '',
-    username: userRow?.username || 'root',
+    username: userRow?.username || ciuser || 'root',
   });
 });
 
