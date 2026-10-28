@@ -5,7 +5,8 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import {
-  auditLog, caddyServers, firewalls, caddySites, users, userVlans, vlans, vmAssignments, vmSshConfigs,
+  auditLog, caddyServers, firewalls, caddySites, pveHosts, publicIpAssignments, publicIpPools, publicIps,
+  users, userVlans, vlans, vmAssignments, vmSshConfigs,
 } from '../db/schema/index.ts';
 
 let testDb: TestDatabase;
@@ -272,4 +273,165 @@ test('a route Caddy fails to delete keeps the site claimable until it is gone', 
     caddyProto.listManagedRouteIds = originals.list;
     caddyProto.deleteRoute = originals.del;
   }
+});
+
+test('access lost while the flow is pushing the route re-arms the revocation instead of publishing', async () => {
+  const { createCaddyClient, managedRouteId } = await import('../utils/caddy.ts');
+  const [user] = await testDb.db.insert(users).values({ username: 'push-race-owner', password: 'unused' }).returning({ id: users.id });
+  const [vlan] = await testDb.db.insert(vlans).values({ name: 'push-race', tag: 1040, mode: 'managed', subnet_cidr: '' }).returning({ id: vlans.id });
+  await testDb.db.insert(userVlans).values({ user_id: user.id, vlan_id: vlan.id });
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'push-race-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'push-race.example.test', upstream_host: '10.10.40.5', upstream_port: 80,
+    owner_user_id: user.id, managed: true, status: 'pushing',
+  }).returning();
+
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { list: caddyProto.listManagedRouteIds, del: caddyProto.deleteRoute, upsert: caddyProto.upsertRoute, conflicts: caddyProto.findConflicts };
+  const live = new Set();
+  caddyProto.listManagedRouteIds = async () => [...live];
+  caddyProto.deleteRoute = async (id) => { live.delete(managedRouteId(id)); };
+  caddyProto.findConflicts = async () => [];
+  // While the push is in flight the owner loses the VLAN and a whole
+  // maintenance pass revokes and cleans the site; then the push lands.
+  caddyProto.upsertRoute = async (id) => {
+    await testDb.db.delete(userVlans).where(eq(userVlans.user_id, user.id));
+    await websites.markSitesUnpublished(await websites.findDisallowedSites(apiServer.id));
+    await websites.finishRevocations(apiServer);
+    live.add(managedRouteId(id));
+    return { wildcard: '' };
+  };
+  try {
+    await websites.runSiteFlow(row.id);
+    const [afterFlow] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.equal(afterFlow.status, 'error', 'the flow did not overwrite the revocation');
+    assert.ok(afterFlow.status_detail.startsWith('Being unpublished:'), 're-armed for the next tick');
+
+    await websites.finishRevocations(apiServer);
+    assert.equal(live.size, 0, 'the route the stale push installed was removed');
+    const [done] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.ok(done.status_detail.startsWith('Unpublished'));
+  } finally {
+    Object.assign(caddyProto, { listManagedRouteIds: originals.list, deleteRoute: originals.del, upsertRoute: originals.upsert, findConflicts: originals.conflicts });
+  }
+});
+
+test('access lost after the flow starts is re-checked right before the snippet is synced', async () => {
+  const { createCaddyClient } = await import('../utils/caddy.ts');
+  const [user] = await testDb.db.insert(users).values({ username: 'snippet-race-owner', password: 'unused' }).returning({ id: users.id });
+  const [vlan] = await testDb.db.insert(vlans).values({ name: 'snippet-race', tag: 1050, mode: 'managed', subnet_cidr: '' }).returning({ id: vlans.id });
+  await testDb.db.insert(userVlans).values({ user_id: user.id, vlan_id: vlan.id });
+  const [sshServer] = await testDb.db.insert(caddyServers).values({
+    name: 'snippet-race-edge', api_url: 'http://127.0.0.1:1', ssh_host: '127.0.0.1', ssh_user: 'caddy',
+  }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: sshServer.id, domain: 'snippet-race.example.test', upstream_host: '10.10.50.5', upstream_port: 80,
+    owner_user_id: user.id, managed: true, status: 'pushing',
+  }).returning();
+
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(sshServer));
+  const original = caddyProto.findWildcardSlot;
+  // Runs after the flow's first check, before the snippet would be deployed.
+  caddyProto.findWildcardSlot = async () => {
+    await testDb.db.delete(userVlans).where(eq(userVlans.user_id, user.id));
+    return null;
+  };
+  try {
+    await websites.runSiteFlow(row.id);
+    const [after] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.equal(after.status, 'error');
+    assert.ok(after.status_detail.startsWith('Being unpublished'), 'parked before any snippet deploy was attempted');
+  } finally {
+    caddyProto.findWildcardSlot = original;
+  }
+});
+
+test('a release skipped for the profile\'s last certificate stays retryable without re-syncing Caddy', async () => {
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  const { createClient } = await import('../fortigate.ts');
+  const { createCaddyClient } = await import('../utils/caddy.ts');
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-last', host: '127.0.0.1', api_key: encryptSecret('k') }).returning();
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'last-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'last.example.test', upstream_host: '192.168.7.7', upstream_port: 80,
+    owner_user_id: ownerId, managed: true, status: 'live',
+    fortigate_id: fw.id, inspection_profile: 'deep', cert_name: 'last.example.test_2026-01-01',
+  }).returning();
+
+  const fortiProto = Object.getPrototypeOf(createClient(fw));
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { detach: fortiProto.detachInspectionServerCert, list: caddyProto.listManagedRouteIds, del: caddyProto.deleteRoute };
+  let onlyCert = true;
+  let detachCalls = 0;
+  let listCalls = 0;
+  fortiProto.detachInspectionServerCert = async () => {
+    detachCalls += 1;
+    return onlyCert
+      ? { removed: [], remaining: ['last.example.test_2026-01-01'], skipped: 'would empty the profile\'s server-certificate list' }
+      : { removed: ['last.example.test_2026-01-01'], remaining: ['other'] };
+  };
+  caddyProto.listManagedRouteIds = async () => { listCalls += 1; return []; };
+  caddyProto.deleteRoute = async () => {};
+  try {
+    const tick = async () => {
+      await websites.markSitesUnpublished(await websites.findDisallowedSites(apiServer.id));
+      await websites.finishRevocations(apiServer);
+      return (await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id)))[0];
+    };
+    const first = await tick();
+    assert.ok(first.status_detail.startsWith('Being unpublished'), 'a skipped release is not finalized');
+    const listedOnce = listCalls;
+    await tick();
+    assert.equal(detachCalls, 2, 'the release is retried');
+    assert.equal(listCalls, listedOnce, 'retrying the release does not touch Caddy again');
+
+    // Another certificate joins the profile: the stale one can now be removed.
+    onlyCert = false;
+    const done = await tick();
+    assert.equal(detachCalls, 3);
+    assert.ok(done.status_detail.startsWith('Unpublished'), 'finalized once the slot is freed');
+  } finally {
+    fortiProto.detachInspectionServerCert = originals.detach;
+    caddyProto.listManagedRouteIds = originals.list;
+    caddyProto.deleteRoute = originals.del;
+  }
+});
+
+test('a site is not revoked when its owner\'s IP cannot be verified because Proxmox is unreachable', async () => {
+  const [user] = await testDb.db.insert(users).values({ username: 'pve-down-owner', password: 'unused' }).returning({ id: users.id });
+  // Two hosts, both unreachable: which one the bare `pve` assignment lives on is unknowable.
+  const [hostA] = await testDb.db.insert(pveHosts).values({ name: 'pve-down-a', host: '127.0.0.1', port: 1, token_id: 't', token_secret: 'x' }).returning({ id: pveHosts.id });
+  await testDb.db.insert(pveHosts).values({ name: 'pve-down-b', host: '127.0.0.1', port: 1, token_id: 't', token_secret: 'x' });
+  await testDb.db.insert(vmAssignments).values({ user_id: user.id, node: 'pve', vmid: 303 });
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-pve-down', host: 'fw.test', api_key: 'x' }).returning({ id: firewalls.id });
+  const [pool] = await testDb.db.insert(publicIpPools).values({ firewall_id: fw.id, name: 'pool-pve-down', external_interface: 'wan1' }).returning({ id: publicIpPools.id });
+  const [ip] = await testDb.db.insert(publicIps).values({ pool_id: pool.id, firewall_id: fw.id, address: '203.0.113.33' }).returning({ id: publicIps.id });
+  await testDb.db.insert(publicIpAssignments).values({
+    public_ip_id: ip.id, firewall_id: fw.id, user_id: user.id, proxmox_host_id: hostA.id, node: `${hostA.id}~pve`, vmid: 303, private_ip: '172.16.33.3',
+  });
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'pve-down-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'pve-down.example.test', upstream_host: '172.16.33.3', upstream_port: 80,
+    owner_user_id: user.id, managed: true, status: 'live',
+  }).returning();
+
+  const { userCanReachUpstream } = await import('../utils/websiteChecks.ts');
+  const reach = await userCanReachUpstream(user.id, '172.16.33.3', false);
+  assert.equal(reach.ok, false);
+  assert.equal(reach.unknown, true, 'an unreachable Proxmox host is not a verdict');
+
+  assert.deepEqual(await websites.findDisallowedSites(apiServer.id), [], 'the sweep defers');
+  await websites.markSitesUnpublished([row]);
+  const [after] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+  assert.equal(after.status, 'live');
+  assert.equal((await testDb.db.select().from(auditLog).where(eq(auditLog.target, 'pve-down.example.test'))).length, 0);
+
+  const app = express();
+  app.use((req, _res, next) => {
+    (req as express.Request & { session: unknown }).session = { userId: user.id, username: 'pve-down-owner', isAdmin: false };
+    next();
+  });
+  app.use('/', websites.default);
+  const retry = await request(app).post(`/sites/${row.id}/retry`);
+  assert.equal(retry.status, 503, 'a retry is refused for now, not as a revocation');
 });

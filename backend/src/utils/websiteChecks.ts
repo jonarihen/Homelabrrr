@@ -155,6 +155,8 @@ export function ipv4InCidr(ip, cidr) {
  *  - vmIps: private IPs an admin assigned to them (public_ip_assignments) for
  *    VMs that are still assigned to them
  *  - subnets: CIDRs of the VLANs assigned to them (see utils/vlanSubnets.js)
+ *  - unverifiedIps: assigned IPs whose VM's Proxmox host could not be checked
+ *    right now; neither allowed nor proven disallowed
  * Never read user- or guest-editable data (vm_ssh_configs.host, guest-agent
  * IPs) here: that would let a user publish an arbitrary internal address.
  */
@@ -173,29 +175,39 @@ export async function getUserAllowedUpstreams(userId) {
   // name, so a node-name match alone is not enough when the row records its
   // Proxmox host: the assignment must resolve to that same host (`pve` must not
   // match `2~pve` on another cluster, in either direction).
+  // Returns null when that cannot be known right now (a Proxmox host needed to
+  // resolve a bare node is unreachable): callers must not treat it as a denial.
   const sameHost = async (a, row) => {
     if (row.hostId == null) return true;
     const { hostId } = decodeNodeRef(a.node);
     if (hostId != null) return String(hostId) === String(row.hostId);
-    const host = await hostForNode(a.node, { vmid: a.vmid }).catch(() => null);
-    return host != null && String(host.id) === String(row.hostId);
+    try {
+      const host = await hostForNode(a.node, { vmid: a.vmid, strict: true });
+      return host != null && String(host.id) === String(row.hostId);
+    } catch (err) {
+      return err?.indeterminate ? null : false;
+    }
   };
   const vmIps = [];
+  const unverifiedIps = [];
   for (const row of rows) {
     if (!isIP(row.ip) || vmIps.includes(row.ip)) continue;
     for (const a of assignments) {
       if (a.vmid !== row.vmid) continue;
       if (!nodeLookupCandidates(a.node).includes(row.node) && !nodeLookupCandidates(row.node).includes(a.node)) continue;
-      if (await sameHost(a, row)) { vmIps.push(row.ip); break; }
+      const same = await sameHost(a, row);
+      if (same) { vmIps.push(row.ip); break; }
+      if (same === null && !unverifiedIps.includes(row.ip)) unverifiedIps.push(row.ip);
     }
   }
-  return { vmIps, subnets: await userVlanCidrs(db, userId) };
+  return { vmIps, subnets: await userVlanCidrs(db, userId), unverifiedIps: unverifiedIps.filter((ip) => !vmIps.includes(ip)) };
 }
 
 /**
  * Whether `host` is an upstream `userId` is allowed to point a public site at.
  * Admins are exempt. Non-admins must give an IPv4 that is either one of their
- * assigned VMs' IPs or inside one of their VLAN subnets.
+ * assigned VMs' IPs or inside one of their VLAN subnets. `unknown: true` on a
+ * refusal means ownership could not be checked (Proxmox unreachable).
  */
 export async function userCanReachUpstream(userId, host, isAdmin) {
   if (isAdmin) return { ok: true };
@@ -206,9 +218,13 @@ export async function userCanReachUpstream(userId, host, isAdmin) {
     // A public IP is not something we can prove the user owns.
     return { ok: false, message: 'Upstream must be a private address of a VM assigned to you or inside your VLAN subnet.' };
   }
-  const { vmIps, subnets } = await getUserAllowedUpstreams(userId);
+  const { vmIps, subnets, unverifiedIps } = await getUserAllowedUpstreams(userId);
   if (vmIps.includes(host)) return { ok: true };
   if (subnets.some((cidr) => ipv4InCidr(host, cidr))) return { ok: true };
+  if (unverifiedIps.includes(host)) {
+    // `unknown`: not a verdict. The maintenance sweep must defer, not revoke.
+    return { ok: false, unknown: true, message: `Could not verify that ${host} belongs to a VM assigned to you because its Proxmox host is unreachable. Try again shortly.` };
+  }
   return {
     ok: false,
     message: `You can only proxy to targets you own. ${host} is not an assigned VM's IP or inside one of your VLAN subnets${subnets.length ? ` (${subnets.join(', ')})` : ''}.`,

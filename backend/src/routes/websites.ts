@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { and, eq, ne, inArray, count, desc } from 'drizzle-orm';
+import { and, or, eq, ne, isNull, notInArray, inArray, count, desc } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { caddyServers, caddySites, firewalls, users, vmAssignments, vmSshConfigs } from '../db/schema/index.ts';
 import { isUniqueViolation } from '../db/errors.ts';
@@ -63,8 +63,12 @@ async function setSiteStep(siteId, key, status, note) {
   await db.update(caddySites).set({ steps }).where(eq(caddySites.id, siteId));
 }
 
+// Flow and probe writes never overwrite a revocation (see isRevoked): only a
+// save or retry, which re-check the upstream first, clears one.
 async function setSiteStatus(siteId, status, detail) {
-  await db.update(caddySites).set({ status, status_detail: detail ?? '' }).where(eq(caddySites.id, siteId));
+  await db.update(caddySites).set({ status, status_detail: detail ?? '' })
+    .where(and(eq(caddySites.id, siteId), or(isNull(caddySites.status), ne(caddySites.status, 'error'),
+      isNull(caddySites.status_detail), notInArray(caddySites.status_detail, REVOCATION_DETAILS))));
 }
 
 // ─── Route conflicts + end-to-end verification ────────────────────────────────
@@ -451,13 +455,43 @@ const REVOKED_DETAIL = 'Unpublished: this upstream is no longer one you are allo
 // Whether a managed site's upstream is still one its owner may publish.
 // Admin-owned sites are exempt, matching userCanReachUpstream. A site whose
 // owner was deleted has nobody left to authorize it, so it fails closed.
+// null = unknown right now (Proxmox unreachable): never publish on it, and
+// never revoke on it either.
 async function siteUpstreamAllowed(site) {
   if (site.owner_user_id == null) return false;
   const [owner] = await db.select({ is_admin: users.is_admin }).from(users)
     .where(eq(users.id, site.owner_user_id)).limit(1);
   if (!owner) return false;
   if (owner.is_admin) return true;
-  return (await userCanReachUpstream(site.owner_user_id, site.upstream_host, false)).ok;
+  const reach = await userCanReachUpstream(site.owner_user_id, site.upstream_host, false);
+  return reach.ok ? true : reach.unknown ? null : false;
+}
+
+const UNVERIFIED_DETAIL = 'Could not verify that you may proxy to this upstream because its Proxmox host is unreachable. Retry in a moment.';
+
+// Re-check right before a publish write. Returns true to go ahead; otherwise
+// the site is left revoked, parked for revocation, or marked unverified.
+async function mayPublish(siteId) {
+  const [current] = await db.select().from(caddySites).where(eq(caddySites.id, siteId)).limit(1);
+  if (!current || isRevoked(current)) return false;
+  const allowed = await siteUpstreamAllowed(current);
+  if (allowed) return true;
+  if (allowed === false) await markSitesUnpublished([current]);
+  else {
+    await setSiteStep(siteId, 'push', 'error', UNVERIFIED_DETAIL);
+    await setSiteStatus(siteId, 'error', UNVERIFIED_DETAIL);
+  }
+  return false;
+}
+
+// A revocation that landed while this flow was publishing may already have
+// been cleaned up, before the push: re-arm it so the next tick removes the
+// route again. True when the site is revoked and the flow must stop.
+async function rearmRevocation(siteId) {
+  const rearmed = await db.update(caddySites).set({ status_detail: REVOKING_DETAIL })
+    .where(and(eq(caddySites.id, siteId), eq(caddySites.status, 'error'), inArray(caddySites.status_detail, REVOCATION_DETAILS)))
+    .returning({ id: caddySites.id });
+  return rearmed.length > 0;
 }
 
 // Parked, but the Caddy route / inspection slot cleanup is not confirmed yet;
@@ -468,8 +502,12 @@ const REVOKING_DETAIL = 'Being unpublished: this upstream is no longer one you a
 const CLEANING_DETAIL = 'Being unpublished (cleaning up): this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
 const PENDING_DETAILS = [REVOKING_DETAIL, CLEANING_DETAIL];
 
-const isRevoked = (site) => site.status === 'error'
-  && [REVOKED_DETAIL, ...PENDING_DETAILS].includes(site.status_detail);
+// Route confirmed gone; only the inspection-slot release is still pending. Kept
+// apart from PENDING_DETAILS so retrying a release never re-syncs Caddy.
+const RELEASING_DETAIL = 'Being unpublished (releasing its certificate slot): this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
+const REVOCATION_DETAILS = [REVOKED_DETAIL, RELEASING_DETAIL, ...PENDING_DETAILS];
+
+const isRevoked = (site) => site.status === 'error' && REVOCATION_DETAILS.includes(site.status_detail);
 
 // A site published under an older, looser upstream policy (or whose owner has
 // since lost the VLAN/IP, or was deleted) must not stay reachable. 'error' rows
@@ -479,7 +517,8 @@ export async function findDisallowedSites(serverId) {
     .where(and(eq(caddySites.server_id, serverId), eq(caddySites.managed, true)));
   const disallowed = [];
   for (const site of sites) {
-    if (!(await siteUpstreamAllowed(site))) disallowed.push(site);
+    // Only a definite "no": an unknown answer defers to a later tick.
+    if ((await siteUpstreamAllowed(site)) === false) disallowed.push(site);
   }
   return disallowed;
 }
@@ -495,7 +534,7 @@ export async function markSitesUnpublished(sites) {
     if (isRevoked(site)) continue;
     const [current] = await db.select().from(caddySites).where(eq(caddySites.id, site.id)).limit(1);
     if (!current || isRevoked(current) || current.upstream_host !== site.upstream_host
-      || current.upstream_port !== site.upstream_port || await siteUpstreamAllowed(current)) continue;
+      || current.upstream_port !== site.upstream_port || (await siteUpstreamAllowed(current)) !== false) continue;
     const parked = await db.update(caddySites).set({ status: 'error', status_detail: REVOKING_DETAIL })
       .where(and(eq(caddySites.id, site.id), eq(caddySites.upstream_host, site.upstream_host),
         eq(caddySites.upstream_port, site.upstream_port)))
@@ -515,10 +554,10 @@ export async function markSitesUnpublished(sites) {
 // tick. Slots are released after every row is parked so siblings sharing one
 // certificate don't keep each other's slot "in use" (see certStillInUse).
 export async function finishRevocations(server) {
-  const pending = await db.select().from(caddySites)
+  const parkedWith = (details) => db.select().from(caddySites)
     .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
-      eq(caddySites.status, 'error'), inArray(caddySites.status_detail, PENDING_DETAILS)));
-  if (pending.length === 0) return;
+      eq(caddySites.status, 'error'), inArray(caddySites.status_detail, details)));
+  const pending = await parkedWith(PENDING_DETAILS);
   // Claim each row right before its side effects: a save that cleared the
   // revocation since `pending` was read makes the claim miss, and the site's
   // new route and certificate are left alone. A crash mid-cleanup leaves the
@@ -535,7 +574,7 @@ export async function finishRevocations(server) {
     }
     // Renders from DB state, so only rows still parked are left out.
     if (claimed.length) await syncServerSnippet(server);
-  } else {
+  } else if (pending.length) {
     const caddy = createCaddyClient(server);
     const liveIds = new Set(await caddy.listManagedRouteIds());
     for (const site of pending) {
@@ -550,12 +589,22 @@ export async function finishRevocations(server) {
   }
   for (const site of claimed) {
     if (stillLive.has(managedRouteId(site.id))) continue;
-    if (!(await releaseInspectionSlot(site, null))) continue;
-    await db.update(caddySites).set({ status_detail: REVOKED_DETAIL })
+    await db.update(caddySites).set({ status_detail: RELEASING_DETAIL })
       .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, CLEANING_DETAIL)));
   }
   if (claimed.length) {
     console.warn(`[websites] unpublished ${claimed.length} site(s) on "${server.name}" whose upstream the owner may no longer use: ${claimed.map((site) => site.domain).join(', ')}`);
+  }
+  // Slots are released only once every route is gone. A failed or skipped
+  // release (the profile's last certificate) stays RELEASING and is retried
+  // every tick, so the slot is freed once another certificate joins the profile.
+  for (const site of await parkedWith([RELEASING_DETAIL])) {
+    const [row] = await db.update(caddySites).set({ status_detail: RELEASING_DETAIL })
+      .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, RELEASING_DETAIL)))
+      .returning();
+    if (!row || !(await releaseInspectionSlot(row, null))) continue;
+    await db.update(caddySites).set({ status_detail: REVOKED_DETAIL })
+      .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, RELEASING_DETAIL)));
   }
 }
 
@@ -651,10 +700,7 @@ export async function runSiteFlow(siteId) {
   // Every (re)publish re-checks the upstream, so a revoked site cannot be
   // brought back by a retry between maintenance ticks. It enters revocation
   // the one way the sweep does, so finishRevocations removes any live route.
-  if (!(await siteUpstreamAllowed(site))) {
-    await markSitesUnpublished([site]);
-    return;
-  }
+  if (!(await mayPublish(siteId))) return;
   const server = await getServerRow(site.server_id);
   if (!server) {
     await setSiteStep(siteId, 'push', 'error', 'Caddy server no longer registered');
@@ -674,12 +720,18 @@ export async function runSiteFlow(siteId) {
     if (sshConfigured(server)) {
       wildcard = await detectWildcard(caddy, server.id, site.domain);
       await db.update(caddySites).set({ wildcard }).where(eq(caddySites.id, siteId));
+      // Access may have been lost since the flow started. The snippet renders
+      // from DB state, so a site revoked after this check is left out of it.
+      if (!(await mayPublish(siteId))) return;
       await syncServerSnippet(server);
+      if (await rearmRevocation(siteId)) return;
       await setSiteStep(siteId, 'push', 'done', wildcard
         ? `Caddyfile snippet updated & Caddy reloaded — the ${wildcard} wildcard certificate covers this site`
         : 'Caddyfile snippet updated & Caddy reloaded');
     } else {
+      if (!(await mayPublish(siteId))) return;
       const pushed = await caddy.upsertRoute(siteId, site.domain, site.upstream_host, site.upstream_port);
+      if (await rearmRevocation(siteId)) return;
       wildcard = pushed.wildcard || '';
       await db.update(caddySites).set({ wildcard }).where(eq(caddySites.id, siteId));
 
@@ -1449,7 +1501,9 @@ router.post('/sites/:id/retry', dnsLimiter, async (req, res) => {
   if (!row) return res.status(404).json({ error: 'Site not found' });
   if (!owns) return res.status(403).json({ error: 'Forbidden' });
   if (!row.managed) return res.status(400).json({ error: 'This site was imported from Caddy and is managed in the Caddyfile — nothing to retry.' });
-  if (!(await siteUpstreamAllowed(row))) return res.status(403).json({ error: REVOKED_DETAIL });
+  const allowed = await siteUpstreamAllowed(row);
+  if (allowed === null) return res.status(503).json({ error: UNVERIFIED_DETAIL });
+  if (!allowed) return res.status(403).json({ error: REVOKED_DETAIL });
 
   const steps = INITIAL_STEPS.map((s) => ({ ...s, status: s.key === 'dns' ? 'done' : 'pending' }));
   await db.update(caddySites).set({ steps: stepList(steps), status: 'pushing', status_detail: '' })
@@ -1494,7 +1548,8 @@ export async function certStillInUse(site) {
 // only delete a cert once nothing references it, which is exactly what
 // detaching here enables. Best-effort: a firewall that's unreachable at delete
 // time must not block removing the site.
-// Returns false only when a detach attempt failed, so callers can retry it.
+// Returns false while the slot is still held (a detach failed or was skipped),
+// so callers can retry it.
 async function releaseInspectionSlot(site, req) {
   if (!site.fortigate_id || !site.inspection_profile || !site.cert_name) return true;
   // Never detach the shared inspection bundle: it covers every published
@@ -1512,7 +1567,8 @@ async function releaseInspectionSlot(site, req) {
     );
     if (skipped) {
       console.log(`[websites] left "${site.cert_name}" on inspection profile "${site.inspection_profile}" — detaching ${skipped}`);
-      return true;
+      // Still held: a revocation retries it once the profile holds another cert.
+      return false;
     }
     if (removed.length === 0) return true;
     if (req) {
