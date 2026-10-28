@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-28 — Pin Proxmox host certificates and test connections before saving
+
+- **Admin → PVE Hosts** can now pin a host's TLS certificate: **Fetch certificate** shows the fingerprint the host presents (handshake only, no token sent), you confirm it, and from then on only that certificate is trusted. Self-signed Proxmox hosts work this way without `ALLOW_INSECURE_UPSTREAM_TLS`.
+- The pin covers every Proxmox connection: API calls, backup file downloads, the VNC console and cross-cluster migration. If the host presents a different certificate, the connection stops before the API token is sent, with a clear "certificate changed" error.
+- Setting, replacing or removing a pin requires re-entering the API token secret, and pin changes are recorded in the audit log.
+- A **Test connection** button tries the host, port, token and trust settings in the form without saving them, and reports whether the certificate is untrusted or changed, the token was rejected, the host is unreachable, or it timed out.
+- Hosts with a certificate from an internal CA can keep TLS verification on by trusting that CA via `NODE_EXTRA_CA_CERTS` (see README).
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.

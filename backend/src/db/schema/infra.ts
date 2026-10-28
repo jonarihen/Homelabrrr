@@ -36,6 +36,9 @@ export const pveHosts = pgTable('pve_hosts', {
   // Encrypted at rest by the app.
   ssh_secret: text('ssh_secret').default(''),
   ssh_host_key: text('ssh_host_key').default(''),
+  // Pinned SHA-256 of the PVE API certificate (colon hex). When set it
+  // replaces CA verification for every connection to this host.
+  tls_fingerprint: text('tls_fingerprint'),
 });
 
 // A PVE API endpoint can expose several physical nodes. Archived connections

@@ -437,7 +437,8 @@ Example values live in [`.env.example`](.env.example).
 | `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGIN` | Passkey relying-party hostname and exact browser origin (normally derived from `ALLOWED_ORIGIN`) |
 | `COOKIE_SECURE` | Marks auth cookies as `Secure` (default `true`; set to `false` only for plain-HTTP local dev) |
 | `TRUST_PROXY` | Number of proxy hops in front of the backend (default `2`: external reverse proxy + bundled nginx; set `1` if clients reach port 8181 directly) — see [Counting your proxies](#4-counting-your-proxies-trust_proxy) |
-| `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`) |
+| `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`). For a self-signed Proxmox host, prefer pinning its certificate under **Admin → PVE Hosts** (Fetch certificate → confirm): only that host is affected and no flag is needed |
+| `NODE_EXTRA_CA_CERTS` | Path to a PEM bundle of private CAs the backend should trust in addition to the public ones (standard Node.js variable, read at start). Use it when your Proxmox/FortiGate/Caddy certificates are issued by an internal CA: mount the bundle into the backend container (e.g. `./certs/lab-ca.pem:/certs/lab-ca.pem:ro` under `volumes:`) and set `NODE_EXTRA_CA_CERTS=/certs/lab-ca.pem` in its `environment:`. Hosts then keep **Verify TLS certificate** on |
 | `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image and ISO downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
 | `PORTAL_BASE_URL` | Absolute portal URL used for "open in portal" links in Discord embeds and as the HTTPS origin for PayPal return URLs and webhook registration (falls back to `ALLOWED_ORIGIN`; Discord links omitted if neither is set) |
 | `PAYPAL_RECONCILE_INTERVAL_MINUTES` | PayPal reconciliation interval in minutes (default `360`, range 15–1440); a startup pass runs after boot |

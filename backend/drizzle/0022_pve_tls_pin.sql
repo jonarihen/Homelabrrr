@@ -1,0 +1,1 @@
+ALTER TABLE "pve_hosts" ADD COLUMN "tls_fingerprint" text;
