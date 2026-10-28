@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-28 — Louder startup warnings for key and bootstrap mistakes
+
+- The backend now logs `secrets_undecryptable` at startup when stored secrets can't be decrypted with the configured `SECRET_ENCRYPTION_KEY`, instead of failing later on upstream calls and 2FA logins.
+- A warning is logged when `INITIAL_ADMIN_PASSWORD` is still set after the first admin exists.
+- The backend container runs with an init process, so child processes are reaped and shutdown signals are forwarded.
+- The README backup section now says the encryption keyring must be kept alongside database backups.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.

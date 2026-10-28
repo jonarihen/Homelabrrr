@@ -161,7 +161,11 @@ export async function reconcileInterruptedOperations(): Promise<void> {
 // Create the default admin on first run.
 async function bootstrapInitialAdmin(): Promise<void> {
   const [{ c }] = await db.select({ c: count() }).from(users);
-  if (c !== 0) return;
+  if (c !== 0) {
+    // The bootstrap password is only read on an empty database; left in the env it is a stale credential.
+    if (process.env.INITIAL_ADMIN_PASSWORD) log('warn', 'initial_admin_password_still_set', { hint: 'remove INITIAL_ADMIN_PASSWORD from the environment; it is only used to create the first admin' });
+    return;
+  }
   const INITIAL_ADMIN_USERNAME = process.env.INITIAL_ADMIN_USERNAME || '';
   const INITIAL_ADMIN_PASSWORD = process.env.INITIAL_ADMIN_PASSWORD || '';
   if (!INITIAL_ADMIN_USERNAME || !INITIAL_ADMIN_PASSWORD) {
@@ -229,6 +233,15 @@ export async function initDatabase(): Promise<void> {
   if (migratedSecretCount > 0) {
     log('info', 'legacy_secrets_encrypted', { count: migratedSecretCount });
     await setSetting('secret_encryption_migration_last', JSON.stringify({ at: new Date().toISOString(), counts: migratedSecrets }));
+  }
+
+  // A wrong or lost SECRET_ENCRYPTION_KEY otherwise only shows up later as failed upstream calls and 2FA lockouts.
+  const rotation = await planEncryptedSecretRotation();
+  if (rotation.undecryptable > 0) {
+    log('error', 'secrets_undecryptable', {
+      count: rotation.undecryptable,
+      hint: 'SECRET_ENCRYPTION_KEY does not match the key these secrets were encrypted with; add the old key to SECRET_ENCRYPTION_PREVIOUS_KEYS',
+    });
   }
 
   await reconcileInterruptedOperations();
