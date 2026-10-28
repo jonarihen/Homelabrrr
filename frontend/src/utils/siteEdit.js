@@ -44,3 +44,33 @@ export function hasSiteChanged(site, draft) {
   if (draft?.inspect === undefined) return false;
   return !!draft.inspect !== isInspectionOn(site);
 }
+
+// Statuses a site passes through while its publish pipeline runs.
+export const IN_FLIGHT = ['validating', 'pushing', 'issuing', 'inspecting', 'pending'];
+
+// The status a site is filed under on the Websites list: the short-lived
+// pipeline steps collapse into one 'publishing' bucket so chips stay put while
+// a publish moves through them, and a missing status reads as the column default.
+export function siteStatusGroup(site) {
+  const status = site?.status || 'pending';
+  return IN_FLIGHT.includes(status) ? 'publishing' : status;
+}
+
+// Site count per status group, in first-seen order. The selected group keeps
+// its chip (at 0) after its last site moves on, so an empty list explains itself.
+export function siteStatusCounts(sites, selected = 'all') {
+  const counts = {};
+  for (const s of sites) counts[siteStatusGroup(s)] = (counts[siteStatusGroup(s)] || 0) + 1;
+  if (selected !== 'all' && !counts[selected]) counts[selected] = 0;
+  return counts;
+}
+
+// Websites list filter: `query` matches domain, upstream and owner (and a
+// non-proxy kind like file_server) case-insensitively; `status` is 'all' or a
+// siteStatusGroup value.
+export function filterSites(sites, { query = '', status = 'all' } = {}) {
+  const q = query.trim().toLowerCase();
+  return sites.filter((s) => (status === 'all' || siteStatusGroup(s) === status) && (!q ||
+    [s.domain, s.upstreamHost, s.upstreamHost && `${s.upstreamHost}:${s.upstreamPort}`, s.kind !== 'reverse_proxy' && s.kind, s.ownerUsername]
+      .some((v) => v && String(v).toLowerCase().includes(q))));
+}

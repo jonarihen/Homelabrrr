@@ -103,10 +103,21 @@ export function validatePassword(value: unknown, field = 'password'): string {
   return value;
 }
 
+// Single-label hostnames (e.g. "pve") are allowed; the public-domain rule lives in websiteChecks.
+const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+// inet_aton spellings (octal, hex, short form: 0127.0.0.1, 0x7f.0.0.1, 127.1) that net.isIP
+// rejects but TLS hostname verification treats as DNS names (CVE-2026-105483/106069/106072).
+const NON_CANONICAL_IPV4_RE = /^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$/i;
+
+// An admin-typed upstream host: a canonical IP literal or a DNS hostname.
+export function isValidUpstreamHost(host: unknown): boolean {
+  if (typeof host !== 'string' || !host) return false;
+  return net.isIP(host) !== 0 || (HOST_RE.test(host) && !NON_CANONICAL_IPV4_RE.test(host));
+}
+
 export function validateHost(value: unknown): string {
   const host = boundedString(value, { field: 'host', min: 1, max: 253 }).toLowerCase();
-  if (net.isIP(host)) return host;
-  if (host === 'localhost' || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)) {
+  if (host === 'localhost' || !isValidUpstreamHost(host)) {
     throw new ValidationError('host must be a valid IP address or DNS hostname', { field: 'host' });
   }
   return host;
