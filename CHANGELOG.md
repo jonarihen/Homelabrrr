@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-28 — Audit log filters and CSV export
+
+- The **Audit Log** action filter now lists every action that has actually been recorded, instead of a fixed list of about 25.
+- New filters for **user** and a **date range** (the end date counts in full). They combine with the action and target filters.
+- **Export CSV** downloads the filtered log (newest first, up to 50,000 rows). Spreadsheet formulas in exported text are neutralised, and each export is recorded in the audit log.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
