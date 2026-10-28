@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-28 — Upstream calls can no longer hang or balloon
+
+- Proxmox and FortiGate API calls now have a 60-second total deadline and a 32 MB response limit, on top of the 15-second idle timeout. A slow-drip or oversized response fails the request instead of tying it up indefinitely.
+- Waiting for a Proxmox task (clones, migrations) still rides out short outages, but gives up with the real error after 5 minutes of failed status checks instead of silently retrying for up to 4 hours.
+- VMID allocation and node lookups query all Proxmox hosts in parallel, so one dead host costs one timeout instead of one per host. Unreachable hosts are logged as `pve_host_unreachable` with the host name, so "node not found" has a visible cause.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
