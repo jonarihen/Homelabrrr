@@ -15,7 +15,16 @@
  * historical hardcoded sequences byte-for-byte.
  */
 
+import { ipv4InCidr } from '../utils/ipPolicy.ts';
+
 const MAX_CUSTOM_BODY_BYTES = 16 * 1024;
+
+// Same network: identical netmask, and the address lies inside the expected network.
+function sameIpv4Network(ip, netmask, expectedIp, expectedNetmask) {
+  if (!netmask || netmask !== expectedNetmask) return false;
+  const prefix = netmask.split('.').reduce((n, octet) => n + (Number(octet) >>> 0).toString(2).replaceAll('0', '').length, 0);
+  return ipv4InCidr(ip, `${expectedIp}/${prefix}`);
+}
 
 function scopeOf(client, vdom) {
   if (vdom === 'global') return 'global';
@@ -92,8 +101,18 @@ export const ACTIONS = {
       if (p.skipIfExists !== false) {
         const existing = await client.getInterface(name);
         if (existing) {
-          // Report the existing interface's address so the sync can record the subnet it really has.
+          // Only adopt an interface that is this VLAN as configured; otherwise its
+          // real address would be recorded as this VLAN's subnet and feed policies.
           const [ip, netmask] = String(existing.ip || '').trim().split(/\s+/);
+          const mismatch = [
+            Number(existing.vlanid) !== Number(p.vlanId) && `VLAN ID ${existing.vlanid ?? 'none'}`,
+            String(existing.interface ?? '') !== String(p.parentInterface) && `parent interface ${existing.interface || 'none'}`,
+            String(existing.vdom ?? '') !== this._body(p, client).vdom && `VDOM ${existing.vdom || 'none'}`,
+            !sameIpv4Network(ip, netmask, String(p.ip), String(p.netmask)) && `address ${existing.ip || 'none'}`,
+          ].filter(Boolean);
+          if (mismatch.length) {
+            throw new Error(`Interface ${name} already exists but does not match this VLAN (${mismatch.join(', ')}); an admin must remove or reconfigure it on the firewall before syncing`);
+          }
           return { skipped: true, output: { interfaceName: name, vlanId: Number(p.vlanId), ip, netmask }, artifacts: [], calls: [{ method: 'GET', path: `cmdb/system/interface/${name}`, scope: client.vdom, summary: `Interface ${name} already exists — skipped` }] };
         }
       }

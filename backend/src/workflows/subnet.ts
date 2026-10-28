@@ -47,3 +47,14 @@ export function syncedSubnet(tag, syncedCidr) {
   const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.0\/24$/.exec(String(syncedCidr || '').trim());
   return m ? subnetFromBase(m[1]) : deriveSubnet(tag, {});
 }
+
+/**
+ * The /24 a VLAN's own interface step configures (`{ vlanId, ip, netmask }`,
+ * as executed or as rendered by a dry-run), or null when it is not this tag's
+ * interface or not a /24 — the sync then records nothing (legacy default).
+ */
+export function interfaceCidr(iface, tag) {
+  if (!iface || Number(iface.vlanId) !== Number(tag) || iface.netmask !== '255.255.255.0') return null;
+  const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(String(iface.ip ?? ''));
+  return m ? `${m[1]}.0/24` : null;
+}

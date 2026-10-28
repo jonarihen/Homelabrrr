@@ -95,9 +95,36 @@ test('GET /vlans returns the provisioned subnet per synced firewall', async () =
   assert.equal(byTag[1128].subnet.network, '10.11.28.0/24');
 });
 
-test('GET /vlans/subnet/:tag previews the firewall scheme with an optional firewallId', async () => {
+async function firewallWithSteps(name: string, steps: unknown[], settings: unknown = {}) {
+  const [fw] = await testDb.db.insert(firewalls)
+    .values({ name, host: `${name}.example`, api_key: 'k', vdom: 'lab', verify_tls: false })
+    .returning({ id: firewalls.id });
+  const [wf] = await testDb.db.insert(workflows).values({ firewall_id: fw.id, trigger: 'vlan_provision', name: 'p', settings }).returning({ id: workflows.id });
+  if (steps.length) {
+    await testDb.db.insert(workflowSteps).values(steps.map((params, position) => ({
+      workflow_id: wf.id, position, step_key: `iface${position}`, action: 'create_vlan_interface', params,
+    })) as any);
+  }
+  return fw.id;
+}
+
+const ifaceStep = (vlanId: string, ip: string) => ({ name: `vlan${vlanId}`, vlanId, parentInterface: 'fortilink', ip, netmask: '255.255.255.0' });
+
+test('GET /vlans/subnet/:tag previews what a sync to the firewall would record', async () => {
   assert.equal((await request(app).get('/vlans/subnet/1126')).body.network, '10.11.26.0/24');
-  assert.equal((await request(app).get(`/vlans/subnet/1126?firewallId=${firewallId}`)).body.network, '192.11.26.0/24');
+  // Default-style step follows the firstOctet setting.
+  const scheme = await firewallWithSteps('fw-preview-scheme', [ifaceStep('{{tag}}', '{{subnet.ip}}')], { subnet: { firstOctet: 192 } });
+  const schemed = (await request(app).get(`/vlans/subnet/1126?firewallId=${scheme}`)).body;
+  assert.equal(schemed.network, '192.11.26.0/24');
+  assert.equal(schemed.recorded, true);
+  // A customised step wins over the setting, exactly as the sync records it.
+  const custom = await firewallWithSteps('fw-preview-custom', [ifaceStep('3999', '172.20.30.1'), ifaceStep('{{tag}}', '192.168.50.1')], { subnet: { firstOctet: 172 } });
+  assert.equal((await request(app).get(`/vlans/subnet/1126?firewallId=${custom}`)).body.network, '192.168.50.0/24');
+  // No interface step for the tag: nothing would be recorded, so the legacy default applies.
+  const none = (await request(app).get(`/vlans/subnet/1126?firewallId=${firewallId}`)).body;
+  assert.equal(none.network, '10.11.26.0/24');
+  assert.equal(none.recorded, false);
+  assert.equal((await request(app).get('/vlans/subnet/1126?firewallId=999999')).status, 404);
 });
 
 test('syncedSubnet rebuilds the full recorded /24, not one derived from the current tag', async () => {
@@ -160,22 +187,14 @@ test('VLAN sync records the subnet from the interface step output, not the setti
 });
 
 async function syncWithSteps(t: any, name: string, tag: number, steps: unknown[], existingInterface: unknown = null) {
-  const [fw] = await testDb.db.insert(firewalls)
-    .values({ name, host: `${name}.example`, api_key: 'k', vdom: 'lab', verify_tls: false })
-    .returning({ id: firewalls.id });
-  const [wf] = await testDb.db.insert(workflows).values({ firewall_id: fw.id, trigger: 'vlan_provision', name: 'p' }).returning({ id: workflows.id });
-  await testDb.db.insert(workflowSteps).values(steps.map((params, position) => ({
-    workflow_id: wf.id, position, step_key: `iface${position}`, action: 'create_vlan_interface', params,
-  })) as any);
+  const fwId = await firewallWithSteps(name, steps);
   t.mock.method(FortiGateAPI.prototype, 'getInterface', async () => existingInterface);
   t.mock.method(FortiGateAPI.prototype, 'request', async () => ({}));
   const [vlan] = await testDb.db.insert(vlans).values({ name, tag, mode: 'managed' }).returning({ id: vlans.id });
-  const res = await request(app).post(`/vlans/${vlan.id}/sync`).send({ firewallId: fw.id });
+  const res = await request(app).post(`/vlans/${vlan.id}/sync`).send({ firewallId: fwId });
   const [sync] = await testDb.db.select().from(firewallVlanSync).where(eq(firewallVlanSync.vlan_id, vlan.id));
   return { res, sync };
 }
-
-const ifaceStep = (vlanId: string, ip: string) => ({ name: `vlan${vlanId}`, vlanId, parentInterface: 'fortilink', ip, netmask: '255.255.255.0' });
 
 test('VLAN sync records the subnet of the subject VLAN interface, not an auxiliary one', async (t) => {
   // An auxiliary interface step runs first; only the step for this VLAN's tag counts.
@@ -184,15 +203,32 @@ test('VLAN sync records the subnet of the subject VLAN interface, not an auxilia
   assert.equal(sync.subnet_cidr, '10.13.3.0/24');
 });
 
-test('VLAN sync records the subnet of an existing interface the step skipped', async (t) => {
-  const { res, sync } = await syncWithSteps(t, 'fw-existing', 1304, [ifaceStep('{{tag}}', '10.13.4.1')], { name: 'vlan1304', ip: '172.13.4.1 255.255.255.0' });
-  assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
-  assert.equal(sync.subnet_cidr, '172.13.4.0/24');
+const existingIface = (tag: number, overrides = {}) => ({
+  name: `vlan${tag}`, vlanid: tag, interface: 'fortilink', vdom: 'lab', ip: `10.13.${tag - 1300}.1 255.255.255.0`, ...overrides,
 });
 
-test('VLAN sync records NULL with a warning when the existing interface address is unreadable', async (t) => {
-  const { res, sync } = await syncWithSteps(t, 'fw-unreadable', 1305, [ifaceStep('{{tag}}', '10.13.5.1')], { name: 'vlan1305' });
+test('VLAN sync adopts an existing interface only when it is this VLAN as configured', async (t) => {
+  const { res, sync } = await syncWithSteps(t, 'fw-existing', 1304, [ifaceStep('{{tag}}', '10.13.4.1')], existingIface(1304, { ip: '10.13.4.254 255.255.255.0' }));
   assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
-  assert.equal(sync.subnet_cidr, null);
-  assert.match(res.body[0].warning, /Could not determine the subnet/);
+  assert.equal(sync.subnet_cidr, '10.13.4.0/24');
+});
+
+// Security: a colliding interface name must not let a sync record an unrelated network.
+const clashes = [
+  ['another VLAN ID', { vlanid: 42 }, /VLAN ID 42/],
+  ['another parent interface', { interface: 'port9' }, /parent interface port9/],
+  ['another VDOM', { vdom: 'root' }, /VDOM root/],
+  ['an unrelated network', { ip: '192.168.1.1 255.255.255.0' }, /address 192\.168\.1\.1/],
+  ['another netmask', { ip: '10.13.5.1 255.255.0.0' }, /address/],
+  ['no address', { ip: undefined }, /address none/],
+] as const;
+clashes.forEach(([label, overrides, reason], i) => {
+  const tag = 1310 + i;
+  test(`VLAN sync refuses an existing interface with ${label}`, async (t) => {
+    const { res, sync } = await syncWithSteps(t, `fw-clash-${label.replaceAll(' ', '-')}`, tag, [ifaceStep('{{tag}}', `10.13.${tag - 1300}.1`)], existingIface(tag, overrides));
+    assert.equal(res.body[0]?.status, 'error', JSON.stringify(res.body));
+    assert.match(res.body[0].error, reason);
+    assert.match(res.body[0].error, /admin must remove or reconfigure/);
+    assert.equal(sync, undefined);
+  });
 });

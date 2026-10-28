@@ -46,9 +46,9 @@ import {
 } from '../utils/leases.ts';
 import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
-import { getWorkflowBundle, getWorkflowRow, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
-import { runBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
-import { deriveSubnet, syncedSubnet } from '../workflows/subnet.ts';
+import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
+import { runBundle, previewBundle, buildFirewallContext, teardownArtifacts } from '../workflows/runner.ts';
+import { deriveSubnet, interfaceCidr, syncedSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, isValidUpstreamHost, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
@@ -1550,10 +1550,31 @@ function isValidCidr(cidr = '') {
   return inRange(Number(prefix), 32);
 }
 
-// The subnet a managed VLAN gets on a firewall comes from that firewall's
-// vlan_provision workflow settings (subnet.firstOctet); missing row → default.
-async function firewallSubnetSettings(firewallId) {
-  return workflowSettings(await getWorkflowRow(firewallId, 'vlan_provision'));
+// Template context for a firewall's vlan_provision workflow (real sync and preview).
+function vlanProvisionContext(vlan, fw, subnet, { allowInternet = true, enableDhcp = true } = {}) {
+  return {
+    tag: vlan.tag,
+    name: vlan.name,
+    subnet,
+    allowInternet: allowInternet !== false,
+    enableDhcp: enableDhcp !== false,
+    trunkConfigured: !!(fw.trunk_switch_serial && fw.trunk_switch_port),
+    firewall: buildFirewallContext(fw),
+  };
+}
+
+// What a sync of `tag` to `fw` would record: the /24 that its vlan_provision
+// workflow renders for this VLAN's own interface step (a customised step may
+// differ from subnet.firstOctet). No such step → nothing recorded → default.
+async function previewSyncSubnet(fw, tag) {
+  const bundle = await getWorkflowBundle(fw.id, 'vlan_provision');
+  const subnet = bundle && deriveSubnet(tag, workflowSettings(bundle.workflow));
+  if (!subnet) return null;
+  const preview = previewBundle({ bundle, context: vlanProvisionContext({ tag, name: '' }, fw, subnet), client: { vdom: fw.vdom || 'root' } });
+  // Same pick as the sync: the first executed interface step for this tag.
+  const iface = preview.find((i) => i.action === 'create_vlan_interface' && !i.skipped && !i.error && Number(i.params?.vlanId) === Number(tag));
+  const cidr = interfaceCidr(iface?.params, tag);
+  return { ...syncedSubnet(tag, cidr), recorded: !!cidr };
 }
 
 // syncedCidr: the network a firewall sync recorded (firewall_vlan_sync.subnet_cidr).
@@ -2477,15 +2498,7 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const settings = workflowSettings(bundle.workflow);
         const subnet = deriveSubnet(vlan.tag, settings);
         if (!subnet) throw new Error(`Cannot derive subnet from VLAN tag ${vlan.tag}`);
-        const context = {
-          tag: vlan.tag,
-          name: vlan.name,
-          subnet,
-          allowInternet: allowInternet !== false,
-          enableDhcp: enableDhcp !== false,
-          trunkConfigured: !!(fw.trunk_switch_serial && fw.trunk_switch_port),
-          firewall: buildFirewallContext(fw),
-        };
+        const context = vlanProvisionContext(vlan, fw, subnet, { allowInternet, enableDhcp });
         const { runId, outputs, artifacts } = await runBundle({
           bundle, context, client, firewall: fw,
           subjectType: 'vlan', subjectId: vlan.id, subjectLabel: `VLAN ${vlan.tag} (${vlan.name})`,
@@ -2503,9 +2516,7 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         // whose vlanId is this tag), as configured or as found when the step
         // skipped an existing interface. Anything else → NULL = legacy default.
         const ifaceOut = outVals.find((o) => o?.interfaceName && Number(o.vlanId) === Number(vlan.tag));
-        const ifaceNet = ifaceOut?.netmask === '255.255.255.0'
-          && /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(ifaceOut.ip);
-        const provisionedCidr = ifaceNet ? `${ifaceNet[1]}.0/24` : null;
+        const provisionedCidr = interfaceCidr(ifaceOut, vlan.tag);
         // Report what was recorded; with no record readers use the legacy default, so show that, labelled.
         const recordedSubnet = syncedSubnet(vlan.tag, provisionedCidr);
         const result = {
@@ -3673,11 +3684,21 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
 
 // Helper: compute subnet for a VLAN tag (optionally on a given firewall's scheme)
 router.get('/vlans/subnet/:tag', pVlans, async (req, res) => {
+  const tag = parseInt(req.params.tag);
+  if (!deriveSubnet(tag, {})) return res.status(400).json({ error: 'Invalid tag for auto IP scheme' });
+  if (req.query.firewallId === undefined) return res.json(deriveSubnet(tag, {}));
+  // With ?firewallId=: what a sync to that firewall would provision and record.
   const firewallId = Number(req.query.firewallId);
-  const subnetSettings = Number.isInteger(firewallId) && firewallId > 0 ? await firewallSubnetSettings(firewallId) : {};
-  const subnet = deriveSubnet(parseInt(req.params.tag), subnetSettings);
-  if (!subnet) return res.status(400).json({ error: 'Invalid tag for auto IP scheme' });
-  res.json(subnet);
+  if (!Number.isInteger(firewallId) || firewallId <= 0) return res.status(400).json({ error: 'Invalid firewallId' });
+  const [fw] = await db.select().from(firewalls).where(eq(firewalls.id, firewallId)).limit(1);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const subnet = await previewSyncSubnet(fw, tag);
+    if (!subnet) return res.status(400).json({ error: 'Invalid tag for this firewall\'s IP scheme' });
+    res.json(subnet);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
 });
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────

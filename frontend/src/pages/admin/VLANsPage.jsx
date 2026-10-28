@@ -20,6 +20,42 @@ function buildManagedSubnet(tag) {
   };
 }
 
+// What a sync of `tag` would provision on each target firewall: the backend
+// renders that firewall's vlan_provision interface step. null while loading.
+function useSubnetPreviews(tag, targets, enabled) {
+  const [previews, setPreviews] = useState(null);
+  const targetKey = targets.map(fw => `${fw.id}:${fw.name}`).join(',');
+  useEffect(() => {
+    setPreviews(null);
+    if (!enabled || !Number.isInteger(tag) || targets.length === 0) return undefined;
+    let cancelled = false;
+    // A failed lookup stays visible as unavailable; never fall back to the default silently.
+    Promise.all(targets.map(fw => api.get(`/admin/vlans/subnet/${tag}`, { params: { firewallId: fw.id } })
+      .then(r => ({ id: fw.id, name: fw.name, network: r.data.network, gateway: r.data.gateway, recorded: r.data.recorded }))
+      .catch(() => ({ id: fw.id, name: fw.name, network: null }))))
+      .then(list => { if (!cancelled) setPreviews(list); });
+    return () => { cancelled = true; };
+    // targets is re-derived every render; targetKey tracks its content.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tag, targetKey, enabled]);
+  return previews;
+}
+
+function SubnetPreviewList({ previews }) {
+  if (!previews) return <p className="text-gray-500">Loading subnet preview…</p>;
+  return previews.map(f => (
+    f.network ? (
+      <p key={f.id} className="text-blue-400">
+        {f.name}: <span className="font-mono">{f.network}</span>
+        <span className="text-gray-500"> · gateway <span className="font-mono text-gray-400">{f.gateway}</span></span>
+        {f.recorded === false && <span className="text-amber-400"> · no interface step for this tag, default not recorded</span>}
+      </p>
+    ) : (
+      <p key={f.id} className="text-amber-400">{f.name}: subnet preview unavailable</p>
+    )
+  ));
+}
+
 function findNextAvailableVlanTag(vlans, firewalls) {
   const usedTags = new Set(vlans.map(vlan => parseInt(vlan.tag, 10)).filter(Number.isInteger));
   const ranges = firewalls.length > 0
@@ -278,21 +314,9 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
   // target would provision; on edit, show what each sync recorded (edits never reprovision).
   const recordedSubnets = (vlan?.firewallSync || [])
     .map(s => ({ id: s.firewallId, name: s.firewallName, network: s.subnet }));
-  const [fwSubnets, setFwSubnets] = useState([]);
   const previewTag = parseInt(form.tag, 10);
   const previewTargets = vlan ? [] : firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
-  useEffect(() => {
-    const targets = vlan ? [] : firewalls.filter(fw => previewTag >= fw.vlan_range_start && previewTag <= fw.vlan_range_end);
-    setFwSubnets([]);
-    if (isTaggedOnly || !subnet || targets.length === 0) return undefined;
-    let cancelled = false;
-    // A failed lookup stays visible as unavailable; never fall back to the default silently.
-    Promise.all(targets.map(fw => api.get(`/admin/vlans/subnet/${previewTag}`, { params: { firewallId: fw.id } })
-      .then(r => ({ id: fw.id, name: fw.name, network: r.data.network, gateway: r.data.gateway }))
-      .catch(() => ({ id: fw.id, name: fw.name, network: null }))))
-      .then(list => { if (!cancelled) setFwSubnets(list); });
-    return () => { cancelled = true; };
-  }, [previewTag, isTaggedOnly, subnet, firewalls, vlan]);
+  const fwSubnets = useSubnetPreviews(previewTag, previewTargets, !isTaggedOnly && !!subnet);
 
   useEffect(() => {
     if (isTaggedOnly) {
@@ -421,18 +445,9 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
             <div className="mt-2 bg-blue-900/20 border border-blue-800/30 rounded-lg px-3 py-2 text-xs space-y-0.5">
               {recordedSubnets.length > 0 ? recordedSubnets.map(f => (
                 <p key={f.id} className="text-blue-400">{f.name}: <span className="font-mono">{f.network}</span></p>
-              )) : previewTargets.length > 0 && fwSubnets.length === 0 ? (
-                <p className="text-gray-500">Loading subnet preview…</p>
-              ) : fwSubnets.length > 0 ? fwSubnets.map(f => (
-                f.network ? (
-                  <p key={f.id} className="text-blue-400">
-                    {f.name}: <span className="font-mono">{f.network}</span>
-                    <span className="text-gray-500"> · gateway <span className="font-mono text-gray-400">{f.gateway}</span></span>
-                  </p>
-                ) : (
-                  <p key={f.id} className="text-amber-400">{f.name}: subnet preview unavailable</p>
-                )
-              )) : (
+              )) : previewTargets.length > 0 ? (
+                <SubnetPreviewList previews={fwSubnets} />
+              ) : (
                 <>
                   <p className="text-blue-400">Auto subnet: <span className="font-mono">{subnet.network}</span></p>
                   <p className="text-gray-500">Gateway: <span className="font-mono text-gray-400">{subnet.gateway}</span></p>
@@ -537,6 +552,8 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
   const unsyncedFws = firewalls.filter(fw => !syncs.find(s => s.firewallId === fw.id));
   const inRangeFws = unsyncedFws.filter(fw => vlan.tag >= (fw.vlan_range_start || 1001) && vlan.tag <= (fw.vlan_range_end || 1999));
   const outOfRangeFws = unsyncedFws.filter(fw => vlan.tag < (fw.vlan_range_start || 1001) || vlan.tag > (fw.vlan_range_end || 1999));
+  // Each target may use its own scheme: show what it would provision before pushing.
+  const targetSubnets = useSubnetPreviews(vlan.tag, inRangeFws, true);
 
   const pushToAll = async () => {
     setSyncing(true); setError(''); setResults(null);
@@ -566,12 +583,6 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
   return (
     <Modal title={`Firewall Sync — VLAN ${vlan.tag} (${vlan.name})`} onClose={onClose} size="md">
       <div className="p-5 space-y-4">
-        {vlan.subnet && (
-          <div className="bg-gray-800/50 rounded-lg px-3 py-2 text-xs text-gray-400">
-            Subnet: <span className="font-mono text-white">{vlan.subnet.network}</span> | Gateway: <span className="font-mono text-white">{vlan.subnet.gateway}</span>
-          </div>
-        )}
-
         {/* Current syncs */}
         {syncs.length > 0 && (
           <div>
@@ -611,6 +622,9 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
             <p className="text-sm text-orange-300">
               Push to: {inRangeFws.map(f => f.name).join(', ')}
             </p>
+            <div className="text-xs space-y-0.5">
+              <SubnetPreviewList previews={targetSubnets} />
+            </div>
             <div className="space-y-2">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={allowInternet} onChange={e => setAllowInternet(e.target.checked)} className="accent-blue-500" />
