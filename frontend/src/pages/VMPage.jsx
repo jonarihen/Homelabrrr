@@ -215,17 +215,33 @@ export default function VMPage() {
 
   useEffect(() => { loadCloudInit(); }, [loadCloudInit]);
 
-  // Top-ranked address from every source the backend knows (cloud-init, DHCP,
-  // guest agent). Re-asked on power changes: the agent only answers once booted.
   const vmStatus = vm?.status;
   useEffect(() => {
+    setDetectedIp('');
     if (!vmStatus) return undefined;
     let cancelled = false;
-    setDetectedIp(''); // never show the previous VM's address while this one loads or fails
-    api.get(`/vms/${node}/${vmid}/detected-ips`)
-      .then(r => { if (!cancelled) setDetectedIp(r.data?.candidates?.[0]?.ip || ''); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    let retryTimer;
+    let attempts = 0;
+    const controller = new AbortController();
+    const discover = async () => {
+      attempts += 1;
+      let ip = '';
+      try {
+        const r = await api.get(`/vms/${node}/${vmid}/detected-ips`, { signal: controller.signal });
+        ip = r.data?.candidates?.[0]?.ip || '';
+      } catch {}
+      if (cancelled) return;
+      setDetectedIp(ip);
+      if (!ip && vmStatus === 'running' && attempts < 20) {
+        retryTimer = setTimeout(discover, 15000);
+      }
+    };
+    discover();
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearTimeout(retryTimer);
+    };
   }, [node, vmid, vmStatus]);
 
   const copyIp = async () => {
