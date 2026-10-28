@@ -17,19 +17,22 @@ const SERVICES = [
 
 const SERVICE_LABELS = Object.fromEntries(SERVICES.map(service => [service.name, service.label]));
 
+// AARIS tokens only (aaris.css): services are grouped by role, the mono
+// labels carry the exact service. Hex, not var(), because callers append alpha.
 const SERVICE_COLORS = {
-  ALL: '#22c55e',
-  HTTP: '#3b82f6',
-  HTTPS: '#8b5cf6',
-  SSH: '#f59e0b',
-  RDP: '#ec4899',
-  DNS: '#06b6d4',
-  PING: '#84cc16',
-  ALL_TCP: '#6366f1',
-  ALL_UDP: '#f97316',
+  ALL: '#3fd97f',     // --ok
+  HTTP: '#ff5a1f',    // --accent
+  HTTPS: '#ff5a1f',
+  SSH: '#ffb224',     // --warning
+  RDP: '#ffb224',
+  DNS: '#e9ecef',     // --ink
+  PING: '#e9ecef',
+  ALL_TCP: '#8b939e', // --muted
+  ALL_UDP: '#8b939e',
 };
+const FALLBACK_COLOR = '#8b939e';
 
-const DENY_COLOR = '#ef4444';
+const DENY_COLOR = '#e5484d'; // --danger
 const NODE_CARD_SIZE = 160;
 const NODE_SAFETY_PADDING = 26;
 const MIN_NODE_SPACING = 172;
@@ -52,11 +55,11 @@ function servicePalette(services = [], action = 'accept') {
     ? [...unique.filter(s => s !== 'ALL'), ...(unique.includes('ALL') ? ['ALL'] : [])]
     : unique;
 
-  return ordered.slice(0, 4).map(s => SERVICE_COLORS[s] || '#94a3b8');
+  return ordered.slice(0, 4).map(s => SERVICE_COLORS[s] || FALLBACK_COLOR);
 }
 
 function badgeStyle(service, action = 'accept') {
-  const color = action !== 'accept' ? DENY_COLOR : (SERVICE_COLORS[service] || '#94a3b8');
+  const color = action !== 'accept' ? DENY_COLOR : (SERVICE_COLORS[service] || FALLBACK_COLOR);
   return {
     color,
     backgroundColor: `${color}1a`,
@@ -1783,7 +1786,7 @@ export default function PoliciesPage() {
                         onClick={() => toggleService(service.name)}
                         className="rounded-full border px-3 py-1.5 text-xs font-medium uppercase tracking-[0.14em] transition-all"
                         style={active
-                          ? { color: '#fff', backgroundColor: color, borderColor: color, boxShadow: `0 0 0 1px ${color}55` }
+                          ? { color: '#0e1014', backgroundColor: color, borderColor: color, boxShadow: `0 0 0 1px ${color}55` }
                           : { color: '#94a3b8', backgroundColor: '#1f2937', borderColor: '#334155' }}
                       >
                         {service.label}

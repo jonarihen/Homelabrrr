@@ -152,6 +152,9 @@ export default function VMPage() {
   const [deleteModal, setDeleteModal] = useState(false);
   const [credModal, setCredModal] = useState(false);
   const [cloudInit, setCloudInit] = useState({ canReset: false, ciuser: '' });
+  const [detectedIp, setDetectedIp] = useState('');
+  const [ipCopied, setIpCopied] = useState(false);
+  const stickyRef = useRef(null);
   const { user } = useAuth();
 
   useDocumentTitle(vm ? (vm.name || `VM ${vm.vmid}`) : 'VM Details');
@@ -212,6 +215,26 @@ export default function VMPage() {
 
   useEffect(() => { loadCloudInit(); }, [loadCloudInit]);
 
+  // Top-ranked address from every source the backend knows (cloud-init, DHCP,
+  // guest agent). Re-asked on power changes: the agent only answers once booted.
+  const vmStatus = vm?.status;
+  useEffect(() => {
+    if (!vmStatus) return undefined;
+    let cancelled = false;
+    api.get(`/vms/${node}/${vmid}/detected-ips`)
+      .then(r => { if (!cancelled) setDetectedIp(r.data?.candidates?.[0]?.ip || ''); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [node, vmid, vmStatus]);
+
+  const copyIp = async () => {
+    try {
+      await navigator.clipboard.writeText(detectedIp);
+      setIpCopied(true);
+      setTimeout(() => setIpCopied(false), 1500);
+    } catch { /* clipboard blocked (insecure context) — the IP is still selectable */ }
+  };
+
   useEffect(() => {
     let cancelled = false;
     setRrdLoading(true);
@@ -243,6 +266,27 @@ export default function VMPage() {
   };
 
   const isRunning = vm?.status === 'running';
+
+  // Anchor nav for the long single-scroll page; every panel stays mounted.
+  const sections = [
+    { id: 'vm-overview', label: 'Overview' },
+    isRunning && { id: 'vm-performance', label: 'Performance' },
+    { id: 'vm-snapshots', label: 'Snapshots' },
+    { id: 'vm-backups', label: 'Backups' },
+    { id: 'vm-ip', label: 'IP' },
+    { id: 'vm-ssh', label: 'SSH' },
+  ].filter(Boolean);
+
+  const jumpTo = (e, id) => {
+    e.preventDefault();
+    const el = document.getElementById(id);
+    if (!el) return;
+    // Land below the sticky header, whose height varies as the action bar wraps.
+    el.style.scrollMarginTop = `${(stickyRef.current?.offsetHeight || 0) + 16}px`;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    el.focus({ preventScroll: true });
+  };
   const cpuData = rrd?.map(d => d.cpu != null ? d.cpu * 100 : null) || [];
   const memData = rrd?.map(d => d.mem != null && d.maxmem ? (d.mem / d.maxmem) * 100 : null) || [];
   const netInData = rrd?.map(d => d.netin ?? null) || [];
@@ -286,7 +330,8 @@ export default function VMPage() {
     <Layout>
       <div className="p-6 lg:p-8 max-w-6xl mx-auto space-y-6">
 
-        {/* ── Header ── */}
+        {/* ── Sticky header: identity, status, actions, section nav ── */}
+        <div ref={stickyRef} className="sticky top-0 z-20 -mx-6 lg:-mx-8 px-6 lg:px-8 py-3 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <button onClick={() => navigate('/dashboard')} className="text-gray-500 hover:text-white transition-colors p-2 rounded-xl hover:bg-gray-800">
@@ -298,6 +343,20 @@ export default function VMPage() {
                 VMID {vm.vmid} / {displayNode(vm.node)}
                 {vm.hostName && <span className="text-gray-600"> · host </span>}
                 {vm.hostName && <span className="text-blue-400/80">{vm.hostName}</span>}
+                {detectedIp && (
+                  <>
+                    <span className="text-gray-600"> · ip </span>
+                    <span className="text-gray-300 normal-case select-all">{detectedIp}</span>
+                    <button
+                      type="button"
+                      onClick={copyIp}
+                      aria-label={`Copy IP address ${detectedIp}`}
+                      className="ml-1.5 align-middle text-gray-500 hover:text-orange-400 transition-colors"
+                    >
+                      {ipCopied ? 'copied' : 'copy'}
+                    </button>
+                  </>
+                )}
               </p>
               {vm.lease && <LeaseBadge lease={vm.lease} className="mt-2" />}
             </div>
@@ -414,8 +473,22 @@ export default function VMPage() {
           {actionError && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5 mt-3">{actionError}</p>}
         </div>
 
+        <nav aria-label="VM sections" className="flex flex-wrap gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em]">
+          {sections.map(s => (
+            <a
+              key={s.id}
+              href={`#${s.id}`}
+              onClick={e => jumpTo(e, s.id)}
+              className="px-2.5 py-1 border border-gray-800 text-gray-400 hover:text-orange-400 hover:border-orange-600 transition-colors"
+            >
+              {s.label}
+            </a>
+          ))}
+        </nav>
+        </div>
+
         {/* ── Stats Grid ── */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div id="vm-overview" tabIndex={-1} className="grid grid-cols-2 sm:grid-cols-4 gap-4 focus:outline-none">
           <StatCard
             label="vCPUs" value={vm.maxcpu || vm.cpus || '—'}
             icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25z" /></svg>}
@@ -499,7 +572,7 @@ export default function VMPage() {
 
         {/* ── Performance Charts ── */}
         {isRunning && (
-          <div className="space-y-4">
+          <div id="vm-performance" tabIndex={-1} className="space-y-4 focus:outline-none">
             <div className="flex items-center justify-between">
               <h2 className="aaris-display text-sm text-gray-100">Performance</h2>
               <div className="flex gap-1 bg-gray-800/50 rounded-lg p-0.5">
@@ -541,21 +614,27 @@ export default function VMPage() {
         )}
 
         {/* ── Snapshots ── */}
-        <SnapshotsSection node={node} vmid={vmid} />
+        <div id="vm-snapshots" tabIndex={-1} className="focus:outline-none">
+          <SnapshotsSection node={node} vmid={vmid} />
+        </div>
 
         {/* ── Backups ── */}
-        <BackupsSection node={node} vmid={vmid} />
+        <div id="vm-backups" tabIndex={-1} className="focus:outline-none">
+          <BackupsSection node={node} vmid={vmid} />
+        </div>
 
         {/* ── IP Management ── */}
-        <VMIPManagementPanel
-          node={node}
-          vmid={vmid}
-          currentSshHost={sshCfg.host}
-          onSshHostUpdate={(host) => setSshCfg((current) => ({ ...current, host }))}
-        />
+        <div id="vm-ip" tabIndex={-1} className="focus:outline-none">
+          <VMIPManagementPanel
+            node={node}
+            vmid={vmid}
+            currentSshHost={sshCfg.host}
+            onSshHostUpdate={(host) => setSshCfg((current) => ({ ...current, host }))}
+          />
+        </div>
 
         {/* ── SSH Config ── */}
-        <div className="space-y-3">
+        <div id="vm-ssh" tabIndex={-1} className="space-y-3 focus:outline-none">
           <h2 className="aaris-display text-sm text-gray-100">SSH Configuration</h2>
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

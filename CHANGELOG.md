@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-28 — VM page sticky header, section nav and IP
+
+- The **VM page** header (name, status, power and connect actions) now stays pinned while you scroll, with a section nav (Overview, Performance, Snapshots, Backups, IP, SSH) that jumps straight to each panel.
+- The VM's IP address is shown next to the VMID, taken from cloud-init, DHCP or the guest agent, with a **copy** button.
+- The app is now called **Homelabrrr** everywhere in the UI (browser tab, sidebar, sign-in screen).
+- Firewall policy service colours use the design-language accent and status colours instead of a rainbow palette.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
