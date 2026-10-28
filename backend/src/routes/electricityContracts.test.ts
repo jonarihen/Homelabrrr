@@ -168,3 +168,28 @@ test('bills support partial payment, void and revision without double counting',
   assert.deepEqual(preview.actualBills.map((row) => [row.kind, row.amountOre, row.status]).sort(), [['advance', 40_000, 'due'], ['settlement', 45_000, 'paid']]);
   assert(preview.actualBills.every((row) => row.estimatedLabShareOre === null), 'no lab share without comparable household coverage');
 });
+
+test('fixed plus tariffs contracts require a fixed rate, VAT and valid components; margin is optional', async () => {
+  const body = { label: 'Fixed plus', kind: 'fixed_plus_tariffs', area: 'DK1', validFrom: '2031-01-01T00:00:00Z', fixedDkkPerKwh: '1.000000',
+    vatRate: '0.250000', requiredComponents: ['network', 'system', 'tax'], provenance: 'fixture agreement' };
+  const post = (overrides: object) => admin(request(app).post(`${base}/contracts`)).send({ ...body, ...overrides });
+  assert.equal((await post({ fixedDkkPerKwh: undefined })).body.error, 'INVALID_RATE');
+  assert.equal((await post({ vatRate: undefined })).body.error, 'INVALID_RATE');
+  assert.equal((await post({ vatRate: '1.500000' })).body.error, 'INVALID_VAT');
+  assert.equal((await post({ requiredComponents: undefined })).body.error, 'INVALID_COMPONENTS');
+  assert.equal((await post({ requiredComponents: ['network', 'network'] })).body.error, 'INVALID_COMPONENTS');
+  assert.equal((await post({ requiredComponents: ['spot'] })).body.error, 'INVALID_COMPONENTS');
+  // A malformed rate is a 400 validation error, not a 500.
+  const malformed = await post({ spotMarginDkkPerKwh: 'abc' });
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.body.error, 'INVALID_RATE');
+  const created = await post({ spotMarginDkkPerKwh: '' });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.kind, 'fixed_plus_tariffs');
+  assert.equal(created.body.fixed_dkk_per_kwh, '1.000000');
+  assert.equal(created.body.spot_margin_dkk_per_kwh, null);
+  assert.equal(created.body.vat_rate, '0.250000');
+  assert.deepEqual(created.body.required_components, ['network', 'system', 'tax']);
+  const withMargin = await post({ spotMarginDkkPerKwh: '0.050000' });
+  assert.equal(withMargin.body.spot_margin_dkk_per_kwh, '0.050000');
+});
