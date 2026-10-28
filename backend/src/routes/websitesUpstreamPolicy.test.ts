@@ -435,3 +435,234 @@ test('a site is not revoked when its owner\'s IP cannot be verified because Prox
   const retry = await request(app).post(`/sites/${row.id}/retry`);
   assert.equal(retry.status, 503, 'a retry is refused for now, not as a revocation');
 });
+
+test('API-mode reconciliation does not re-push a route whose upstream ownership cannot be verified', async () => {
+  await testDb.db.delete(pveHosts);
+  const { createCaddyClient } = await import('../utils/caddy.ts');
+  const [user] = await testDb.db.insert(users).values({ username: 'recon-owner', password: 'unused' }).returning({ id: users.id });
+  // Two hosts, both unreachable: which host the bare `pve` assignment lives on
+  // is unknowable, so ownership is unknown rather than denied.
+  const [hostA] = await testDb.db.insert(pveHosts).values({ name: 'recon-a', host: '127.0.0.1', port: 1, token_id: 't', token_secret: 'x' }).returning({ id: pveHosts.id });
+  await testDb.db.insert(pveHosts).values({ name: 'recon-b', host: '127.0.0.1', port: 1, token_id: 't', token_secret: 'x' });
+  await testDb.db.insert(vmAssignments).values({ user_id: user.id, node: 'pve', vmid: 404 });
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-recon', host: 'fw.test', api_key: 'x' }).returning({ id: firewalls.id });
+  const [pool] = await testDb.db.insert(publicIpPools).values({ firewall_id: fw.id, name: 'pool-recon', external_interface: 'wan1' }).returning({ id: publicIpPools.id });
+  const [ip] = await testDb.db.insert(publicIps).values({ pool_id: pool.id, firewall_id: fw.id, address: '203.0.113.44' }).returning({ id: publicIps.id });
+  await testDb.db.insert(publicIpAssignments).values({
+    public_ip_id: ip.id, firewall_id: fw.id, user_id: user.id, proxmox_host_id: hostA.id, node: 'pve', vmid: 404, private_ip: '172.16.44.4',
+  });
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'recon-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'recon.example.test', upstream_host: '172.16.44.4', upstream_port: 80,
+    owner_user_id: user.id, managed: true, status: 'live',
+  });
+
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { list: caddyProto.listManagedRouteIds, upsert: caddyProto.upsertRoute, conflicts: caddyProto.findConflicts };
+  caddyProto.listManagedRouteIds = async () => [];
+  caddyProto.findConflicts = async () => [];
+  let upserts = 0;
+  caddyProto.upsertRoute = async () => { upserts += 1; return { wildcard: '' }; };
+  try {
+    const memo = new Map();
+    assert.deepEqual(await websites.findDisallowedSites(apiServer.id, memo), [], 'the sweep defers an unverifiable site');
+    const { repaired, conflicted } = await websites.reconcileManagedRoutes(apiServer, memo);
+    assert.equal(upserts, 0, 'reconciliation must not republish an unverified upstream');
+    assert.deepEqual(repaired, []);
+    assert.deepEqual(conflicted, []);
+  } finally {
+    Object.assign(caddyProto, { listManagedRouteIds: originals.list, upsertRoute: originals.upsert, findConflicts: originals.conflicts });
+  }
+});
+
+test('API-mode reconciliation does not re-push a route whose ownership was definitely revoked by the scan', async () => {
+  await testDb.db.delete(pveHosts);
+  const { createCaddyClient } = await import('../utils/caddy.ts');
+  const [user] = await testDb.db.insert(users).values({ username: 'recon-denied-owner', password: 'unused' }).returning({ id: users.id });
+  // One host: the bare `pve` assignment resolves to it, and the IP row records
+  // a different host id, so the upstream is a definite "no".
+  const [host] = await testDb.db.insert(pveHosts).values({ name: 'recon-solo', host: '127.0.0.1', port: 1, token_id: 't', token_secret: 'x' }).returning({ id: pveHosts.id });
+  await testDb.db.insert(vmAssignments).values({ user_id: user.id, node: 'pve', vmid: 405 });
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-recon-denied', host: 'fw.test', api_key: 'x' }).returning({ id: firewalls.id });
+  const [pool] = await testDb.db.insert(publicIpPools).values({ firewall_id: fw.id, name: 'pool-recon-denied', external_interface: 'wan1' }).returning({ id: publicIpPools.id });
+  const [ip] = await testDb.db.insert(publicIps).values({ pool_id: pool.id, firewall_id: fw.id, address: '203.0.113.45' }).returning({ id: publicIps.id });
+  await testDb.db.insert(publicIpAssignments).values({
+    public_ip_id: ip.id, firewall_id: fw.id, user_id: user.id, proxmox_host_id: host.id + 100, node: 'pve', vmid: 405, private_ip: '172.16.45.5',
+  });
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'recon-denied-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'recon-denied.example.test', upstream_host: '172.16.45.5', upstream_port: 80,
+    owner_user_id: user.id, managed: true, status: 'live',
+  });
+
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { list: caddyProto.listManagedRouteIds, upsert: caddyProto.upsertRoute, conflicts: caddyProto.findConflicts };
+  caddyProto.listManagedRouteIds = async () => [];
+  caddyProto.findConflicts = async () => [];
+  let upserts = 0;
+  caddyProto.upsertRoute = async () => { upserts += 1; return { wildcard: '' }; };
+  try {
+    const memo = new Map();
+    const disallowed = await websites.findDisallowedSites(apiServer.id, memo);
+    assert.equal(disallowed.length, 1, 'the scan revokes the site');
+    const { repaired } = await websites.reconcileManagedRoutes(apiServer, memo);
+    assert.equal(upserts, 0, 'the revoked upstream is not restored by reconciliation');
+    assert.deepEqual(repaired, []);
+  } finally {
+    Object.assign(caddyProto, { listManagedRouteIds: originals.list, upsertRoute: originals.upsert, conflicts: originals.conflicts });
+  }
+});
+
+test('authorization scans resolve each bare node once, not once per site or IP row', async () => {
+  await testDb.db.delete(pveHosts);
+  const [user] = await testDb.db.insert(users).values({ username: 'memo-owner', password: 'unused' }).returning({ id: users.id });
+  const [host] = await testDb.db.insert(pveHosts).values({ name: 'memo-host', host: '127.0.0.1', port: 1, token_id: 't', token_secret: 'x' }).returning({ id: pveHosts.id });
+  await testDb.db.insert(vmAssignments).values({ user_id: user.id, node: 'pve', vmid: 505 });
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-memo', host: 'fw.test', api_key: 'x' }).returning({ id: firewalls.id });
+  const [pool] = await testDb.db.insert(publicIpPools).values({ firewall_id: fw.id, name: 'pool-memo', external_interface: 'wan1' }).returning({ id: publicIpPools.id });
+  const ipRow = async (address: string, privateIp: string) => {
+    const [ip] = await testDb.db.insert(publicIps).values({ pool_id: pool.id, firewall_id: fw.id, address }).returning({ id: publicIps.id });
+    await testDb.db.insert(publicIpAssignments).values({
+      public_ip_id: ip.id, firewall_id: fw.id, user_id: user.id, proxmox_host_id: host.id + 100, node: 'pve', vmid: 505, private_ip: privateIp,
+    });
+  };
+  await ipRow('203.0.113.51', '172.16.51.1');
+  await ipRow('203.0.113.52', '172.16.51.2');
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'memo-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  await testDb.db.insert(caddySites).values([
+    { server_id: apiServer.id, domain: 'memo-a.example.test', upstream_host: '172.16.51.1', upstream_port: 80, owner_user_id: user.id, managed: true, status: 'live' },
+    { server_id: apiServer.id, domain: 'memo-b.example.test', upstream_host: '172.16.51.2', upstream_port: 80, owner_user_id: user.id, managed: true, status: 'live' },
+  ]);
+
+  const memo = new Map();
+  const disallowed = await websites.findDisallowedSites(apiServer.id, memo);
+  assert.equal(disallowed.length, 2, 'both stale-IP sites are disallowed');
+  assert.equal(memo.size, 1, 'the shared bare-node identity was resolved once for the whole scan');
+});
+
+test('a save during the certificate detach keeps the new state and is not finalized over', async () => {
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  const { createClient } = await import('../fortigate.ts');
+  const { createCaddyClient } = await import('../utils/caddy.ts');
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-claim-race', host: '127.0.0.1', api_key: encryptSecret('k') }).returning();
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'claim-race-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'claimrace.example.test', upstream_host: '192.168.9.9', upstream_port: 80,
+    owner_user_id: ownerId, managed: true, status: 'live',
+    fortigate_id: fw.id, inspection_profile: 'deep', cert_name: 'claimrace.example.test_2026-01-01',
+  }).returning();
+  await websites.markSitesUnpublished(await websites.findDisallowedSites(apiServer.id));
+
+  const fortiProto = Object.getPrototypeOf(createClient(fw));
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = { detach: fortiProto.detachInspectionServerCert, list: caddyProto.listManagedRouteIds, del: caddyProto.deleteRoute };
+  caddyProto.listManagedRouteIds = async () => [];
+  caddyProto.deleteRoute = async () => {};
+  let detachCalls = 0;
+  fortiProto.detachInspectionServerCert = async () => {
+    detachCalls += 1;
+    // The owner's save lands between the release claim and the detach, like
+    // PUT /sites/:id clearing the detail while the firewall call is in flight.
+    await testDb.db.update(caddySites).set({ upstream_host: '10.10.10.66', status: 'pushing', status_detail: '' })
+      .where(eq(caddySites.id, row.id));
+    return { removed: ['claimrace.example.test_2026-01-01'], remaining: ['other'] };
+  };
+  try {
+    await websites.finishRevocations(apiServer);
+    const [after] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.equal(after.status, 'pushing', 'the save wins; the release must not re-finalize over it');
+    assert.equal(after.status_detail, '');
+    assert.equal(detachCalls, 1, 'the detach ran against the row it claimed');
+  } finally {
+    fortiProto.detachInspectionServerCert = originals.detach;
+    caddyProto.listManagedRouteIds = originals.list;
+    caddyProto.deleteRoute = originals.del;
+  }
+});
+
+test('a save or retry is refused while the certificate detach holds the row', async () => {
+  const claimed = 'Being unpublished (releasing its certificate slot now): this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: serverId, domain: 'claimguard.example.test', upstream_host: '10.10.10.77', upstream_port: 80,
+    owner_user_id: ownerId, managed: true, status: 'error', status_detail: claimed,
+  }).returning();
+
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as express.Request & { session: unknown }).session = { userId: ownerId, username: 'site-owner', isAdmin: false };
+    next();
+  });
+  app.use('/', websites.default);
+  const save = await request(app).put(`/sites/${row.id}`).send({ upstreamHost: '10.10.10.77', upstreamPort: 80 });
+  assert.equal(save.status, 409, 'a save cannot republish while the detach holds the row');
+  const retry = await request(app).post(`/sites/${row.id}/retry`);
+  assert.equal(retry.status, 409, 'a retry cannot republish while the detach holds the row');
+  const [after] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+  assert.equal(after.status_detail, claimed);
+});
+
+test('a revocation completed during the certificate poll blocks the inspection attach', async () => {
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  const { createClient } = await import('../fortigate.ts');
+  const { createCaddyClient, managedRouteId } = await import('../utils/caddy.ts');
+  const [user] = await testDb.db.insert(users).values({ username: 'poll-owner', password: 'unused' }).returning({ id: users.id });
+  const [vlan] = await testDb.db.insert(vlans).values({ name: 'poll', tag: 1060, mode: 'managed', subnet_cidr: '' }).returning({ id: vlans.id });
+  await testDb.db.insert(userVlans).values({ user_id: user.id, vlan_id: vlan.id });
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-poll', host: '127.0.0.1', api_key: encryptSecret('k') }).returning();
+  const [apiServer] = await testDb.db.insert(caddyServers).values({ name: 'poll-edge', api_url: 'http://127.0.0.1:1' }).returning();
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: apiServer.id, domain: 'poll.example.test', upstream_host: '10.10.60.5', upstream_port: 80,
+    owner_user_id: user.id, managed: true, status: 'pushing',
+    fortigate_id: fw.id, inspection_profile: 'deep',
+  }).returning();
+
+  const fortiProto = Object.getPrototypeOf(createClient(fw));
+  const caddyProto = Object.getPrototypeOf(createCaddyClient(apiServer));
+  const originals = {
+    getLocal: fortiProto.getLocalCertificates, attach: fortiProto.setInspectionServerCert,
+    detach: fortiProto.detachInspectionServerCert,
+    list: caddyProto.listManagedRouteIds, del: caddyProto.deleteRoute,
+    upsert: caddyProto.upsertRoute, conflicts: caddyProto.findConflicts,
+  };
+  const live = new Set();
+  caddyProto.listManagedRouteIds = async () => [...live];
+  caddyProto.deleteRoute = async (id) => { live.delete(managedRouteId(id)); };
+  caddyProto.upsertRoute = async (id) => { live.add(managedRouteId(id)); return { wildcard: '' }; };
+  caddyProto.findConflicts = async () => [];
+  let attachCalls = 0;
+  fortiProto.setInspectionServerCert = async () => { attachCalls += 1; return { action: 'append', occupied: [] }; };
+  fortiProto.detachInspectionServerCert = async () => ({ removed: ['poll.example.test_2026-01-01'], remaining: [] });
+  let revoked = false;
+  fortiProto.getLocalCertificates = async () => {
+    if (!revoked) {
+      revoked = true;
+      // Access is lost and a full sweep+cleanup finalizes the revocation while
+      // the flow polls for the certificate.
+      await testDb.db.delete(userVlans).where(eq(userVlans.user_id, user.id));
+      await websites.markSitesUnpublished(await websites.findDisallowedSites(apiServer.id));
+      await websites.finishRevocations(apiServer);
+    }
+    return [{ name: 'poll.example.test_2026-01-01' }];
+  };
+  try {
+    await websites.runSiteFlow(row.id);
+    const [after] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.equal(attachCalls, 0, 'the flow must not attach a cert to a row revoked mid-poll');
+    assert.equal(after.status, 'error');
+    assert.ok(after.status_detail.startsWith('Being unpublished'), 'the revocation is re-armed after the skipped attach');
+    await websites.finishRevocations(apiServer);
+    const [done] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+    assert.ok(done.status_detail.startsWith('Unpublished'), 'the next tick finalizes the site');
+    assert.equal(live.size, 0, 'the route the stale push installed is removed');
+  } finally {
+    Object.assign(fortiProto, {
+      getLocalCertificates: originals.getLocal, setInspectionServerCert: originals.attach,
+      detachInspectionServerCert: originals.detach,
+    });
+    Object.assign(caddyProto, {
+      listManagedRouteIds: originals.list, deleteRoute: originals.del,
+      upsertRoute: originals.upsert, findConflicts: originals.conflicts,
+    });
+  }
+});

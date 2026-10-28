@@ -160,7 +160,9 @@ export function ipv4InCidr(ip, cidr) {
  * Never read user- or guest-editable data (vm_ssh_configs.host, guest-agent
  * IPs) here: that would let a user publish an arbitrary internal address.
  */
-export async function getUserAllowedUpstreams(userId) {
+export type HostResolutionMemo = Map<string, Promise<number | false | null>>;
+
+export async function getUserAllowedUpstreams(userId, hostResolutionMemo: HostResolutionMemo = new Map()) {
   const [rows, assignments] = await Promise.all([
     db.select({
       ip: publicIpAssignments.private_ip, node: publicIpAssignments.node, vmid: publicIpAssignments.vmid,
@@ -181,13 +183,14 @@ export async function getUserAllowedUpstreams(userId) {
     if (row.hostId == null) return true;
     const { hostId } = decodeNodeRef(a.node);
     if (hostId != null) return String(hostId) === String(row.hostId);
-    try {
-      const host = await hostForNode(a.node, { vmid: a.vmid, strict: true });
-      return host != null && String(host.id) === String(row.hostId);
-    } catch (err) {
-      // Only a definite lookup answer is a denial; an outage or DB error is not.
-      return err?.definite ? false : null;
+    const key = `${a.node}|${a.vmid}`;
+    if (!hostResolutionMemo.has(key)) {
+      hostResolutionMemo.set(key, hostForNode(a.node, { vmid: a.vmid, strict: true })
+        .then((host) => host?.id ?? false)
+        .catch((err) => err?.definite ? false : null));
     }
+    const resolved = await hostResolutionMemo.get(key);
+    return resolved === null ? null : resolved !== false && String(resolved) === String(row.hostId);
   };
   const vmIps = [];
   const unverifiedIps = [];
@@ -210,7 +213,7 @@ export async function getUserAllowedUpstreams(userId) {
  * assigned VMs' IPs or inside one of their VLAN subnets. `unknown: true` on a
  * refusal means ownership could not be checked (Proxmox unreachable).
  */
-export async function userCanReachUpstream(userId, host, isAdmin) {
+export async function userCanReachUpstream(userId, host, isAdmin, hostResolutionMemo?: HostResolutionMemo) {
   if (isAdmin) return { ok: true };
   if (!isIP(host)) {
     return { ok: false, message: 'Upstream must be an IP address you own (a VM assigned to you or an address in your VLAN). Host names can only be used by admins.' };
@@ -219,7 +222,7 @@ export async function userCanReachUpstream(userId, host, isAdmin) {
     // A public IP is not something we can prove the user owns.
     return { ok: false, message: 'Upstream must be a private address of a VM assigned to you or inside your VLAN subnet.' };
   }
-  const { vmIps, subnets, unverifiedIps } = await getUserAllowedUpstreams(userId);
+  const { vmIps, subnets, unverifiedIps } = await getUserAllowedUpstreams(userId, hostResolutionMemo);
   if (vmIps.includes(host)) return { ok: true };
   if (subnets.some((cidr) => ipv4InCidr(host, cidr))) return { ok: true };
   if (unverifiedIps.includes(host)) {

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { and, or, eq, ne, isNull, notInArray, inArray, count, desc } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { db, type DbOrTx } from '../db/client.ts';
 import { caddyServers, caddySites, firewalls, users, vmAssignments, vmSshConfigs } from '../db/schema/index.ts';
 import { isUniqueViolation } from '../db/errors.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
@@ -16,7 +16,7 @@ import { probeSite, probeAddressFor, PROBE_PORT } from '../utils/caddyProbe.ts';
 import { sshConfigured, deploySnippet, isSafeRemotePath } from '../utils/caddySnippet.ts';
 import {
   normalizeDomain, isValidDomain, isValidUpstreamHost, parsePort,
-  validateDomainDns, userCanReachUpstream, getUserAllowedUpstreams, ipv4InCidr,
+  validateDomainDns, userCanReachUpstream, getUserAllowedUpstreams, ipv4InCidr, type HostResolutionMemo,
 } from '../utils/websiteChecks.ts';
 
 const router = Router();
@@ -214,12 +214,12 @@ function serializeServer(row, siteCount, firewall) {
 
 // ─── Lookups ───────────────────────────────────────────────────────────────────
 
-async function getServerRow(id) {
+async function getServerRow(id, database: DbOrTx = db) {
   // PostgreSQL rejects a NaN integer parameter, so parse defensively — a
   // non-numeric route id resolves to "not found" (a 404), never a 500.
   const parsed = Number.parseInt(id, 10);
   if (!Number.isInteger(parsed)) return undefined;
-  const [row] = await db.select().from(caddyServers).where(eq(caddyServers.id, parsed)).limit(1);
+  const [row] = await database.select().from(caddyServers).where(eq(caddyServers.id, parsed)).limit(1);
   return row;
 }
 
@@ -426,7 +426,7 @@ async function detectWildcard(caddy, serverId, domain) {
 // The re-push is conflict-checked exactly like the publish path. Self-healing a
 // route back into a position where it is shadowed would restore the config and
 // none of the behaviour, which is the failure this whole check exists to catch.
-async function reconcileManagedRoutes(server) {
+export async function reconcileManagedRoutes(server, hostResolutionMemo: HostResolutionMemo = new Map()) {
   const sites = await db.select().from(caddySites)
     .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
       inArray(caddySites.status, ['live', 'warning', 'blocked'])));
@@ -437,7 +437,9 @@ async function reconcileManagedRoutes(server) {
   const conflicted = [];
   for (const site of sites) {
     if (liveIds.has(managedRouteId(site.id))) continue;
+    if ((await siteUpstreamAllowed(site, hostResolutionMemo)) !== true) continue;
     const { wildcard } = await caddy.upsertRoute(site.id, site.domain, site.upstream_host, site.upstream_port);
+    if (await rearmRevocation(site.id)) continue;
     const conflicts = await checkForConflicts(caddy, site.id, site.domain);
     if (conflicts?.length) {
       await recordConflict(site, conflicts);
@@ -457,13 +459,13 @@ const REVOKED_DETAIL = 'Unpublished: this upstream is no longer one you are allo
 // owner was deleted has nobody left to authorize it, so it fails closed.
 // null = unknown right now (Proxmox unreachable): never publish on it, and
 // never revoke on it either.
-async function siteUpstreamAllowed(site) {
+async function siteUpstreamAllowed(site, hostResolutionMemo?: HostResolutionMemo) {
   if (site.owner_user_id == null) return false;
   const [owner] = await db.select({ is_admin: users.is_admin }).from(users)
     .where(eq(users.id, site.owner_user_id)).limit(1);
   if (!owner) return false;
   if (owner.is_admin) return true;
-  const reach = await userCanReachUpstream(site.owner_user_id, site.upstream_host, false);
+  const reach = await userCanReachUpstream(site.owner_user_id, site.upstream_host, false, hostResolutionMemo);
   return reach.ok ? true : reach.unknown ? null : false;
 }
 
@@ -498,27 +500,33 @@ async function rearmRevocation(siteId) {
 // every tick retries it until it succeeds and the detail becomes REVOKED_DETAIL.
 const REVOKING_DETAIL = 'Being unpublished: this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
 
-// Claimed by a finishRevocations pass that is removing its route/slot right now.
+// Claimed by a finishRevocations pass that is removing its route right now.
 const CLEANING_DETAIL = 'Being unpublished (cleaning up): this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
+// Claimed by the finishRevocations pass that is detaching the site's
+// inspection certificate right now. The RELEASING detail alone is not a claim:
+// writing the same value twice cannot tell two passes apart, so a save or retry
+// that clears it between the update and the detach would let the detach fire
+// against a row that is being republished.
+const RELEASING_CLAIMED_DETAIL = 'Being unpublished (releasing its certificate slot now): this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
 const PENDING_DETAILS = [REVOKING_DETAIL, CLEANING_DETAIL];
 
 // Route confirmed gone; only the inspection-slot release is still pending. Kept
 // apart from PENDING_DETAILS so retrying a release never re-syncs Caddy.
 const RELEASING_DETAIL = 'Being unpublished (releasing its certificate slot): this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
-const REVOCATION_DETAILS = [REVOKED_DETAIL, RELEASING_DETAIL, ...PENDING_DETAILS];
+const REVOCATION_DETAILS = [REVOKED_DETAIL, RELEASING_DETAIL, RELEASING_CLAIMED_DETAIL, ...PENDING_DETAILS];
 
 const isRevoked = (site) => site.status === 'error' && REVOCATION_DETAILS.includes(site.status_detail);
 
 // A site published under an older, looser upstream policy (or whose owner has
 // since lost the VLAN/IP, or was deleted) must not stay reachable. 'error' rows
 // are scanned too: a publish can fail after its route was already installed.
-export async function findDisallowedSites(serverId) {
+export async function findDisallowedSites(serverId, hostResolutionMemo: HostResolutionMemo = new Map()) {
   const sites = await db.select().from(caddySites)
     .where(and(eq(caddySites.server_id, serverId), eq(caddySites.managed, true)));
   const disallowed = [];
   for (const site of sites) {
     // Only a definite "no": an unknown answer defers to a later tick.
-    if ((await siteUpstreamAllowed(site)) === false) disallowed.push(site);
+    if ((await siteUpstreamAllowed(site, hostResolutionMemo)) === false) disallowed.push(site);
   }
   return disallowed;
 }
@@ -529,12 +537,12 @@ export async function findDisallowedSites(serverId) {
 // `sites` is a snapshot, so each row is re-read and re-checked, and the park
 // only applies if the upstream is still the one that was evaluated: a site
 // repointed meanwhile is left for the next tick. Each site is audited once.
-export async function markSitesUnpublished(sites) {
+export async function markSitesUnpublished(sites, hostResolutionMemo: HostResolutionMemo = new Map()) {
   for (const site of sites) {
     if (isRevoked(site)) continue;
     const [current] = await db.select().from(caddySites).where(eq(caddySites.id, site.id)).limit(1);
     if (!current || isRevoked(current) || current.upstream_host !== site.upstream_host
-      || current.upstream_port !== site.upstream_port || (await siteUpstreamAllowed(current)) !== false) continue;
+      || current.upstream_port !== site.upstream_port || (await siteUpstreamAllowed(current, hostResolutionMemo)) !== false) continue;
     const parked = await db.update(caddySites).set({ status: 'error', status_detail: REVOKING_DETAIL })
       .where(and(eq(caddySites.id, site.id), eq(caddySites.upstream_host, site.upstream_host),
         eq(caddySites.upstream_port, site.upstream_port)))
@@ -599,17 +607,54 @@ export async function finishRevocations(server) {
   // release (the profile's last certificate) stays RELEASING and is retried
   // every tick, so the slot is freed once another certificate joins the profile.
   for (const site of await parkedWith([RELEASING_DETAIL])) {
-    const [row] = await db.update(caddySites).set({ status_detail: RELEASING_DETAIL })
-      .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, RELEASING_DETAIL)))
-      .returning();
-    if (!row || !(await releaseInspectionSlot(row, null))) continue;
-    await db.update(caddySites).set({ status_detail: REVOKED_DETAIL })
-      .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'), eq(caddySites.status_detail, RELEASING_DETAIL)));
+    // Claim the row right before the detach, the same conditional-update
+    // pattern as the route cleanup above: a save or retry that cleared the
+    // RELEASING detail in between makes the claim miss and the site keeps its
+    // new state. A pass that dies mid-detach leaves the row in the claimed
+    // detail for the next tick.
+    const row = await releaseClaim(site);
+    if (!row) continue;
+    const released = await releaseInspectionSlot(row, null);
+    if (released) {
+      // Finalize only while the claim still holds: a save or retry that
+      // republished the site since the detach makes the update miss, and the
+      // site's new state is left alone.
+      await reclaimReleased(row.id);
+      continue;
+    }
+    // Hand the row back so the next tick retries. A save or retry that started
+    // a new publish between the (failed/skipped) detach and this update makes
+    // it miss; the site's new state stands, which is safe because a failed or
+    // skipped detach removed nothing.
+    await db.update(caddySites).set({ status_detail: RELEASING_DETAIL })
+      .where(and(eq(caddySites.id, row.id), eq(caddySites.status, 'error'),
+        eq(caddySites.status_detail, RELEASING_CLAIMED_DETAIL))).returning();
   }
 }
 
-async function unpublishDisallowedSites(server) {
-  await markSitesUnpublished(await findDisallowedSites(server.id));
+// Claim a RELEASING row for detach, atomically: only one pass may proceed, and
+// any save/retry that cleared the detail since the release pass was loaded
+// makes the claim miss.
+async function releaseClaim(site) {
+  const [row] = await db.update(caddySites).set({ status_detail: RELEASING_CLAIMED_DETAIL })
+    .where(and(eq(caddySites.id, site.id), eq(caddySites.status, 'error'),
+      eq(caddySites.status_detail, RELEASING_DETAIL)))
+    .returning();
+  return row;
+}
+
+// Finalize a claimed release whose detach succeeded. Where the detail is no
+// longer RELEASING_CLAIMED_DETAIL (a save or retry republished the site), the
+// site's new state is left alone.
+async function reclaimReleased(siteId) {
+  return db.update(caddySites).set({ status_detail: REVOKED_DETAIL })
+    .where(and(eq(caddySites.id, siteId), eq(caddySites.status, 'error'),
+      eq(caddySites.status_detail, RELEASING_CLAIMED_DETAIL)))
+    .returning({ id: caddySites.id });
+}
+
+async function unpublishDisallowedSites(server, hostResolutionMemo: HostResolutionMemo = new Map()) {
+  await markSitesUnpublished(await findDisallowedSites(server.id, hostResolutionMemo), hostResolutionMemo);
   await finishRevocations(server);
 }
 
@@ -658,9 +703,12 @@ async function websiteMaintenanceTick() {
   try { servers = await db.select().from(caddyServers); } catch { return; }
   for (const server of servers) {
     try {
-      await unpublishDisallowedSites(server);
+      // One shared memo per tick: a bare-node assignment is resolved against
+      // Proxmox at most once, by the sweep and the reconcile alike.
+      const hostResolutionMemo: HostResolutionMemo = new Map();
+      await unpublishDisallowedSites(server, hostResolutionMemo);
       if (!sshConfigured(server)) {
-        const { repaired, conflicted } = await reconcileManagedRoutes(server);
+        const { repaired, conflicted } = await reconcileManagedRoutes(server, hostResolutionMemo);
         if (repaired.length) console.log(`[websites] re-pushed ${repaired.length} Caddy route(s) on "${server.name}" after a config reload: ${repaired.join(', ')}`);
         if (conflicted.length) console.warn(`[websites] ${conflicted.length} route(s) on "${server.name}" are shadowed by routes Homelabrrr does not own: ${conflicted.join(', ')}`);
       }
@@ -831,6 +879,16 @@ export async function runSiteFlow(siteId) {
     // ── Attach the cert to the SSL/SSH inspection profile ─────────────────────
     await setSiteStep(siteId, 'inspect', 'active');
     await setSiteStatus(siteId, 'inspecting', '');
+    // A revocation can be cleaned up while the cert poll runs (maintenance
+    // saw no cert_name and freed nothing, then finalized the row). Re-read
+    // the row right before the profile write: an attach on a finalized
+    // revoked row would consume a slot that nobody is left to release, so
+    // re-arm the revocation instead and let the next tick free it.
+    const [beforeAttach] = await db.select().from(caddySites).where(eq(caddySites.id, siteId)).limit(1);
+    if (!beforeAttach || isRevoked(beforeAttach)) {
+      if (beforeAttach) await rearmRevocation(siteId);
+      return;
+    }
     const result = await client.setInspectionServerCert(profileName, certName, rootVdom, site.domain);
     // A revocation cleaned up during the cert poll saw no cert_name and freed
     // nothing; re-arm it so the next tick releases the slot just taken.
@@ -1464,6 +1522,12 @@ router.put('/sites/:id', dnsLimiter, async (req, res) => {
   // upstream target can change. Re-validate ownership of the new upstream.
   const parsed = await validateSiteInput(req, { domain: row.domain, upstreamHost: req.body.upstreamHost, upstreamPort: req.body.upstreamPort });
   if (parsed.error) return res.status(400).json({ error: parsed.error });
+  // A revocation pass is detaching this site's certificate right now
+  // (RELEASING_CLAIMED_DETAIL). Starting a publish here could go live without
+  // the certificate that pass was detaching; try again once it finishes.
+  if (row.status_detail === RELEASING_CLAIMED_DETAIL) {
+    return res.status(409).json({ error: 'This site is being unpublished right now — try again in a moment.' });
+  }
 
   // Admins may also flip this site's SSL-inspection wiring after the fact —
   // turning it off is how a slot on a full profile gets freed without deleting
@@ -1507,6 +1571,10 @@ router.post('/sites/:id/retry', dnsLimiter, async (req, res) => {
   const allowed = await siteUpstreamAllowed(row);
   if (allowed === null) return res.status(503).json({ error: UNVERIFIED_DETAIL });
   if (!allowed) return res.status(403).json({ error: REVOKED_DETAIL });
+  // A revocation pass is detaching this site's certificate right now — see PUT.
+  if (row.status_detail === RELEASING_CLAIMED_DETAIL) {
+    return res.status(409).json({ error: 'This site is being unpublished right now — try again in a moment.' });
+  }
 
   const steps = INITIAL_STEPS.map((s) => ({ ...s, status: s.key === 'dns' ? 'done' : 'pending' }));
   await db.update(caddySites).set({ steps: stepList(steps), status: 'pushing', status_detail: '' })
