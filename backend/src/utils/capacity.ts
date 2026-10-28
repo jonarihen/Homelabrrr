@@ -63,6 +63,44 @@ async function allocatedMemoryOnNode(node: string): Promise<number | null> {
   }
 }
 
+// ─── In-flight reservations (#284) ───────────────────────────────────────────
+// A deploy's memory and disk only show up in Proxmox once its clone/create task
+// has run, so two concurrent deploys could each pass the same free-space check.
+// A passed check with `reserve: true` holds its request here until the caller
+// releases it (when the background deploy job ends). In-memory is enough: the
+// window is one deploy, and a restart reconciles interrupted deploys anyway.
+// shortcut: per-process only, revisit if the backend ever runs more than one replica.
+
+interface Reservation { node: string; storage: string; memoryBytes: number; diskBytes: number; expiresAt: number }
+
+// Safety net for a path that forgets to release; a deploy job is far shorter.
+const RESERVATION_TTL_MS = 60 * 60 * 1000;
+const reservations = new Map<symbol, Reservation>();
+
+export function pendingReservations(node: string, storage?: string, now = Date.now()): { memoryBytes: number; diskBytes: number } {
+  let memoryBytes = 0;
+  let diskBytes = 0;
+  for (const [key, r] of reservations) {
+    if (r.expiresAt <= now) { reservations.delete(key); continue; }
+    if (r.node !== node) continue;
+    memoryBytes += r.memoryBytes;
+    if (storage && r.storage === storage) diskBytes += r.diskBytes;
+  }
+  return { memoryBytes, diskBytes };
+}
+
+export function reserveCapacity(node: string, { memoryMb, diskGb, storage }: { memoryMb?: unknown; diskGb?: unknown; storage?: string }, now = Date.now()): () => void {
+  const key = Symbol(node);
+  reservations.set(key, {
+    node,
+    storage: storage || '',
+    memoryBytes: Math.max(0, Number(memoryMb) || 0) * 1024 ** 2,
+    diskBytes: Math.max(0, parseFloat(diskGb as string) || 0) * GB,
+    expiresAt: now + RESERVATION_TTL_MS,
+  });
+  return () => { reservations.delete(key); };
+}
+
 // Pre-flight check for a provision/migration request against a target node.
 //
 // Memory is compared against physical RAM × the configured overcommit ratio
@@ -75,8 +113,10 @@ async function allocatedMemoryOnNode(node: string): Promise<number | null> {
 // monitoring hiccup — the clone/create call will surface real API problems.
 //
 // Returns { warnings: string[], memoryWarning: string } so callers can record
-// an advisory note on the deployment instead of failing it.
-export async function assertNodeCapacity(node: string, { memoryMb, diskGb, storage }: { memoryMb?: unknown; diskGb?: unknown; storage?: string }): Promise<{ warnings: string[]; memoryWarning: string }> {
+// an advisory note on the deployment instead of failing it. Requests still in
+// flight count against the node; with `reserve: true` a passing request joins
+// them, and the caller must call the returned `release` once its deploy ends.
+export async function assertNodeCapacity(node: string, { memoryMb, diskGb, storage, reserve = false }: { memoryMb?: unknown; diskGb?: unknown; storage?: string; reserve?: boolean }): Promise<{ warnings: string[]; memoryWarning: string; release: () => void }> {
   const warnings: string[] = [];
 
   let nodeStatus = null;
@@ -87,41 +127,52 @@ export async function assertNodeCapacity(node: string, { memoryMb, diskGb, stora
   }
 
   const requestedMb = Number(memoryMb);
-  if (nodeStatus && Number.isFinite(requestedMb) && requestedMb > 0) {
-    const { memoryMode, overcommitRatio } = await getCapacitySettings();
-    if (memoryMode !== 'off') {
-      const verdict = evaluateMemoryCapacity({
-        requestedMb,
-        nodeTotalBytes: nodeStatus.memory?.total,
-        allocatedBytes: await allocatedMemoryOnNode(node),
-        freeBytes: nodeStatus.memory?.free,
-        mode: memoryMode,
-        ratio: overcommitRatio,
-        nodeName: nodeStatus.nodeName || decodeNodeRef(node).nodeName,
-      });
-      if (verdict.decision === 'block') throw validationError(verdict.reason);
-      if (verdict.decision === 'warn') {
-        console.warn(`[capacity] ${verdict.reason}`);
-        warnings.push(verdict.reason);
-      }
-    }
-  }
+  const checkMemory = nodeStatus && Number.isFinite(requestedMb) && requestedMb > 0;
+  const { memoryMode, overcommitRatio } = await getCapacitySettings();
+  const allocatedBytes = checkMemory && memoryMode !== 'off' ? await allocatedMemoryOnNode(node) : null;
 
   const requestedDiskGb = parseFloat(diskGb as string);
+  let storageStatus = null;
   if (storage && Number.isFinite(requestedDiskGb) && requestedDiskGb > 0) {
-    let storageStatus = null;
     try {
       storageStatus = await getStorageStatus(node, storage);
     } catch (err: any) {
       console.warn(`[capacity] could not read storage "${storage}" on ${node}: ${err.message}`);
     }
-    const availBytes = storageStatus?.avail;
-    if (Number.isFinite(availBytes) && requestedDiskGb * GB > availBytes) {
+  }
+
+  // No awaits from here on: reading the pending reservations, deciding and
+  // reserving happen in one tick, so a concurrent deploy sees this one.
+  const pending = pendingReservations(node, storage);
+
+  if (checkMemory && memoryMode !== 'off') {
+    const verdict = evaluateMemoryCapacity({
+      requestedMb,
+      nodeTotalBytes: nodeStatus.memory?.total,
+      allocatedBytes: allocatedBytes === null ? null : allocatedBytes + pending.memoryBytes,
+      freeBytes: nodeStatus.memory?.free,
+      mode: memoryMode,
+      ratio: overcommitRatio,
+      nodeName: nodeStatus.nodeName || decodeNodeRef(node).nodeName,
+    });
+    if (verdict.decision === 'block') throw validationError(verdict.reason);
+    if (verdict.decision === 'warn') {
+      console.warn(`[capacity] ${verdict.reason}`);
+      warnings.push(verdict.reason);
+    }
+  }
+
+  const rawAvail = storageStatus?.avail;
+  if (Number.isFinite(rawAvail)) {
+    const availBytes = rawAvail - pending.diskBytes;
+    if (requestedDiskGb * GB > availBytes) {
+      const inFlight = pending.diskBytes > 0 ? ` after ${fmtGb(pending.diskBytes)} GB held by deploys in progress` : '';
       throw validationError(
-        `Not enough space on storage "${storage}": requested ${requestedDiskGb} GB, only ${fmtGb(availBytes)} GB available`,
+        `Not enough space on storage "${storage}": requested ${requestedDiskGb} GB, only ${fmtGb(Math.max(0, availBytes))} GB available${inFlight}`,
       );
     }
   }
 
-  return { warnings, memoryWarning: warnings[0] || '' };
+  const release = reserve ? reserveCapacity(node, { memoryMb, diskGb, storage }) : () => {};
+  return { warnings, memoryWarning: warnings[0] || '', release };
 }

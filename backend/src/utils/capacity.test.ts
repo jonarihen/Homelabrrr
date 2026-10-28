@@ -69,6 +69,25 @@ test('unrecognized values normalize to safe defaults instead of disabling the ra
 });
 
 test('assertNodeCapacity skips (never blocks) when Proxmox cannot be queried', async () => {
-  const verdict = await capacity.assertNodeCapacity('1~pve', { memoryMb: 4096, diskGb: 32, storage: 'local-lvm' });
+  const { release, ...verdict } = await capacity.assertNodeCapacity('1~pve', { memoryMb: 4096, diskGb: 32, storage: 'local-lvm' });
   assert.deepEqual(verdict, { warnings: [], memoryWarning: '' });
+  assert.equal(typeof release, 'function');
+});
+
+test('a passed check with reserve holds its request until released (#284)', async () => {
+  const { release } = await capacity.assertNodeCapacity('1~pve', { memoryMb: 2048, diskGb: 10, storage: 'local-lvm', reserve: true });
+  assert.deepEqual(capacity.pendingReservations('1~pve', 'local-lvm'), { memoryBytes: 2048 * 1024 ** 2, diskBytes: 10 * 1024 ** 3 });
+  // Disk is per storage pool, memory per node.
+  assert.deepEqual(capacity.pendingReservations('1~pve', 'other-pool'), { memoryBytes: 2048 * 1024 ** 2, diskBytes: 0 });
+  assert.deepEqual(capacity.pendingReservations('2~pve', 'local-lvm'), { memoryBytes: 0, diskBytes: 0 });
+  release();
+  release(); // idempotent
+  assert.deepEqual(capacity.pendingReservations('1~pve', 'local-lvm'), { memoryBytes: 0, diskBytes: 0 });
+});
+
+test('a forgotten reservation expires instead of blocking the node forever', () => {
+  const now = Date.now();
+  capacity.reserveCapacity('3~pve', { memoryMb: 1024, diskGb: 5, storage: 'local' }, now);
+  assert.equal(capacity.pendingReservations('3~pve', 'local', now).diskBytes, 5 * 1024 ** 3);
+  assert.deepEqual(capacity.pendingReservations('3~pve', 'local', now + 2 * 60 * 60 * 1000), { memoryBytes: 0, diskBytes: 0 });
 });

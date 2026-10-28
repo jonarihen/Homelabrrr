@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-28 — Concurrent deploys can't overbook a node
+
+- A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
+- When a deploy is refused for space, the message says how much is held by other deploys still in progress.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
