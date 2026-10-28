@@ -505,7 +505,7 @@ export default function VMPage() {
         </div>
 
         {/* ── Stats Grid ── */}
-        <div id="vm-overview" tabIndex={-1} className="grid grid-cols-2 sm:grid-cols-4 gap-4 focus:outline-none">
+        <div id="vm-overview" tabIndex={-1} className="grid grid-cols-2 sm:grid-cols-4 gap-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
           <StatCard
             label="vCPUs" value={vm.maxcpu || vm.cpus || '—'}
             icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25z" /></svg>}
@@ -589,7 +589,7 @@ export default function VMPage() {
 
         {/* ── Performance Charts ── */}
         {isRunning && (
-          <div id="vm-performance" tabIndex={-1} className="space-y-4 focus:outline-none">
+          <div id="vm-performance" tabIndex={-1} className="space-y-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
             <div className="flex items-center justify-between">
               <h2 className="aaris-display text-sm text-gray-100">Performance</h2>
               <div className="flex gap-1 bg-gray-800/50 rounded-lg p-0.5">
@@ -631,17 +631,17 @@ export default function VMPage() {
         )}
 
         {/* ── Snapshots ── */}
-        <div id="vm-snapshots" tabIndex={-1} className="focus:outline-none">
+        <div id="vm-snapshots" tabIndex={-1} className="focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
           <SnapshotsSection node={node} vmid={vmid} />
         </div>
 
         {/* ── Backups ── */}
-        <div id="vm-backups" tabIndex={-1} className="focus:outline-none">
+        <div id="vm-backups" tabIndex={-1} className="focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
           <BackupsSection node={node} vmid={vmid} />
         </div>
 
         {/* ── IP Management ── */}
-        <div id="vm-ip" tabIndex={-1} className="focus:outline-none">
+        <div id="vm-ip" tabIndex={-1} className="focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
           <VMIPManagementPanel
             node={node}
             vmid={vmid}
@@ -651,7 +651,7 @@ export default function VMPage() {
         </div>
 
         {/* ── SSH Config ── */}
-        <div id="vm-ssh" tabIndex={-1} className="space-y-3 focus:outline-none">
+        <div id="vm-ssh" tabIndex={-1} className="space-y-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
           <h2 className="aaris-display text-sm text-gray-100">SSH Configuration</h2>
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

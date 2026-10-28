@@ -86,3 +86,14 @@ test('VM navigation clears the previous IP and ignores late discovery responses'
   await oldRequest.fulfill({ json: { candidates: [{ ip: '192.0.2.199' }] } });
   await expect(page.getByRole('button', { name: /Copy IP address/ })).toHaveCount(0);
 });
+
+test('section links focus the target with a visible focus ring', async ({ page, context }) => {
+  await mockVm(context, route => route.fulfill({ json: { candidates: [] } }));
+  await page.goto('/vm/2~pve/101');
+  const link = page.getByRole('link', { name: 'Snapshots' });
+  await link.focus();
+  await page.keyboard.press('Enter');
+  const target = page.locator('#vm-snapshots');
+  await expect(target).toBeFocused();
+  await expect(target).toHaveCSS('box-shadow', /rgb\(255, 122, 68\)/);
+});
