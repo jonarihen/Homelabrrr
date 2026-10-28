@@ -283,6 +283,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
 
   const startDrag = useCallback((event) => {
     if (event.button !== 0) return;
+    const pointerId = event.pointerId;
 
     onFocus(session.id);
 
@@ -292,6 +293,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
     const initialY = session.y;
 
     const handleMove = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
       onMove(session.id, clampWindowPosition(
         session,
         initialX + (moveEvent.clientX - initialPointerX),
@@ -299,13 +301,15 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
       ));
     };
 
-    const stopDrag = () => {
+    const stopDrag = (upEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
       document.removeEventListener('pointermove', handleMove);
       document.removeEventListener('pointerup', stopDrag);
       document.removeEventListener('pointercancel', stopDrag);
       document.body.style.userSelect = '';
     };
 
+    try { event.currentTarget.setPointerCapture(pointerId); } catch { /* pointer already gone */ }
     document.body.style.userSelect = 'none';
     document.addEventListener('pointermove', handleMove);
     document.addEventListener('pointerup', stopDrag);
@@ -330,6 +334,8 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
         top: `${session.y}px`,
         width: `${session.width}px`,
         height: `${session.height}px`,
+        minWidth: '320px',
+        minHeight: '240px',
         zIndex,
       }}
       onMouseDown={() => onFocus(session.id)}
@@ -338,6 +344,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
         className="flex items-center justify-between gap-3 border-b border-gray-700 bg-gray-950 px-4 py-3 cursor-move shrink-0 touch-none focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-blue-500"
         onPointerDown={startDrag}
         onKeyDown={handleMoveKey}
+        onFocus={() => onFocus(session.id)}
         tabIndex={0}
         role="group"
         aria-roledescription="movable window"

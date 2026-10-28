@@ -34,8 +34,8 @@ export function computeTileLayout(sessions, mode, viewport) {
     rows = Math.ceil(n / cols);
   }
 
-  const cellW = (areaW - gap * (cols - 1)) / cols;
-  const cellH = (areaH - gap * (rows - 1)) / rows;
+  const cellW = Math.max(320, (areaW - gap * (cols - 1)) / cols);
+  const cellH = Math.max(240, (areaH - gap * (rows - 1)) / rows);
 
   return sessions.map((session, i) => {
     const col = i % cols;
