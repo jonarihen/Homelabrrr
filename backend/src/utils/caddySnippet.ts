@@ -119,10 +119,14 @@ function sftpWriteFile(sftp, path, content) {
  * Sequence: write to <path>.tmp → mv into place → `caddy validate` → on
  * failure restore the previous snippet and DON'T reload (the running config is
  * never touched by a failed sync) → `caddy reload`.
+ * A failed reload normally leaves the new snippet in place, because it matches
+ * the DB and the next reload or restart should apply it. A caller that will
+ * not commit the change behind the new snippet passes restoreOnReloadFailure,
+ * so a later reload cannot apply what was refused.
  * Returns { sites, reloaded, fingerprint } — the caller persists the
  * fingerprint on first use (TOFU pinning).
  */
-export async function deploySnippet(server, sites) {
+export async function deploySnippet(server, sites, { restoreOnReloadFailure = false } = {}) {
   if (!sshConfigured(server)) throw new Error('SSH is not configured for this Caddy server');
   if (!server.ssh_secret) throw new Error('No SSH credential is stored for this Caddy server');
   const snippetPath = server.snippet_path || '/etc/caddy/homelabrrr.caddy';
@@ -144,19 +148,29 @@ export async function deploySnippet(server, sites) {
       if (mv.code !== 0) throw new Error(`Could not write the snippet on the Caddy host: ${mv.output.trim()}`);
     };
 
+    // An empty file keeps a pre-added `import` line working on a first deploy.
+    const restorePrevious = async () => {
+      try {
+        await putInPlace(previous ?? '');
+        return 'Previous snippet restored.';
+      } catch (err) {
+        return `Could not restore the previous snippet (${err.message}), so re-sync this server.`;
+      }
+    };
+
     await putInPlace(content);
 
     const validate = await execSsh(conn, `caddy validate --config '${caddyfilePath}' --adapter caddyfile 2>&1`);
     if (validate.code !== 0) {
-      // Restore what was there before so the user's next manual reload isn't
-      // broken by us. (An empty file keeps a pre-added `import` line working.)
-      try { await putInPlace(previous ?? ''); } catch { /* best effort */ }
-      throw new Error(`Caddyfile validation failed — snippet rolled back, Caddy was NOT reloaded. ${validate.output.trim().slice(-500)}`);
+      const restored = await restorePrevious();
+      throw new Error(`Caddyfile validation failed, so Caddy was NOT reloaded. ${restored} ${validate.output.trim().slice(-500)}`);
     }
 
     const reload = await execSsh(conn, `caddy reload --config '${caddyfilePath}' --adapter caddyfile 2>&1`);
     if (reload.code !== 0) {
-      throw new Error(`Caddy reload failed (the snippet is in place; reload manually or re-sync): ${reload.output.trim().slice(-500)}`);
+      const output = reload.output.trim().slice(-500);
+      if (restoreOnReloadFailure) throw new Error(`Caddy reload failed. ${await restorePrevious()} ${output}`);
+      throw new Error(`Caddy reload failed (the snippet is in place; reload manually or re-sync): ${output}`);
     }
 
     return { sites: sites.length, reloaded: true, fingerprint };
