@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-28 — Revoking a session closes its open consoles
+
+- Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.

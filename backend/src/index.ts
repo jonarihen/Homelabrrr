@@ -62,6 +62,7 @@ import { buildConfigReport, formatConfigReport } from './utils/configReport.ts';
 import { startScheduler, stopScheduler, waitForSchedulerIdle } from './scheduler.ts';
 import { sshClientError } from './utils/sshError.ts';
 import { collectBoundedBody } from './utils/boundedBody.ts';
+import { trackConsoleSocket } from './utils/consoleSockets.ts';
 import { installConsoleRedaction, log, redactText, requestContext } from './utils/logger.ts';
 import { csrfProtection } from './middleware/requestSecurity.ts';
 import { liveness, metricsText, observeRequests, readiness } from './utils/observability.ts';
@@ -363,6 +364,7 @@ server.on('upgrade', async (request, socket, head) => {
     sess._consumed = true;
     vncWss.handleUpgrade(request, socket, head, (ws) => {
       vncSessions.delete(token);
+      trackConsoleSocket(ws, request.sessionID, request.session.userId);
       vncWss.emit('connection', ws, sess);
     });
   } else if (url.pathname === '/api/ssh') {
@@ -379,6 +381,7 @@ server.on('upgrade', async (request, socket, head) => {
     sess._consumed = true;
     sshWss.handleUpgrade(request, socket, head, (ws) => {
       sshSessions.delete(token);
+      trackConsoleSocket(ws, request.sessionID, request.session.userId);
       sshWss.emit('connection', ws, sess);
     });
   } else {
