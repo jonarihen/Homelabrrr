@@ -4,7 +4,7 @@ import PrereqCallout from '../components/PrereqCallout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
-import { normalizeUpstreamPort, isUpstreamDraftValid, hasSiteChanged, isInspectionOn } from '../utils/siteEdit.js';
+import { normalizeUpstreamPort, isUpstreamDraftValid, hasSiteChanged, isInspectionOn, filterSites } from '../utils/siteEdit.js';
 import { startPolling } from '../utils/polling.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
@@ -20,6 +20,8 @@ export default function WebsitesPage() {
   const [upstream, setUpstream] = useState({ isAdmin: false, vms: [], subnets: [] });
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
 
   const load = useCallback(async () => {
     try {
@@ -42,6 +44,10 @@ export default function WebsitesPage() {
   // record, and the certificate step will never validate.
   const canManageWebsites = !!(user?.isAdmin || user?.permissions?.canManageWebsites);
   const noWanIp = servers.length > 0 && servers.every((s) => !s.wanIp);
+
+  const visibleSites = filterSites(sites, { query, status: statusFilter });
+  // The selected status keeps its chip (at 0) after its last site moves on, so an empty list still explains itself.
+  const statusCounts = sites.reduce((acc, s) => ({ ...acc, [s.status]: (acc[s.status] || 0) + 1 }), statusFilter === 'all' ? {} : { [statusFilter]: 0 });
 
   const hasInFlight = sites.some((s) => IN_FLIGHT.includes(s.status));
   // While something is publishing, refresh the list periodically so terminal
@@ -104,14 +110,46 @@ export default function WebsitesPage() {
               />
             )}
 
+            {sites.length > 0 && (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                <input
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className={`${inputCls} sm:max-w-xs`}
+                  placeholder="Search domain, upstream, owner…"
+                  aria-label="Search websites"
+                />
+                <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filter by status">
+                  {[['all', sites.length], ...Object.entries(statusCounts)].map(([st, n]) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setStatusFilter(st)}
+                      aria-pressed={statusFilter === st}
+                      className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${statusFilter === st ? 'border-orange-500 text-orange-400 bg-orange-500/10' : 'border-gray-700 text-gray-400 hover:text-white hover:border-gray-600'}`}
+                    >
+                      {st} <span className="font-mono text-gray-500">{n}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="space-y-3">
+              {sites.length > 0 && visibleSites.length === 0 && (
+                <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 text-center">
+                  <p className="text-sm text-gray-400">No websites match the current filter.</p>
+                  <button type="button" onClick={() => { setQuery(''); setStatusFilter('all'); }} className="text-xs text-blue-400 hover:text-blue-300 mt-2">Clear filters</button>
+                </div>
+              )}
               {sites.length === 0 && !showForm && (
                 <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
                   <p className="text-gray-400 font-medium">No websites published yet</p>
                   <p className="text-sm text-gray-600 mt-1">Point a domain’s A record at the homelab WAN IP, then publish it here.</p>
                 </div>
               )}
-              {sites.map((site) => (
+              {visibleSites.map((site) => (
                 <SiteCard key={site.id} site={site} servers={servers} upstream={upstream} isAdmin={!!user?.isAdmin} onChanged={load} />
               ))}
             </div>

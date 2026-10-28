@@ -2,7 +2,7 @@
 // Run with:  node --test src/utils/siteEdit.test.js   (from frontend/)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeUpstreamPort, normalizeUpstreamHost, isUpstreamDraftValid, hasUpstreamChanged, isInspectionOn, hasSiteChanged } from './siteEdit.js';
+import { normalizeUpstreamPort, normalizeUpstreamHost, isUpstreamDraftValid, hasUpstreamChanged, isInspectionOn, hasSiteChanged, filterSites } from './siteEdit.js';
 
 test('port normalization matches the backend range', () => {
   assert.equal(normalizeUpstreamPort(80), 80);
@@ -73,4 +73,20 @@ test('a form that omits the inspection flag never reads as turning it off', () =
   assert.equal(hasSiteChanged(on, { upstreamHost: '10.11.26.5', upstreamPort: '8080' }), false);
   // ...but a genuine upstream edit still saves.
   assert.equal(hasSiteChanged(on, { upstreamHost: '10.11.26.9', upstreamPort: '8080' }), true);
+});
+
+test('filterSites matches domain, upstream and owner, and narrows by status', () => {
+  const sites = [
+    { domain: 'app.example.com', status: 'live', upstreamHost: '10.0.0.5', upstreamPort: 80, ownerUsername: 'alice' },
+    { domain: 'Blog.example.org', status: 'error', upstreamHost: '10.0.0.9', upstreamPort: 8080, ownerUsername: 'bob' },
+    { domain: 'static.example.org', status: 'live', kind: 'file_server' },
+  ];
+  const domains = (opts) => filterSites(sites, opts).map((s) => s.domain);
+  assert.deepEqual(domains(), sites.map((s) => s.domain));
+  assert.deepEqual(domains({ query: '  BLOG ' }), ['Blog.example.org']);
+  assert.deepEqual(domains({ query: '10.0.0.9:8080' }), ['Blog.example.org']);
+  assert.deepEqual(domains({ query: 'alice' }), ['app.example.com']);
+  assert.deepEqual(domains({ query: 'file_server' }), ['static.example.org']);
+  assert.deepEqual(domains({ status: 'live' }), ['app.example.com', 'static.example.org']);
+  assert.deepEqual(domains({ query: '.org', status: 'live' }), ['static.example.org']);
 });

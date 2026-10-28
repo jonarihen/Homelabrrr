@@ -1,8 +1,9 @@
 # Changelog
 
-## 2026-10-24 — Upstream host fields reject non-canonical IP spellings
+## 2026-10-28 — Search and filter on the Websites page
 
-- Proxmox, FortiGate, Caddy SSH and iLO host fields now accept only a canonical IPv4/IPv6 address or a DNS hostname. Spellings such as `0127.0.0.1`, `0x7f.0.0.1` or `127.1` are rejected with a clear error, closing the TLS hostname-verification gap from the Node.js October 2026 security release regardless of the runtime version.
+- The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
+- Status chips (live, error, blocked, …) with counts narrow the list to one status. When nothing matches, a **Clear filters** button resets the view.
 
 ## 2026-10-15 — Cloud-image deployment no longer requires host SSH
 

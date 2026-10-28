@@ -44,3 +44,12 @@ export function hasSiteChanged(site, draft) {
   if (draft?.inspect === undefined) return false;
   return !!draft.inspect !== isInspectionOn(site);
 }
+
+// Websites list filter: `query` matches domain, upstream and owner
+// case-insensitively; `status` is 'all' or one exact site status.
+export function filterSites(sites, { query = '', status = 'all' } = {}) {
+  const q = query.trim().toLowerCase();
+  return sites.filter((s) => (status === 'all' || s.status === status) && (!q ||
+    [s.domain, s.upstreamHost, s.upstreamHost && `${s.upstreamHost}:${s.upstreamPort}`, s.kind, s.ownerUsername]
+      .some((v) => v && String(v).toLowerCase().includes(q))));
+}
