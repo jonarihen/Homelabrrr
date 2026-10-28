@@ -1,4 +1,5 @@
 import { vlanTagToSubnet } from '../fortigate.ts';
+import { ipv4InCidr } from '../utils/ipPolicy.ts';
 
 /**
  * Subnet derivation for a VLAN tag. This used to be the hardcoded
@@ -43,9 +44,12 @@ function subnetFromBase(base) {
  * (firewall_vlan_sync.subnet_cidr) — independent of the VLAN's current tag or
  * the workflow setting. A row without a record gets the default scheme.
  */
-export function syncedSubnet(tag, syncedCidr) {
+export function syncedSubnet(tag, syncedCidr, interfaceIp: string | null = null) {
   const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.0\/24$/.exec(String(syncedCidr || '').trim());
-  return m ? subnetFromBase(m[1]) : deriveSubnet(tag, {});
+  const subnet = m ? subnetFromBase(m[1]) : deriveSubnet(tag, {});
+  if (!subnet) return null;
+  const ip = m && interfaceIp && ipv4InCidr(String(interfaceIp), subnet.network) ? String(interfaceIp) : null;
+  return { ...subnet, ip, gateway: ip };
 }
 
 /**

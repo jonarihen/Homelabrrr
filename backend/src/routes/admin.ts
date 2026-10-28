@@ -1574,7 +1574,7 @@ async function previewSyncSubnet(fw, tag) {
   // Same pick as the sync: the first executed interface step for this tag.
   const iface = preview.find((i) => i.action === 'create_vlan_interface' && !i.skipped && !i.error && Number(i.params?.vlanId) === Number(tag));
   const cidr = interfaceCidr(iface?.params, tag);
-  return { ...syncedSubnet(tag, cidr), recorded: !!cidr };
+  return { ...syncedSubnet(tag, cidr, iface?.params?.ip), recorded: !!cidr };
 }
 
 // syncedCidr: the network a firewall sync recorded (firewall_vlan_sync.subnet_cidr).
@@ -2518,7 +2518,7 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const ifaceOut = outVals.find((o) => o?.interfaceName && Number(o.vlanId) === Number(vlan.tag));
         const provisionedCidr = interfaceCidr(ifaceOut, vlan.tag);
         // Report what was recorded; with no record readers use the legacy default, so show that, labelled.
-        const recordedSubnet = syncedSubnet(vlan.tag, provisionedCidr);
+        const recordedSubnet = syncedSubnet(vlan.tag, provisionedCidr, ifaceOut?.ip);
         const result = {
           interfaceName, policyIds, dhcpServerId, staticRouteId, subnet: recordedSubnet, subnetRecorded: !!provisionedCidr,
           ...(provisionedCidr ? {} : {

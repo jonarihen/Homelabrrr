@@ -2,7 +2,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import request from 'supertest';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { users, firewalls, vlans, firewallVlanSync, workflows, workflowSteps } from '../db/schema/index.ts';
 import { FortiGateAPI } from '../fortigate.ts';
@@ -91,8 +91,10 @@ test('GET /vlans returns the provisioned subnet per synced firewall', async () =
     [legacyFirewallId, '10.11.26.0/24'],
   ]);
   assert.equal(byTag[1126].subnet.network, '172.11.26.0/24');
-  assert.equal(byTag[1126].subnet.gateway, '172.11.26.1');
+  assert.equal(byTag[1126].subnet.ip, null);
+  assert.equal(byTag[1126].subnet.gateway, null);
   assert.equal(byTag[1128].subnet.network, '10.11.28.0/24');
+  assert.equal(byTag[1128].subnet.gateway, null);
 });
 
 async function firewallWithSteps(name: string, steps: unknown[], settings: unknown = {}) {
@@ -116,23 +118,70 @@ test('GET /vlans/subnet/:tag previews what a sync to the firewall would record',
   const scheme = await firewallWithSteps('fw-preview-scheme', [ifaceStep('{{tag}}', '{{subnet.ip}}')], { subnet: { firstOctet: 192 } });
   const schemed = (await request(app).get(`/vlans/subnet/1126?firewallId=${scheme}`)).body;
   assert.equal(schemed.network, '192.11.26.0/24');
+  assert.equal(schemed.ip, '192.11.26.1');
+  assert.equal(schemed.gateway, '192.11.26.1');
   assert.equal(schemed.recorded, true);
   // A customised step wins over the setting, exactly as the sync records it.
-  const custom = await firewallWithSteps('fw-preview-custom', [ifaceStep('3999', '172.20.30.1'), ifaceStep('{{tag}}', '192.168.50.1')], { subnet: { firstOctet: 172 } });
-  assert.equal((await request(app).get(`/vlans/subnet/1126?firewallId=${custom}`)).body.network, '192.168.50.0/24');
+  const custom = await firewallWithSteps('fw-preview-custom', [ifaceStep('3999', '172.20.30.1'), ifaceStep('{{tag}}', '192.168.50.254')], { subnet: { firstOctet: 172 } });
+  const customized = (await request(app).get(`/vlans/subnet/1126?firewallId=${custom}`)).body;
+  assert.equal(customized.network, '192.168.50.0/24');
+  assert.equal(customized.ip, '192.168.50.254');
+  assert.equal(customized.gateway, '192.168.50.254');
   // No interface step for the tag: nothing would be recorded, so the legacy default applies.
   const none = (await request(app).get(`/vlans/subnet/1126?firewallId=${firewallId}`)).body;
   assert.equal(none.network, '10.11.26.0/24');
+  assert.equal(none.ip, null);
+  assert.equal(none.gateway, null);
   assert.equal(none.recorded, false);
   assert.equal((await request(app).get('/vlans/subnet/1126?firewallId=999999')).status, 404);
+});
+
+test('subnet preview matches sync when the subject interface depends on earlier interface outputs', async (t) => {
+  const fwId = await firewallWithSteps('fw-preview-dependent', [
+    ifaceStep('3999', '192.168.50.254'),
+    { ...ifaceStep('{{tag}}', '{{steps.iface0.ip}}'), netmask: '{{steps.iface0.netmask}}' },
+  ]);
+  const [workflow] = await testDb.db.select().from(workflows).where(eq(workflows.firewall_id, fwId));
+  await testDb.db.update(workflowSteps).set({ condition: '{{steps.iface0.vlanId}}' })
+    .where(and(eq(workflowSteps.workflow_id, workflow.id), eq(workflowSteps.position, 1)));
+  const preview = await request(app).get(`/vlans/subnet/1320?firewallId=${fwId}`);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.network, '192.168.50.0/24');
+  assert.equal(preview.body.gateway, '192.168.50.254');
+  assert.equal(preview.body.recorded, true);
+  t.mock.method(FortiGateAPI.prototype, 'getInterface', async () => null);
+  t.mock.method(FortiGateAPI.prototype, 'request', async () => ({}));
+  const [vlan] = await testDb.db.insert(vlans).values({ name: 'dependent', tag: 1320, mode: 'managed' }).returning({ id: vlans.id });
+  const res = await request(app).post(`/vlans/${vlan.id}/sync`).send({ firewallId: fwId });
+  assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
+  const { recorded, ...subnet } = preview.body;
+  assert.equal(recorded, true);
+  assert.deepEqual(res.body[0].subnet, subnet);
 });
 
 test('syncedSubnet rebuilds the full recorded /24, not one derived from the current tag', async () => {
   const { syncedSubnet } = await import('../workflows/subnet.ts');
   const subnet = syncedSubnet(1200, '172.11.26.0/24');
   assert.equal(subnet.network, '172.11.26.0/24');
-  assert.equal(subnet.gateway, '172.11.26.1');
+  assert.equal(subnet.ip, null);
+  assert.equal(subnet.gateway, null);
   assert.equal(syncedSubnet(1126, null).network, '10.11.26.0/24');
+});
+
+test('syncedSubnet reports an interface IP only when the source carries one in the recorded network', async () => {
+  const { syncedSubnet } = await import('../workflows/subnet.ts');
+  const known = syncedSubnet(1200, '192.168.50.0/24', '192.168.50.254');
+  assert.equal(known.ip, '192.168.50.254');
+  assert.equal(known.gateway, '192.168.50.254');
+  for (const [cidr, ip] of [
+    ['192.168.50.0/24', null],
+    ['192.168.50.0/24', '192.168.51.254'],
+    [null, '10.12.0.254'],
+  ]) {
+    const unknown = syncedSubnet(1200, cidr, ip);
+    assert.equal(unknown.ip, null);
+    assert.equal(unknown.gateway, null);
+  }
 });
 
 test('PUT /vlans/:id refuses a tag change while the VLAN is synced', async () => {
@@ -165,13 +214,13 @@ test('VLAN sync records the subnet from the interface step output, not the setti
   const [fw] = await testDb.db.insert(firewalls)
     .values({ name: 'fw-iface', host: '192.168.100.4', api_key: 'k', vdom: 'lab', verify_tls: false })
     .returning({ id: firewalls.id });
-  // Setting says 172, but the customised interface step configures 192.168.50.1/24.
+  // Setting says 172, but the customised interface step configures 192.168.50.254/24.
   const [wf] = await testDb.db.insert(workflows).values({
     firewall_id: fw.id, trigger: 'vlan_provision', name: 'VLAN provision', settings: { subnet: { firstOctet: 172 } },
   }).returning({ id: workflows.id });
   await testDb.db.insert(workflowSteps).values({
     workflow_id: wf.id, position: 0, step_key: 'iface', action: 'create_vlan_interface',
-    params: { name: 'vlan{{tag}}', vlanId: '{{tag}}', parentInterface: 'fortilink', ip: '192.168.50.1', netmask: '255.255.255.0' },
+    params: { name: 'vlan{{tag}}', vlanId: '{{tag}}', parentInterface: 'fortilink', ip: '192.168.50.254', netmask: '255.255.255.0' },
   });
   t.mock.method(FortiGateAPI.prototype, 'getInterface', async () => null);
   t.mock.method(FortiGateAPI.prototype, 'request', async () => ({}));
@@ -183,7 +232,13 @@ test('VLAN sync records the subnet from the interface step output, not the setti
   assert.equal(sync.subnet_cidr, '192.168.50.0/24');
   // The response reports the recorded network, not the 172 setting.
   assert.equal(res.body[0].subnet.network, '192.168.50.0/24');
+  assert.equal(res.body[0].subnet.ip, '192.168.50.254');
+  assert.equal(res.body[0].subnet.gateway, '192.168.50.254');
   assert.equal(res.body[0].subnetRecorded, true);
+  const listed = (await request(app).get('/vlans')).body.find((v: any) => v.id === vlan.id);
+  assert.equal(listed.subnet.network, '192.168.50.0/24');
+  assert.equal(listed.subnet.ip, null);
+  assert.equal(listed.subnet.gateway, null);
 });
 
 async function syncWithSteps(t: any, name: string, tag: number, steps: unknown[], existingInterface: unknown = null) {
@@ -211,6 +266,12 @@ test('VLAN sync adopts an existing interface only when it is this VLAN as config
   const { res, sync } = await syncWithSteps(t, 'fw-existing', 1304, [ifaceStep('{{tag}}', '10.13.4.1')], existingIface(1304, { ip: '10.13.4.254 255.255.255.0' }));
   assert.equal(res.body[0]?.status, 'ok', JSON.stringify(res.body));
   assert.equal(sync.subnet_cidr, '10.13.4.0/24');
+  assert.equal(res.body[0].subnet.ip, '10.13.4.254');
+  assert.equal(res.body[0].subnet.gateway, '10.13.4.254');
+  const listed = (await request(app).get('/vlans')).body.find((v: any) => v.tag === 1304);
+  assert.equal(listed.subnet.network, '10.13.4.0/24');
+  assert.equal(listed.subnet.ip, null);
+  assert.equal(listed.subnet.gateway, null);
 });
 
 // Security: a colliding interface name must not let a sync record an unrelated network.
