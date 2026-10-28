@@ -155,7 +155,7 @@ export default function PVEHostsPage() {
         </div>
         <button
           onClick={openAdd}
-          className="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20"
+          className="flex items-center gap-2 text-sm btn-primary px-4 py-2.5 rounded-xl font-medium shadow-lg shadow-blue-600/20"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
@@ -470,7 +470,7 @@ export default function PVEHostsPage() {
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">
                   Cancel
                 </button>
-                <button type="submit" disabled={saving} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors shadow-lg shadow-blue-600/20">
+                <button type="submit" disabled={saving} className="flex-1 btn-primary rounded-xl py-2.5 text-sm font-semibold shadow-lg shadow-blue-600/20">
                   {saving ? 'Saving...' : editId ? 'Update' : 'Add Host'}
                 </button>
               </div>
@@ -647,7 +647,7 @@ function CapacityPolicySection() {
           </div>
           <button
             type="submit" disabled={saving}
-            className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl font-medium transition-colors"
+            className="text-sm btn-primary px-4 py-2.5 rounded-xl font-medium"
           >
             {saving ? 'Saving...' : 'Save policy'}
           </button>

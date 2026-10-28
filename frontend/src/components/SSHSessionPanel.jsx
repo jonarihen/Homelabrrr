@@ -305,7 +305,7 @@ function SSHTerminal({ token, visible, onReconnect, reconnecting = false, reconn
             type="button"
             onClick={onReconnect}
             disabled={reconnecting}
-            className="text-xs px-3 py-1 rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium transition-colors"
+            className="text-xs px-3 py-1 rounded btn-primary disabled:opacity-40 disabled:cursor-not-allowed font-medium"
             title="Open a new SSH session with the same key and host settings"
           >
             {reconnecting ? 'Reconnecting...' : 'Reconnect'}

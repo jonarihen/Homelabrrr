@@ -104,7 +104,7 @@ export default function FirewallsPage() {
           <h1 className="aaris-display text-xl text-gray-100">Firewalls</h1>
           <p className="text-sm text-gray-500 mt-1">Manage FortiGate and other firewall appliances</p>
         </div>
-        <button onClick={openAdd} className="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20">
+        <button onClick={openAdd} className="flex items-center gap-2 text-sm btn-primary px-4 py-2.5 rounded-xl font-medium shadow-lg shadow-blue-600/20">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
           </svg>
@@ -355,7 +355,7 @@ export default function FirewallsPage() {
               {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
               <div className="flex gap-3 pt-1">
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">Cancel</button>
-                <button type="submit" disabled={saving} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors shadow-lg shadow-blue-600/20">
+                <button type="submit" disabled={saving} className="flex-1 btn-primary rounded-xl py-2.5 text-sm font-semibold shadow-lg shadow-blue-600/20">
                   {saving ? 'Saving...' : editId ? 'Update' : 'Add Firewall'}
                 </button>
               </div>
