@@ -489,13 +489,14 @@ function CloudImageForm({ onStarted }) {
   // host the image is reachable from (shared storage), from image.deployTargets.
   const [targetNode, setTargetNode] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     api.get('/provision/images')
       .then(r => setImages(r.data))
-      .catch(() => {})
+      .catch(e => setLoadError(e))
       .finally(() => setLoading(false));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     // Unusable keys are kept in the list and disabled in the picker, so a user
@@ -587,6 +588,8 @@ function CloudImageForm({ onStarted }) {
   if (loading) {
     return <div className="space-y-4">{[1, 2].map(i => <div key={i} className="h-24 bg-gray-900 rounded-2xl animate-pulse" />)}</div>;
   }
+
+  if (loadError) return <ErrorCallout error={loadError} fallback="Failed to load cloud images" />;
 
   if (images.length === 0) {
     return (
@@ -819,13 +822,14 @@ function CloneForm({ onStarted }) {
   const [form, setForm] = useState({ name: '', cores: '', memory: '', diskGb: '', storage: '', description: '', assignTo: '', vlanTag: '' });
   const [ci, setCi] = useState({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     api.get('/provision/templates')
       .then(r => setTemplates(r.data))
-      .catch(() => {})
+      .catch(e => setLoadError(e))
       .finally(() => setLoading(false));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     // Unusable keys are kept in the list and disabled in the picker, so a user
@@ -895,6 +899,8 @@ function CloneForm({ onStarted }) {
   if (loading) {
     return <div className="space-y-4">{[1, 2].map(i => <div key={i} className="h-24 bg-gray-900 rounded-2xl animate-pulse" />)}</div>;
   }
+
+  if (loadError) return <ErrorCallout error={loadError} fallback="Failed to load templates" />;
 
   if (templates.length === 0) {
     return (
@@ -1097,7 +1103,7 @@ function CreateForm({ onStarted }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
+    api.get('/provision/nodes').then(r => setNodes(r.data)).catch(e => setError(normalizeApiError(e, 'Failed to load nodes')));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     api.get('/portal/status').then(r => setMaint(r.data.maintenance || [])).catch(() => {});
     if (user?.isAdmin) {

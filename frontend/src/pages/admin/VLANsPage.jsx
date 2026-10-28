@@ -3,6 +3,7 @@ import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
 
 function buildManagedSubnet(tag) {
   const parsedTag = parseInt(tag, 10);
@@ -45,6 +46,8 @@ function findNextAvailableVlanTag(vlans, firewalls) {
 }
 
 export default function VLANsPage() {
+  const confirm = useConfirm();
+  const toast = useToast();
   useDocumentTitle('VLANs');
   const { user } = useAuth();
   const [vlans, setVlans]       = useState([]);
@@ -84,16 +87,16 @@ export default function VLANsPage() {
     const msg = hasSyncs
       ? `Delete VLAN ${vlan.tag} (${vlan.name})?\n\nThis will remove it from:\n• ${vlan.firewallSync.map(s => s.firewallName).join('\n• ')}\n\nAll user assignments will also be removed.`
       : `Delete VLAN ${vlan.tag} (${vlan.name})? All user assignments will be removed.`;
-    if (!confirm(msg)) return;
+    if (!await confirm({ message: msg, confirmLabel: 'Delete', danger: true })) return;
     try {
       const r = await api.delete(`/admin/vlans/${id}`);
       const failed = r.data?.firewallCleanup?.filter(f => f.status === 'error' || f.status === 'partial');
       if (failed?.length > 0) {
-        alert(`VLAN deleted from database, but FortiGate cleanup had issues:\n\n${failed.map(f => `${f.firewall}: ${f.error || f.errors?.join(', ')}`).join('\n')}\n\nYou may need to manually remove the interface/policies from the firewall.`);
+        toast.error(`VLAN deleted from database, but FortiGate cleanup had issues:\n\n${failed.map(f => `${f.firewall}: ${f.error || f.errors?.join(', ')}`).join('\n')}\n\nYou may need to manually remove the interface/policies from the firewall.`);
       }
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      toast.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -484,6 +487,7 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
 }
 
 function SyncModal({ vlan, firewalls, onClose, onSaved }) {
+  const toast = useToast();
   const [syncs, setSyncs]     = useState(vlan.firewallSync || []);
   const [syncing, setSyncing] = useState(false);
   const [removing, setRemoving] = useState(null);
@@ -517,7 +521,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
       setSyncs(prev => prev.filter(s => s.firewallId !== firewallId));
       onSaved();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to remove');
+      toast.error(e.response?.data?.error || 'Failed to remove');
     } finally { setRemoving(null); }
   };
 

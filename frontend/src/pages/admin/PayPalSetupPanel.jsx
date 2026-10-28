@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const card = 'border border-gray-800 bg-gray-900/90 p-5';
 const button = 'border border-gray-700 px-3 py-1.5 text-xs text-gray-200 disabled:opacity-40';
@@ -9,6 +10,7 @@ const when = (value) => value ? new Intl.DateTimeFormat('da-DK', { dateStyle: 's
 // of the product, monthly plan and webhook registration. Created IDs are only
 // copied into the form; saving them is a separate, versioned step.
 export default function PayPalSetupPanel({ environment, act, busy, configVersion, onUseId }) {
+  const confirm = useConfirm();
   const [checks, setChecks] = useState(null);
   const [created, setCreated] = useState({});
   const [planAmount, setPlanAmount] = useState('50.00');
@@ -31,8 +33,8 @@ export default function PayPalSetupPanel({ environment, act, busy, configVersion
   const offerPlan = (planId, amount) => act('offer-plan', async () => {
     const { data } = await api.post('/payments/admin/monthly-plans', { environment, planId, amount }); setPlans(data.items);
   });
-  const retirePlan = (plan) => {
-    if (!window.confirm('Stop offering this amount to new subscribers? Existing subscriptions keep billing until cancelled.')) return;
+  const retirePlan = async (plan) => {
+    if (!await confirm({ message: 'Stop offering this amount to new subscribers? Existing subscriptions keep billing until cancelled.', confirmLabel: 'Stop offering', danger: true })) return;
     act('retire-plan', async () => { const { data } = await api.post(`/payments/admin/monthly-plans/${plan.id}/deactivate`, { environment }); setPlans(data.items); });
   };
   return <section className={card}>

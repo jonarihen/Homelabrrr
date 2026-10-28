@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import Modal from '../../components/Modal.jsx';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
 
 const SERVICES = [
   { name: 'ALL', label: 'All Traffic' },
@@ -431,6 +433,8 @@ function GraphLegend({ usedServices, hasDeny }) {
 }
 
 export default function PoliciesPage() {
+  const confirm = useConfirm();
+  const toast = useToast();
   useDocumentTitle('Policies');
   const { user } = useAuth();
   const canManageObjects = !!user?.isAdmin;
@@ -795,13 +799,13 @@ export default function PoliciesPage() {
   };
 
   const deletePolicy = async (policyId) => {
-    if (!confirm('Delete this policy?')) return;
+    if (!await confirm({ message: 'Delete this policy?', confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/admin/policies/${policyId}?firewallId=${selectedFw}`);
       setLinePopover(null);
       loadData();
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to delete policy');
+      toast.error(err.response?.data?.error || 'Failed to delete policy');
     }
   };
 
@@ -1576,12 +1580,12 @@ export default function PoliciesPage() {
                     <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{object.type}</span>
                     <button
                       onClick={async () => {
-                        if (!confirm(`Delete address object "${object.name}"?`)) return;
+                        if (!await confirm({ message: `Delete address object "${object.name}"?`, confirmLabel: 'Delete', danger: true })) return;
                         try {
                           await api.delete(`/admin/objects/addresses/${encodeURIComponent(object.name)}?firewallId=${selectedFw}`);
                           loadObjects();
                         } catch (err) {
-                          alert(err.response?.data?.error || 'Failed to delete');
+                          toast.error(err.response?.data?.error || 'Failed to delete');
                         }
                       }}
                       className="shrink-0 rounded p-1 text-gray-600 transition-colors hover:bg-red-500/10 hover:text-red-400"
@@ -1669,12 +1673,12 @@ export default function PoliciesPage() {
                     <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{object.protocol}</span>
                     <button
                       onClick={async () => {
-                        if (!confirm(`Delete service object "${object.name}"?`)) return;
+                        if (!await confirm({ message: `Delete service object "${object.name}"?`, confirmLabel: 'Delete', danger: true })) return;
                         try {
                           await api.delete(`/admin/objects/services/${encodeURIComponent(object.name)}?firewallId=${selectedFw}`);
                           loadObjects();
                         } catch (err) {
-                          alert(err.response?.data?.error || 'Failed to delete');
+                          toast.error(err.response?.data?.error || 'Failed to delete');
                         }
                       }}
                       className="shrink-0 rounded p-1 text-gray-600 transition-colors hover:bg-red-500/10 hover:text-red-400"
@@ -1747,11 +1751,7 @@ export default function PoliciesPage() {
       </div>
 
       {showModal && srcVlan && dstVlan && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) cancelSelection(); }}>
-          <div className="w-full max-w-md rounded-3xl border border-gray-700 bg-gray-900 shadow-2xl">
-            <div className="border-b border-gray-700 px-5 py-4">
-              <h2 className="font-semibold text-white">Create Policy</h2>
-            </div>
+        <Modal title="Create Policy" onClose={cancelSelection} size="sm">
 
             <div className="space-y-5 p-5">
               <div className="flex items-center justify-center gap-3 rounded-2xl border border-slate-800 bg-slate-800/50 py-3">
@@ -1831,8 +1831,7 @@ export default function PoliciesPage() {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

@@ -2,8 +2,12 @@ import { useState, useEffect } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import HardwareConnection from './HardwareConnection.jsx';
+import Modal from '../../components/Modal.jsx';
+import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
 
 export default function PVEHostsPage() {
+  const confirm = useConfirm();
+  const toast = useToast();
   useDocumentTitle('PVE Hosts');
   const [hosts, setHosts] = useState([]);
   const [statuses, setStatuses] = useState({});
@@ -76,14 +80,14 @@ export default function PVEHostsPage() {
       const { data: report } = await api.get(`/admin/pve-hosts/${id}/dependencies`);
       if (report.total > 0) {
         const lines = report.dependencies.map((item) => `${item.label}: ${item.count}`).join('\n');
-        alert(`This host cannot be deleted while portal resources still reference it:\n\n${lines}\n\nReassign or remove those resources first.`);
+        toast.error(`This host cannot be deleted while portal resources still reference it:\n\n${lines}\n\nReassign or remove those resources first.`);
         return;
       }
-      if (!confirm('This host has no portal dependencies. Delete it permanently?')) return;
+      if (!await confirm({ message: 'This host has no portal dependencies. Delete it permanently?', confirmLabel: 'Delete', danger: true })) return;
       await api.delete(`/admin/pve-hosts/${id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      toast.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -121,12 +125,12 @@ export default function PVEHostsPage() {
 
   const endMaint = async (host, node) => {
     if (!node.maintenance) return;
-    if (!confirm(`Lift maintenance on ${node.node}? New deployments will be allowed again and the notice will close.`)) return;
+    if (!await confirm(`Lift maintenance on ${node.node}? New deployments will be allowed again and the notice will close.`)) return;
     try {
       await api.delete(`/admin/node-maintenance/${node.maintenance.id}`);
       refreshHostStatus(host.id);
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to end maintenance');
+      toast.error(e.response?.data?.error || 'Failed to end maintenance');
     }
   };
 
@@ -330,15 +334,8 @@ export default function PVEHostsPage() {
 
       {/* Add/Edit form modal */}
       {showForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}>
-          <div role="dialog" aria-modal="true" aria-label={editId ? 'Edit Host' : 'Add PVE Host'} className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl">
+        <Modal title={editId ? 'Edit Host' : 'Add PVE Host'} onClose={() => setShowForm(false)}>
           <form onSubmit={save}>
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-              <h2 className="text-white font-semibold">{editId ? 'Edit Host' : 'Add PVE Host'}</h2>
-              <button type="button" onClick={() => setShowForm(false)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-              </button>
-            </div>
             <div className="p-5 space-y-4">
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">Name</label>
@@ -478,21 +475,13 @@ export default function PVEHostsPage() {
           </form>
           {/* Outside the host <form>: each iLO has its own form and save. */}
           {editId && <HostHardwareSettings hostId={editId} nodes={statuses[editId]?.nodes || []} rebindTargets={hardwareNodeRefs} />}
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Node maintenance (drain) modal */}
       {maintTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={e => { if (e.target === e.currentTarget) setMaintTarget(null); }}>
-          <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl">
+        <Modal title={`Drain node — ${maintTarget.nodeName}`} onClose={() => setMaintTarget(null)} size="sm">
             <div className="h-0.5 bg-yellow-500" />
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-              <h2 className="text-white font-semibold">Drain node — {maintTarget.nodeName}</h2>
-              <button type="button" onClick={() => setMaintTarget(null)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-              </button>
-            </div>
             <div className="p-5 space-y-4">
               <p className="text-xs text-gray-400">
                 New VMs cannot be deployed to this node while it is in maintenance. A notice is published to all users and Overview shows it as amber. Running VMs keep running — this is a soft drain.
@@ -524,8 +513,7 @@ export default function PVEHostsPage() {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

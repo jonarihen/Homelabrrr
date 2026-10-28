@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-28 — Styled confirmations, notices and dialogs
+
+- Browser confirm and alert pop-ups are replaced by in-app dialogs and notices. Destructive actions (delete, remove, revoke, discard) use a red confirm button, and focus starts on **Cancel**. **Escape** cancels.
+- Errors appear as notices in the bottom-right corner and stay until you dismiss them. Other notices close on their own.
+- The firewall, Proxmox host, drain-node, policy, Caddy server, site-import, hardware, changelog and identity-check dialogs now close with **Escape**. Keyboard focus stays inside them and returns to the button that opened them.
+- **Stop** on a VM page now asks for confirmation before the hard power-off. Start, Reboot, Shutdown and Stop show their progress (for example "Starting…") until the VM status refreshes.
+- The VM page hides **Delete** from users who can see a VM but do not own it.
+- The hardware dialog takes memory in **GB**, matching the deploy forms.
+- If cloud images, templates, nodes or websites fail to load, the error is shown. Previously the page claimed none were available.
+- An empty dashboard offers **Create your first VM** to users who may provision. Website upstream chips show VM names, and an invalid invite link explains how to get a new one.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.

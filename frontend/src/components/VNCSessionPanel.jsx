@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 import { readClipboardText, typeIntoVnc } from '../utils/vncPaste.js';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 import {
   CONNECTING, CONNECTED, DISCONNECTED, CONNECTION_LOST,
   canReconnect, isConnected,
@@ -26,6 +27,7 @@ function forceFullRefresh(rfb) {
 }
 
 export default function VNCSessionPanel({ vm, visible = true }) {
+  const confirm = useConfirm();
   const vmNode = routeNode(vm);
   const containerRef = useRef(null);
   const rfbRef = useRef(null);
@@ -128,7 +130,7 @@ export default function VNCSessionPanel({ vm, visible = true }) {
     if (!rfb || pasting) return;
     const text = await readClipboardText();
     if (!text) return;
-    if (text.length > 2000 && !confirm(`Type all ${text.length} clipboard characters into the VM?`)) return;
+    if (text.length > 2000 && !await confirm(`Type all ${text.length} clipboard characters into the VM?`)) return;
     setPasting(true);
     try {
       await typeIntoVnc(rfb, text, { shouldStop: () => pasteStopRef.current || rfbRef.current !== rfb });

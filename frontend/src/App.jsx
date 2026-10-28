@@ -3,6 +3,7 @@ import {
 } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
 import { ConsoleSessionsProvider } from './contexts/ConsoleSessionsContext.jsx';
+import { FeedbackProvider } from './contexts/FeedbackContext.jsx';
 import Login from './pages/Login.jsx';
 import AcceptInvite from './pages/AcceptInvite.jsx';
 import WelcomePage from './pages/WelcomePage.jsx';
@@ -159,7 +160,9 @@ const router = createBrowserRouter(createRoutesFromElements(
 export default function App() {
   return (
     <AuthProvider>
-      <RouterProvider router={router} />
+      <FeedbackProvider>
+        <RouterProvider router={router} />
+      </FeedbackProvider>
     </AuthProvider>
   );
 }

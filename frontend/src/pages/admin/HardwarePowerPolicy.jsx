@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
 import { manualPowerDurationRequest } from '../../utils/manualPowerDuration.js';
 import { POWER_MODES as modes, controlStatusLines, modeLabel, outcomeLabel, policyRequest } from '../../utils/powerPolicyView.js';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const toneClass = { warning: 'text-amber-400', error: 'text-red-400', info: 'text-gray-400' };
@@ -48,6 +49,7 @@ function ModeSelect({ value, onChange, omitHigh = false, placeholder = null }) {
 }
 
 export default function HardwarePowerPolicy({ connection, onConnectionChange }) {
+  const confirm = useConfirm();
   const [record, setRecord] = useState(null);
   const [draft, setDraft] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -81,7 +83,7 @@ export default function HardwarePowerPolicy({ connection, onConnectionChange }) 
     setPreview(null);
   });
   const control = (enable) => action(async () => {
-    if (enable && !window.confirm('Enable live iLO Power Regulator changes for this physical server? The server and VMs stay running.')) return;
+    if (enable && !await confirm('Enable live iLO Power Regulator changes for this physical server? The server and VMs stay running.')) return;
     await api.post(`/admin/power-control/${connection.id}/${enable ? 'enable' : 'disable'}`, enable ? { acknowledgeLiveControl: true } : {});
     onConnectionChange({ ...connection, control_enabled: enable });
     setNotice(enable ? 'Live mode control enabled.' : 'Live mode control disabled. In-flight commands cannot be recalled.');

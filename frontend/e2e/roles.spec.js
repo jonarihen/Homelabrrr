@@ -63,8 +63,10 @@ test('keyboard Review and Back refocus a reused role dialog without losing its o
   expect(await editor.evaluate(() => document.activeElement.value)).toBe('Operator');
   await expect(editor.getByRole('textbox').first()).toBeFocused();
   expect(await editor.getAttribute('aria-labelledby')).toBe(titleId);
-  page.once('dialog', (dialog) => dialog.accept());
   await page.keyboard.press('Escape');
+  const discard = page.getByRole('dialog', { name: 'Are you sure?' });
+  await expect(discard.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await discard.getByRole('button', { name: 'Discard' }).click();
   await expect(editor).toHaveCount(0);
   await expect(trigger).toBeFocused();
 });

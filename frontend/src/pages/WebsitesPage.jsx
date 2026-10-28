@@ -1,6 +1,7 @@
 import { useCallback, useState, useEffect } from 'react';
 import Layout from '../components/Layout.jsx';
 import PrereqCallout from '../components/PrereqCallout.jsx';
+import ErrorCallout from '../components/ErrorCallout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
@@ -18,6 +19,7 @@ export default function WebsitesPage() {
   const [sites, setSites] = useState([]);
   const [upstream, setUpstream] = useState({ isAdmin: false, vms: [], subnets: [] });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -32,7 +34,15 @@ export default function WebsitesPage() {
       setServers(cfg.data.servers || []);
       setSites(s.data || []);
       setUpstream(up.data || { isAdmin: false, vms: [], subnets: [] });
-    } catch { /* ignore */ }
+      setLoadError(null);
+      // Names come from Proxmox; until (or unless) they load, chips show the VMID.
+      if (up.data?.vms?.length) {
+        api.get('/vms').then((r) => {
+          const names = new Map((r.data || []).map((vm) => [vm.vmid, vm.name]));
+          setUpstream((u) => ({ ...u, vms: u.vms.map((vm) => ({ ...vm, name: names.get(vm.vmid) })) }));
+        }).catch(() => {});
+      }
+    } catch (e) { setLoadError(e); }
     finally { setLoading(false); }
   }, []);
 
@@ -78,6 +88,8 @@ export default function WebsitesPage() {
 
         {loading ? (
           <div className="space-y-4">{[1, 2].map((i) => <div key={i} className="bg-gray-900 border border-gray-800 rounded-2xl h-24 animate-pulse" />)}</div>
+        ) : loadError ? (
+          <ErrorCallout error={loadError} fallback="Failed to load websites" />
         ) : servers.length === 0 ? (
           <PrereqCallout
             title="No reverse proxy configured yet"
@@ -260,7 +272,7 @@ function PublishForm({ servers, upstream, isAdmin, onClose, onPublished }) {
                 {upstream.vms.map((vm) => (
                   <button type="button" key={`${vm.node}-${vm.vmid}`} onClick={() => setUpstreamHost(vm.ip)}
                     className="font-mono text-[11px] px-2 py-1 rounded border border-gray-700 bg-gray-800 hover:border-orange-500 hover:text-orange-400 transition-colors">
-                    VM {vm.vmid} · {vm.ip}
+                    {vm.name || `VM ${vm.vmid}`} · {vm.ip}
                   </button>
                 ))}
               </div>
@@ -507,7 +519,7 @@ function EditUpstreamForm({ site, upstream, isAdmin, serverHasInspection, onCanc
             {upstream.vms.map((vm) => (
               <button type="button" key={`${vm.node}-${vm.vmid}`} onClick={() => setHost(vm.ip)}
                 className="font-mono text-[11px] px-2 py-1 rounded border border-gray-700 bg-gray-800 hover:border-orange-500 hover:text-orange-400 transition-colors">
-                VM {vm.vmid} · {vm.ip}
+                {vm.name || `VM ${vm.vmid}`} · {vm.ip}
               </button>
             ))}
           </div>

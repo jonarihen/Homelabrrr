@@ -86,6 +86,7 @@ test('enabling live control requires explicit acknowledgement', async ({ page })
   const writes = await mockHosts(page);
   await page.goto('/admin/hosts');
   await page.getByRole('button', { name: 'Enable live control' }).click();
+  await page.getByRole('dialog', { name: 'Confirm' }).getByRole('button', { name: 'Confirm' }).click();
   await expect.poll(() => writes.find((item) => item.path.endsWith('/enable'))).toBeTruthy();
   expect(writes.find((item) => item.path.endsWith('/enable')).body).toEqual({ acknowledgeLiveControl: true });
 });

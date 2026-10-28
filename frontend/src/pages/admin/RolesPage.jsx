@@ -6,6 +6,7 @@ import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import useUnsavedChangesGuard from '../../hooks/useUnsavedChangesGuard.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { PERM_GROUPS, permLabel, isDangerPerm, roleMatchesQuery, diffRole, invalidRoleQuotaKeys } from '../../utils/roleDiff.js';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const btnCls = 'text-xs px-2 py-1 rounded hover:bg-gray-700 transition-colors';
 const KNOWN_PERMS = new Set(PERM_GROUPS.flatMap((g) => g.perms.map((p) => p.key)));
@@ -286,6 +287,7 @@ function ChangeList({ changes }) {
 // Create + edit share one modal; `role` present = edit mode. `prefill` seeds a
 // new role (used by Import).
 function RoleModal({ role, prefill, onClose, onSaved }) {
+  const confirm = useConfirm();
   const editing = !!role;
   const seed = role || prefill || null;
   const initial = useMemo(() => ({
@@ -318,8 +320,8 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
     ? changes.length > 0
     : JSON.stringify({ ...draft, permissions: [...perms].sort() }) !== JSON.stringify(initial) || !!prefill;
 
-  const requestClose = () => {
-    if (dirty && !saving && !confirm('Discard unsaved changes to this role?')) return;
+  const requestClose = async () => {
+    if (dirty && !saving && !await confirm({ message: 'Discard unsaved changes to this role?', confirmLabel: 'Discard', danger: true })) return;
     onClose();
   };
 
@@ -600,6 +602,7 @@ function CloneRoleModal({ source, onClose, onSaved }) {
 }
 
 function HoldersModal({ role, isAdmin, onClose, onChanged }) {
+  const confirm = useConfirm();
   const [holders, setHolders] = useState(null);
   const [allUsers, setAllUsers] = useState([]);
   const [selected, setSelected] = useState(() => new Set());
@@ -628,7 +631,7 @@ function HoldersModal({ role, isAdmin, onClose, onChanged }) {
     if (selected.size === 0) return;
     const names = candidates.filter((u) => selected.has(u.id)).map((u) => u.username);
     const moving = candidates.filter((u) => selected.has(u.id) && u.role_id).length;
-    if (!confirm(`Assign “${role.name}” to ${names.length} user${names.length === 1 ? '' : 's'} (${names.join(', ')})?${moving ? `\n\n${moving} of them will lose their current role.` : ''}`)) return;
+    if (!await confirm(`Assign “${role.name}” to ${names.length} user${names.length === 1 ? '' : 's'} (${names.join(', ')})?${moving ? `\n\n${moving} of them will lose their current role.` : ''}`)) return;
     setBusy(true);
     setError('');
     try {
@@ -844,10 +847,11 @@ function CompareRolesModal({ roles, onClose }) {
 }
 
 function ImportRoleModal({ permissionKeys, onClose, onImported }) {
+  const confirm = useConfirm();
   const [text, setText] = useState('');
   const [error, setError] = useState('');
 
-  const parse = () => {
+  const parse = async () => {
     setError('');
     let data;
     try { data = JSON.parse(text); } catch { setError('Not valid JSON'); return; }
@@ -858,7 +862,7 @@ function ImportRoleModal({ permissionKeys, onClose, onImported }) {
     const known = new Set(permissionKeys);
     const requested = data.permissions.filter((p) => typeof p === 'string');
     const unknown = requested.filter((p) => !known.has(p));
-    if (unknown.length && !confirm(`This instance does not know ${unknown.length} permission${unknown.length === 1 ? '' : 's'} in the export (${unknown.join(', ')}). Import without ${unknown.length === 1 ? 'it' : 'them'}?`)) {
+    if (unknown.length && !await confirm(`This instance does not know ${unknown.length} permission${unknown.length === 1 ? '' : 's'} in the export (${unknown.join(', ')}). Import without ${unknown.length === 1 ? 'it' : 'them'}?`)) {
       return;
     }
     onImported({

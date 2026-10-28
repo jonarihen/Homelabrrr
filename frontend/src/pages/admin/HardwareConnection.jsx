@@ -3,6 +3,7 @@ import api from '../../api.js';
 import HardwareTelemetryView from './HardwareTelemetryView.jsx';
 import HardwarePowerPolicy from './HardwarePowerPolicy.jsx';
 import { connectionNotices, connectionStatusText, connectionStatusTone, testFailureText, tlsTrustText, writePrivilegeText } from '../../utils/hardwareView.js';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const blank = { host: '', port: 443, username: '', password: '', tlsMode: 'pinned', caCertificate: '', clearCaCertificate: false };
 // iLOs almost always present a self-signed certificate, so pinning it is the default.
@@ -16,6 +17,7 @@ const STATUS_CLASS = { ok: 'text-green-400', info: 'text-gray-400', error: 'text
 // telemetry and power policy. `mode="config"` lives in the Edit Host dialog and
 // owns the connection settings, rebind and decommission.
 export default function HardwareConnection({ nodeRef, rebindTargets = [], mode = 'summary' }) {
+  const confirm = useConfirm();
   const configMode = mode === 'config';
   const [connection, setConnection] = useState(null);
   const [form, setForm] = useState(blank);
@@ -80,7 +82,7 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
     finally { setBusy(false); }
   }
   async function rebind() {
-    if (!rebindTo || !window.confirm(`Move this iLO binding from ${nodeRef} to ${rebindTo}? Collection and control will be disabled until it is tested again.`)) return;
+    if (!rebindTo || !await confirm(`Move this iLO binding from ${nodeRef} to ${rebindTo}? Collection and control will be disabled until it is tested again.`)) return;
     setBusy(true); setError('');
     try {
       await api.post(`/admin/hardware-connections/${connection.id}/rebind`, { nodeRef: rebindTo, configVersion: connection.config_version });
@@ -90,7 +92,7 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
     finally { setBusy(false); }
   }
   async function disconnect() {
-    if (!window.confirm(`Decommission iLO binding for ${nodeRef}? Collection and control will stop.`)) return;
+    if (!await confirm({ message: `Decommission iLO binding for ${nodeRef}? Collection and control will stop.`, confirmLabel: 'Decommission', danger: true })) return;
     setBusy(true); setError('');
     try { await api.delete(`/admin/hardware-connections/${connection.id}`); setConnection(null); setDiscovery(null); setForm(blank); window.dispatchEvent(new Event(CHANGED_EVENT)); }
     catch (err) { setError(err.response?.data?.error || 'Could not disconnect'); }

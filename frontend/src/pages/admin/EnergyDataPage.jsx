@@ -3,8 +3,10 @@ import api from '../../api.js';
 import ElectricityPricingPanel from './ElectricityPricingPanel.jsx';
 import ExtraLabLoadsPanel from './ExtraLabLoadsPanel.jsx';
 import ElectricityBillsPanel from './ElectricityBillsPanel.jsx';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 export default function EnergyDataPage() {
+  const confirm = useConfirm();
   const [status, setStatus] = useState(null);
   const [meters, setMeters] = useState([]);
   const [token, setToken] = useState('');
@@ -66,7 +68,7 @@ export default function EnergyDataPage() {
         <label>to (exclusive, max 31 days)<input type="date" required value={period.to} onChange={(event) => setPeriod((value) => ({ ...value, to: event.target.value }))} className="ml-1 rounded bg-slate-800 p-2" /></label>
         <button disabled={busy || !status.enabled} className="rounded border border-slate-600 px-3 py-2 disabled:opacity-50">Resync period</button>
       </form>
-      <div className="flex flex-wrap gap-3"><button disabled={busy || !status.enabled} onClick={() => action('sync')} className="rounded border border-slate-600 px-4 py-2 disabled:opacity-50">Sync now</button><button disabled={busy} onClick={() => action('disconnect')} className="rounded border border-red-700 px-4 py-2 disabled:opacity-50">Disconnect and keep history</button><button disabled={busy} onClick={() => { if (window.confirm('Disconnect and permanently delete all imported meter intervals and charge snapshots? Finalized cost statements are kept.')) action('disconnect', { purgeHistory: true }); }} className="rounded border border-red-700 px-4 py-2 text-red-300 disabled:opacity-50">Disconnect and purge history</button></div>
+      <div className="flex flex-wrap gap-3"><button disabled={busy || !status.enabled} onClick={() => action('sync')} className="rounded border border-slate-600 px-4 py-2 disabled:opacity-50">Sync now</button><button disabled={busy} onClick={() => action('disconnect')} className="rounded border border-red-700 px-4 py-2 disabled:opacity-50">Disconnect and keep history</button><button disabled={busy} onClick={async () => { if (await confirm('Disconnect and permanently delete all imported meter intervals and charge snapshots? Finalized cost statements are kept.')) action('disconnect', { purgeHistory: true }); }} className="rounded border border-red-700 px-4 py-2 text-red-300 disabled:opacity-50">Disconnect and purge history</button></div>
     </section>}
     <ElectricityPricingPanel />
     <ElectricityBillsPanel />

@@ -77,6 +77,10 @@ export default function AcceptInvite() {
             <p className="flex items-start gap-2 text-xs text-red-400 bg-red-900/20 border border-red-800/40 px-3 py-2.5 font-mono">
               <span className="aaris-led aaris-led--error mt-1" /> {loadError}
             </p>
+            <p className="text-xs text-gray-400">
+              Invite links work once and expire. If you don't have an account yet, ask the administrator who invited you for a new link.
+              If you already have an account, sign in instead.
+            </p>
             <button
               type="button"
               onClick={() => navigate('/login', { replace: true })}

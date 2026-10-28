@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
@@ -15,6 +16,7 @@ const CATEGORY_LABELS = {
 };
 
 export default function NotificationsPage() {
+  const confirm = useConfirm();
   useDocumentTitle('Notifications');
   const [webhooks, setWebhooks] = useState([]);
   const [eventTypes, setEventTypes] = useState([]);
@@ -43,7 +45,7 @@ export default function NotificationsPage() {
   useEffect(() => { load(); }, []);
 
   const del = async (wh) => {
-    if (!confirm(`Delete webhook "${wh.name}"? Events routed only to it will stop being sent.`)) return;
+    if (!await confirm({ message: `Delete webhook "${wh.name}"? Events routed only to it will stop being sent.`, confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/notifications/webhooks/${wh.id}`);
       load();
