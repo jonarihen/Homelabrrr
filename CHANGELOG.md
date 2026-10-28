@@ -3,7 +3,7 @@
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
-- Status chips (live, error, blocked, …) with counts narrow the list to one status. When nothing matches, a **Clear filters** button resets the view.
+- Status chips with counts (live, error, blocked, publishing, …) narrow the list to one status. All in-progress pipeline steps count as **publishing**. When nothing matches, a **Clear filters** button resets the view.
 
 ## 2026-10-15 — Cloud-image deployment no longer requires host SSH
 

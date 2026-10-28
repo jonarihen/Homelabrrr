@@ -4,13 +4,12 @@ import PrereqCallout from '../components/PrereqCallout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
-import { normalizeUpstreamPort, isUpstreamDraftValid, hasSiteChanged, isInspectionOn, filterSites } from '../utils/siteEdit.js';
+import { normalizeUpstreamPort, isUpstreamDraftValid, hasSiteChanged, isInspectionOn, filterSites, siteStatusCounts, IN_FLIGHT } from '../utils/siteEdit.js';
 import { startPolling } from '../utils/polling.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const selectCls = inputCls;
 
-const IN_FLIGHT = ['validating', 'pushing', 'issuing', 'inspecting', 'pending'];
 
 export default function WebsitesPage() {
   useDocumentTitle('Websites');
@@ -45,9 +44,8 @@ export default function WebsitesPage() {
   const canManageWebsites = !!(user?.isAdmin || user?.permissions?.canManageWebsites);
   const noWanIp = servers.length > 0 && servers.every((s) => !s.wanIp);
 
-  const visibleSites = filterSites(sites, { query, status: statusFilter });
-  // The selected status keeps its chip (at 0) after its last site moves on, so an empty list still explains itself.
-  const statusCounts = sites.reduce((acc, s) => ({ ...acc, [s.status]: (acc[s.status] || 0) + 1 }), statusFilter === 'all' ? {} : { [statusFilter]: 0 });
+  const visibleIds = new Set(filterSites(sites, { query, status: statusFilter }).map((s) => s.id));
+  const statusCounts = siteStatusCounts(sites, statusFilter);
 
   const hasInFlight = sites.some((s) => IN_FLIGHT.includes(s.status));
   // While something is publishing, refresh the list periodically so terminal
@@ -137,7 +135,7 @@ export default function WebsitesPage() {
             )}
 
             <div className="space-y-3">
-              {sites.length > 0 && visibleSites.length === 0 && (
+              {sites.length > 0 && visibleIds.size === 0 && (
                 <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 text-center">
                   <p className="text-sm text-gray-400">No websites match the current filter.</p>
                   <button type="button" onClick={() => { setQuery(''); setStatusFilter('all'); }} className="text-xs text-blue-400 hover:text-blue-300 mt-2">Clear filters</button>
@@ -149,8 +147,9 @@ export default function WebsitesPage() {
                   <p className="text-sm text-gray-600 mt-1">Point a domain’s A record at the homelab WAN IP, then publish it here.</p>
                 </div>
               )}
-              {visibleSites.map((site) => (
-                <SiteCard key={site.id} site={site} servers={servers} upstream={upstream} isAdmin={!!user?.isAdmin} onChanged={load} />
+              {/* Filtered-out cards stay mounted (just hidden) so an in-flight card keeps polling and an open edit keeps its draft. */}
+              {sites.map((site) => (
+                <SiteCard key={site.id} hidden={!visibleIds.has(site.id)} site={site} servers={servers} upstream={upstream} isAdmin={!!user?.isAdmin} onChanged={load} />
               ))}
             </div>
           </>
@@ -314,7 +313,7 @@ function InspectionToggle({ checked, onChange }) {
 
 // ─── Site card (with live stepper) ─────────────────────────────────────────────
 
-function SiteCard({ site: initial, servers, upstream, isAdmin, onChanged }) {
+function SiteCard({ hidden, site: initial, servers, upstream, isAdmin, onChanged }) {
   const [site, setSite] = useState(initial);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -375,7 +374,7 @@ function SiteCard({ site: initial, servers, upstream, isAdmin, onChanged }) {
   const serverHasInspection = !!servers?.find((s) => String(s.id) === String(site.serverId))?.hasInspection;
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+    <div hidden={hidden} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
       <div className={`h-0.5 ${isLive ? 'bg-green-500' : isError ? 'bg-red-500' : isHeld ? 'bg-orange-500' : isWarning ? 'bg-amber-500' : 'bg-blue-500 animate-pulse'}`} />
       <div className="p-5">
         <div className="flex items-start justify-between gap-3">
