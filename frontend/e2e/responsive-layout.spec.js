@@ -59,8 +59,7 @@ test('an admin table page does not scroll horizontally at phone width', async ({
   expect(await noHorizontalScroll(page)).toBe(true);
 });
 
-test('the drawer and its backdrop sit above console windows and below app modals', async ({ page }) => {
-  await page.route('**/api/vms/2~pve/101/status', (route) => route.fulfill({ json: { node: 'pve', nodeRef: '2~pve', vmid: 101, name: 'Test VM', status: 'running' } }));
+test('the drawer and its backdrop sit above console windows and below app modals', async ({ page }) => {  await page.route('**/api/vms/2~pve/101/status', (route) => route.fulfill({ json: { node: 'pve', nodeRef: '2~pve', vmid: 101, name: 'Test VM', status: 'running' } }));
   await page.route('**/api/vms/2~pve/101/vnc-ticket', (route) => route.fulfill({ status: 503, json: { error: 'Test console offline' } }));
   await page.goto('/vm/2~pve/101');
   await page.getByRole('button', { name: 'VNC', exact: true }).click();

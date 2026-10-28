@@ -20,6 +20,12 @@ export default function Layout({ children }) {
   const navRef = useRef(null);
   const menuButtonRef = useRef(null);
 
+  // Any navigation — including Back/forward onto the path the drawer was
+  // opened on — closes the drawer and forgets the stored path.
+  useEffect(() => {
+    setDrawerPath(null);
+  }, [pathname]);
+
   // Below lg the open drawer is a modal: focus trap, Escape, scroll lock and
   // focus return to the menu button all come from the shared Modal helper.
   // A passive effect, so React's post-commit focus restore cannot undo the return.
@@ -90,7 +96,7 @@ export default function Layout({ children }) {
           </div>
         </div>
 
-        <nav ref={navRef} className="flex-1 py-3 space-y-0.5 overflow-y-auto">
+        <nav ref={navRef} onClick={() => setDrawerPath(null)} className="flex-1 py-3 space-y-0.5 overflow-y-auto">
           <NavLink to="/welcome" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
             <Icon d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /> Overview
           </NavLink>
