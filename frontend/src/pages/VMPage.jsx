@@ -221,6 +221,7 @@ export default function VMPage() {
   useEffect(() => {
     if (!vmStatus) return undefined;
     let cancelled = false;
+    setDetectedIp(''); // never show the previous VM's address while this one loads or fails
     api.get(`/vms/${node}/${vmid}/detected-ips`)
       .then(r => { if (!cancelled) setDetectedIp(r.data?.candidates?.[0]?.ip || ''); })
       .catch(() => {});
@@ -330,7 +331,7 @@ export default function VMPage() {
     <Layout>
       <div className="p-6 lg:p-8 max-w-6xl mx-auto space-y-6">
 
-        {/* ── Sticky header: identity, status, actions, section nav ── */}
+        {/* ── Sticky header: identity, status, section nav (actions scroll away to keep it slim) ── */}
         <div ref={stickyRef} className="sticky top-0 z-20 -mx-6 lg:-mx-8 px-6 lg:px-8 py-3 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -374,6 +375,20 @@ export default function VMPage() {
             )}
             <StatusBadge status={vm.status} />
           </div>
+        </div>
+
+        <nav aria-label="VM sections" className="flex flex-wrap gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em]">
+          {sections.map(s => (
+            <a
+              key={s.id}
+              href={`#${s.id}`}
+              onClick={e => jumpTo(e, s.id)}
+              className="px-2.5 py-1 border border-gray-800 text-gray-400 hover:text-orange-400 hover:border-orange-600 transition-colors"
+            >
+              {s.label}
+            </a>
+          ))}
+        </nav>
         </div>
 
         {/* ── Action Bar ── */}
@@ -471,20 +486,6 @@ export default function VMPage() {
             }>Delete</ActionBtn>
           </div>
           {actionError && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5 mt-3">{actionError}</p>}
-        </div>
-
-        <nav aria-label="VM sections" className="flex flex-wrap gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em]">
-          {sections.map(s => (
-            <a
-              key={s.id}
-              href={`#${s.id}`}
-              onClick={e => jumpTo(e, s.id)}
-              className="px-2.5 py-1 border border-gray-800 text-gray-400 hover:text-orange-400 hover:border-orange-600 transition-colors"
-            >
-              {s.label}
-            </a>
-          ))}
-        </nav>
         </div>
 
         {/* ── Stats Grid ── */}
