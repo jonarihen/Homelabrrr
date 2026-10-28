@@ -7,18 +7,20 @@
 // `subnet_cidr` alone therefore sees *nothing at all* for the common case,
 // which is how browser SSH came to reject a VM sitting in the user's own VLAN.
 //
-// Precedence per VLAN (#331): (1) the /24s firewall syncs recorded in
-// `firewall_vlan_sync.subnet_cidr` — what the firewall actually provisioned,
-// one per firewall, all of them granted since the VLAN is the user's on each;
-// (2) an explicit `vlans.subnet_cidr`; (3) the default tag scheme, only when
-// nothing is recorded. Recorded data wins a conflict (with a warning) and is
-// never widened by the other two.
+// Precedence per firewall sync row (#331): a row with a recorded
+// `firewall_vlan_sync.subnet_cidr` contributes exactly that /24 (what the
+// firewall provisioned); a legacy row without one — or a VLAN with no sync
+// rows — contributes the pre-#331 derivation: `vlans.subnet_cidr` if set, else
+// the default tag scheme. All rows are granted, since the VLAN is the user's on
+// each firewall. A `vlans.subnet_cidr` that no recorded row matches is logged
+// as a conflict and grants nothing on the recorded firewalls.
 //
 // The db handle is passed in by callers (which already import it) so this
 // module stays free of side effects and is unit-testable with a stub.
 
 import { eq } from 'drizzle-orm';
 import { vlanTagToSubnet } from '../fortigate.ts';
+import { log } from './logger.ts';
 import type { DbOrTx } from '../db/client.ts';
 import { vlans, userVlans, firewallVlanSync } from '../db/schema/index.ts';
 
@@ -44,18 +46,22 @@ export function vlanRowCidr(row: VlanRow): string {
   return vlanTagToSubnet(row?.tag)?.network || '';
 }
 
-/** Every network a `vlans` row covers, applying the precedence above. */
+/** Every network a `vlans` row covers, applying the precedence above per sync row. */
 export function vlanRowCidrList(row: VlanRow): string[] {
-  const recorded = [...new Set((row?.synced || []).map((c) => String(c || '').trim()).filter((c) => CIDR_RE.test(c)))];
-  if (!recorded.length) {
-    const cidr = vlanRowCidr(row);
-    return cidr ? [cidr] : [];
+  const cidrs: string[] = [];
+  const recorded: string[] = [];
+  // No sync rows behaves like one legacy row: the pre-#331 derivation.
+  for (const synced of row?.synced?.length ? row.synced : [null]) {
+    const value = String(synced || '').trim();
+    const cidr = CIDR_RE.test(value) ? value : vlanRowCidr(row);
+    if (CIDR_RE.test(value) && !recorded.includes(value)) recorded.push(value);
+    if (cidr && !cidrs.includes(cidr)) cidrs.push(cidr);
   }
   const explicit = String(row?.subnet_cidr || '').trim();
-  if (CIDR_RE.test(explicit) && !recorded.includes(explicit)) {
-    console.warn(`[vlanSubnets] VLAN ${row?.tag}: subnet_cidr ${explicit} conflicts with recorded sync subnet(s) ${recorded.join(', ')}; using the recorded ones`);
+  if (recorded.length && CIDR_RE.test(explicit) && !recorded.includes(explicit)) {
+    log('warn', 'vlan_subnet_conflict', { tag: row?.tag, subnetCidr: explicit, recorded });
   }
-  return recorded;
+  return cidrs;
 }
 
 /** Unique, empty-free CIDR list for a set of `vlans` rows. */
