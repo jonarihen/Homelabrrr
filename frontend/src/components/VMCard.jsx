@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import StatusBadge from './StatusBadge.jsx';
 import LeaseBadge from './LeaseBadge.jsx';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
@@ -16,10 +16,12 @@ export default function VMCard({ vm, selected, onSelect }) {
   const cpuPct = vm.cpu !== undefined ? (vm.cpu * 100) : 0;
   const memPct = vm.mem && vm.maxmem ? (vm.mem / vm.maxmem * 100) : 0;
   const isLxc = vm.type === 'lxc';
+  const detailPath = `/vm/${routeNode(vm)}/${vm.vmid}`;
+  const label = vm.name || `VM ${vm.vmid}`;
 
   return (
     <div
-      onClick={() => navigate(`/vm/${routeNode(vm)}/${vm.vmid}`)}
+      onClick={() => navigate(detailPath)}
       className={`relative bg-gray-900 border p-5 flex flex-col gap-4 hover:border-gray-600 transition-colors duration-200 cursor-pointer group overflow-hidden ${selected ? 'border-orange-600/60 bg-orange-950/20' : 'border-gray-800'}`}
     >
       {/* Status strip at top — solid, status color only */}
@@ -28,11 +30,14 @@ export default function VMCard({ vm, selected, onSelect }) {
       {/* Selection indicator — visible on hover or when selected */}
       {onSelect && (
         <button
+          type="button"
           onClick={(e) => { e.stopPropagation(); onSelect(vm); }}
-          className={`absolute top-2.5 left-2.5 z-10 w-4 h-4 border-[1.5px] flex items-center justify-center transition-all duration-150 ${
+          aria-label={`Select ${label}`}
+          aria-pressed={!!selected}
+          className={`absolute top-2.5 left-2.5 z-10 w-4 h-4 border-[1.5px] flex items-center justify-center transition-all duration-150 focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 ${
             selected
               ? 'bg-orange-600 border-orange-600 scale-100 opacity-100'
-              : 'border-gray-600 bg-gray-800/80 scale-90 opacity-0 group-hover:opacity-100 group-hover:scale-100'
+              : 'border-gray-600 bg-gray-800/80 scale-90 opacity-0 group-hover:opacity-100 group-hover:scale-100 group-focus-within:opacity-100 group-focus-within:scale-100'
           }`}
         >
           {selected && (
@@ -47,7 +52,13 @@ export default function VMCard({ vm, selected, onSelect }) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-white font-semibold truncate group-hover:text-blue-400 transition-colors flex items-center gap-2" title={vm.name}>
-            {vm.name || `VM ${vm.vmid}`}
+            <Link
+              to={detailPath}
+              onClick={(e) => e.stopPropagation()}
+              className="truncate focus:outline-none focus-visible:underline"
+            >
+              {label}
+            </Link>
             {isLxc && (
               <span className="shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400 border border-orange-500/20 uppercase tracking-wide">
                 LXC

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-28 — Keyboard-friendly VM cards, movable console windows, clearer deploy forms
+
+- **VM cards** can now be opened with the keyboard (the VM name is a real link), and the select box shows up when focused and is announced to screen readers.
+- **Console windows** can be dragged with touch or a pen, moved with the arrow keys on the title bar (Shift for bigger steps), and resized from the bottom-right corner.
+- **Deploy**: if your account has no VLAN yet, the deploy forms say so up front ("Ask an admin to assign you a VLAN") and the deploy button stays disabled. With exactly one VLAN it is preselected.
+- The cloud-init **Username** field no longer suggests "operator"; leaving it blank keeps the image's default user.
+- The 2FA step on the login page now tells you what to do if you lost your device.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.

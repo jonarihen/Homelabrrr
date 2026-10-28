@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import ErrorCallout from '../components/ErrorCallout.jsx';
 import SSHSessionPanel from '../components/SSHSessionPanel.jsx';
@@ -249,43 +249,82 @@ function ConsoleSessionLayer({
   );
 }
 
+const KEYBOARD_MOVE_STEP = 20;
+const ARROW_DELTAS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+
+function clampWindowPosition(session, x, y) {
+  const { width, height } = getViewport();
+  return {
+    x: clamp(x, 12, Math.max(12, width - session.width - 12)),
+    y: clamp(y, 12, Math.max(12, height - session.height - 72)),
+  };
+}
+
 function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, onMove, onPopOut }) {
+  const windowRef = useRef(null);
+  const sizeRef = useRef({ width: session.width, height: session.height });
+  sizeRef.current = { width: session.width, height: session.height };
+
+  // Sync a native CSS resize (resize: both) back into session state so drag/tile clamping sees the new size.
+  useEffect(() => {
+    const el = windowRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => {
+      const width = el.offsetWidth;
+      const height = el.offsetHeight;
+      if (!width || !height) return; // hidden while minimized
+      if (width !== sizeRef.current.width || height !== sizeRef.current.height) {
+        onMove(session.id, { width, height });
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [onMove, session.id]);
+
   const startDrag = useCallback((event) => {
     if (event.button !== 0) return;
 
     onFocus(session.id);
 
-    const initialMouseX = event.clientX;
-    const initialMouseY = event.clientY;
+    const initialPointerX = event.clientX;
+    const initialPointerY = event.clientY;
     const initialX = session.x;
     const initialY = session.y;
 
     const handleMove = (moveEvent) => {
-      const { width, height } = getViewport();
-      const maxX = Math.max(12, width - session.width - 12);
-      const maxY = Math.max(12, height - session.height - 72);
-
-      onMove(session.id, {
-        x: clamp(initialX + (moveEvent.clientX - initialMouseX), 12, maxX),
-        y: clamp(initialY + (moveEvent.clientY - initialMouseY), 12, maxY),
-      });
+      onMove(session.id, clampWindowPosition(
+        session,
+        initialX + (moveEvent.clientX - initialPointerX),
+        initialY + (moveEvent.clientY - initialPointerY),
+      ));
     };
 
     const stopDrag = () => {
-      document.removeEventListener('mousemove', handleMove);
-      document.removeEventListener('mouseup', stopDrag);
+      document.removeEventListener('pointermove', handleMove);
+      document.removeEventListener('pointerup', stopDrag);
+      document.removeEventListener('pointercancel', stopDrag);
       document.body.style.userSelect = '';
     };
 
     document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', handleMove);
-    document.addEventListener('mouseup', stopDrag);
+    document.addEventListener('pointermove', handleMove);
+    document.addEventListener('pointerup', stopDrag);
+    document.addEventListener('pointercancel', stopDrag);
     event.preventDefault();
-  }, [onFocus, onMove, session.id, session.width, session.height, session.x, session.y]);
+  }, [onFocus, onMove, session]);
+
+  const handleMoveKey = useCallback((event) => {
+    const delta = ARROW_DELTAS[event.key];
+    if (!delta || event.target !== event.currentTarget) return;
+    event.preventDefault();
+    const step = event.shiftKey ? KEYBOARD_MOVE_STEP * 5 : KEYBOARD_MOVE_STEP;
+    onMove(session.id, clampWindowPosition(session, session.x + delta[0] * step, session.y + delta[1] * step));
+  }, [onMove, session]);
 
   return (
     <div
-      className={`${session.minimized ? 'hidden' : 'flex'} pointer-events-auto fixed flex-col overflow-hidden border border-gray-700 bg-gray-900`}
+      ref={windowRef}
+      className={`${session.minimized ? 'hidden' : 'flex'} pointer-events-auto fixed flex-col overflow-hidden resize min-w-[320px] min-h-[240px] border border-gray-700 bg-gray-900`}
       style={{
         left: `${session.x}px`,
         top: `${session.y}px`,
@@ -296,8 +335,11 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
       onMouseDown={() => onFocus(session.id)}
     >
       <div
-        className="flex items-center justify-between gap-3 border-b border-gray-700 bg-gray-950 px-4 py-3 cursor-move shrink-0"
-        onMouseDown={startDrag}
+        className="flex items-center justify-between gap-3 border-b border-gray-700 bg-gray-950 px-4 py-3 cursor-move shrink-0 touch-none focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-blue-500"
+        onPointerDown={startDrag}
+        onKeyDown={handleMoveKey}
+        tabIndex={0}
+        aria-label={`Move ${consoleTitle(session)} window (arrow keys, Shift for larger steps)`}
       >
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm text-white font-semibold">
@@ -305,7 +347,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
             <span className="truncate">{consoleTitle(session)}</span>
           </div>
           <p className="mt-0.5 truncate font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500">
-            {session.vm.node} / {session.vm.vmid}
+            {displayNode(session.vm.node)} / {session.vm.vmid}
           </p>
         </div>
 
@@ -375,7 +417,7 @@ function ConsoleSessionDock({ sessions, restoreSession, closeSession, liveCount,
             {sessions.map((session) => (
               <div
                 key={session.id}
-                className="flex items-center gap-2 rounded-xl border border-gray-800 bg-gray-900/90 px-3 py-2"
+                className="flex items-center gap-2 border border-gray-800 bg-gray-900/90 px-3 py-2"
               >
                 <button
                   type="button"
@@ -389,7 +431,7 @@ function ConsoleSessionDock({ sessions, restoreSession, closeSession, liveCount,
                 <button
                   type="button"
                   onClick={() => closeSession(session.id)}
-                  className="rounded-md p-1 text-gray-500 hover:bg-red-500/10 hover:text-red-300 transition-colors"
+                  className="p-1 text-gray-500 hover:bg-red-500/10 hover:text-red-300 transition-colors"
                   aria-label={`Close ${consoleTitle(session)}`}
                 >
                   <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -410,7 +452,7 @@ function TileButton({ label, onClick, icon }) {
     <button
       type="button"
       onClick={onClick}
-      className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-800 hover:text-white transition-colors"
+      className="p-1.5 text-gray-500 hover:bg-gray-800 hover:text-white transition-colors"
       aria-label={label}
       title={label}
     >
@@ -427,7 +469,7 @@ function SessionTypeBadge({ type, compact = false }) {
     : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/20';
 
   return (
-    <span className={`inline-flex items-center rounded-lg border px-2 ${compact ? 'py-0.5 text-[10px]' : 'py-1 text-[11px]'} font-semibold uppercase tracking-wide ${styles}`}>
+    <span className={`inline-flex items-center border px-2 ${compact ? 'py-0.5 text-[10px]' : 'py-1 text-[11px]'} font-semibold uppercase tracking-wide ${styles}`}>
       {type}
     </span>
   );
@@ -437,12 +479,12 @@ function WindowAction({ label, onClick, icon }) {
   return (
     <button
       type="button"
-      onMouseDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation();
         onClick();
       }}
-      className="rounded-lg p-2 text-gray-500 hover:bg-gray-800 hover:text-white transition-colors"
+      className="p-2 text-gray-500 hover:bg-gray-800 hover:text-white transition-colors"
       aria-label={label}
       title={label}
     >
