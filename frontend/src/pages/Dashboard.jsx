@@ -195,7 +195,7 @@ export default function Dashboard() {
     <Layout>
       <div className="p-6 lg:p-8">
         {/* Header */}
-        <div className="flex items-start justify-between mb-6">
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
           <div>
             <div className="flex items-baseline gap-3">
               <span className="font-mono text-xs font-semibold text-orange-600 tracking-[0.12em]">01</span>
@@ -243,7 +243,7 @@ export default function Dashboard() {
 
         {/* Summary stats bar */}
         {running > 0 && !loading && (
-          <div className="flex items-center gap-6 bg-gray-900/60 border border-gray-800/50 rounded-xl px-5 py-3 mb-5">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 bg-gray-900/60 border border-gray-800/50 rounded-xl px-5 py-3 mb-5">
             <div className="flex items-center gap-2">
               <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2z" />

@@ -117,7 +117,7 @@ export default function AuditLogPage() {
         </div>
       )}
 
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="bg-gray-800/50">

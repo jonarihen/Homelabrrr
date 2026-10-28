@@ -267,7 +267,7 @@ export default function AdminWebsitesPage() {
       {/* ── All published sites ── */}
       <section className="space-y-3">
         <h2 className="text-xs uppercase tracking-wider text-gray-500 font-medium">Published sites</h2>
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">

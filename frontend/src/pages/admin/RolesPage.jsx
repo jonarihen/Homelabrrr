@@ -126,7 +126,7 @@ export default function RolesPage() {
           {[1, 2].map(i => <div key={i} className="h-16 bg-gray-900 rounded-xl animate-pulse" />)}
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
@@ -814,7 +814,7 @@ function CompareRolesModal({ roles, onClose }) {
             {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
           </select>
         </div>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto"><table className="w-full text-sm">
           <thead>
             <tr className="text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
               <th className="text-left py-2">Permission / quota</th>
@@ -837,7 +837,7 @@ function CompareRolesModal({ roles, onClose }) {
               );
             })}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </Modal>
   );

@@ -276,7 +276,7 @@ function CloudImagesSection({ onTemplatesChanged }) {
           <p className="text-sm text-gray-500">No cloud images yet. Add Ubuntu, Debian or another distro's cloud image to build templates from.</p>
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
@@ -731,7 +731,7 @@ function IsosSection() {
           <p className="text-sm text-gray-500">No ISOs catalogued yet. Add an installer ISO by URL to boot from-scratch VMs from it.</p>
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
