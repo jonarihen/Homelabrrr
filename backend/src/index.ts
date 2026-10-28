@@ -362,9 +362,9 @@ server.on('upgrade', async (request, socket, head) => {
     // Mark as consumed immediately to prevent parallel replays, but keep the
     // entry until the upgrade completes so a failed upgrade doesn't lose data.
     sess._consumed = true;
-    vncWss.handleUpgrade(request, socket, head, (ws) => {
+    vncWss.handleUpgrade(request, socket, head, async (ws) => {
       vncSessions.delete(token);
-      trackConsoleSocket(ws, request.sessionID, request.session.userId);
+      if (!await trackConsoleSocket(ws, request.sessionID, request.session.userId, sessionStore)) return;
       vncWss.emit('connection', ws, sess);
     });
   } else if (url.pathname === '/api/ssh') {
@@ -379,9 +379,9 @@ server.on('upgrade', async (request, socket, head) => {
       return;
     }
     sess._consumed = true;
-    sshWss.handleUpgrade(request, socket, head, (ws) => {
+    sshWss.handleUpgrade(request, socket, head, async (ws) => {
       sshSessions.delete(token);
-      trackConsoleSocket(ws, request.sessionID, request.session.userId);
+      if (!await trackConsoleSocket(ws, request.sessionID, request.session.userId, sessionStore)) return;
       sshWss.emit('connection', ws, sess);
     });
   } else {
@@ -423,6 +423,7 @@ vncWss.on('connection', async (clientWs, vncSession) => {
     clientWs.close();
     return;
   }
+  if (clientWs.readyState !== WebSocket.OPEN) return; // client left while the host was resolving
 
   const TOKEN = `PVEAPIToken=${pveHost.tokenId}=${pveHost.tokenSecret}`;
   const vncUrl = `wss://${pveHost.host}:${pveHost.port}/api2/json/nodes/${proxmoxNode}/${vmtype}/${vmid}/vncwebsocket`
@@ -438,6 +439,11 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   });
 
   proxmoxWs.on('open', () => {
+    // The browser may have left while PVE was still accepting the upgrade.
+    if (clientWs.readyState !== WebSocket.OPEN) {
+      proxmoxWs.terminate();
+      return;
+    }
     console.log(`[VNC-ws] proxy OPEN: ${proxmoxNode}/${vmid} (${Date.now() - createdAt}ms since ticket)`);
   });
 
@@ -493,7 +499,14 @@ sshWss.on('connection', (clientWs, sshSession) => {
   const expectedHostFingerprint = normalizeSshHostFingerprint(hostFingerprint);
   let hostVerificationError = '';
 
+  // Installed before connecting: a console revoked mid-handshake must still end the SSH session.
+  clientWs.on('close', () => conn.end());
+
   conn.on('ready', () => {
+    if (clientWs.readyState !== WebSocket.OPEN) {
+      conn.end();
+      return;
+    }
     log('info', 'ssh_connected', { requestId, node, vmid, port });
     clientWs.send(JSON.stringify({ type: 'status', status: 'connected' }));
 
@@ -501,6 +514,11 @@ sshWss.on('connection', (clientWs, sshSession) => {
       if (err) {
         clientWs.send(JSON.stringify({ type: 'error', ...sshClientError(err) }));
         clientWs.close();
+        return;
+      }
+      if (clientWs.readyState !== WebSocket.OPEN) {
+        stream.close();
+        conn.end();
         return;
       }
 
