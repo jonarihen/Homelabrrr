@@ -1,5 +1,6 @@
 import https from 'https';
 import tls from 'tls';
+import { isIP } from 'node:net';
 import { timingSafeEqual } from 'node:crypto';
 import { eq, inArray } from 'drizzle-orm';
 import { db, type DbOrTx } from './db/client.ts';
@@ -31,6 +32,11 @@ function hostPin(host) {
   return pin;
 }
 
+// SNI only makes sense for DNS names — RFC 6066 forbids IP literals.
+function sniForHost(host) {
+  return isIP(host.host) ? undefined : host.host;
+}
+
 function fingerprintMatches(presented, pin) {
   const a = Buffer.from(String(presented || ''));
   const b = Buffer.from(pin);
@@ -58,7 +64,7 @@ export function agentForHost(host) {
   (agent as unknown as { createConnection: unknown }).createConnection = (options, callback) => {
     let done = false;
     const finish = (err) => { if (!done) { done = true; callback(err, socket); } };
-    const socket = tls.connect({ ...options, rejectUnauthorized: false });
+    const socket = tls.connect({ ...options, servername: sniForHost(host), rejectUnauthorized: false });
     socket.setTimeout(15000, () => socket.destroy(new Error('Proxmox TLS handshake timeout')));
     socket.once('error', finish);
     socket.once('secureConnect', () => {
@@ -879,6 +885,7 @@ export function getHostCertFingerprint(host) {
     const socket = tls.connect({
       host: host.host,
       port: host.port,
+      servername: sniForHost(host),
       rejectUnauthorized: pin ? false : host.verify_tls !== false,
     }, () => {
       const cert = socket.getPeerCertificate();

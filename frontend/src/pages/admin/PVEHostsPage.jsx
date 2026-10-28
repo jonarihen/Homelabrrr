@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import HardwareConnection from './HardwareConnection.jsx';
@@ -21,6 +21,9 @@ export default function PVEHostsPage() {
   const [clearPin, setClearPin] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  // Bumped whenever the probe target can change (form edits, dialog reopen):
+  // responses from an older target/dialog session must not install its probe.
+  const probeGeneration = useRef(0);
   // Node maintenance drain form: { hostId, nodeRef, nodeName } | null
   const [maintTarget, setMaintTarget] = useState(null);
   const [maintForm, setMaintForm] = useState({ reason: '', until: '' });
@@ -67,20 +70,27 @@ export default function PVEHostsPage() {
 
   const resetTrust = (pin) => {
     setCurrentPin(pin); setProbe(null); setPinConfirmed(false); setClearPin(false); setTestResult(null);
+    probeGeneration.current += 1;
   };
   // The pin to save or test with: a confirmed new certificate, an explicit
   // removal, or else whatever is stored.
   const pinValue = () => (probe && pinConfirmed ? probe.fingerprint256 : clearPin ? null : currentPin);
-  const setTarget = (patch) => { setForm(f => ({ ...f, ...patch })); setProbe(null); setPinConfirmed(false); setTestResult(null); };
+  const setTarget = (patch) => { setForm(f => ({ ...f, ...patch })); setProbe(null); setPinConfirmed(false); setTestResult(null); probeGeneration.current += 1; };
 
   const fetchCertificate = async () => {
     setBusy('probe'); setError(''); setProbe(null); setPinConfirmed(false);
+    const generation = probeGeneration.current;
+    const host = form.host, port = form.port;
     try {
-      const { data } = await api.post('/admin/pve-hosts/certificate-probe', { host: form.host, port: form.port });
+      const { data } = await api.post('/admin/pve-hosts/certificate-probe', { host, port });
+      if (generation !== probeGeneration.current || form.host !== host || form.port !== port) return;
       setProbe(data);
     } catch (e) {
+      if (generation !== probeGeneration.current || form.host !== host || form.port !== port) return;
       setError(e.response?.data?.error || 'Could not read the host certificate');
-    } finally { setBusy(false); }
+    } finally {
+      if (generation === probeGeneration.current) setBusy((b) => (b === 'probe' ? false : b));
+    }
   };
 
   // A result only describes the inputs it was run with; editing any of them hides it.
