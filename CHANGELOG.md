@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-28 — VLAN access follows the subnets firewalls actually provisioned
+
+- Browser SSH targets, website upstreams and public-IP targets now check your VLANs against the subnet each firewall sync recorded, so deployments that don't use the `10.x` scheme no longer refuse addresses in your own VLAN — and no longer accept the unused `10.x` range.
+- A VLAN synced to several firewalls covers each firewall's recorded subnet. VLANs without a recorded subnet keep using their configured subnet or the default scheme.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
