@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 process.env.DATABASE_URL ||= 'postgres://test:test@127.0.0.1:5432/test';
-const { runBundle } = await import('./runner.ts');
+const { runBundle, WorkflowDisabledError } = await import('./runner.ts');
 
 const args = {
   bundle: { workflow: { id: 12, trigger: 'vlan_provision' }, steps: [{ id: 1 }] },
@@ -46,6 +46,20 @@ test('runBundle records a failed workflow before rethrowing it', async () => {
   );
   assert.equal(recorded.status, 'failed');
   assert.deepEqual(recorded.artifacts, original.workflowRun.artifacts);
+});
+
+test('runBundle refuses a disabled workflow without running or recording it', async () => {
+  let ran = false;
+  let recorded = false;
+  await assert.rejects(
+    runBundle({ ...args, bundle: { ...args.bundle, workflow: { ...args.bundle.workflow, enabled: false } } }, {
+      executeWorkflow: async () => { ran = true; return { status: 'success', outputs: {}, artifacts: [], log: [] }; },
+      saveRun: async () => { recorded = true; return 1; },
+    }),
+    (err) => err instanceof WorkflowDisabledError && err.status === 409,
+  );
+  assert.equal(ran, false);
+  assert.equal(recorded, false);
 });
 
 test('failed-run recording errors do not mask the workflow error', async (t) => {
