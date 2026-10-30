@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-28 — A slow iLO no longer delays its neighbours
+
+- Hardware telemetry now polls each node independently (still at most two at a time), so one slow or unresponsive iLO no longer holds back the next node's power reading for up to a minute.
+
 ## 2026-10-28 — Search and filter on the Websites page
 
 - The **Websites** page now has a search box that matches domain, upstream host/port, site kind and owner.
