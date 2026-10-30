@@ -1,5 +1,22 @@
 import { runWorkflow, previewWorkflow, teardownArtifacts } from './engine.ts';
 import { recordRun } from './store.ts';
+import { isForeignKeyViolation } from '../db/errors.ts';
+
+/** The firewall (or VLAN) was deleted while a run was creating its objects. */
+export class ProvisioningTargetGoneError extends Error {
+  status = 409;
+}
+
+/**
+ * Remove what a run just created when its records can no longer be stored
+ * (FK target deleted mid-run), so nothing stays live without a managed record.
+ */
+export async function teardownForGoneTarget(client, artifacts) {
+  const { errors } = await teardownArtifacts(client, artifacts);
+  return new ProvisioningTargetGoneError(errors.length > 0
+    ? `The firewall or VLAN was deleted during provisioning; removing the created objects failed: ${errors.join('; ')}`
+    : 'The firewall or VLAN was deleted during provisioning; the created objects were removed');
+}
 
 /** A workflow the admin switched off: callers answer 409 instead of running it. */
 export class WorkflowDisabledError extends Error {
@@ -63,12 +80,17 @@ export async function runBundle(
       artifacts: result.artifacts,
       dryRun: false,
       requestId,
+    }).catch(async (err) => {
+      // The firewall's workflow is gone (firewall deleted mid-run).
+      if (isForeignKeyViolation(err)) throw await teardownForGoneTarget(client, result.artifacts);
+      throw err;
     });
     if (!Number.isInteger(runId)) {
       throw new TypeError('Workflow run recording did not return a numeric ID');
     }
     return { runId, outputs: result.outputs, artifacts: result.artifacts, status: result.status };
   } catch (err: any) {
+    if (err instanceof ProvisioningTargetGoneError) throw err;
     const failed = err.workflowRun || { status: 'failed', log: [{ status: 'error', error: err.message }], artifacts: [] };
     try {
       await saveRun({

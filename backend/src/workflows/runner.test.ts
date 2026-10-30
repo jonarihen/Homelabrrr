@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 process.env.DATABASE_URL ||= 'postgres://test:test@127.0.0.1:5432/test';
-const { runBundle, WorkflowDisabledError } = await import('./runner.ts');
+const { runBundle, ProvisioningTargetGoneError, WorkflowDisabledError } = await import('./runner.ts');
 
 const args = {
   bundle: { workflow: { id: 12, trigger: 'vlan_provision' }, steps: [{ id: 1 }] },
@@ -46,6 +46,21 @@ test('runBundle records a failed workflow before rethrowing it', async () => {
   );
   assert.equal(recorded.status, 'failed');
   assert.deepEqual(recorded.artifacts, original.workflowRun.artifacts);
+});
+
+test('runBundle tears down created objects when the run cannot be recorded because its firewall is gone', async () => {
+  const deleted = [];
+  const client = { deleteAddressObject: async (name) => { deleted.push(name); } };
+  let saves = 0;
+  await assert.rejects(
+    runBundle({ ...args, client }, {
+      executeWorkflow: async () => ({ status: 'success', outputs: {}, artifacts: [{ type: 'address', name: 'NET-x' }], log: [] }),
+      saveRun: async () => { saves += 1; throw Object.assign(new Error('fk'), { code: '23503' }); },
+    }),
+    (err) => err instanceof ProvisioningTargetGoneError && err.status === 409,
+  );
+  assert.deepEqual(deleted, ['NET-x']);
+  assert.equal(saves, 1);
 });
 
 test('runBundle refuses a disabled workflow without running or recording it', async () => {
