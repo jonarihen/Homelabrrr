@@ -124,11 +124,13 @@ export async function getWorkflowById(id: number) {
 
 export async function listWorkflowsForFirewall(firewallId: number) {
   await seedWorkflowsForFirewall(firewallId);
-  const rows = await db
+  const rows = (await db
     .select()
     .from(workflows)
     .where(eq(workflows.firewall_id, firewallId))
-    .orderBy(workflows.trigger);
+    .orderBy(workflows.trigger))
+    // Older installs seeded delete triggers that never ran; hide rows for triggers we no longer offer.
+    .filter((w) => TRIGGER_MAP[w.trigger]);
   if (rows.length === 0) return [];
   // Single grouped count instead of a COUNT(*) per workflow (was an N+1 loop).
   const ids = rows.map((w) => w.id);

@@ -11,11 +11,8 @@
 
 export const TRIGGERS = [
   { trigger: 'vlan_provision',       label: 'VLAN — provision',        subjectType: 'vlan',         kind: 'create', description: 'Runs when a VLAN is synced to this firewall.' },
-  { trigger: 'vlan_deprovision',     label: 'VLAN — deprovision',      subjectType: 'vlan',         kind: 'delete', description: 'Runs when a VLAN is unsynced / deleted. Artifact-based teardown.' },
   { trigger: 'port_forward_create',  label: 'Port forward — create',   subjectType: 'port_forward', kind: 'create', description: 'Runs when a port forward (VIP + policy chain) is created.' },
-  { trigger: 'port_forward_delete',  label: 'Port forward — delete',   subjectType: 'port_forward', kind: 'delete', description: 'Runs when a managed port forward is deleted. Artifact-based teardown.' },
   { trigger: 'policy_create',        label: 'Policy — create',         subjectType: 'policy',       kind: 'create', description: 'Runs when an inter-VLAN policy is created.' },
-  { trigger: 'policy_delete',        label: 'Policy — delete',         subjectType: 'policy',       kind: 'delete', description: 'Runs when an inter-VLAN policy is deleted.' },
 ];
 
 export const TRIGGER_MAP = Object.fromEntries(TRIGGERS.map((t) => [t.trigger, t]));
@@ -44,9 +41,6 @@ export const TRIGGER_VARIABLES = {
     '{{dstVlan.interface_name}}', '{{dstVlan.name}}', '{{dstVlan.tag}}',
     '{{srcAddrName}}', '{{dstAddrName}}',
   ],
-  vlan_deprovision: [],
-  port_forward_delete: [],
-  policy_delete: [],
 };
 
 function step(step_key, action, params, opts = {}) {
@@ -213,13 +207,6 @@ export function defaultSteps(trigger) {
           globalLabel: '{{dstVlan.name}} ({{dstVlan.interface_name}})',
           comments: 'Inter-VLAN policy created via VM Manager',
         }, { label: 'Reverse policy', condition: '{{bidirectional}}' }),
-      ];
-
-    case 'vlan_deprovision':
-    case 'port_forward_delete':
-    case 'policy_delete':
-      return [
-        step('teardown', 'teardown_recorded_artifacts', {}, { label: 'Delete recorded artifacts' }),
       ];
 
     default:

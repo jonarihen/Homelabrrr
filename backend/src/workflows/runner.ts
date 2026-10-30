@@ -18,6 +18,18 @@ export async function teardownForGoneTarget(client, artifacts) {
     : 'The firewall or VLAN was deleted during provisioning; the created objects were removed');
 }
 
+/** A workflow the admin switched off: callers answer 409 instead of running it. */
+export class WorkflowDisabledError extends Error {
+  status = 409;
+}
+
+/** Throw WorkflowDisabledError for a disabled workflow — call before any firewall mutation. */
+export function assertWorkflowEnabled(workflow) {
+  if (workflow?.enabled === false) {
+    throw new WorkflowDisabledError(`Workflow "${workflow.name || workflow.trigger}" is disabled for this firewall`);
+  }
+}
+
 /**
  * Sanitized firewall fields exposed to templates as `{{firewall.*}}`.
  * Never expose api_key.
@@ -53,6 +65,7 @@ export async function runBundle(
   { executeWorkflow = runWorkflow, saveRun = recordRun } = {},
 ) {
   const { workflow, steps } = bundle;
+  assertWorkflowEnabled(workflow);
   try {
     const result = await executeWorkflow({ steps, context, client });
     const runId = await saveRun({
