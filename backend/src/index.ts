@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { db, closeDb } from './db/client.ts';
 import { initDatabase } from './db/init.ts';
 import { DrizzleSessionStore } from './db/sessionStore.ts';
-import { users, sshKeys } from './db/schema/index.ts';
+import { sshKeys } from './db/schema/index.ts';
 import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -55,7 +55,7 @@ import { sweepExpiredMaintenance } from './utils/nodeMaintenance.ts';
 import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.ts';
 import { logAuditEntry } from './utils/audit.ts';
 import { authenticateApiToken, enforceApiTokenScope } from './middleware/apiToken.ts';
-import { requireAdmin, requireAuth } from './middleware/auth.ts';
+import { loadSessionUser, requireAdmin, requireAuth } from './middleware/auth.ts';
 import { parseTrustProxy } from './utils/proxyChain.ts';
 import { trustProxyCheck, inspectProxyChain } from './middleware/trustProxyCheck.ts';
 import { buildConfigReport, formatConfigReport } from './utils/configReport.ts';
@@ -150,30 +150,7 @@ app.use((req, res, next) => {
 app.use(enforceApiTokenScope);
 app.use(csrfProtection({ allowedOrigin: ALLOWED_ORIGIN || '' }));
 
-app.use(async (req, res, next) => {
-  if (!req.session?.userId) return next();
-  // Token auth already resolved the live user; don't re-hydrate (and never try
-  // to destroy) the plain token session object.
-  if (req.apiToken) return next();
-
-  const [user] = await db
-    .select({ username: users.username, is_admin: users.is_admin })
-    .from(users)
-    .where(eq(users.id, req.session.userId))
-    .limit(1);
-  if (!user) {
-    return req.session.destroy(() => next());
-  }
-
-  req.session.username = user.username;
-  req.session.isAdmin = user.is_admin === true;
-  if (!req.session.lastSeenAt || Date.now() - Number(req.session.lastSeenAt) > 5 * 60 * 1000) {
-    req.session.lastSeenAt = Date.now();
-    req.session.clientIp = String(req.ip || '').slice(0, 128);
-    req.session.userAgent = String(req.headers['user-agent'] || '').slice(0, 256);
-  }
-  next();
-});
+app.use(loadSessionUser);
 
 // Compare the observed X-Forwarded-For hop count against TRUST_PROXY on the
 // first few authenticated requests and warn once if they disagree — a wrong
