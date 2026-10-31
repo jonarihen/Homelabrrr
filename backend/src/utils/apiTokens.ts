@@ -18,12 +18,3 @@ export function generateApiToken() {
 export function hashApiToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
-
-// Extract a Bearer token from an Authorization header, or null if absent.
-export function extractBearerToken(authorizationHeader) {
-  if (!authorizationHeader || typeof authorizationHeader !== 'string') return null;
-  const match = authorizationHeader.match(/^Bearer\s+(.+)$/i);
-  if (!match) return null;
-  const token = match[1].trim();
-  return token || null;
-}

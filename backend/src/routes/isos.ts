@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { isos } from '../db/schema/index.ts';
 import {
-  downloadUrlToStorage, deleteVolume, getTaskStatus, getStorageContent,
+  downloadUrlToStorage, deleteVolume, waitForTask, getStorageContent,
 } from '../proxmox.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
@@ -26,19 +26,6 @@ function serializeIso(row: any) {
 
 async function setIsoStatus(id: number, status: string, detail = '') {
   await db.update(isos).set({ status, status_detail: detail }).where(eq(isos.id, id));
-}
-
-async function waitForTask(node: string, upid: string, { attempts = 240, intervalMs = 5000 } = {}) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    try {
-      const task = await getTaskStatus(node, upid);
-      if (task.status === 'stopped') {
-        return { ok: task.exitstatus === 'OK', exitstatus: task.exitstatus || '' };
-      }
-    } catch { /* keep polling */ }
-  }
-  return { ok: false, exitstatus: 'timeout' };
 }
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -82,11 +69,13 @@ router.post('/', async (req, res) => {
 
     // Poll in the background; the row's status is the source of truth for the UI
     startBackgroundWork(async () => {
-      const result = await waitForTask(node, upid);
-      if (!result.ok) {
-        await setIsoStatus(id, 'error', result.exitstatus === 'timeout'
+      try {
+        // Shared poller; the old per-route copy waited 240 × 5s too.
+        await waitForTask(node, upid, { timeoutMs: 20 * 60_000, intervalMs: 5000 });
+      } catch (err: any) {
+        await setIsoStatus(id, 'error', err.exitstatus === 'timeout'
           ? 'Timed out waiting for the download'
-          : `Download failed: ${result.exitstatus}`);
+          : `Download failed: ${err.exitstatus ?? ''}`);
         return;
       }
       try {
