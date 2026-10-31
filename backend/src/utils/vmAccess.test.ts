@@ -30,6 +30,7 @@ const {
 await testDb.db.insert(users).values([
   { id: 10, username: 'assignee', password: 'x' },
   { id: 11, username: 'db-admin', password: 'x', is_admin: true },
+  { id: 12, username: 'fleet-viewer', password: 'x', see_all_vms: true },
 ]);
 await testDb.db.insert(vmAssignments).values([
   { user_id: 10, node: 'pve1', vmid: 100 }, // legacy bare node name
@@ -100,4 +101,21 @@ test('userCanPerformVmOp gates by tier through the resolved context', async () =
 test('userSeesAllVms: admin yes, plain assignee no', async () => {
   assert.equal(await userSeesAllVms(999, true), true);
   assert.equal(await userSeesAllVms(10, false), false);
+});
+
+test('see_all_vms grants read access but never ownership', async () => {
+  // Unassigned viewer: reads everywhere (bare and encoded nodes), owns nothing.
+  assert.equal(await userCanAccessVm(12, 'pve1', 100, false), true);
+  assert.equal(await userCanAccessVm(12, '2~pve2', 999, false), true);
+  assert.equal(await userOwnsVm(12, 'pve1', 100), false);
+  assert.equal(await userSeesAllVms(12, false), true);
+  // Destructive ops stay assignment-only for the viewer.
+  assert.equal(await userCanPerformVmOp(12, 'pve1', 100, false, 'vm.delete'), false);
+});
+
+test('admins can read via the permission path but still do not "own" unassigned VMs', async () => {
+  // userOwnsVm takes no isAdmin flag: admins must be assigned to "own".
+  assert.equal(await userOwnsVm(11, 'pve1', 100), false);
+  // A DB is_admin row passes the permission check even with isAdmin=false.
+  assert.equal(await userCanAccessVm(11, 'pve1', 100, false), true);
 });
