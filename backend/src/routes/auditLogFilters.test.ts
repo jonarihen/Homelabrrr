@@ -4,7 +4,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import request from 'supertest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
 import { users, auditLog } from '../db/schema/index.ts';
 
@@ -48,7 +48,7 @@ test('user and date filters combine; `to` includes its whole day', async () => {
 });
 
 test('malformed dates are rejected', async () => {
-  for (const bad of ['yesterday', '2026-13-45', '2026-10-1', "2026-10-01' OR 1=1"]) {
+  for (const bad of ['yesterday', '2026-13-45', '2026-02-30', '2026-04-31', '2025-02-29', '2026-10-1', "2026-10-01' OR 1=1"]) {
     const res = await request(app).get('/audit-log').query({ from: bad });
     assert.equal(res.status, 400, bad);
   }
@@ -70,4 +70,20 @@ test('CSV export applies the filters, neutralises formulas and is itself audited
   assert.match(lines[1], /^2026-10-03T00:00:00\.000Z,bob,login_failed,,"'=HYPERLINK\(""x""\)",/);
   const [exportRow] = await testDb.db.select().from(auditLog).where(eq(auditLog.action, 'admin_export_audit_log'));
   assert.equal(exportRow.detail, '1 row(s)');
+});
+
+test('the export is marked truncated only when more rows than the cap match', async () => {
+  const insert = (n: number) => testDb.db.execute(sql`
+    INSERT INTO audit_log (username, action, target, created_at)
+    SELECT 'bulk', 'bulk_action', '', now() FROM generate_series(1, ${n})`);
+  const lastExport = async () => (await testDb.db.select().from(auditLog)
+    .where(eq(auditLog.action, 'admin_export_audit_log')).orderBy(sql`id DESC`).limit(1))[0].detail;
+  await insert(50_000);
+  const exact = await request(app).get('/audit-log.csv').query({ user: 'bulk' });
+  assert.equal(exact.text.trim().split('\r\n').length, 50_001);
+  assert.equal(await lastExport(), '50000 row(s)');
+  await insert(1);
+  const over = await request(app).get('/audit-log.csv').query({ user: 'bulk' });
+  assert.equal(over.text.trim().split('\r\n').length, 50_001);
+  assert.equal(await lastExport(), '50000 row(s) (truncated)');
 });

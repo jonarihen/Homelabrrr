@@ -46,7 +46,21 @@ export default function AuditLogPage() {
     if (legacyFilter) params.legacy = 'true';
     return params;
   }, [actionFilter, userFilter, fromDate, toDate, targetFilter, targetRefFilter, legacyFilter]);
-  const exportHref = `/api/admin/audit-log.csv?${new URLSearchParams(filterParams)}`;
+  const exportCsv = async () => {
+    setError('');
+    try {
+      // Through the api module so a 401 redirects to login and failures are shown, not saved as a file.
+      const { data } = await api.get('/admin/audit-log.csv', { params: filterParams, responseType: 'blob' });
+      const url = URL.createObjectURL(data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'audit-log.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.response?.data instanceof Blob ? 'Export failed' : (e.response?.data?.error || 'Export failed'));
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -66,7 +80,7 @@ export default function AuditLogPage() {
 
   // The dropdown lists every action actually recorded, not a hand-kept subset.
   useEffect(() => {
-    api.get('/admin/audit-log/actions').then((r) => setActionTypes(r.data || [])).catch(() => {});
+    api.get('/admin/audit-log/actions').then((r) => setActionTypes(Array.isArray(r.data) ? r.data : [])).catch(() => {});
   }, []);
 
   const handleFilterChange = (e) => {
@@ -112,13 +126,13 @@ export default function AuditLogPage() {
               <option key={a} value={a}>{a}</option>
             ))}
           </select>
-          <a
-            href={exportHref}
-            download
+          <button
+            type="button"
+            onClick={exportCsv}
             className="text-sm bg-gray-800 border border-gray-700 text-gray-300 rounded-lg px-3 py-2 hover:bg-gray-700 transition-colors"
           >
             Export CSV
-          </a>
+          </button>
         </div>
       </div>
 
