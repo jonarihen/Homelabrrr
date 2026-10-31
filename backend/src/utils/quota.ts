@@ -32,7 +32,10 @@ export interface UserQuota {
  * mirrors what the PVE UI itself reports. Hosts that can't be reached are
  * skipped by getAllVMs (their VMs simply don't count until they're back).
  */
-export async function getUserResourceUsage(userId: number, database: DbOrTx = db, liveVms?: any[]): Promise<ResourceUsage> {
+export async function getUserResourceUsage(
+  userId: number, database: DbOrTx = db, liveVms?: any[],
+  diskFloor?: { vmid: number; diskGb: number },
+): Promise<ResourceUsage> {
   const assignments = await database.select({ vmid: vmAssignments.vmid, resource_allocation: vmAssignments.resource_allocation })
     .from(vmAssignments).where(eq(vmAssignments.user_id, userId));
   const jobs = await database.select({ id: provisionedVms.id, vmid: provisionedVms.vmid, steps: provisionedVms.steps, status: provisionedVms.status })
@@ -69,6 +72,14 @@ export async function getUserResourceUsage(userId: number, database: DbOrTx = db
       diskGb: Math.max(intent.diskGb, current?.diskGb || 0), vmCount: 1,
     });
   }
+  // A VM's config-measured disks (all of them, not just maxdisk's boot disk) when the caller has them.
+  if (diskFloor && vmids.has(diskFloor.vmid)) {
+    const current = allocated.get(diskFloor.vmid);
+    allocated.set(diskFloor.vmid, {
+      cores: current?.cores || 0, memoryGb: current?.memoryGb || 0,
+      diskGb: Math.max(diskFloor.diskGb, current?.diskGb || 0), vmCount: 1,
+    });
+  }
   const usage: ResourceUsage = { cores: 0, memoryGb: 0, diskGb: 0, vmCount: 0 };
   for (const resource of allocated.values()) {
     usage.cores += resource.cores;
@@ -84,23 +95,55 @@ export async function getUserResourceUsage(userId: number, database: DbOrTx = db
  * user doesn't exist. Per metric: an explicit per-user value overrides the
  * role's default; otherwise the role's value applies (if any role is set).
  */
-export async function refreshHardwareAllocation(node: string, vmid: number, updates: { cores?: number; memoryMb?: number }) {
+export async function refreshHardwareAllocation(
+  node: string, vmid: number,
+  updates: { cores?: number; memoryMb?: number; addDiskGb?: number; config?: Record<string, any> },
+) {
   const candidates = nodeLookupCandidates(node);
   if (!candidates.length) return;
+  const addDiskGb = updates.addDiskGb && updates.addDiskGb > 0 ? updates.addDiskGb : 0;
+  // PVE maxdisk only reflects the boot disk, so growth of any disk is kept in
+  // the allocation floor instead; it is measured against every disk in config.
+  const measuredDiskGb = addDiskGb && updates.config ? configDiskGb(updates.config).diskGb : 0;
   await db.transaction(async tx => {
     const owners = await tx.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
       .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
     for (const owner of owners) await tx.execute(sql`SELECT pg_advisory_xact_lock(208, ${owner.user_id})`);
     const rows = await tx.select().from(vmAssignments)
       .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates))).for('update');
+    // Conflicting owner aliases: charge nobody rather than both (routes 409 via vmQuotaUserId first).
+    if (new Set(rows.map(row => row.user_id)).size > 1) return;
     for (const row of rows) {
-      if (!row.resource_allocation) continue;
-      await tx.update(vmAssignments).set({ resource_allocation: { ...row.resource_allocation,
+      const prev = row.resource_allocation;
+      if (!prev && !addDiskGb) continue;
+      // VMs assigned without an allocation get one seeded from their config.
+      const base = prev ?? {
+        cores: (Number(updates.config?.sockets) || 1) * (Number(updates.config?.cores) || 1),
+        memoryMb: parseInt(String(updates.config?.memory ?? ''), 10) || 0,
+        diskGb: 0,
+      };
+      await tx.update(vmAssignments).set({ resource_allocation: { ...base,
         ...(updates.cores !== undefined ? { cores: updates.cores } : {}),
         ...(updates.memoryMb !== undefined ? { memoryMb: updates.memoryMb } : {}),
+        ...(addDiskGb ? { diskGb: Math.max(base.diskGb, measuredDiskGb) + addDiskGb } : {}),
       } }).where(eq(vmAssignments.id, row.id));
     }
   });
+}
+
+/**
+ * The user a VM's resources are charged to: its assigned owner, else the
+ * fallback (the caller). Qualified and legacy bare-name rows that disagree on
+ * the owner fail closed, as in recordProvisionOwnership.
+ */
+export async function vmQuotaUserId(node: string, vmid: number, fallbackUserId: number): Promise<number> {
+  const candidates = nodeLookupCandidates(node);
+  if (!candidates.length) return fallbackUserId;
+  const rows = await db.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
+    .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
+  const owners = new Set(rows.map(row => row.user_id));
+  if (owners.size > 1) throw httpError(409, 'This VM has conflicting owner assignments; an administrator must resolve them');
+  return rows[0]?.user_id ?? fallbackUserId;
 }
 
 export async function getUserQuota(userId: number, database: DbOrTx = db): Promise<UserQuota | null> {
@@ -138,12 +181,13 @@ export async function assertUserQuota(
   { addCores = 0, addMemoryMb = 0, addDiskGb = 0 }: { addCores?: number; addMemoryMb?: number; addDiskGb?: number } = {},
   database: DbOrTx = db,
   liveVms?: any[],
+  diskFloor?: { vmid: number; diskGb: number },
 ): Promise<void> {
   const quota = await getUserQuota(userId, database);
   if (!quota || quota.isAdmin) return;
   if (quota.maxCores == null && quota.maxMemoryGb == null && quota.maxStorageGb == null) return;
 
-  const usage = await getUserResourceUsage(userId, database, liveVms);
+  const usage = await getUserResourceUsage(userId, database, liveVms, diskFloor);
   const addMemoryGb = addMemoryMb / 1024;
 
   if (quota.maxCores != null && usage.cores + addCores > quota.maxCores) {
@@ -165,21 +209,39 @@ export async function assertUserQuota(
 
 export function cloneDiskAllocation(config: Record<string, unknown>, requestedGb: number) {
   if (!Number.isFinite(requestedGb) || requestedGb <= 0) throw httpError(400, 'Invalid clone disk size');
-  const disks = new Map<string, number>();
-  for (const [key, value] of Object.entries(config)) {
-    if (!/^(?:(?:scsi|virtio|sata|ide|efidisk|tpmstate)\d+)$/.test(key) || typeof value !== 'string') continue;
-    const volume = value.split(',')[0];
-    if (volume === 'none' || volume.includes('cloudinit') || value.split(',').includes('media=cdrom')) continue;
-    const size = value.split(',').find(option => option.startsWith('size='))?.slice(5);
-    const gb = sizeToGb(size);
-    if (gb === null || gb <= 0) throw httpError(503, 'Cannot determine the template disk size safely');
-    disks.set(key, gb);
-  }
+  const { disks, unmeasured } = measureConfigDisks(config);
+  if (unmeasured > 0) throw httpError(503, 'Cannot determine the template disk size safely');
   if (disks.size === 0) throw httpError(503, 'The template has no measurable clone disks');
   const primary = disks.has('scsi0') ? 'scsi0' : disks.has('virtio0') ? 'virtio0' : null;
   const total = [...disks.values()].reduce((sum, size) => sum + size, 0);
   const growthGb = primary ? Math.max(0, requestedGb - disks.get(primary)!) : 0;
   return { diskGb: total + growthGb, resizeDisk: growthGb > 0 ? primary : null };
+}
+
+/** GB from a PVE disk config value ("local:vm-1-disk-0,size=32G"), or null. */
+export function diskSizeGb(value: unknown): number | null {
+  return sizeToGb(String(value ?? '').match(/(?:^|,)size=(\d+(?:\.\d+)?[MGT])(?:,|$)/i)?.[1]);
+}
+
+/** Sizes of a VM's real disks (no CD-ROM / cloud-init / empty slots), plus how many lack a usable size. */
+function measureConfigDisks(config: Record<string, unknown>) {
+  const disks = new Map<string, number>();
+  let unmeasured = 0;
+  for (const [key, value] of Object.entries(config)) {
+    if (!/^(?:(?:scsi|virtio|sata|ide|efidisk|tpmstate)\d+)$/.test(key) || typeof value !== 'string') continue;
+    const volume = value.split(',')[0];
+    if (volume === 'none' || volume.includes('cloudinit') || value.split(',').includes('media=cdrom')) continue;
+    const gb = sizeToGb(value.split(',').find(option => option.startsWith('size='))?.slice(5));
+    if (gb === null || gb <= 0) unmeasured += 1;
+    else disks.set(key, gb);
+  }
+  return { disks, unmeasured };
+}
+
+/** Total GB of every measurable disk in a VM config; `complete` is false when some real disk has no usable size. */
+export function configDiskGb(config: Record<string, unknown>): { diskGb: number; complete: boolean } {
+  const { disks, unmeasured } = measureConfigDisks(config);
+  return { diskGb: [...disks.values()].reduce((sum, size) => sum + size, 0), complete: unmeasured === 0 };
 }
 
 /** Parse a PVE disk size string ("32G", "512M", "1T") to GB. */

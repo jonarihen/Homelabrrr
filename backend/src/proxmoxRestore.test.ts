@@ -8,7 +8,7 @@ process.env.DATABASE_URL ||= 'postgres://test:test@127.0.0.1:5432/test';
 process.env.SECRET_ENCRYPTION_KEY ||= '44'.repeat(32);
 
 const { db } = await import('./db/client.ts');
-const { restoreVMBackup } = await import('./proxmox.ts');
+const { restoreVMBackup, waitForTask } = await import('./proxmox.ts');
 
 interface CapturedRequest {
   url: string;
@@ -178,4 +178,30 @@ test('restoreVMBackup integrates with resolveRestoreGuestType for LXC and QEMU b
   assert.equal(captured.body.archive, 'local:backup/vzdump-qemu-100-2026_07_01-00_00_00.vma.zst');
   assert.equal('ostemplate' in captured.body, false);
   assert.equal('restore' in captured.body, false);
+});
+
+function mockTaskStatuses(statuses: Array<Record<string, unknown>>) {
+  https.request = ((_url: URL | string, _options: https.RequestOptions, cb?: (res: EventEmitter & { statusCode?: number }) => void) => {
+    const req = Object.assign(new EventEmitter(), {
+      setTimeout: () => {}, destroy: () => {}, write: () => {},
+      end: () => {
+        const res = Object.assign(new EventEmitter(), { statusCode: 200 });
+        if (cb) cb(res);
+        res.emit('data', JSON.stringify({ data: statuses.length > 1 ? statuses.shift() : statuses[0] }));
+        res.emit('end');
+      },
+    });
+    return req as unknown as ReturnType<typeof https.request>;
+  }) as typeof https.request;
+}
+
+test('waitForTask polls once more after the deadline before timing out', async () => {
+  mockTaskStatuses([{ status: 'running' }, { status: 'stopped', exitstatus: 'OK' }]);
+  await waitForTask('1~pve1', 'UPID:pve1:1', { timeoutMs: 10, intervalMs: 30 });
+
+  mockTaskStatuses([{ status: 'running' }]);
+  await assert.rejects(
+    waitForTask('1~pve1', 'UPID:pve1:2', { timeoutMs: 10, intervalMs: 30 }),
+    (err: any) => err.exitstatus === 'timeout',
+  );
 });
