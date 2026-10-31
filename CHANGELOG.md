@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-28 — VLAN access follows the subnets firewalls actually provisioned
+
+- Browser SSH targets, website upstreams and public-IP targets now check your VLANs against the subnet each firewall sync recorded, so deployments that don't use the `10.x` scheme no longer refuse addresses in your own VLAN — and no longer accept the unused `10.x` range.
+- A VLAN synced to several firewalls covers each firewall's recorded subnet. Firewalls synced before subnets were recorded keep the previous behaviour (configured subnet or default scheme) until re-synced.
+
 ## 2026-10-28 — A slow iLO no longer delays its neighbours
 
 - Hardware telemetry now polls each node independently (still at most two at a time), so one slow or unresponsive iLO no longer holds back the next node's power reading for up to a minute.
