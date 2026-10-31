@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-28 — VM page sticky header, section nav and IP
+
+- The **VM page** identity header (name and status) and section nav (Overview, Performance, Snapshots, Backups, IP, SSH) stay pinned while you scroll. Power and connect actions scroll away to keep the sticky area compact on small screens.
+- The VM's IP address is shown next to the VMID, taken from cloud-init, DHCP or the guest agent, with a **copy** button.
+- The app is now called **Homelabrrr** everywhere in the UI (browser tab, sidebar, sign-in screen).
+- Firewall policy service colours use the design-language accent and status colours instead of a rainbow palette.
 ## 2026-10-28 — Readable primary buttons and labelled form fields
 
 - Primary (orange) buttons and active tabs now use dark text instead of white, so their labels meet contrast guidelines. They also show a clear focus ring when reached by keyboard.
