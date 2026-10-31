@@ -1,17 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
-
-const ACTION_TYPES = [
-  'login', 'login_failed', 'vm_action', 'backup_create', 'backup_delete',
-  'vm_restore', 'vlan_change', 'vm_clone', 'vm_create',
-  'admin_create_user', 'admin_delete_user', 'admin_reset_2fa',
-  'admin_unlock_user', 'admin_reset_password',
-  'admin_create_role', 'admin_update_role', 'admin_clone_role', 'admin_delete_role', 'admin_assign_role', 'admin_unassign_role',
-  'admin_create_firewall', 'admin_update_firewall', 'admin_delete_firewall',
-  'admin_sync_vlan_firewall', 'admin_unsync_vlan_firewall', 'admin_delete_vlan',
-];
 
 function actionBadgeClass(action) {
   if (action === 'login') return 'bg-green-500/15 text-green-400 border-green-500/20';
@@ -30,6 +20,11 @@ export default function AuditLogPage() {
   const [page, setPage] = useState(1);
   const [limit] = useState(50);
   const [actionFilter, setActionFilter] = useState(() => searchParams.get('action') || '');
+  const [actionTypes, setActionTypes] = useState([]);
+  const [userFilter, setUserFilter] = useState('');
+  const [userDraft, setUserDraft] = useState('');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
   const targetFilter = searchParams.get('target') || '';
   const targetRefFilter = searchParams.get('targetRef') || '';
   const legacyFilter = searchParams.get('legacy') === 'true';
@@ -39,16 +34,39 @@ export default function AuditLogPage() {
 
   const totalPages = Math.max(1, Math.ceil(total / limit));
 
+  // Shared by the page query and the CSV export link so both apply the same filters.
+  const filterParams = useMemo(() => {
+    const params = {};
+    if (actionFilter) params.action = actionFilter;
+    if (userFilter) params.user = userFilter;
+    if (fromDate) params.from = fromDate;
+    if (toDate) params.to = toDate;
+    if (targetFilter) params.target = targetFilter;
+    if (targetRefFilter) params.targetRef = targetRefFilter;
+    if (legacyFilter) params.legacy = 'true';
+    return params;
+  }, [actionFilter, userFilter, fromDate, toDate, targetFilter, targetRefFilter, legacyFilter]);
+  const exportCsv = async () => {
+    setError('');
+    try {
+      // Through the api module so a 401 redirects to login and failures are shown, not saved as a file.
+      const { data } = await api.get('/admin/audit-log.csv', { params: filterParams, responseType: 'blob' });
+      const url = URL.createObjectURL(data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'audit-log.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.response?.data instanceof Blob ? 'Export failed' : (e.response?.data?.error || 'Export failed'));
+    }
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const params = { page, limit };
-      if (actionFilter) params.action = actionFilter;
-      if (targetFilter) params.target = targetFilter;
-      if (targetRefFilter) params.targetRef = targetRefFilter;
-      if (legacyFilter) params.legacy = true;
-      const res = await api.get('/admin/audit-log', { params });
+      const res = await api.get('/admin/audit-log', { params: { page, limit, ...filterParams } });
       setRows(res.data.rows);
       setTotal(res.data.total);
     } catch (e) {
@@ -56,9 +74,14 @@ export default function AuditLogPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, actionFilter, targetFilter, targetRefFilter, legacyFilter]);
+  }, [page, limit, filterParams]);
 
   useEffect(() => { load(); }, [load]);
+
+  // The dropdown lists every action actually recorded, not a hand-kept subset.
+  useEffect(() => {
+    api.get('/admin/audit-log/actions').then((r) => setActionTypes(Array.isArray(r.data) ? r.data : [])).catch(() => {});
+  }, []);
 
   const handleFilterChange = (e) => {
     setActionFilter(e.target.value);
@@ -98,12 +121,56 @@ export default function AuditLogPage() {
             className="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
           >
             <option value="">All actions</option>
-            {ACTION_TYPES.map(a => (
+            {/* Keep a deep-linked action selectable even before the list loads. */}
+            {[...new Set([...(actionFilter ? [actionFilter] : []), ...actionTypes])].map(a => (
               <option key={a} value={a}>{a}</option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={exportCsv}
+            className="text-sm bg-gray-800 border border-gray-700 text-gray-300 rounded-lg px-3 py-2 hover:bg-gray-700 transition-colors"
+          >
+            Export CSV
+          </button>
         </div>
       </div>
+
+      <form
+        onSubmit={(e) => { e.preventDefault(); setUserFilter(userDraft.trim()); setPage(1); }}
+        className="flex flex-wrap items-end gap-3"
+      >
+        <label className="text-xs text-gray-400">
+          <span className="block mb-1">User</span>
+          <input
+            type="text"
+            value={userDraft}
+            onChange={(e) => setUserDraft(e.target.value)}
+            onBlur={() => { if (userDraft.trim() !== userFilter) { setUserFilter(userDraft.trim()); setPage(1); } }}
+            placeholder="exact username"
+            className="bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+          />
+        </label>
+        <label className="text-xs text-gray-400">
+          <span className="block mb-1">From</span>
+          <input type="date" value={fromDate} max={toDate || undefined} onChange={(e) => { setFromDate(e.target.value); setPage(1); }}
+            className="bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/40" />
+        </label>
+        <label className="text-xs text-gray-400">
+          <span className="block mb-1">To (inclusive)</span>
+          <input type="date" value={toDate} min={fromDate || undefined} onChange={(e) => { setToDate(e.target.value); setPage(1); }}
+            className="bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/40" />
+        </label>
+        {(userFilter || fromDate || toDate) && (
+          <button
+            type="button"
+            onClick={() => { setUserDraft(''); setUserFilter(''); setFromDate(''); setToDate(''); setPage(1); }}
+            className="text-xs text-gray-400 hover:text-white px-2 py-2"
+          >
+            Clear filters
+          </button>
+        )}
+      </form>
 
       {legacyFilter && (
         <p className="text-xs text-amber-300 bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-2">

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-28 — Audit log filters and CSV export
+
+- The **Audit Log** action filter now lists every action that has actually been recorded, instead of a fixed list of about 25.
+- New filters for **user** and a **date range** (the end date counts in full). They combine with the action and target filters.
+- **Export CSV** downloads the filtered log (newest first, up to 50,000 rows). Spreadsheet formulas in exported text are neutralised, and each export is recorded in the audit log.
 ## 2026-10-28 — Failed background deploy steps no longer leave a VM stuck "in progress"
 
 - If background work after a deploy fails unexpectedly (for example recording ownership or tagging), the VM moves to **needs review** with the cause shown, instead of staying in "creating" indefinitely with the error only in the server log. A more specific status already recorded by a deploy step is kept.
