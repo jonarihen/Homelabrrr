@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-28 — Switching a Caddy server to API-only mode removes its old routes
+
+- Clearing a Caddy server's SSH host (switching from Caddyfile sync to API-only mode) now empties the Homelabrrr snippet and reloads Caddy first, then re-publishes the sites through the admin API. Before, the old Caddyfile routes stayed live and came back on every reload, out of reach of API-mode unpublish and delete.
+- If the snippet can't be cleared (SSH unreachable, validation fails), the switch is refused and the server stays in Caddyfile mode, with the reason shown.
 ## 2026-10-28 — SSH works with fewer steps after deploy
 
 - The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
