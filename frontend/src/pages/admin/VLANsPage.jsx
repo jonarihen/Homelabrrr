@@ -145,7 +145,7 @@ export default function VLANsPage() {
         </div>
         <button
           onClick={() => { setEditVlan(null); setModalOpen(true); }}
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          className="flex items-center gap-2 btn-primary px-4 py-2 rounded-lg text-sm font-medium"
         >
           + New VLAN
         </button>
@@ -532,7 +532,7 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
         })()}
 
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded p-2">{error}</p>}
-        <button type="submit" disabled={saving} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors">
+        <button type="submit" disabled={saving} className="w-full btn-primary rounded-lg py-2.5 text-sm font-medium">
           {saving ? 'Saving...' : vlan ? 'Save Changes' : !isTaggedOnly && syncToFw ? 'Create VLAN & Push to Firewall' : 'Create VLAN'}
         </button>
       </form>
@@ -638,7 +638,7 @@ function SyncModal({ vlan, firewalls, onClose, onSaved }) {
             <button
               onClick={pushToAll}
               disabled={syncing}
-              className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white rounded-lg py-2 text-sm font-medium transition-colors"
+              className="w-full btn-primary rounded-lg py-2 text-sm font-medium"
             >
               {syncing ? 'Provisioning...' : 'Push to Firewall'}
             </button>

@@ -261,7 +261,7 @@ function IPInterfaceCard({ network, node, vmid, currentSshHost, onReload, onSshH
                   type="button"
                   onClick={saveReservation}
                   disabled={saving || !reservationIp.trim()}
-                  className="text-xs px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-medium transition-colors"
+                  className="text-xs px-4 py-2 rounded-lg btn-primary disabled:opacity-40 font-medium"
                 >
                   {saving ? 'Saving...' : selectedScope?.reservation ? 'Update Reservation' : 'Reserve IP'}
                 </button>

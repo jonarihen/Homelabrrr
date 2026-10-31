@@ -88,7 +88,7 @@ export default function Layout({ children }) {
               </svg>
             </div>
             <div className="min-w-0">
-              <span className="aaris-display text-gray-100 text-sm block leading-none">VM Manager</span>
+              <span className="aaris-display text-gray-100 text-sm block leading-none">Homelabrrr</span>
               <p className="flex items-center gap-1.5 mt-1.5 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500 truncate">
                 <span className="aaris-led aaris-led--ok" />{user?.username}
               </p>

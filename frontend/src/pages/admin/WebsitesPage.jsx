@@ -190,7 +190,7 @@ export default function AdminWebsitesPage() {
             <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
             Publish site
           </Link>
-          <button onClick={openAdd} className="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20">
+          <button onClick={openAdd} className="flex items-center gap-2 text-sm btn-primary px-4 py-2.5 rounded-xl font-medium shadow-lg shadow-blue-600/20">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
             Add Caddy Server
           </button>
@@ -360,7 +360,7 @@ export default function AdminWebsitesPage() {
               </p>
               <div className="flex gap-2">
                 <button type="button" onClick={() => setImportSrv(null)} className="text-sm bg-gray-700 hover:bg-gray-600 text-white rounded-xl px-4 py-2 transition-colors">Close</button>
-                <button type="button" onClick={runImport} disabled={importing || importSel.size === 0} className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl px-4 py-2 font-semibold transition-colors shadow-lg shadow-blue-600/20">
+                <button type="button" onClick={runImport} disabled={importing || importSel.size === 0} className="text-sm btn-primary rounded-xl px-4 py-2 font-semibold shadow-lg shadow-blue-600/20">
                   {importing ? 'Importing…' : `Import ${importSel.size || ''}`}
                 </button>
               </div>
@@ -518,7 +518,7 @@ export default function AdminWebsitesPage() {
               {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
               <div className="flex gap-3 pt-1">
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">Cancel</button>
-                <button type="submit" disabled={saving} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors shadow-lg shadow-blue-600/20">
+                <button type="submit" disabled={saving} className="flex-1 btn-primary rounded-xl py-2.5 text-sm font-semibold shadow-lg shadow-blue-600/20">
                   {saving ? 'Saving…' : editId ? 'Update' : 'Add Server'}
                 </button>
               </div>
