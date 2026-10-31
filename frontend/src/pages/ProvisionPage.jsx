@@ -1,3 +1,4 @@
+import { PROVISION_TERMINAL, PROVISION_FAILED } from '../utils/provisionStatus';
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
@@ -195,7 +196,7 @@ function DeploymentProgress({ job, onDeployAnother }) {
         if (!active) return;
         setRow(r.data);
         setFailedPoll(false);
-        const done = ['ready', 'warning', 'error', 'timeout'].includes(r.data.status);
+        const done = PROVISION_TERMINAL.includes(r.data.status);
         if (!done) timer = setTimeout(tick, 2000);
       } catch {
         if (!active) return;
@@ -209,7 +210,7 @@ function DeploymentProgress({ job, onDeployAnother }) {
 
   const status = row?.status;
   const steps = row?.steps || [];
-  const isError = status === 'error' || status === 'timeout';
+  const isError = PROVISION_FAILED.includes(status);
   const isReady = status === 'ready' || status === 'warning';
   const isWarning = status === 'warning';
   const doneCount = steps.filter((s) => ['done', 'skipped'].includes(s.status)).length;
@@ -311,6 +312,7 @@ function StatusPill({ status }) {
     warning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
     error: 'bg-red-500/10 text-red-400 ring-red-500/20',
     timeout: 'bg-red-500/10 text-red-400 ring-red-500/20',
+    needs_review: 'bg-red-500/10 text-red-400 ring-red-500/20',
   }[status] || 'bg-gray-500/10 text-gray-400 ring-gray-500/20';
   const inFlight = ['creating', 'cloning', 'configuring'].includes(status);
   return (
