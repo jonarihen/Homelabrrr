@@ -14,7 +14,7 @@ import { and, count, eq, sql } from 'drizzle-orm';
 import { db, pool, type DbOrTx } from './db/client.ts';
 import { vmSchedules } from './db/schema/index.ts';
 import { getAllVMs, scheduledStopVM, scheduledStartVM } from './proxmox.ts';
-import { logAuditEntry } from './utils/audit.ts';
+import { logSystemAudit } from './utils/audit.ts';
 import { decodeNodeRef, nodeLookupCandidates } from './utils/nodeRef.ts';
 import { withMigrationSafeSchedule } from './utils/vmMigrationLock.ts';
 import {
@@ -33,13 +33,6 @@ const inFlight = new Set<string>();
 const claiming = new Set<string>();
 let firstRunTimer: ReturnType<typeof setTimeout> | null = null;
 let intervalTimer: ReturnType<typeof setInterval> | null = null;
-
-// Synthesize a "system"/"scheduler" actor for the loop's audit entries. Fire and
-// forget — an audit failure must never break the loop (conventions rule M13).
-function systemAudit(action: string, target: string, detail: string) {
-  logAuditEntry({ userId: null, username: 'scheduler', action, target, detail })
-    .catch(() => { /* never let audit failure break the loop */ });
-}
 
 export function findVmStatus(vms: any[], node: any, vmid: any) {
   const candidates = new Set(nodeLookupCandidates(node));
@@ -114,10 +107,10 @@ function claimAndRunAction(schedule: Schedule, action: 'stop' | 'start', flags: 
       } else {
         await markAction(schedule, 'start', result.method, database);
       }
-      systemAudit(`vm_schedule_${action}`, target, `method=${result.method}`);
+      void logSystemAudit(`vm_schedule_${action}`, target, `method=${result.method}`, 'scheduler');
     } catch (err: any) {
       await markAction(schedule, `${action}_failed`, '', database).catch(() => {});
-      systemAudit(`vm_schedule_${action}_failed`, target, String(err.message || err).slice(0, 300));
+      void logSystemAudit(`vm_schedule_${action}_failed`, target, String(err.message || err).slice(0, 300), 'scheduler');
     }
   });
 
@@ -232,7 +225,7 @@ export async function runScheduleTick() {
         if (res?.rowCount !== 1) continue;
 
         if (manual && !s.running_due_to_manual) {
-          systemAudit('vm_schedule_manual_override', `${s.node}/${s.vmid}`, 'running inside off-window');
+          void logSystemAudit('vm_schedule_manual_override', `${s.node}/${s.vmid}`, 'running inside off-window', 'scheduler');
         }
       } catch (err: any) {
         // One bad schedule must never abort the sweep.

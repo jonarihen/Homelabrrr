@@ -7,7 +7,7 @@ import { renderParams, evaluateCondition } from './template.ts';
  * Runs the enabled steps of a workflow in order against a live FortiGate client,
  * recording every created artifact. On a non-`continue_on_error` step failure it
  * rolls back everything created so far (reverse order) — the same guarantee as
- * the old hardcoded `provisionVlan`. Returns a structured run object (log +
+ * the old hardcoded VLAN provisioning sequence. Returns a structured run object (log +
  * artifacts + per-step outputs). On rollback it throws the original error with
  * the run attached as `err.workflowRun`.
  */
