@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "lint": "eslint src",
     "test": "node --test",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "screenshots": "playwright test -c playwright.screenshots.config.js"
   },
   "dependencies": {
     "@novnc/novnc": "^1.7.0",
