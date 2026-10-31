@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-28 — Readable primary buttons and labelled form fields
+
+- Primary (orange) buttons and active tabs now use dark text instead of white, so their labels meet contrast guidelines. They also show a clear focus ring when reached by keyboard.
+- Form labels in the SSH key, SSH connect and user management forms are now linked to their inputs: screen readers announce them, and clicking a label focuses its field.
 ## 2026-10-28 — Frontend container runs without root
 
 - The frontend container now runs nginx as its unprivileged `nginx` user and listens on port 8080 inside the container. The published host port (8181) is unchanged. If you have a compose override that targets the container's port 80, change it to 8080.
