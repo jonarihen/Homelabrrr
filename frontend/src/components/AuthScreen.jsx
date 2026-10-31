@@ -20,7 +20,7 @@ export default function AuthScreen({ step = '01', title, footerNote, children })
               </svg>
             </div>
             <div className="leading-none">
-              <div className="aaris-display text-lg text-gray-100">VM Manager</div>
+              <div className="aaris-display text-lg text-gray-100">Homelabrrr</div>
               <div className="aaris-meta mt-1 text-[10px]">Operator Console</div>
             </div>
           </div>

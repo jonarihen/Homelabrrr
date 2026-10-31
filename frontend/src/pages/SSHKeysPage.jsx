@@ -4,6 +4,7 @@ import Modal from '../components/Modal.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
 import { isUsableKey, unusableKeyReason, NO_PUBLIC_KEY_LABEL } from '../utils/cloudInitCredentials.js';
+import Field from '../components/Field.jsx';
 
 export default function SSHKeysPage() {
   useDocumentTitle('SSH Keys');
@@ -41,7 +42,7 @@ export default function SSHKeysPage() {
           </div>
           <button
             onClick={() => setAddOpen(true)}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            className="flex items-center gap-2 btn-primary px-4 py-2 rounded-lg text-sm font-medium"
           >
             + Add Key
           </button>
@@ -60,7 +61,7 @@ export default function SSHKeysPage() {
             <p className="text-sm mt-1">Add a private key to connect to your VMs via SSH.</p>
           </div>
         ) : (
-          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
@@ -181,7 +182,7 @@ function AddKeyModal({ onClose, onAdded }) {
             required
             value={form.name}
             onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-            className={inputCls}
+            className="input"
             placeholder="my-server-key"
             autoFocus
           />
@@ -192,7 +193,7 @@ function AddKeyModal({ onClose, onAdded }) {
             required
             value={form.privateKey}
             onChange={e => setForm(f => ({ ...f, privateKey: e.target.value }))}
-            className={`${inputCls} font-mono text-xs h-32 resize-none`}
+            className={`input font-mono text-xs h-32 resize-none`}
             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;&#10;PuTTY PPK files are also supported."
           />
           <label className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 cursor-pointer transition-colors">
@@ -210,7 +211,7 @@ function AddKeyModal({ onClose, onAdded }) {
               type="password"
               value={form.passphrase}
               onChange={e => setForm(f => ({ ...f, passphrase: e.target.value }))}
-              className={inputCls}
+              className="input"
               placeholder="Leave empty if the key is not encrypted"
             />
             <p className="text-xs text-gray-500 mt-1">PPK keys are converted to OpenSSH format on upload.</p>
@@ -224,7 +225,7 @@ function AddKeyModal({ onClose, onAdded }) {
           <textarea
             value={form.publicKey}
             onChange={e => setForm(f => ({ ...f, publicKey: e.target.value }))}
-            className={`${inputCls} font-mono text-xs h-16 resize-none`}
+            className={`input font-mono text-xs h-16 resize-none`}
             placeholder="ssh-ed25519 AAAA... (auto-derived from your private key if left blank)"
           />
           <label className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 cursor-pointer transition-colors">
@@ -245,14 +246,4 @@ function AddKeyModal({ onClose, onAdded }) {
   );
 }
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
-const btnCls = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors';
-
-function Field({ label, children }) {
-  return (
-    <div>
-      <label className="block text-xs text-gray-400 mb-1.5">{label}</label>
-      {children}
-    </div>
-  );
-}
+const btnCls = 'w-full btn-primary rounded-lg py-2.5 text-sm font-medium';

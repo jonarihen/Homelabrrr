@@ -326,7 +326,7 @@ export default function PortForwardingPage() {
             className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
               showCreate
                 ? 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-                : 'bg-blue-600 hover:bg-blue-500 text-white'
+                : 'btn-primary'
             }`}
           >
             {showCreate ? 'Cancel' : 'New Port Forward'}
@@ -372,7 +372,7 @@ export default function PortForwardingPage() {
               </div>
               <div className="flex gap-2">
                 <button onClick={saveWanConfig} disabled={savingWan || !wanForm.externalIp}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm rounded-lg transition-colors">
+                  className="px-3 py-1.5 btn-primary text-sm rounded-lg">
                   {savingWan ? 'Saving...' : 'Save'}
                 </button>
                 <button onClick={() => { setEditingWan(false); setWanForm({ externalIp: fwConfig.external_ip, rootWanZone: fwConfig.root_wan_zone }); }}
@@ -625,7 +625,7 @@ export default function PortForwardingPage() {
 
             <div className="flex gap-2 pt-1">
               <button type="submit" disabled={creating}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors">
+                className="px-4 py-2 btn-primary text-sm font-medium rounded-lg">
                 {creating ? 'Creating...' : 'Create Port Forward'}
               </button>
               <button type="button" onClick={() => { setShowCreate(false); setCreateError(''); setAttempted(false); }}
@@ -714,7 +714,7 @@ export default function PortForwardingPage() {
                           ) : 'Delete'}
                         </button>
                       ) : (
-                        <span className="text-gray-700" title="VIP not created through VM Manager">
+                        <span className="text-gray-700" title="VIP not created through Homelabrrr">
                           <svg className="w-3.5 h-3.5 inline" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
                           </svg>

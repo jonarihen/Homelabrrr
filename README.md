@@ -468,7 +468,7 @@ Every variable in this table is passed into the backend container by `docker-com
 Useful implementation defaults:
 
 - backend listens on port `3000` inside Docker
-- frontend nginx listens on port `80` inside Docker and publishes host port `8181`
+- frontend nginx listens on port `8080` inside Docker and publishes host port `8181`
 - PostgreSQL data is stored in the `pg_data` Docker volume; the old `db_data` volume is retained for one release only, as the SQLite import source / rollback artifact, and the running server no longer writes to it
 - SFTP uploads stream directly to the guest without an application-level size cap; available space and limits on the remote host are the effective ceiling. Other API requests are capped by nginx at 105 MB
 

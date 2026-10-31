@@ -18,8 +18,12 @@ export function computeTileLayout(sessions, mode, viewport) {
 
   const areaX = sidebarOffset + margin;
   const areaY = topOffset + margin;
-  const areaW = Math.max(360, viewport.width - sidebarOffset - margin * 2);
-  const areaH = Math.max(300, viewport.height - topOffset - bottomReserve - margin);
+  // The tile area is the real space the viewport leaves for windows. The old
+  // 360x300 floor made the area wider than narrow viewports, and fitting each
+  // resulting rectangle afterwards only moved the last column back on top of
+  // the first — so compute from the actual available width/height instead.
+  const areaW = Math.max(0, viewport.width - sidebarOffset - margin * 2);
+  const areaH = Math.max(0, viewport.height - topOffset - bottomReserve - margin);
 
   let cols, rows;
   if (mode === 'horizontal') {
