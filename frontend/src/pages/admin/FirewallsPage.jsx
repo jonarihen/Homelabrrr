@@ -65,7 +65,7 @@ export default function FirewallsPage() {
 
   const openEdit = (fw) => {
     setEditId(fw.id);
-    setForm({ name: fw.name, host: fw.host, port: fw.port, apiKey: '', vdom: fw.vdom, parentInterface: fw.parent_interface, wanInterface: fw.wan_interface, vlanRangeStart: fw.vlan_range_start || 1001, vlanRangeEnd: fw.vlan_range_end || 1999, labVdomLink: fw.lab_vdom_link || 'lab-root0', rootVdom: fw.root_vdom || 'root', rootVdomLink: fw.root_vdom_link || 'lab-root1', routeGateway: fw.route_gateway || '10.255.254.2', trunkSwitchSerial: fw.trunk_switch_serial || '', trunkSwitchPort: fw.trunk_switch_port || '', verifyTls: !!fw.verify_tls });
+    setForm({ name: fw.name, host: fw.host, port: fw.port, apiKey: '', vdom: fw.vdom, parentInterface: fw.parent_interface, wanInterface: fw.wan_interface, vlanRangeStart: fw.vlan_range_start || 1001, vlanRangeEnd: fw.vlan_range_end || 1999, labVdomLink: fw.lab_vdom_link || 'lab-root0', rootVdom: fw.root_vdom || 'root', rootVdomLink: fw.root_vdom_link || 'lab-root1', routeGateway: fw.route_gateway || '10.255.254.2', trunkSwitchSerial: fw.trunk_switch_serial || '', trunkSwitchPort: fw.trunk_switch_port || '', verifyTls: fw.verify_tls !== false });
     setError('');
     setShowForm(true);
     loadSwitches(fw.id);
@@ -144,7 +144,7 @@ export default function FirewallsPage() {
                       <div>
                         <h3 className="text-white font-semibold">{fw.name}</h3>
                         <p className="text-xs text-gray-500 font-mono">{fw.host}:{fw.port}</p>
-                        <p className="text-[10px] text-gray-600 mt-0.5">{fw.verify_tls ? 'TLS verification on' : 'TLS verification off'}</p>
+                        <p className="text-[10px] text-gray-600 mt-0.5">{fw.verify_tls !== false ? 'TLS verification on' : 'TLS verification off'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -236,7 +236,7 @@ export default function FirewallsPage() {
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                  API Key {editId && <span className="text-gray-600">(leave empty to keep current)</span>}
+                  API Key {editId && <span className="text-gray-600">(leave empty to keep current; required if the address changes)</span>}
                 </label>
                 <input type="password" required={!editId} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} className={inputCls} placeholder="REST API administrator token" />
                 <p className="text-xs text-gray-600 mt-1">Create in FortiGate: System &gt; Administrators &gt; REST API</p>
