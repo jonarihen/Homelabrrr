@@ -1,6 +1,7 @@
 import { eq, and, desc, inArray, count } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import type { DbOrTx } from '../db/client.ts';
+import { isUniqueViolation } from '../db/errors.ts';
 import { workflows, workflowSteps, workflowRuns, firewalls } from '../db/schema/index.ts';
 import { defaultSteps, defaultWorkflowName, TRIGGERS, TRIGGER_MAP } from './definitions.ts';
 
@@ -99,7 +100,8 @@ export async function getWorkflowRow(firewallId: number, trigger: string) {
 export async function getWorkflowBundle(firewallId: number, trigger: string) {
   let workflow = await getWorkflowRow(firewallId, trigger);
   if (!workflow) {
-    await seedWorkflowsForFirewall(firewallId);
+    // A concurrent caller may seed the same firewall first; its rows win.
+    await seedWorkflowsForFirewall(firewallId).catch((err) => { if (!isUniqueViolation(err)) throw err; });
     workflow = await getWorkflowRow(firewallId, trigger);
   }
   if (!workflow) return null;

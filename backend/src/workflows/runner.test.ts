@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { previewWorkflow, runWorkflow } from './engine.ts';
 
 process.env.DATABASE_URL ||= 'postgres://test:test@127.0.0.1:5432/test';
 const { runBundle, ProvisioningTargetGoneError, WorkflowDisabledError } = await import('./runner.ts');
@@ -14,6 +15,33 @@ const args = {
   subjectId: 1015,
   subjectLabel: 'VLAN 1015',
 };
+
+test('previewWorkflow renders dependent interface outputs exactly as execution does', async () => {
+  const steps = [
+    {
+      position: 0, step_key: 'iface', action: 'create_vlan_interface',
+      params: { name: 1234, vlanId: '1234', parentInterface: 'fortilink', ip: '192.168.50.254', netmask: '255.255.255.0' },
+    },
+    {
+      position: 1, step_key: 'dependent', action: 'custom_api_call', condition: '{{steps.iface.vlanId}}',
+      params: {
+        method: 'POST', path: '/api/v2/cmdb/firewall/address',
+        body: {
+          interfaceName: '{{steps.iface.interfaceName}}', vlanId: '{{steps.iface.vlanId}}',
+          ip: '{{steps.iface.ip}}', netmask: '{{steps.iface.netmask}}',
+        },
+      },
+    },
+  ];
+  const client = { vdom: 'lab', getInterface: async () => null, request: async () => ({}) };
+  const preview = previewWorkflow({ steps, context: {}, client });
+  const run = await runWorkflow({ steps, context: {}, client });
+  const expected = { interfaceName: '1234', vlanId: 1234, ip: '192.168.50.254', netmask: '255.255.255.0' };
+  assert.deepEqual(run.outputs.iface, expected);
+  assert.equal(preview[1].skipped, undefined);
+  assert.deepEqual(preview[1].params.body, expected);
+  assert.deepEqual(preview[1].calls[0].body, run.log[1].calls[0].body);
+});
 
 test('runBundle awaits successful run recording and returns a numeric run ID', async () => {
   let recordingFinished = false;

@@ -49,10 +49,10 @@ import { getCapacitySettings, setCapacitySettings } from '../utils/capacity.ts';
 import { MEMORY_MODES } from '../utils/capacityPolicy.ts';
 import { getWorkflowBundle, workflowSettings, seedWorkflowsForFirewall } from '../workflows/store.ts';
 import {
-  runBundle, buildFirewallContext, teardownArtifacts, teardownForGoneTarget, ProvisioningTargetGoneError, WorkflowDisabledError, assertWorkflowEnabled,
+  runBundle, previewBundle, buildFirewallContext, teardownArtifacts, teardownForGoneTarget, ProvisioningTargetGoneError, WorkflowDisabledError, assertWorkflowEnabled,
 } from '../workflows/runner.ts';
 import { isArtifactGone } from '../workflows/engine.ts';
-import { deriveSubnet } from '../workflows/subnet.ts';
+import { deriveSubnet, interfaceCidr, syncedSubnet } from '../workflows/subnet.ts';
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, isValidUpstreamHost, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
@@ -1568,7 +1568,35 @@ function isValidCidr(cidr = '') {
   return inRange(Number(prefix), 32);
 }
 
-function serializeVlanSubnet(vlan) {
+// Template context for a firewall's vlan_provision workflow (real sync and preview).
+function vlanProvisionContext(vlan, fw, subnet, { allowInternet = true, enableDhcp = true } = {}) {
+  return {
+    tag: vlan.tag,
+    name: vlan.name,
+    subnet,
+    allowInternet: allowInternet !== false,
+    enableDhcp: enableDhcp !== false,
+    trunkConfigured: !!(fw.trunk_switch_serial && fw.trunk_switch_port),
+    firewall: buildFirewallContext(fw),
+  };
+}
+
+// What a sync of `tag` to `fw` would record: the /24 that its vlan_provision
+// workflow renders for this VLAN's own interface step (a customised step may
+// differ from subnet.firstOctet). No such step → nothing recorded → default.
+async function previewSyncSubnet(fw, tag) {
+  const bundle = await getWorkflowBundle(fw.id, 'vlan_provision');
+  const subnet = bundle && deriveSubnet(tag, workflowSettings(bundle.workflow));
+  if (!subnet) return null;
+  const preview = previewBundle({ bundle, context: vlanProvisionContext({ tag, name: '' }, fw, subnet), client: { vdom: fw.vdom || 'root' } });
+  // Same pick as the sync: the first executed interface step for this tag.
+  const iface = preview.find((i) => i.action === 'create_vlan_interface' && !i.skipped && !i.error && Number(i.params?.vlanId) === Number(tag));
+  const cidr = interfaceCidr(iface?.params, tag);
+  return { ...syncedSubnet(tag, cidr, iface?.params?.ip), recorded: !!cidr };
+}
+
+// syncedCidr: the network a firewall sync recorded (firewall_vlan_sync.subnet_cidr).
+function serializeVlanSubnet(vlan, syncedCidr) {
   if (vlan.mode === 'tagged_only') {
     if (!vlan.subnet_cidr) return null;
     return {
@@ -1578,7 +1606,7 @@ function serializeVlanSubnet(vlan) {
       custom: true,
     };
   }
-  return vlanTagToSubnet(vlan.tag);
+  return syncedSubnet(vlan.tag, syncedCidr);
 }
 
 // VLANs read also needed by policies page and assignments page
@@ -1597,16 +1625,28 @@ router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies'
   const syncs = await db.select({
     vlan_id: firewallVlanSync.vlan_id, firewall_id: firewallVlanSync.firewall_id,
     interface_name: firewallVlanSync.interface_name, firewall_name: firewalls.name,
-  }).from(firewallVlanSync).innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id));
+    subnet_cidr: firewallVlanSync.subnet_cidr,
+  }).from(firewallVlanSync).innerJoin(firewalls, eq(firewalls.id, firewallVlanSync.firewall_id))
+    .orderBy(firewallVlanSync.firewall_id);
   const syncMap = {};
   syncs.forEach(s => {
     if (!syncMap[s.vlan_id]) syncMap[s.vlan_id] = [];
-    syncMap[s.vlan_id].push({ firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name });
+    syncMap[s.vlan_id].push(s);
   });
   const fwRanges = await db.select({
     id: firewalls.id, name: firewalls.name, vlan_range_start: firewalls.vlan_range_start, vlan_range_end: firewalls.vlan_range_end,
   }).from(firewalls);
-  res.json(vlanRows.map(v => ({ ...v, firewallSync: syncMap[v.id] || [], subnet: serializeVlanSubnet(v), firewallRanges: fwRanges })));
+  // Each sync carries the subnet it provisioned; the VLAN-level subnet is the
+  // lowest-id firewall's (unsynced → default scheme).
+  res.json(vlanRows.map(v => ({
+    ...v,
+    firewallSync: (syncMap[v.id] || []).map(s => ({
+      firewallId: s.firewall_id, firewallName: s.firewall_name, interfaceName: s.interface_name,
+      subnet: serializeVlanSubnet(v, s.subnet_cidr)?.network || '',
+    })),
+    subnet: serializeVlanSubnet(v, syncMap[v.id]?.[0]?.subnet_cidr),
+    firewallRanges: fwRanges,
+  })));
 });
 
 router.post('/vlans', pVlans, async (req, res) => {
@@ -2610,15 +2650,7 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const settings = workflowSettings(bundle.workflow);
         const subnet = deriveSubnet(vlan.tag, settings);
         if (!subnet) throw new Error(`Cannot derive subnet from VLAN tag ${vlan.tag}`);
-        const context = {
-          tag: vlan.tag,
-          name: vlan.name,
-          subnet,
-          allowInternet: allowInternet !== false,
-          enableDhcp: enableDhcp !== false,
-          trunkConfigured: !!(fw.trunk_switch_serial && fw.trunk_switch_port),
-          firewall: buildFirewallContext(fw),
-        };
+        const context = vlanProvisionContext(vlan, fw, subnet, { allowInternet, enableDhcp });
         const { runId, outputs, artifacts } = await runBundle({
           bundle, context, client, firewall: fw,
           subjectType: 'vlan', subjectId: vlan.id, subjectLabel: `VLAN ${vlan.tag} (${vlan.name})`,
@@ -2632,7 +2664,19 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         const policyIds = outVals.map((o) => o?.policyId).filter((v) => v !== undefined && v !== null);
         const dhcpServerId = outVals.find((o) => o?.dhcpServerId)?.dhcpServerId ?? null;
         const staticRouteId = outVals.find((o) => o?.routeId)?.routeId ?? null;
-        const result = { interfaceName, policyIds, dhcpServerId, staticRouteId, subnet };
+        // Record only the /24 of this VLAN's own interface (the interface step
+        // whose vlanId is this tag), as configured or as found when the step
+        // skipped an existing interface. Anything else → NULL = legacy default.
+        const ifaceOut = outVals.find((o) => o?.interfaceName && Number(o.vlanId) === Number(vlan.tag));
+        const provisionedCidr = interfaceCidr(ifaceOut, vlan.tag);
+        // Report what was recorded; with no record readers use the legacy default, so show that, labelled.
+        const recordedSubnet = syncedSubnet(vlan.tag, provisionedCidr, ifaceOut?.ip);
+        const result = {
+          interfaceName, policyIds, dhcpServerId, staticRouteId, subnet: recordedSubnet, subnetRecorded: !!provisionedCidr,
+          ...(provisionedCidr ? {} : {
+            warning: `Could not determine the subnet of VLAN ${vlan.tag}'s interface; none recorded, so policies use the legacy default ${recordedSubnet?.network}`,
+          }),
+        };
         console.log(`[sync] Success:`, JSON.stringify(result));
         // policy_ids and artifacts are jsonb columns — pass objects directly.
         await trackProvisioned(client, artifacts, () => db.transaction(async (tx) => {
@@ -2643,9 +2687,10 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
           await tx.insert(firewallVlanSync).values({
             firewall_id: fw.id, vlan_id: vlan.id, interface_name: interfaceName,
             policy_ids: policyIds, dhcp_server_id: dhcpServerId, artifacts, workflow_run_id: runId,
+            subnet_cidr: provisionedCidr,
           });
         }));
-        await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${subnet.network})`);
+        await logAudit(req, 'admin_sync_vlan_firewall', `VLAN ${vlan.tag}`, `${fw.name}: ${interfaceName} (${provisionedCidr || `no subnet recorded; default ${recordedSubnet?.network}`})`);
         results.push({ firewall: fw.name, status: 'ok', ...result });
       } catch (err) {
         console.error(`[sync] Error provisioning VLAN ${vlan.tag} on ${fw.name}:`, err.message);
@@ -2816,7 +2861,9 @@ router.post('/policies', pPolicies, async (req, res) => {
   if (!fw) return res.status(404).json({ error: 'Firewall not found' });
 
   // Resolve VLANs
-  const vlanWithIfaceCols = { ...getTableColumns(vlans), interface_name: firewallVlanSync.interface_name };
+  const vlanWithIfaceCols = {
+    ...getTableColumns(vlans), interface_name: firewallVlanSync.interface_name, synced_cidr: firewallVlanSync.subnet_cidr,
+  };
   const [srcVlan] = await db.select(vlanWithIfaceCols).from(vlans)
     .innerJoin(firewallVlanSync, eq(firewallVlanSync.vlan_id, vlans.id))
     .where(and(eq(vlans.tag, Number(srcVlanTag)), eq(firewallVlanSync.firewall_id, Number(firewallId)))).limit(1);
@@ -2834,8 +2881,9 @@ router.post('/policies', pPolicies, async (req, res) => {
     if (!hasDst) return res.status(403).json({ error: `You do not have access to destination VLAN ${dstVlanTag}` });
   }
 
-  const srcSubnet = vlanTagToSubnet(srcVlanTag);
-  const dstSubnet = vlanTagToSubnet(dstVlanTag);
+  // Address the networks these syncs actually provisioned on this firewall.
+  const srcSubnet = syncedSubnet(srcVlan.tag, srcVlan.synced_cidr);
+  const dstSubnet = syncedSubnet(dstVlan.tag, dstVlan.synced_cidr);
   if (!srcSubnet || !dstSubnet) return res.status(400).json({ error: 'Cannot derive subnets from VLAN tags' });
 
   const srcAddrName = `NET-${srcSubnet.networkIp}_24`;
@@ -3792,11 +3840,23 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
   }
 });
 
-// Helper: compute subnet for a VLAN tag
-router.get('/vlans/subnet/:tag', pVlans, (req, res) => {
-  const subnet = vlanTagToSubnet(parseInt(req.params.tag));
-  if (!subnet) return res.status(400).json({ error: 'Invalid tag for auto IP scheme' });
-  res.json(subnet);
+// Helper: compute subnet for a VLAN tag (optionally on a given firewall's scheme)
+router.get('/vlans/subnet/:tag', pVlans, async (req, res) => {
+  const tag = parseInt(req.params.tag);
+  if (!deriveSubnet(tag, {})) return res.status(400).json({ error: 'Invalid tag for auto IP scheme' });
+  if (req.query.firewallId === undefined) return res.json(deriveSubnet(tag, {}));
+  // With ?firewallId=: what a sync to that firewall would provision and record.
+  const firewallId = Number(req.query.firewallId);
+  if (!Number.isInteger(firewallId) || firewallId <= 0) return res.status(400).json({ error: 'Invalid firewallId' });
+  const [fw] = await db.select().from(firewalls).where(eq(firewalls.id, firewallId)).limit(1);
+  if (!fw) return res.status(404).json({ error: 'Firewall not found' });
+  try {
+    const subnet = await previewSyncSubnet(fw, tag);
+    if (!subnet) return res.status(400).json({ error: 'Invalid tag for this firewall\'s IP scheme' });
+    res.json(subnet);
+  } catch (err) {
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
 });
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────

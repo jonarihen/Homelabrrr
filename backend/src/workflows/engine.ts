@@ -187,7 +187,7 @@ export function previewWorkflow({ steps, context, client }) {
 
 function predictOutput(action, p) {
   switch (action) {
-    case 'create_vlan_interface': return { interfaceName: p.name };
+    case 'create_vlan_interface': return { interfaceName: String(p.name), vlanId: Number(p.vlanId), ip: String(p.ip), netmask: String(p.netmask) };
     case 'create_address_object': return { name: p.name };
     case 'create_service_object': return { name: p.name };
     case 'create_vip': return { name: p.name };
