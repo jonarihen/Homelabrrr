@@ -98,6 +98,34 @@ test('one failing or throwing node does not stop collection for the others', asy
   assert.equal(JSON.stringify(metricEvents()).includes('mgmt.example.test'), false);
 });
 
+test('a slow node occupies one worker while the others keep being polled', async () => {
+  await fixture.db.update(hardwareConnections).set({ collection_enabled: false });
+  const rows = [];
+  for (const node of ['n1', 'n2', 'n3', 'n4']) rows.push(await connection(node, `${node}-uuid`));
+  const at = new Date('2026-10-09T14:00:00Z');
+  let slowHost: string | null = null;
+  const read = new Set<string>();
+  let othersRead: () => void = () => {};
+  const allOthersRead = new Promise<boolean>((resolve) => { othersRead = () => resolve(true); });
+  let othersFinishedFirst = false;
+  const reader = async (config: IloConfig): Promise<HardwareDiscovery> => {
+    const uuid = `${config.host.split('.')[0]}-uuid`;
+    // Whichever node is read first is the slow one. Paired batching would make
+    // the nodes in the next pair wait for it, so it would hit the timeout.
+    if (slowHost === null) {
+      slowHost = config.host;
+      othersFinishedFirst = await Promise.race([allOthersRead, new Promise<boolean>((resolve) => setTimeout(resolve, 2000, false))]);
+      return reading(at, uuid);
+    }
+    read.add(config.host);
+    if (read.size === rows.length - 1) othersRead();
+    return reading(at, uuid);
+  };
+  await collector.sweepHardwareTelemetry(reader, () => at);
+  assert.equal(othersFinishedFirst, true);
+  for (const row of rows) assert.equal((await samplesFor(row.id)).length, 1);
+});
+
 test('restart resumes from durable state: a stale lease left by a crash is reclaimed', async () => {
   const row = await connection('restart', 'restart-uuid');
   const crashedAt = new Date('2026-10-09T13:00:00Z');

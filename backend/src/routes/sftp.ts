@@ -3,12 +3,11 @@ import { v4 as uuidv4 } from 'uuid';
 import Busboy from 'busboy';
 import ssh2 from 'ssh2';
 import { basename, posix } from 'path';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { sessions, sshKeys, users, vmSshConfigs, vmSshUserConfigs } from '../db/schema/index.ts';
+import { sessions, sshKeys, users } from '../db/schema/index.ts';
 import { requireAuth, requireInteractiveSession } from '../middleware/auth.ts';
 import { userCanPerformVmOp } from '../utils/vmAccess.ts';
-import { nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { normalizeSshHostFingerprint } from '../utils/sshHostKey.ts';
 import { decryptSecret } from '../utils/secrets.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
@@ -20,6 +19,7 @@ import { sftpClientError } from '../utils/sftpError.ts';
 import { log } from '../utils/logger.ts';
 import { boundedString } from '../utils/validation.ts';
 import { sftpSessions, revokeUserSftpSessions } from '../utils/sftpSessions.ts';
+import { getGlobalSshConfig, getUserSshConfig } from '../utils/sshConfigLookup.ts';
 
 export { sftpSessions } from '../utils/sftpSessions.ts';
 
@@ -64,46 +64,7 @@ function purgeExpired() {
   }
 }
 
-async function getGlobalSshConfig(node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
-  const candidates = nodeLookupCandidates(node);
-  if (candidates.length === 0) return null;
-  // Legacy rows may store the bare node name — match any candidate in one query,
-  // then honour the candidate order (full ref preferred over bare name).
-  const rows = await db
-    .select({
-      node: vmSshConfigs.node,
-      host: vmSshConfigs.host,
-      port: vmSshConfigs.port,
-      host_fingerprint: vmSshConfigs.host_fingerprint,
-    })
-    .from(vmSshConfigs)
-    .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, parsedVmid)));
-  for (const candidate of candidates) {
-    const row = rows.find((r) => r.node === candidate);
-    if (row) return row;
-  }
-  return null;
-}
 
-async function getUserSshConfig(userId, node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
-  const candidates = nodeLookupCandidates(node);
-  if (candidates.length === 0) return null;
-  const rows = await db
-    .select({ node: vmSshUserConfigs.node, username: vmSshUserConfigs.username })
-    .from(vmSshUserConfigs)
-    .where(and(
-      eq(vmSshUserConfigs.user_id, userId),
-      inArray(vmSshUserConfigs.node, candidates),
-      eq(vmSshUserConfigs.vmid, parsedVmid),
-    ));
-  for (const candidate of candidates) {
-    const row = rows.find((r) => r.node === candidate);
-    if (row) return row;
-  }
-  return null;
-}
 
 async function resolveSession(req, token, deny) {
   const sess = sftpSessions.get(token);
@@ -146,7 +107,9 @@ async function resolveSession(req, token, deny) {
 }
 
 /** Open an SSH connection and start the SFTP subsystem, returning both. */
-async function openSftp(sess) {
+// `signal` (optional) aborts the handshake and the subsystem request when the
+// caller's client goes away before the SFTP channel is ready.
+async function openSftp(sess, signal?: AbortSignal) {
   const conn = await createSshConnection({
     host: sess.host,
     port: sess.port,
@@ -154,7 +117,7 @@ async function openSftp(sess) {
     privateKey: sess.privateKey,
     passphrase: sess.passphrase,
     hostFingerprint: sess.hostFingerprint,
-  });
+  }, signal);
 
   return new Promise((resolve, reject) => {
     conn.sftp((err, sftp) => {
@@ -278,17 +241,38 @@ router.post('/ls', async (req, res) => {
 /** Download a remote file. */
 router.get('/download', async (req, res) => {
   const { token, path: filePath } = req.query;
+  let conn, sftp, stream;
+  let clientGone = false;
+  const opening = new AbortController();
+  // A cancelled download pauses the read stream forever (neither 'end' nor
+  // 'error' fires), so release the SSH connection when the response closes.
+  // Registered before the first await so a client that leaves early is seen;
+  // the abort reaches the SSH client while openSftp is still pending.
+  res.on('close', () => {
+    clientGone = true;
+    opening.abort();
+    stream?.destroy();
+    conn?.end();
+  });
+
   const sess = await resolveSession(req, token, (status, body) => res.status(status).json(body));
-  if (!sess) return;
+  if (!sess || clientGone) return;
   if (!filePath) return res.status(400).json({ error: 'path is required' });
 
-  let conn, sftp;
   try {
-    ({ conn, sftp } = await openSftp(sess));
+    ({ conn, sftp } = await openSftp(sess, opening.signal));
+    if (clientGone) {
+      conn.end();
+      return;
+    }
 
     const stat = await new Promise((resolve, reject) => {
       sftp.stat(filePath, (err, s) => (err ? reject(err) : resolve(s)));
     });
+    if (clientGone) {
+      conn.end();
+      return;
+    }
 
     // Remote filename is untrusted — strip quotes/control chars from the ASCII
     // fallback and carry the real name RFC5987-encoded in filename*.
@@ -300,7 +284,7 @@ router.get('/download', async (req, res) => {
     res.setHeader('Content-Type', 'application/octet-stream');
     if (stat.size != null) res.setHeader('Content-Length', stat.size);
 
-    const stream = sftp.createReadStream(filePath);
+    stream = sftp.createReadStream(filePath);
     stream.pipe(res);
 
     stream.on('error', (err) => {

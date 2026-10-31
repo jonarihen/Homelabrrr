@@ -5,6 +5,21 @@
 - Proxmox and FortiGate API calls now have a 60-second total deadline and a 32 MB response limit, on top of the 15-second idle timeout. A slow-drip or oversized response fails the request instead of tying it up indefinitely.
 - Waiting for a Proxmox task (clones, migrations) still rides out short outages, but gives up with the real error after 5 minutes of failed status checks instead of silently retrying for up to 4 hours.
 - VMID allocation and node lookups query all Proxmox hosts in parallel, so one dead host costs one timeout instead of one per host. Unreachable hosts are logged as `pve_host_unreachable` with the host name, so "node not found" has a visible cause.
+## 2026-10-28 — SSH works with fewer steps after deploy
+
+- The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
+- SSH connection failures now say what to check (wrong username or key, VM still booting, SSH not running) instead of showing the raw error.
+## 2026-10-28 — Revoking a session closes its open consoles
+
+- Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.
+## 2026-10-28 — VLAN access follows the subnets firewalls actually provisioned
+
+- Browser SSH targets, website upstreams and public-IP targets now check your VLANs against the subnet each firewall sync recorded, so deployments that don't use the `10.x` scheme no longer refuse addresses in your own VLAN — and no longer accept the unused `10.x` range.
+- A VLAN synced to several firewalls covers each firewall's recorded subnet. Firewalls synced before subnets were recorded keep the previous behaviour (configured subnet or default scheme) until re-synced.
+
+## 2026-10-28 — A slow iLO no longer delays its neighbours
+
+- Hardware telemetry now polls each node independently (still at most two at a time), so one slow or unresponsive iLO no longer holds back the next node's power reading for up to a minute.
 
 ## 2026-10-28 — Search and filter on the Websites page
 
