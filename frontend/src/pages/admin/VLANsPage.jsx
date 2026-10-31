@@ -47,7 +47,7 @@ function SubnetPreviewList({ previews }) {
     f.network ? (
       <p key={f.id} className="text-blue-400">
         {f.name}: <span className="font-mono">{f.network}</span>
-        <span className="text-gray-500"> · gateway <span className="font-mono text-gray-400">{f.gateway}</span></span>
+        {f.gateway && <span className="text-gray-500"> · gateway <span className="font-mono text-gray-400">{f.gateway}</span></span>}
         {f.recorded === false && <span className="text-amber-400"> · no interface step for this tag, default not recorded</span>}
       </p>
     ) : (

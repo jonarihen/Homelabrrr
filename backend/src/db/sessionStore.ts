@@ -35,16 +35,30 @@ export class DrizzleSessionStore extends session.Store {
           // Expired — remove lazily and report a miss.
           return db.delete(sessions).where(eq(sessions.sid, sid)).then(() => cb(null, null), () => cb(null, null));
         }
-        cb(null, row.sess as session.SessionData);
+        // A row in the store is persisted by definition (covers rows stored
+        // before the _persisted marker existed), so later saves stay UPDATE-only.
+        cb(null, { ...(row.sess as object), _persisted: true } as unknown as session.SessionData);
       }, (err) => cb(err));
   }
 
   set(sid: string, sess: session.SessionData, cb?: (err?: unknown) => void): void {
     const expire = this.expiryFor(sess);
+    const data = sess as session.SessionData & { _persisted?: boolean };
+    // A session that was already stored is only ever UPDATEd: if it was revoked
+    // (row deleted) while a request on it was in flight, that request's save
+    // must not recreate it. Only a never-stored session may INSERT.
+    if (data._persisted) {
+      db.update(sessions)
+        .set({ sess: data as object, expire })
+        .where(eq(sessions.sid, sid))
+        .then(() => cb?.(), (err) => cb?.(err));
+      return;
+    }
+    const stored = { ...data, _persisted: true };
     db.insert(sessions)
-      .values({ sid, sess: sess as object, expire })
-      .onConflictDoUpdate({ target: sessions.sid, set: { sess: sess as object, expire } })
-      .then(() => cb?.(), (err) => cb?.(err));
+      .values({ sid, sess: stored, expire })
+      .onConflictDoUpdate({ target: sessions.sid, set: { sess: stored, expire } })
+      .then(() => { data._persisted = true; cb?.(); }, (err) => cb?.(err));
   }
 
   destroy(sid: string, cb?: (err?: unknown) => void): void {

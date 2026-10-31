@@ -173,21 +173,25 @@ export async function pollHardwareConnection(id: number, now = () => new Date(),
 }
 
 // At most two nodes are polled at once; each poll is bounded by the
-// discovery deadline, and one node's failure never stops the others.
+// discovery deadline, and one node's failure or slowness never stops the others.
 export async function sweepHardwareTelemetry(reader = discoverHardware, now = () => new Date()) {
   if (sweepRunning) return;
   sweepRunning = true;
   try {
     const rows = await db.select({ id: hardwareConnections.id }).from(hardwareConnections).where(and(eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.collection_enabled, true)));
-    for (let i = 0; i < rows.length; i += 2) {
-      const results = await Promise.allSettled(rows.slice(i, i + 2).map((row) => pollHardwareConnection(row.id, now, reader)));
-      for (const [index, result] of results.entries()) {
-        if (result.status === 'rejected') {
+    // Two workers pull from one queue, so a slow iLO only holds its own worker.
+    const queue = rows.map((row) => row.id);
+    const worker = async () => {
+      for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
+        try {
+          await pollHardwareConnection(id, now, reader);
+        } catch (err) {
           countPoll('error');
-          log('warn', 'hardware_telemetry_poll_rejected', { hardwareId: rows[i + index].id, error: result.reason });
+          log('warn', 'hardware_telemetry_poll_rejected', { hardwareId: id, error: err });
         }
       }
-    }
+    };
+    await Promise.all([worker(), worker()]);
     incrementMetric('hardware_telemetry_sweeps');
   } finally { sweepRunning = false; }
 }
