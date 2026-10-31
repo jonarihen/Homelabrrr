@@ -4,6 +4,17 @@
 
 - The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
 - SSH connection failures now say what to check (wrong username or key, VM still booting, SSH not running) instead of showing the raw error.
+## 2026-10-28 — Revoking a session closes its open consoles
+
+- Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.
+## 2026-10-28 — VLAN access follows the subnets firewalls actually provisioned
+
+- Browser SSH targets, website upstreams and public-IP targets now check your VLANs against the subnet each firewall sync recorded, so deployments that don't use the `10.x` scheme no longer refuse addresses in your own VLAN — and no longer accept the unused `10.x` range.
+- A VLAN synced to several firewalls covers each firewall's recorded subnet. Firewalls synced before subnets were recorded keep the previous behaviour (configured subnet or default scheme) until re-synced.
+
+## 2026-10-28 — A slow iLO no longer delays its neighbours
+
+- Hardware telemetry now polls each node independently (still at most two at a time), so one slow or unresponsive iLO no longer holds back the next node's power reading for up to a minute.
 
 ## 2026-10-28 — Search and filter on the Websites page
 

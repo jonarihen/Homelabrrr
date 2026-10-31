@@ -72,7 +72,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         }));
       }
       // Nothing saved yet: fill in the VM's address instead of making the user type it.
-      if (!cfg?.host) detectIp({ quiet: true });
+      if (!cfg?.host) detectIp({ quiet: true, isStale: () => cancelled });
 
       if (keysRes.data.length > 0) {
         setForm((current) => ({
@@ -133,23 +133,26 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
   // Proxmox and type it back in.
   // quiet: the automatic run on open — never clobber a host the user has
   // started typing, and don't greet them with an error.
-  const detectIp = async ({ quiet = false } = {}) => {
+  const detectIp = async ({ quiet = false, isStale = () => false } = {}) => {
     setDetectingIp(true);
     if (!quiet) setError('');
 
     try {
       const { data } = await api.get(`/vms/${vmNode}/${vm.vmid}/detected-ips`);
+      if (isStale()) return;
       const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+      if (quiet && candidates.length === 0) return; // nothing found yet: stay quiet on the automatic run
       setDetected({ ...data, candidates });
 
       if (candidates.length > 0) {
         setForm((current) => (quiet && current.host ? current : { ...current, host: candidates[0].ip }));
       }
     } catch (e) {
+      if (isStale()) return;
       setDetected(null);
       if (!quiet) setError(e.response?.data?.error || 'Failed to detect an IP address');
     } finally {
-      setDetectingIp(false);
+      if (!isStale()) setDetectingIp(false);
     }
   };
 

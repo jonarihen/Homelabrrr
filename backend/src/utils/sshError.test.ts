@@ -14,3 +14,9 @@ test('an auth failure says what to check instead of the raw ssh2 text', () => {
   assert.equal(payload.code, 'SSH_AUTHENTICATION_FAILED');
   assert.match(payload.error, /username/);
 });
+
+test('auth failure advice does not declare root invalid', () => {
+  const payload = sshClientError(new Error('All configured authentication methods failed'));
+  assert.doesNotMatch(payload.error, /not root\b/);
+  assert.match(payload.error, /often not root/);
+});
