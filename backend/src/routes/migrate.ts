@@ -18,6 +18,7 @@ import { requireAdmin } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { httpError, sendError } from '../utils/httpError.ts';
 import { logAudit } from '../utils/audit.ts';
+import { diskSizeGb } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates, isValidNodeName } from '../utils/nodeRef.ts';
 import { assertNodeCapacity } from '../utils/capacity.ts';
 import { lockVmMigration, vmMigrationPending } from '../utils/vmMigrationLock.ts';
@@ -324,15 +325,6 @@ function dataVolumes(disks, srcDefs) {
 
 // ─── Disk plan ───────────────────────────────────────────────────────────────
 
-function parseSizeGb(value) {
-  const m = String(value).match(/(?:^|,)size=(\d+(?:\.\d+)?)([MGT]?)/);
-  if (!m) return null;
-  const n = parseFloat(m[1]);
-  if (m[2] === 'T') return n * 1024;
-  if (m[2] === 'M') return n / 1024;
-  return n;
-}
-
 // qemu config → per-disk migration plan. LXC never plans (always full copy).
 function buildDiskPlan(config, sharedMap) {
   const disks = [];
@@ -348,7 +340,7 @@ function buildDiskPlan(config, sharedMap) {
       key,
       volid,
       storage,
-      sizeGb: parseSizeGb(value),
+      sizeGb: diskSizeGb(value),
       shared,
       action: isCloudInit ? 'recreate' : isCdrom ? 'detach' : shared ? 'remount' : 'copy',
       targetStorageId: shared ? sharedMap.get(storage).targetId : null,
@@ -383,7 +375,7 @@ async function computePlan(vm, sourceHost, targetHost) {
       const cfg = await getLXCConfig(vm.nodeRef, vm.vmid);
       disks = Object.entries(cfg)
         .filter(([k, v]) => (/^(?:rootfs|mp\d+)$/.test(k)) && typeof v === 'string')
-        .map(([k, v]) => ({ key: k, volid: v.split(',')[0], storage: v.split(':')[0], sizeGb: parseSizeGb(v), shared: false, action: 'copy' }));
+        .map(([k, v]) => ({ key: k, volid: v.split(',')[0], storage: v.split(':')[0], sizeGb: diskSizeGb(v), shared: false, action: 'copy' }));
     } catch { /* config unreadable — plan without disks */ }
     return {
       mode: 'remote_migrate',
