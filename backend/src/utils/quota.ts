@@ -218,6 +218,11 @@ export function cloneDiskAllocation(config: Record<string, unknown>, requestedGb
   return { diskGb: total + growthGb, resizeDisk: growthGb > 0 ? primary : null };
 }
 
+/** GB from a PVE disk config value ("local:vm-1-disk-0,size=32G"), or null. */
+export function diskSizeGb(value: unknown): number | null {
+  return sizeToGb(String(value ?? '').match(/(?:^|,)size=(\d+(?:\.\d+)?[MGT])(?:,|$)/i)?.[1]);
+}
+
 /** Sizes of a VM's real disks (no CD-ROM / cloud-init / empty slots), plus how many lack a usable size. */
 function measureConfigDisks(config: Record<string, unknown>) {
   const disks = new Map<string, number>();
