@@ -148,11 +148,11 @@ export default function Login() {
               {loading ? 'Verifying…' : 'Verify →'}
             </button>
             {methods.includes('passkey') && <button type="button" disabled={loading} onClick={verifyPasskey} className="w-full border border-gray-700 text-gray-200 font-mono text-xs uppercase tracking-[0.1em] py-3 hover:border-orange-600">Use a passkey</button>}
-            {methods.includes('recovery') && <button type="button" onClick={() => { setStep('recovery'); setCode(''); setError(''); }} className="w-full font-mono text-[10px] uppercase tracking-[0.14em] text-gray-500 hover:text-gray-300">Use a recovery code</button>}
+            {methods.includes('recovery') && <button type="button" onClick={() => { setStep('recovery'); setCode(''); setError(''); }} className="w-full font-mono text-[11px] uppercase tracking-[0.14em] text-gray-500 hover:text-gray-300">Use a recovery code</button>}
             <button
               type="button"
               onClick={() => { setStep('credentials'); setError(''); setCode(''); }}
-              className="w-full font-mono text-[10px] uppercase tracking-[0.14em] text-gray-500 hover:text-gray-300 py-1 transition-colors"
+              className="w-full font-mono text-[11px] uppercase tracking-[0.14em] text-gray-500 hover:text-gray-300 py-1 transition-colors"
             >
               {'←'} Back to login
             </button>
@@ -163,7 +163,7 @@ export default function Login() {
             <input value={code} onChange={(event) => setCode(event.target.value.toUpperCase().slice(0, 19))} className={inputCls} autoComplete="one-time-code" placeholder="ABCD-EF12-3456-7890" required autoFocus />
             {error && <p className="text-xs text-red-400">{error}</p>}
             <button type="submit" disabled={loading || code.length < 16} className={btnCls}>{loading ? 'Verifying…' : 'Use Recovery Code →'}</button>
-            <button type="button" onClick={() => { setStep('totp'); setCode(''); setError(''); }} className="w-full font-mono text-[10px] uppercase tracking-[0.14em] text-gray-500 hover:text-gray-300">← Back</button>
+            <button type="button" onClick={() => { setStep('totp'); setCode(''); setError(''); }} className="w-full font-mono text-[11px] uppercase tracking-[0.14em] text-gray-500 hover:text-gray-300">← Back</button>
           </form>
         )}
       </>

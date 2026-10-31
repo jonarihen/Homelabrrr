@@ -394,7 +394,7 @@ export default function PortForwardingPage() {
                   Configure WAN
                 </button>
               ) : (
-                <p className="text-xs text-gray-600">Ask a firewall admin to configure the WAN settings for this firewall.</p>
+                <p className="text-xs text-gray-400">Ask a firewall admin to configure the WAN settings for this firewall.</p>
               )}
             </div>
           ) : (
@@ -411,7 +411,7 @@ export default function PortForwardingPage() {
                 <div>
                   <span className="text-gray-500">VIPs: </span>
                   <span className="text-white">{vips.length}</span>
-                  {managedCount > 0 && <span className="text-gray-600 ml-1">({managedCount} managed)</span>}
+                  {managedCount > 0 && <span className="text-gray-400 ml-1">({managedCount} managed)</span>}
                 </div>
               </div>
               {canManageAllPortForwards ? (
@@ -455,7 +455,7 @@ export default function PortForwardingPage() {
                     {blockedCallout.action || 'Fix this'}
                   </Link>
                 ) : blockedCallout.action ? (
-                  <p className="text-xs text-gray-600">{blockedCallout.action}</p>
+                  <p className="text-xs text-gray-400">{blockedCallout.action}</p>
                 ) : null}
               </div>
             </div>
@@ -487,14 +487,14 @@ export default function PortForwardingPage() {
                   )}
                 </select>
                 {vmTargets.length === 0 && !loading && (
-                  <p className="text-[11px] text-gray-600 mt-1">
+                  <p className="text-[11px] text-gray-400 mt-1">
                     {canManageAllPortForwards
                       ? 'No VMs found on any registered Proxmox host.'
                       : 'No VMs are assigned to you yet — ask an admin for access.'}
                   </p>
                 )}
                 {selectableTargets.length > 0 && blockedTargets.length > 0 && (
-                  <p className="text-[11px] text-gray-600 mt-1">
+                  <p className="text-[11px] text-gray-400 mt-1">
                     {blockedTargets.length} VM{blockedTargets.length !== 1 ? 's are' : ' is'} missing a
                     prerequisite and shown greyed out below.
                   </p>
@@ -565,7 +565,7 @@ export default function PortForwardingPage() {
                   className={inputCls}
                   readOnly={!isCustom}
                 />
-                {!isCustom && <p className="text-[11px] text-gray-600 mt-1">Set by service preset</p>}
+                {!isCustom && <p className="text-[11px] text-gray-400 mt-1">Set by service preset</p>}
               </div>
             </div>
 
@@ -649,19 +649,19 @@ export default function PortForwardingPage() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-800/50">
-                  <th className="px-4 py-3 text-left text-[10px] text-gray-500 uppercase tracking-wider font-semibold">Status</th>
-                  <th className="px-4 py-3 text-left text-[10px] text-gray-500 uppercase tracking-wider font-semibold">Name</th>
-                  <th className="px-4 py-3 text-left text-[10px] text-gray-500 uppercase tracking-wider font-semibold">Proto</th>
-                  <th className="px-4 py-3 text-left text-[10px] text-gray-500 uppercase tracking-wider font-semibold">External</th>
-                  <th className="px-4 py-3 text-center text-[10px] text-gray-500 uppercase tracking-wider font-semibold"></th>
-                  <th className="px-4 py-3 text-left text-[10px] text-gray-500 uppercase tracking-wider font-semibold">Internal</th>
-                  <th className="px-4 py-3 text-right text-[10px] text-gray-500 uppercase tracking-wider font-semibold w-20"></th>
+                  <th className="px-4 py-3 text-left text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Status</th>
+                  <th className="px-4 py-3 text-left text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Name</th>
+                  <th className="px-4 py-3 text-left text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Proto</th>
+                  <th className="px-4 py-3 text-left text-[11px] text-gray-500 uppercase tracking-wider font-semibold">External</th>
+                  <th className="px-4 py-3 text-center text-[11px] text-gray-500 uppercase tracking-wider font-semibold"></th>
+                  <th className="px-4 py-3 text-left text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Internal</th>
+                  <th className="px-4 py-3 text-right text-[11px] text-gray-500 uppercase tracking-wider font-semibold w-20"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/30">
                 {sortedVips.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-12 text-center text-gray-600 text-sm">
+                    <td colSpan={7} className="px-4 py-12 text-center text-gray-400 text-sm">
                       No port forwarding rules found
                     </td>
                   </tr>
@@ -694,7 +694,7 @@ export default function PortForwardingPage() {
                     <td className="px-4 py-3 text-sm font-mono text-gray-300">
                       :{v.extport}
                     </td>
-                    <td className="px-4 py-3 text-center text-gray-600 text-xs">
+                    <td className="px-4 py-3 text-center text-gray-400 text-xs">
                       <svg className="w-4 h-4 inline" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
                       </svg>
@@ -729,7 +729,7 @@ export default function PortForwardingPage() {
 
           {/* Footer */}
           {vips.length > 0 && (
-            <div className="border-t border-gray-800/50 px-4 py-2.5 text-xs text-gray-600 flex justify-between">
+            <div className="border-t border-gray-800/50 px-4 py-2.5 text-xs text-gray-400 flex justify-between">
               <span>{vips.length} VIP{vips.length !== 1 ? 's' : ''} total</span>
               <span>
                 {managedCount > 0 && <span className="text-blue-500/60">{managedCount} managed</span>}

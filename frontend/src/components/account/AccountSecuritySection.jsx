@@ -97,7 +97,7 @@ export default function AccountSecuritySection() {
           <input value={passkeyName} maxLength={64} onChange={(event) => setPasskeyName(event.target.value)} className={inputCls} aria-label="Passkey name" />
           <button disabled={!!busy} onClick={registerPasskey} className="px-4 rounded-xl btn-primary disabled:opacity-40 text-sm whitespace-nowrap">{busy === 'passkey' ? 'Waiting…' : 'Add passkey'}</button>
         </div>
-        {passkeys.length === 0 ? <p className="text-xs text-gray-600">No passkeys registered.</p> : <ul className="space-y-2">{passkeys.map((passkey) => (
+        {passkeys.length === 0 ? <p className="text-xs text-gray-400">No passkeys registered.</p> : <ul className="space-y-2">{passkeys.map((passkey) => (
           <li key={passkey.id} className="flex justify-between gap-3 bg-gray-800/50 rounded-lg px-3 py-2">
             <div><p className="text-sm text-white">{passkey.name}</p><p className="text-[11px] text-gray-500">Created {fmt(passkey.createdAt)} · Last used {fmt(passkey.lastUsedAt)}</p></div>
             <button disabled={!!busy} onClick={() => run(`passkey-${passkey.id}`, () => api.delete(`/auth/passkeys/${encodeURIComponent(passkey.id)}`))} className="text-xs text-red-400">Remove</button>

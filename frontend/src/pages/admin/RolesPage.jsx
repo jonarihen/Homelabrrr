@@ -161,9 +161,9 @@ export default function RolesPage() {
                         >
                           <span className="font-mono">{open ? '▾' : '▸'}</span>
                           {role.permissions.length} granted
-                          {hasDanger && <span className="ml-1 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+                          {hasDanger && <span className="ml-1 text-[11px] uppercase tracking-wider text-amber-400">high blast radius</span>}
                         </button>
-                      ) : <span className="text-xs text-gray-600">None</span>}
+                      ) : <span className="text-xs text-gray-400">None</span>}
                       {open && (
                         <ul className="mt-2 flex flex-wrap gap-1">
                           {[...role.permissions].sort().map((k) => (
@@ -274,7 +274,7 @@ function ChangeList({ changes }) {
               : c.kind === 'revoke' ? 'text-red-400' : 'text-gray-300'
           }
         >
-          {c.kind === 'grant' && <>+ {c.label}{c.danger && <span className="ml-2 text-[10px] uppercase tracking-wider">high blast radius</span>}</>}
+          {c.kind === 'grant' && <>+ {c.label}{c.danger && <span className="ml-2 text-[11px] uppercase tracking-wider">high blast radius</span>}</>}
           {c.kind === 'revoke' && <>− {c.label}</>}
           {c.kind === 'field' && <>~ {c.label}: <span className="text-gray-500">{c.from}</span> → <span className="text-white">{c.to}</span></>}
         </li>
@@ -476,7 +476,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
                   <div>
                     <p className="text-sm text-white">
                       {p.label}
-                      {p.danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+                      {p.danger && <span className="ml-2 text-[11px] uppercase tracking-wider text-amber-400">high blast radius</span>}
                     </p>
                     <p className={`text-xs ${p.danger && perms.has(p.key) ? 'text-amber-300/80' : 'text-gray-500'}`}>{p.desc}</p>
                   </div>
@@ -657,7 +657,7 @@ function HoldersModal({ role, isAdmin, onClose, onChanged }) {
               {holders.map((u) => (
                 <li key={u.id} className="flex items-center justify-between px-3 py-2 text-sm">
                   <span className="text-white">{u.username}</span>
-                  {u.is_admin && <span className="text-[10px] uppercase tracking-wider text-blue-400">admin</span>}
+                  {u.is_admin && <span className="text-[11px] uppercase tracking-wider text-blue-400">admin</span>}
                 </li>
               ))}
             </ul>
@@ -828,10 +828,10 @@ function CompareRolesModal({ roles, onClose }) {
                 <tr key={r.key} className={`border-b border-gray-800/60 ${differs ? 'bg-blue-900/10' : ''}`}>
                   <td className={`py-1.5 ${differs ? 'text-white' : 'text-gray-500'}`}>
                     {r.label}
-                    {r.danger && <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400">high blast radius</span>}
+                    {r.danger && <span className="ml-2 text-[11px] uppercase tracking-wider text-amber-400">high blast radius</span>}
                   </td>
-                  <td className={`text-center font-mono ${differs ? 'text-white' : 'text-gray-600'}`}>{r.a}</td>
-                  <td className={`text-center font-mono ${differs ? 'text-white' : 'text-gray-600'}`}>{r.b}</td>
+                  <td className={`text-center font-mono ${differs ? 'text-white' : 'text-gray-400'}`}>{r.a}</td>
+                  <td className={`text-center font-mono ${differs ? 'text-white' : 'text-gray-400'}`}>{r.b}</td>
                 </tr>
               );
             })}

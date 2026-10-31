@@ -237,7 +237,7 @@ function WebhookFormModal({ webhook, eventTypes, onClose, onSaved }) {
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">
-            Discord Webhook URL {isEdit && <span className="text-gray-600">(leave blank to keep current)</span>}
+            Discord Webhook URL {isEdit && <span className="text-gray-400">(leave blank to keep current)</span>}
           </label>
           <input
             type="password"
@@ -256,7 +256,7 @@ function WebhookFormModal({ webhook, eventTypes, onClose, onSaved }) {
           <div className="space-y-3 max-h-64 overflow-y-auto border border-gray-800 rounded-lg p-3">
             {Object.entries(groups).map(([cat, items]) => (
               <div key={cat}>
-                <p className="text-[10px] uppercase tracking-wider text-gray-600 mb-1.5">{CATEGORY_LABELS[cat] || cat}</p>
+                <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1.5">{CATEGORY_LABELS[cat] || cat}</p>
                 <div className="space-y-1.5">
                   {items.map(et => (
                     <label key={et.key} className="flex items-center gap-2 cursor-pointer">

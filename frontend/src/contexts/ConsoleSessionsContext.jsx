@@ -315,7 +315,7 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
             <SessionTypeBadge type={session.type} />
             <span className="truncate">{consoleTitle(session)}</span>
           </div>
-          <p className="mt-0.5 truncate font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500">
+          <p className="mt-0.5 truncate font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500">
             {session.vm.node} / {session.vm.vmid}
           </p>
         </div>
@@ -358,7 +358,7 @@ function ConsoleSessionDock({ sessions, restoreSession, closeSession, liveCount,
       <div className="inline-flex max-w-full flex-col gap-3 border border-gray-800 bg-gray-950 px-4 py-3">
         <div className="flex items-center justify-between gap-6">
           <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-gray-500">Console Dock</p>
+            <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-gray-500">Console Dock</p>
             <p className="text-sm text-gray-300">
               {sessions.length > 0 ? `${sessions.length} minimized` : ''}
               {sessions.length > 0 && liveCount > 0 ? ' \u2022 ' : ''}

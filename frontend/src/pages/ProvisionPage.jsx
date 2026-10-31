@@ -24,7 +24,7 @@ const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-
 function VmNamePreview({ value }) {
   const typed = String(value || '');
   if (!typed.trim()) {
-    return <p className="text-xs text-gray-600 mt-1">Lowercased and hyphenated for Proxmox (e.g. "My Web" → my-web).</p>;
+    return <p className="text-xs text-gray-400 mt-1">Lowercased and hyphenated for Proxmox (e.g. "My Web" → my-web).</p>;
   }
   const safe = toPveVmName(typed);
   if (!safe) {
@@ -49,7 +49,7 @@ function QuotaBanner({ quota }) {
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-2xl px-5 py-4">
-      <p className="text-[10px] uppercase tracking-[0.22em] text-gray-500 mb-3">Your resource quota</p>
+      <p className="text-[11px] uppercase tracking-[0.22em] text-gray-500 mb-3">Your resource quota</p>
       <div className="grid gap-3 sm:grid-cols-3">
         {rows.map(row => {
           const pct = Math.min(100, Math.round((row.used / row.limit) * 100));
@@ -377,7 +377,7 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
     <div className="border border-gray-800 rounded-2xl p-4 space-y-4">
       <div>
         <p className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Cloud-Init Setup</p>
-        <p className="text-xs text-gray-600 mt-0.5">Guest account and network are applied on first boot.</p>
+        <p className="text-xs text-gray-400 mt-0.5">Guest account and network are applied on first boot.</p>
       </div>
 
       <div className="grid grid-cols-2 gap-4">
@@ -424,11 +424,11 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
               );
             })}
             {sshKeys.some(k => !isUsableKey(k)) && (
-              <p className="text-[11px] text-gray-600 pt-0.5">Fix a key under SSH Keys to make it selectable here.</p>
+              <p className="text-[11px] text-gray-400 pt-0.5">Fix a key under SSH Keys to make it selectable here.</p>
             )}
           </div>
         ) : (
-          <p className="text-xs text-gray-600">No SSH keys yet — add one under SSH Keys to get key-based login.</p>
+          <p className="text-xs text-gray-400">No SSH keys yet — add one under SSH Keys to get key-based login.</p>
         )}
       </div>
 
@@ -719,7 +719,7 @@ function CloudImageForm({ onStarted }) {
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-gray-600 mt-1">This image is on shared storage, so it can be deployed from any of these hosts.</p>
+              <p className="text-xs text-gray-400 mt-1">This image is on shared storage, so it can be deployed from any of these hosts.</p>
             </div>
           )}
 
@@ -772,7 +772,7 @@ function CloudImageForm({ onStarted }) {
                 <option value="">No assignment</option>
                 {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
               </select>
-              <p className="text-xs text-gray-600 mt-1">Admins can see all VMs without an assignment.</p>
+              <p className="text-xs text-gray-400 mt-1">Admins can see all VMs without an assignment.</p>
             </div>
           )}
 
@@ -1047,7 +1047,7 @@ function CloneForm({ onStarted }) {
                 <option value="">No assignment</option>
                 {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
               </select>
-              <p className="text-xs text-gray-600 mt-1">Admins can see all VMs without an assignment.</p>
+              <p className="text-xs text-gray-400 mt-1">Admins can see all VMs without an assignment.</p>
             </div>
           )}
 
@@ -1298,7 +1298,7 @@ function CreateForm({ onStarted }) {
               <option value="">No assignment</option>
               {users.map(u => <option key={u.id} value={u.id}>{u.username}{u.is_admin ? ' (admin)' : ''}</option>)}
             </select>
-            <p className="text-xs text-gray-600 mt-1">Admins can see all VMs without an assignment.</p>
+            <p className="text-xs text-gray-400 mt-1">Admins can see all VMs without an assignment.</p>
           </div>
         )}
 

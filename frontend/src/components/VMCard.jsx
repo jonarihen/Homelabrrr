@@ -54,7 +54,7 @@ export default function VMCard({ vm, selected, onSelect }) {
               </span>
             )}
           </h3>
-          <p className="text-[10px] text-gray-500 mt-1 font-mono uppercase tracking-[0.1em]">
+          <p className="text-[11px] text-gray-500 mt-1 font-mono uppercase tracking-[0.1em]">
             ID {vm.vmid} / {displayNode(vm.node)}
             {vm.hostName && <span className="text-blue-400/70"> @ {vm.hostName}</span>}
           </p>
@@ -62,7 +62,7 @@ export default function VMCard({ vm, selected, onSelect }) {
           {vm.schedule?.enabled && (
             <span
               title={`Power schedule — ${sleepLabel(vm.schedule)}${vm.schedule.skipActive ? ' (skipping next shutdown)' : ''}`}
-              className="mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 border border-indigo-500/30 bg-indigo-500/10 font-mono text-[9px] uppercase tracking-wide text-indigo-300 whitespace-nowrap"
+              className="mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 border border-indigo-500/30 bg-indigo-500/10 font-mono text-[10px] uppercase tracking-wide text-indigo-300 whitespace-nowrap"
             >
               <svg className="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" /></svg>
               {sleepLabel(vm.schedule)}
@@ -80,14 +80,14 @@ export default function VMCard({ vm, selected, onSelect }) {
           <MiniBar label="RAM" value={memPct} color="purple" />
         </div>
       ) : (
-        <div className="flex items-center justify-center py-3 text-gray-600 text-xs">
+        <div className="flex items-center justify-center py-3 text-gray-400 text-xs">
           {isLxc ? 'Container' : 'VM'} is offline
         </div>
       )}
 
       {/* Arrow hint */}
       <div className="flex items-center justify-end">
-        <span className="text-xs text-gray-600 group-hover:text-gray-400 transition-colors flex items-center gap-1">
+        <span className="text-xs text-gray-400 group-hover:text-gray-400 transition-colors flex items-center gap-1">
           View details
           <svg className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
@@ -109,7 +109,7 @@ function MiniBar({ label, value, color }) {
 
   return (
     <div className="flex items-center gap-3">
-      <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500 w-8 shrink-0">{label}</span>
+      <span className="font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500 w-8 shrink-0">{label}</span>
       <div className="flex-1 bg-gray-800 h-1.5 overflow-hidden">
         <div className={`${barColor} h-full transition-all duration-500`} style={{ width: `${pct}%` }} />
       </div>

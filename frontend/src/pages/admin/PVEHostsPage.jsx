@@ -180,7 +180,7 @@ export default function PVEHostsPage() {
             </svg>
           </div>
           <p className="text-gray-400 font-medium">No PVE hosts configured</p>
-          <p className="text-sm text-gray-600 mt-1">Add a Proxmox VE server to get started.</p>
+          <p className="text-sm text-gray-400 mt-1">Add a Proxmox VE server to get started.</p>
         </div>
       ) : (
         <div className="space-y-4">
@@ -203,7 +203,7 @@ export default function PVEHostsPage() {
                       <div>
                         <h3 className="text-white font-semibold">{h.name}</h3>
                         <p className="text-xs text-gray-500 font-mono">{h.host}:{h.port}</p>
-                        <p className="text-[10px] text-gray-600 mt-0.5">{h.verify_tls !== false ? 'TLS verification on' : 'TLS verification off'}</p>
+                        <p className="text-[11px] text-gray-400 mt-0.5">{h.verify_tls !== false ? 'TLS verification on' : 'TLS verification off'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -241,7 +241,7 @@ export default function PVEHostsPage() {
                         </span>
                         <span>{s.nodes?.length || 0} node{s.nodes?.length !== 1 ? 's' : ''}</span>
                         <span>{s.vmCount || 0} VMs ({s.runningVms || 0} running)</span>
-                        <span className="font-mono text-gray-600">API: {h.token_id}</span>
+                        <span className="font-mono text-gray-400">API: {h.token_id}</span>
                       </div>
 
                       {/* Nodes */}
@@ -373,11 +373,11 @@ export default function PVEHostsPage() {
                   onChange={e => setForm(f => ({ ...f, tokenId: e.target.value }))}
                   className={inputCls} placeholder="root@pam!my-token"
                 />
-                <p className="text-xs text-gray-600 mt-1">Format: user@realm!token-name</p>
+                <p className="text-xs text-gray-400 mt-1">Format: user@realm!token-name</p>
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                  API Token Secret {editId && <span className="text-gray-600">(leave empty to keep current; required if the address changes)</span>}
+                  API Token Secret {editId && <span className="text-gray-400">(leave empty to keep current; required if the address changes)</span>}
                 </label>
                 <input
                   type="password" required={!editId} value={form.tokenSecret}
@@ -399,7 +399,7 @@ export default function PVEHostsPage() {
               </label>
               <div className="rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3 space-y-3">
                 <div>
-                  <p className="text-sm text-white">Root SSH <span className="text-gray-600">(optional)</span></p>
+                  <p className="text-sm text-white">Root SSH <span className="text-gray-400">(optional)</span></p>
                   <p className="text-xs text-gray-500 mt-0.5">
                     Used for the one thing the API can't do: removing the leftover source config after a shared-storage
                     migration without touching its disks. Leave the SSH host empty to disable.
@@ -447,7 +447,7 @@ export default function PVEHostsPage() {
                 <div>
                   <label className="block text-xs text-gray-400 mb-1.5 font-medium">
                     {form.sshAuthType === 'password' ? 'Password' : 'Private key'}
-                    {form.hasSsh && <span className="text-gray-600"> (leave empty to keep current; required if the address changes)</span>}
+                    {form.hasSsh && <span className="text-gray-400"> (leave empty to keep current; required if the address changes)</span>}
                   </label>
                   {form.sshAuthType === 'password' ? (
                     <input
@@ -512,7 +512,7 @@ export default function PVEHostsPage() {
                   onChange={e => setMaintForm(f => ({ ...f, until: e.target.value }))}
                   className={inputCls}
                 />
-                <p className="text-xs text-gray-600 mt-1">If set, maintenance lifts itself automatically at this time.</p>
+                <p className="text-xs text-gray-400 mt-1">If set, maintenance lifts itself automatically at this time.</p>
               </div>
               {maintError && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{maintError}</p>}
               <div className="flex gap-3 pt-1">
@@ -609,7 +609,7 @@ function CapacityPolicySection() {
     <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
       <div className="flex items-center justify-between gap-4 mb-1">
         <h2 className="text-white font-semibold">Capacity policy</h2>
-        <span className="text-[10px] font-mono uppercase tracking-[0.1em] text-gray-600">Provisioning pre-flight</span>
+        <span className="text-[11px] font-mono uppercase tracking-[0.1em] text-gray-400">Provisioning pre-flight</span>
       </div>
       <p className="text-xs text-gray-500 mb-4 max-w-3xl">
         New deployments are sized against each node's physical RAM × the overcommit ratio — not the RAM
@@ -633,7 +633,7 @@ function CapacityPolicySection() {
               <option value="warn">Warn — deploy anyway</option>
               <option value="block">Block — refuse</option>
             </select>
-            <p className="text-[11px] text-gray-600 mt-1">{modeHint}</p>
+            <p className="text-[11px] text-gray-400 mt-1">{modeHint}</p>
           </div>
           <div>
             <label htmlFor="capacity-overcommit" className="block text-xs text-gray-400 mb-1.5 font-medium">Overcommit ratio</label>
@@ -643,7 +643,7 @@ function CapacityPolicySection() {
               onChange={e => setForm(f => ({ ...f, overcommitRatio: e.target.value }))}
               className={`${inputCls} w-32`}
             />
-            <p className="text-[11px] text-gray-600 mt-1">1.0 = no overcommit · 1.5 = 50% over physical RAM</p>
+            <p className="text-[11px] text-gray-400 mt-1">1.0 = no overcommit · 1.5 = 50% over physical RAM</p>
           </div>
           <button
             type="submit" disabled={saving}
@@ -710,14 +710,14 @@ function StoragePoolsSection({ hostId, online, loading }) {
     <div className="mt-4 pt-4 border-t border-gray-800">
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-[11px] font-mono uppercase tracking-[0.1em] text-gray-500">Storage pools</h4>
-        <span className="text-[10px] text-gray-600">exposed to users</span>
+        <span className="text-[11px] text-gray-400">exposed to users</span>
       </div>
       {loadingPools ? (
         <div className="h-10 bg-gray-800/40 rounded-xl animate-pulse" />
       ) : error ? (
         <p className="text-xs text-red-400/70 bg-red-900/10 rounded-lg px-3 py-2">{error}</p>
       ) : !pools || pools.length === 0 ? (
-        <p className="text-xs text-gray-600">No storage pools found on this host.</p>
+        <p className="text-xs text-gray-400">No storage pools found on this host.</p>
       ) : (
         <div className="space-y-1.5">
           {saveError && (
@@ -727,10 +727,10 @@ function StoragePoolsSection({ hostId, online, loading }) {
             <div key={p.storage} className="bg-gray-800/50 border border-gray-700/30 rounded-xl px-3 py-2 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <span className="text-sm text-white font-mono">{p.storage}</span>
-                <span className="text-[10px] text-gray-500 ml-2 uppercase tracking-wide">{p.type}{p.content ? ` · ${p.content}` : ''}</span>
+                <span className="text-[11px] text-gray-500 ml-2 uppercase tracking-wide">{p.type}{p.content ? ` · ${p.content}` : ''}</span>
               </div>
               <label className="flex items-center gap-2 shrink-0 cursor-pointer select-none">
-                <span className={`text-[10px] font-mono uppercase tracking-wide ${p.exposed ? 'text-green-400' : 'text-gray-500'}`}>
+                <span className={`text-[11px] font-mono uppercase tracking-wide ${p.exposed ? 'text-green-400' : 'text-gray-500'}`}>
                   {p.exposed ? 'Exposed' : 'Hidden'}
                 </span>
                 <input

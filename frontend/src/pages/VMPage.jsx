@@ -360,7 +360,7 @@ export default function VMPage() {
               <h1 className="aaris-display text-xl text-gray-100">{vm.name || `VM ${vm.vmid}`}</h1>
               <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mt-1.5">
                 VMID {vm.vmid} / {displayNode(vm.node)}
-                {vm.hostName && <span className="text-gray-600"> · host </span>}
+                {vm.hostName && <span className="text-gray-400"> · host </span>}
                 {vm.hostName && <span className="text-blue-400/80">{vm.hostName}</span>}
                 {detectedIp && (
                   <>
@@ -458,7 +458,7 @@ export default function VMPage() {
                 }>SSH Tab</ActionBtn>
               </>
             ) : (
-              <span className="text-xs text-gray-600 italic">Start VM to connect</span>
+              <span className="text-xs text-gray-400 italic">Start VM to connect</span>
             )}
 
             <Divider />
@@ -834,7 +834,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
 
         {/* New password */}
         <div>
-          <label htmlFor={pwId} className="block text-xs text-gray-500 mb-1.5 font-medium">New password <span className="text-gray-600">(optional)</span></label>
+          <label htmlFor={pwId} className="block text-xs text-gray-500 mb-1.5 font-medium">New password <span className="text-gray-400">(optional)</span></label>
           <input
             id={pwId}
             type="password"
@@ -850,7 +850,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
 
         {/* SSH public key */}
         <div className="space-y-2">
-          <span className="block text-xs text-gray-500 font-medium">SSH public key <span className="text-gray-600">(optional)</span></span>
+          <span className="block text-xs text-gray-500 font-medium">SSH public key <span className="text-gray-400">(optional)</span></span>
           <div className="flex flex-wrap gap-2 font-mono text-[11px] uppercase tracking-[0.08em]">
             {[
               { key: 'none', label: 'Leave unchanged' },
@@ -1537,7 +1537,7 @@ function BackupsSection({ node, vmid }) {
           <p className="text-xs text-gray-500 font-mono mt-2">
             {runningTask.progress_detail || 'Waiting for the first progress line from Proxmox…'}
           </p>
-          <p className="text-[11px] text-gray-600 mt-1.5">
+          <p className="text-[11px] text-gray-400 mt-1.5">
             Leave this VM alone until it finishes — powering it off, deleting it or migrating it now would leave the archive incomplete.
           </p>
         </div>
@@ -1715,7 +1715,7 @@ function BackupsSection({ node, vmid }) {
                         <svg className="w-4 h-4 text-gray-500 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
                       )}
                       <span className="text-xs text-white font-mono truncate">{displayName}</span>
-                      {f.type === 'v' && <span className="text-xs text-gray-600 italic ml-1">volume</span>}
+                      {f.type === 'v' && <span className="text-xs text-gray-400 italic ml-1">volume</span>}
                     </button>
                     <div className="flex items-center gap-3 shrink-0 ml-3">
                       {f.size != null && <span className="text-xs text-gray-500">{fmtSize(f.size)}</span>}
@@ -1778,7 +1778,7 @@ function BackupsSection({ node, vmid }) {
                       {g.items.length} {g.items.length === 1 ? 'backup' : 'backups'} · {fmtSize(g.size)}
                     </span>
                     {usedPct != null && (
-                      <span className={`hidden sm:inline text-xs font-mono ${usedPct >= 85 ? 'text-yellow-400' : 'text-gray-600'}`} title={`${fmtSize(g.used)} of ${fmtSize(g.total)} used on this storage`}>
+                      <span className={`hidden sm:inline text-xs font-mono ${usedPct >= 85 ? 'text-yellow-400' : 'text-gray-400'}`} title={`${fmtSize(g.used)} of ${fmtSize(g.total)} used on this storage`}>
                         {usedPct}% full
                       </span>
                     )}
@@ -1829,9 +1829,9 @@ function BackupsSection({ node, vmid }) {
                             <div className="flex items-center gap-4 mt-1 ml-[24px]">
                               <span className="text-xs text-gray-500">{fmtDate(b.ctime)}</span>
                               {isWriting
-                                ? <span className="text-xs text-gray-600 italic">size not final</span>
+                                ? <span className="text-xs text-gray-400 italic">size not final</span>
                                 : <span className="text-xs text-gray-500">{fmtSize(b.size)}</span>}
-                              {b.format && <span className="text-xs text-gray-600 font-mono">{b.format}</span>}
+                              {b.format && <span className="text-xs text-gray-400 font-mono">{b.format}</span>}
                               {b.notes && <span className="text-xs text-gray-500 italic truncate" title={b.notes}>{b.notes}</span>}
                             </div>
                           </div>
