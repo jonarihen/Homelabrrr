@@ -9,6 +9,7 @@ import { logAudit } from '../utils/audit.ts';
 import { isUniqueViolation } from '../db/errors.ts';
 import { discoverHardware, IloError, normalizeTlsFingerprint, physicalSystemIdentity, probeIloCertificate } from '../services/iloAdapter.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
+import { isValidUpstreamHost } from '../utils/validation.ts';
 import { HARDWARE_POLL_INTERVAL_MS, latestHardwareSample } from '../services/hardwareTelemetry.ts';
 
 function safeDto(row: any) {
@@ -19,7 +20,7 @@ function target(body: any) {
   const host = String(body?.host || '').trim();
   const port = Number(body?.port ?? 443);
   const username = String(body?.username || '').trim();
-  if (!host || host.length > 253 || /[\/:?#@\s]/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535 || !username || username.length > 128) throw new Error('Invalid iLO connection fields');
+  if (!isValidUpstreamHost(host) || !Number.isInteger(port) || port < 1 || port > 65535 || !username || username.length > 128) throw new Error('Invalid iLO connection fields');
   return { host, port, username };
 }
 function validOptionalSecrets(body: any): boolean {
@@ -80,7 +81,7 @@ router.post('/certificate-probe', async (req, res) => {
   try {
     const host = String(req.body?.host || '').trim();
     const port = Number(req.body?.port ?? 443);
-    if (!host || host.length > 253 || /[\/:?#@\s]/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) return res.status(400).json({ error: 'Invalid iLO address' });
+    if (!isValidUpstreamHost(host) || !Number.isInteger(port) || port < 1 || port > 65535) return res.status(400).json({ error: 'Invalid iLO address' });
     const certificate = await certificateProbe(host, port);
     res.set('Cache-Control', 'no-store').json(certificate);
   } catch (err) {

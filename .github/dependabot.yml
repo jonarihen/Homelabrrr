@@ -14,6 +14,11 @@ updates:
     directory: /backend
     patterns: ["*"]
     multi-ecosystem-group: monthly-maintenance
+    ignore:
+      # typescript-eslint pins its TypeScript peer range (currently <6.1.0);
+      # a TypeScript major lands only together with a typescript-eslint that supports it.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: npm
     directory: /frontend
     patterns: ["*"]

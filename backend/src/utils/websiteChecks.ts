@@ -5,6 +5,9 @@ import { db } from '../db/client.ts';
 import { vmAssignments, vmSshConfigs } from '../db/schema/index.ts';
 import { nodeLookupCandidates } from './nodeRef.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
+import { isValidUpstreamHost } from './validation.ts';
+
+export { isValidUpstreamHost };
 
 // ─── Field validation ─────────────────────────────────────────────────────────
 // Everything a user submits is validated here before it is ever built into a
@@ -21,16 +24,6 @@ export function normalizeDomain(input) {
 
 export function isValidDomain(domain) {
   return HOSTNAME_RE.test(domain);
-}
-
-// Upstream host: an IP literal or a DNS hostname (single-label hostnames like
-// "app" are allowed for upstreams, unlike the public domain).
-const UPSTREAM_HOST_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
-
-export function isValidUpstreamHost(host) {
-  if (!host) return false;
-  if (isIP(host)) return true;
-  return UPSTREAM_HOST_RE.test(host);
 }
 
 export function parsePort(port) {
