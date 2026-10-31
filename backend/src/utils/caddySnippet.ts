@@ -137,7 +137,22 @@ export async function deploySnippet(server, sites, { restoreOnReloadFailure = fa
 
   const content = generateSnippet(sites);
   const { conn, fingerprint } = await connectSsh(server);
+  // Callers hold a per-server lock while this runs, so a stalled SFTP/exec must
+  // not hang forever: after the deadline the connection is destroyed and we fail.
+  const timeoutMs = Number(process.env.CADDY_SSH_OP_TIMEOUT_MS) || 60_000;
+  let timer;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`SSH operation on ${server.ssh_host} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+  });
   try {
+    return await Promise.race([deploy(), deadline]);
+  } finally {
+    clearTimeout(timer);
+    try { conn.end(); } catch { /* ignore */ }
+    try { conn.destroy(); } catch { /* ignore */ }
+  }
+
+  async function deploy() {
     const sftp = await getSftp(conn);
     const previous = await sftpReadFile(sftp, snippetPath);
     const tmpPath = `${snippetPath}.tmp`;
@@ -174,7 +189,5 @@ export async function deploySnippet(server, sites, { restoreOnReloadFailure = fa
     }
 
     return { sites: sites.length, reloaded: true, fingerprint };
-  } finally {
-    try { conn.end(); } catch { /* ignore */ }
   }
 }

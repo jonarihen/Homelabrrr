@@ -454,10 +454,13 @@ async function detectWildcard(caddy, serverId, domain) {
 // The re-push is conflict-checked exactly like the publish path. Self-healing a
 // route back into a position where it is shadowed would restore the config and
 // none of the behaviour, which is the failure this whole check exists to catch.
-async function reconcileManagedRoutes(server) {
+const ROUTE_STATUSES = ['live', 'warning', 'blocked'];
+// Mid-publish rows already hold a snippet route that the mode switch just emptied.
+const IN_FLIGHT_STATUSES = ['pushing', 'issuing', 'inspecting'];
+async function reconcileManagedRoutes(server, statuses = ROUTE_STATUSES) {
   const sites = await db.select().from(caddySites)
     .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
-      inArray(caddySites.status, ['live', 'warning', 'blocked'])));
+      inArray(caddySites.status, statuses)));
   if (sites.length === 0) return { repaired: [], conflicted: [] };
   const caddy = createCaddyClient(server);
   const liveIds = new Set(await caddy.listManagedRouteIds());
@@ -872,13 +875,25 @@ router.put('/servers/:id', pWebsites, async (req, res) => withServerSnippetLock(
     }
   }
 
-  await db.update(caddyServers).set({
-    name, api_url: apiUrl, auth_type: authType, auth_secret: authSecret, server_name: serverName,
-    verify_tls: !!verifyTls, wan_ip: wanIp, fortigate_id: fortigateId, inspection_profile: inspectionProfile,
-    inspection_bundle_cert: inspectionBundleCert, ssh_host: sshHost, ssh_port: sshPort, ssh_user: sshUser,
-    ssh_auth_type: sshAuthType, ssh_secret: sshSecret, ssh_host_key: sshHostKey,
-    snippet_path: snippetPath, caddyfile_path: caddyfilePath,
-  }).where(eq(caddyServers.id, Number(req.params.id)));
+  try {
+    await db.update(caddyServers).set({
+      name, api_url: apiUrl, auth_type: authType, auth_secret: authSecret, server_name: serverName,
+      verify_tls: !!verifyTls, wan_ip: wanIp, fortigate_id: fortigateId, inspection_profile: inspectionProfile,
+      inspection_bundle_cert: inspectionBundleCert, ssh_host: sshHost, ssh_port: sshPort, ssh_user: sshUser,
+      ssh_auth_type: sshAuthType, ssh_secret: sshSecret, ssh_host_key: sshHostKey,
+      snippet_path: snippetPath, caddyfile_path: caddyfilePath,
+    }).where(eq(caddyServers.id, Number(req.params.id)));
+  } catch (e) {
+    // The row stays in Caddyfile mode, so put the routes back rather than leave them down.
+    let restored = '';
+    if (leavingSnippetMode && existing.ssh_secret) {
+      try {
+        await deploySnippet(existing, await managedSitesForSnippet(existing.id));
+        restored = ' The snippet was regenerated.';
+      } catch (re) { restored = ` Could not regenerate the snippet (${sanitizeError(re.message)}); re-sync this server.`; }
+    }
+    return res.status(500).json({ error: `Could not save the server.${restored} ${sanitizeError(e.message)}`.trim() });
+  }
   await logAudit(req, 'website_update_caddy_server', name, apiUrl);
 
   let syncWarning = '';
@@ -889,7 +904,7 @@ router.put('/servers/:id', pWebsites, async (req, res) => withServerSnippetLock(
   } else if (leavingSnippetMode) {
     // The emptied snippet took the sites down; bring them back as API routes now
     // rather than on the next maintenance pass.
-    try { await reconcileManagedRoutes(updated); }
+    try { await reconcileManagedRoutes(updated, [...ROUTE_STATUSES, ...IN_FLIGHT_STATUSES]); }
     catch (e) { syncWarning = `Saved, but re-publishing the sites through the Caddy API failed: ${sanitizeError(e.message)}`; }
   }
   res.json({ ok: true, syncWarning });

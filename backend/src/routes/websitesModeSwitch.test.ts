@@ -25,11 +25,13 @@ function mockCaddyHost(t: TestContext, options: {
   fail?: 'validate' | 'reload';
   rollbackFails?: boolean;
   beforeWrite?: () => Promise<void>;
+  hangFirstMv?: boolean;
 } = {}) {
   const previous = 'old.example.test {\n\treverse_proxy 192.0.2.1:80\n}\n';
   const files = new Map([[snippetPath, previous]]);
   const deployments: string[] = [];
   const commands: string[] = [];
+  let hung = false;
   t.mock.method(SSHClient.prototype, 'connect', function () {
     queueMicrotask(() => this.emit('ready'));
     return this;
@@ -54,6 +56,7 @@ function mockCaddyHost(t: TestContext, options: {
     callback(null, stream);
     queueMicrotask(() => {
       let code = 0;
+      if (command.startsWith('mv ') && options.hangFirstMv && !hung) { hung = true; return; }
       if (command.startsWith('mv ')) {
         const content = files.get(`${snippetPath}.tmp`)!;
         files.set(snippetPath, content);
@@ -247,4 +250,52 @@ test('a server without a stored SSH credential switches to API mode directly', a
   const res = await request(app).put(`/servers/${id}`).send({ sshHost: '' });
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.equal((await readServer(id)).ssh_host, '');
+});
+
+test('in-flight sites are re-published through the API when leaving Caddyfile mode', async (t) => {
+  mockCaddyHost(t);
+  const pushed: unknown[] = [];
+  t.mock.method(CaddyClient.prototype, 'listManagedRouteIds', async () => []);
+  t.mock.method(CaddyClient.prototype, 'findConflicts', async () => []);
+  t.mock.method(CaddyClient.prototype, 'findWildcardSlot', async () => null);
+  t.mock.method(CaddyClient.prototype, 'upsertRoute', async (siteId) => {
+    pushed.push(siteId);
+    return { wildcard: '', serverName: 'srv0' };
+  });
+  const id = await seedSnippetServer(true);
+  const [site] = await testDb.db.select().from(caddySites).where(eq(caddySites.server_id, id));
+  await testDb.db.update(caddySites).set({ status: 'issuing' }).where(eq(caddySites.id, site.id));
+  const res = await request(app).put(`/servers/${id}`).send({ sshHost: '' });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual(pushed, [site.id]);
+});
+
+test('a failed database update restores the snippet that was emptied', async (t) => {
+  const host = mockCaddyHost(t);
+  const id = await seedSnippetServer(true);
+  const { db } = await import('../db/client.ts');
+  const update = db.update.bind(db);
+  t.mock.method(db, 'update', (table) => {
+    if (table === caddyServers) throw new Error('connection reset');
+    return update(table);
+  });
+  const res = await request(app).put(`/servers/${id}`).send({ sshHost: '' });
+  assert.equal(res.status, 500, JSON.stringify(res.body));
+  assert.equal(host.deployments.length, 2);
+  assert.equal(host.deployments[0], generateSnippet([]));
+  assert.match(host.files.get(snippetPath)!, new RegExp(`site-${id}\\.example\\.test`));
+  assert.equal((await readServer(id)).ssh_host, '127.0.0.1');
+});
+
+test('a stalled SSH operation times out and releases the per-server lock', async (t) => {
+  process.env.CADDY_SSH_OP_TIMEOUT_MS = '150';
+  t.after(() => { delete process.env.CADDY_SSH_OP_TIMEOUT_MS; });
+  const host = mockCaddyHost(t, { hangFirstMv: true });
+  const id = await seedSnippetServer(true);
+  const first = await request(app).post(`/servers/${id}/sync`);
+  assert.notEqual(first.status, 200);
+  assert.match(JSON.stringify(first.body), /timed out/);
+  const second = await request(app).post(`/servers/${id}/sync`);
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(host.deployments.length, 1);
 });
