@@ -65,12 +65,14 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
       if (cfg) {
         setForm((current) => ({
           ...current,
-          host: cfg.host,
+          host: cfg.host || '',
           port: cfg.port,
           username: cfg.username,
           hostFingerprint: cfg.hostFingerprint || '',
         }));
       }
+      // Nothing saved yet: fill in the VM's address instead of making the user type it.
+      if (!cfg?.host) detectIp({ quiet: true, isStale: () => cancelled });
 
       if (keysRes.data.length > 0) {
         setForm((current) => ({
@@ -87,6 +89,8 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
     });
 
     return () => { cancelled = true; };
+    // detectIp is recreated each render but only reads vmNode/vm.vmid.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vmNode, vm.vmid]);
 
   const connect = async (e) => {
@@ -127,23 +131,28 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
   // The portal usually already knows this address (DHCP reservation/lease,
   // cloud-init, guest agent) — asking beats making the user go find it in
   // Proxmox and type it back in.
-  const detectIp = async () => {
+  // quiet: the automatic run on open — never clobber a host the user has
+  // started typing, and don't greet them with an error.
+  const detectIp = async ({ quiet = false, isStale = () => false } = {}) => {
     setDetectingIp(true);
-    setError('');
+    if (!quiet) setError('');
 
     try {
       const { data } = await api.get(`/vms/${vmNode}/${vm.vmid}/detected-ips`);
+      if (isStale()) return;
       const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+      if (quiet && candidates.length === 0) return; // nothing found yet: stay quiet on the automatic run
       setDetected({ ...data, candidates });
 
       if (candidates.length > 0) {
-        setForm((current) => ({ ...current, host: candidates[0].ip }));
+        setForm((current) => (quiet && current.host ? current : { ...current, host: candidates[0].ip }));
       }
     } catch (e) {
+      if (isStale()) return;
       setDetected(null);
-      setError(e.response?.data?.error || 'Failed to detect an IP address');
+      if (!quiet) setError(e.response?.data?.error || 'Failed to detect an IP address');
     } finally {
-      setDetectingIp(false);
+      if (!isStale()) setDetectingIp(false);
     }
   };
 
@@ -210,7 +219,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
               <label className="block text-xs text-gray-400">Host / IP</label>
               <button
                 type="button"
-                onClick={detectIp}
+                onClick={() => detectIp()}
                 disabled={detectingIp}
                 className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
               >

@@ -8,7 +8,7 @@ import {
   sshKeys as sshKeysTable, users, userVlans,
 } from '../db/schema/index.ts';
 import {
-  getVMStatus, vmAction, getVNCTicket, getVMConfig, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
+  getVMStatus, vmAction, getVNCTicket, getVMConfig, getVMConfigCurrent, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType, resolveLegacyVmNode,
   getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
@@ -24,9 +24,10 @@ import { notify, portalLink } from '../utils/notify.ts';
 import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.ts';
 import { checkVlanAssignment, parseVlanTag, parseNetInterface } from '../utils/vlanAccess.ts';
 import { summarizeLease, renewLease } from '../utils/leases.ts';
-import { assertUserQuota, refreshHardwareAllocation, sizeToGb } from '../utils/quota.ts';
+import { assertUserQuota, configDiskGb, refreshHardwareAllocation, sizeToGb, vmQuotaUserId } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
+import { assertStorageExposed } from '../utils/storageVisibility.ts';
 import {
   isValidTime, isValidDaysMask, isValidTimezone, timeToMinutes,
   serializeSchedule, scheduleBadge, nextTimeOccurrence, ALL_DAYS,
@@ -1308,7 +1309,9 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
     }
 
     // Quota: only the increase over the VM's current allocation counts —
-    // a user at their quota can still shrink resources
+    // a user at their quota can still shrink resources. The owner is resolved
+    // for admins too, so conflicting owner rows answer 409 before any change.
+    const quotaUserId = await vmQuotaUserId(node, Number(vmid), req.session.userId);
     if (!req.session.isAdmin) {
       const current = (await getAllVMs()).find((v) => Number(v.vmid) === Number(vmid));
       const curCores = current?.maxcpu || 0;
@@ -1318,7 +1321,7 @@ router.put('/:node/:vmid/hardware', pHardware, async (req, res) => {
       const addCores = Math.max(0, newCores - curCores);
       const addMemoryMb = Math.max(0, newMemMb - curMemMb);
       if (addCores > 0 || addMemoryMb > 0) {
-        await assertUserQuota(req.session.userId, { addCores, addMemoryMb });
+        await assertUserQuota(quotaUserId, { addCores, addMemoryMb });
       }
     }
 
@@ -1364,22 +1367,29 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
   try {
     // Quota: count only the growth (PVE resize can never shrink). Relative
     // sizes ("+10G") are the delta directly; absolute sizes are compared to
-    // the disk's current size from the VM config.
-    if (!req.session.isAdmin) {
-      let addDiskGb = 0;
-      if (size.startsWith('+')) {
-        addDiskGb = sizeToGb(size.slice(1)) || 0;
-      } else {
-        const config = await getVMConfig(node, vmid);
-        const currentGb = sizeToGb(String(config?.[disk] || '').match(/(?:^|,)size=(\d+[MGT])/)?.[1]) || 0;
-        addDiskGb = Math.max(0, (sizeToGb(size) || 0) - currentGb);
-      }
-      if (addDiskGb > 0) {
-        await assertUserQuota(req.session.userId, { addDiskGb });
-      }
+    // the disk's current size from the VM config. The growth is charged to
+    // the VM's owner, not to an operator resizing someone else's VM.
+    // Uncached: a cached size from just before an earlier resize would inflate the delta.
+    const config = await getVMConfigCurrent(node, vmid);
+    // Resolved for admins too: conflicting owner rows answer 409 before the resize.
+    const quotaUserId = await vmQuotaUserId(node, Number(vmid), req.session.userId);
+    let addDiskGb = 0;
+    if (size.startsWith('+')) {
+      addDiskGb = sizeToGb(size.slice(1)) || 0;
+    } else {
+      const currentGb = sizeToGb(String(config?.[disk] || '').match(/(?:^|,)size=(\d+[MGT])/)?.[1]) || 0;
+      addDiskGb = Math.max(0, (sizeToGb(size) || 0) - currentGb);
+    }
+    if (!req.session.isAdmin && addDiskGb > 0) {
+      // Count every existing disk from config, the same measure the post-resize floor uses.
+      // A disk without a readable size (e.g. passthrough) would hide usage, so fail closed.
+      const measured = configDiskGb(config);
+      if (!measured.complete) throw httpError(409, 'Cannot verify disk usage for this VM; ask an administrator to resize it');
+      await assertUserQuota(quotaUserId, { addDiskGb }, undefined, undefined, { vmid: Number(vmid), diskGb: measured.diskGb });
     }
 
     await resizeVMDisk(node, vmid, disk, size);
+    await refreshHardwareAllocation(node, Number(vmid), { addDiskGb, config });
     await logAudit(req, 'vm_disk_resize', `${node}/${vmid}`, `${disk}=${size}`);
     res.json({ ok: true });
   } catch (err) {
@@ -1559,6 +1569,7 @@ router.post('/:node/:vmid/backup', async (req, res) => {
   const { nodeName } = decodeNodeRef(node);
   const vmLabel = `#${vmid}${nodeName ? ` on ${nodeName}` : ''}`;
   try {
+    await assertStorageExposed(node, storage, { isAdmin: req.session.isAdmin }, vmid);
     const upid = await createVMBackup(node, vmid, { mode, compress, storage, notes });
     await logAudit(req, 'backup_create', `${node}/${vmid}`, storage || '');
     // Track the task so the UI can mark the archive as in progress instead of
@@ -1629,6 +1640,7 @@ router.post('/:node/:vmid/restore', async (req, res) => {
   // unknown — a fresh VMID has no guest to probe, and an unrecognised volid
   // shape tells us nothing — but if both are, refuse rather than assume qemu.
   try {
+    await assertStorageExposed(node, storage, { isAdmin: req.session.isAdmin }, vmid);
     const detected = await getGuestType(node, vmid);
     const guest = resolveRestoreGuestType({ volid: archive, detected, vmid });
     if (guest.error) return res.status(guest.status).json({ error: guest.error });
