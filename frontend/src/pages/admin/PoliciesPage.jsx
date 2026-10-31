@@ -40,11 +40,6 @@ const NODE_COLLISION_GAP = 18;
 const MUTED_LINE_OPACITY = 0.44;
 const MUTED_NODE_OPACITY = 0.68;
 
-function vlanTagToSubnet(tag) {
-  const s = String(tag).padStart(4, '0');
-  return `10.${parseInt(s.substring(0, 2), 10)}.${parseInt(s.substring(2, 4), 10)}.0/24`;
-}
-
 function servicePalette(services = [], action = 'accept') {
   if (action !== 'accept') return [DENY_COLOR];
 
@@ -506,9 +501,11 @@ export default function PoliciesPage() {
       api.get(`/admin/policies?firewallId=${selectedFw}`),
     ]).then(([vlansRes, policiesRes]) => {
       const allVlans = vlansRes.data || [];
-      const syncedVlans = allVlans.filter(v =>
-        v.firewallSync?.some(s => String(s.firewallId) === String(selectedFw))
-      );
+      // Keep only VLANs synced to this firewall, with the subnet that sync provisioned.
+      const syncedVlans = allVlans.flatMap(v => {
+        const sync = v.firewallSync?.find(s => String(s.firewallId) === String(selectedFw));
+        return sync ? [{ ...v, fwSubnet: sync.subnet || v.subnet?.network || '' }] : [];
+      });
       setVlans(syncedVlans);
       setPolicies(policiesRes.data || []);
     }).catch((err) => {
@@ -1450,7 +1447,7 @@ export default function PoliciesPage() {
               <div className="mt-3">
                 <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 px-4 py-3">
                   <p className="text-sm font-semibold text-white">{srcVlan.name}</p>
-                  <p className="mt-1 text-xs font-mono text-slate-400">{vlanTagToSubnet(srcVlan.tag)}</p>
+                  <p className="mt-1 text-xs font-mono text-slate-400">{srcVlan.fwSubnet}</p>
                   <p className="mt-3 text-xs text-slate-400">
                     {peerTags.size} linked VLANs already share a policy with this source.
                   </p>
@@ -1761,7 +1758,7 @@ export default function PoliciesPage() {
                 <div className="text-center">
                   <p className="text-xs text-slate-500">Source</p>
                   <p className="text-sm font-medium text-cyan-300">{srcVlan.name}</p>
-                  <p className="text-[10px] font-mono text-slate-600">{vlanTagToSubnet(srcVlan.tag)}</p>
+                  <p className="text-[10px] font-mono text-slate-600">{srcVlan.fwSubnet}</p>
                 </div>
                 <svg className="h-8 w-8 text-slate-600" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
@@ -1769,7 +1766,7 @@ export default function PoliciesPage() {
                 <div className="text-center">
                   <p className="text-xs text-slate-500">Destination</p>
                   <p className="text-sm font-medium text-emerald-300">{dstVlan.name}</p>
-                  <p className="text-[10px] font-mono text-slate-600">{vlanTagToSubnet(dstVlan.tag)}</p>
+                  <p className="text-[10px] font-mono text-slate-600">{dstVlan.fwSubnet}</p>
                 </div>
               </div>
 
