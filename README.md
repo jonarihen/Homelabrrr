@@ -336,6 +336,8 @@ BACKUP_OFFSITE_HOST_PATH=/mnt/nas/homelabrrr
 
 Keep `BACKUP_ENCRYPTION_KEY` in a password manager or secrets system separate from the database, staging directory, and off-host destination. Scheduled failure/success events use the existing configurable backup notification channels. **Admin → Operations** shows whether backups are configured, the last outcome/failure reason, size, and the last successful full-restore time (even if a later run failed); it can also run one immediately. Historical TOC-only verification runs are labelled `toc_checked`, not full-restore verified.
 
+Keep `SECRET_ENCRYPTION_KEY` (and any `SECRET_ENCRYPTION_PREVIOUS_KEYS`) with the backup key as well: the database stores PVE tokens, FortiGate keys, SSH keys and TOTP secrets encrypted with it, so a restored database is unusable without the matching keyring. The backend logs `secrets_undecryptable` at startup when stored secrets don't match the configured key.
+
 #### Disaster-recovery restore
 
 Restore is a two-step operation: `restore-backup` turns the encrypted archive back into a decrypted, TOC-checked plain `pg_dump` custom-format file (this alone does not verify its data), and then `pg_restore` loads that file into a **new, empty database** — never over a live one.
