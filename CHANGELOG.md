@@ -4,6 +4,24 @@
 
 - If background work after a deploy fails unexpectedly (for example recording ownership or tagging), the VM moves to **needs review** with the cause shown, instead of staying in "creating" indefinitely with the error only in the server log. A more specific status already recorded by a deploy step is kept.
 - Deploy failures, VLAN-tag failures and auto-placement skips are now structured log events (`provision_*_background_failed`, `provision_vlan_tag_failed`, `placement_node_skipped`) with the provision ID and VMID.
+## 2026-10-28 — VM page sticky header, section nav and IP
+
+- The **VM page** identity header (name and status) and section nav (Overview, Performance, Snapshots, Backups, IP, SSH) stay pinned while you scroll. Power and connect actions scroll away to keep the sticky area compact on small screens.
+- The VM's IP address is shown next to the VMID, taken from cloud-init, DHCP or the guest agent, with a **copy** button.
+- The app is now called **Homelabrrr** everywhere in the UI (browser tab, sidebar, sign-in screen).
+- Firewall policy service colours use the design-language accent and status colours instead of a rainbow palette.
+## 2026-10-28 — Readable primary buttons and labelled form fields
+
+- Primary (orange) buttons and active tabs now use dark text instead of white, so their labels meet contrast guidelines. They also show a clear focus ring when reached by keyboard.
+- Form labels in the SSH key, SSH connect and user management forms are now linked to their inputs: screen readers announce them, and clicking a label focuses its field.
+## 2026-10-28 — Frontend container runs without root
+
+- The frontend container now runs nginx as its unprivileged `nginx` user and listens on port 8080 inside the container. The published host port (8181) is unchanged. If you have a compose override that targets the container's port 80, change it to 8080.
+- The frontend container has its own health check.
+## 2026-10-28 — Switching a Caddy server to API-only mode removes its old routes
+
+- Clearing a Caddy server's SSH host (switching from Caddyfile sync to API-only mode) now empties the Homelabrrr snippet and reloads Caddy first, then re-publishes the sites through the admin API. Before, the old Caddyfile routes stayed live and came back on every reload, out of reach of API-mode unpublish and delete.
+- If the snippet can't be cleared (SSH unreachable, validation fails), the switch is refused and the server stays in Caddyfile mode, with the reason shown.
 ## 2026-10-28 — SSH works with fewer steps after deploy
 
 - The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
