@@ -21,25 +21,35 @@ export function computeTileLayout(sessions, mode, viewport) {
   const areaW = Math.max(360, viewport.width - sidebarOffset - margin * 2);
   const areaH = Math.max(300, viewport.height - topOffset - bottomReserve - margin);
 
+  // Cells never shrink below the resizable-window minimum, so a row/column
+  // count that assumed smaller cells would push later windows past the area.
+  // Cap the count by how many minimum cells fit and wrap the overflow onto
+  // the next row/column instead.
+  const minCellW = 320;
+  const minCellH = 240;
+  const maxCols = Math.max(1, Math.floor((areaW + gap) / (minCellW + gap)));
+  const maxRows = Math.max(1, Math.floor((areaH + gap) / (minCellH + gap)));
+
   let cols, rows;
   if (mode === 'horizontal') {
-    cols = n;
-    rows = 1;
+    cols = Math.min(n, maxCols);
+    rows = Math.ceil(n / cols);
   } else if (mode === 'vertical') {
-    cols = 1;
-    rows = n;
+    rows = Math.min(n, maxRows);
+    cols = Math.ceil(n / rows);
   } else {
     // grid
-    cols = Math.ceil(Math.sqrt(n));
+    cols = Math.min(Math.ceil(Math.sqrt(n)), maxCols);
     rows = Math.ceil(n / cols);
   }
 
-  const cellW = (areaW - gap * (cols - 1)) / cols;
-  const cellH = (areaH - gap * (rows - 1)) / rows;
+  const cellW = Math.max(minCellW, (areaW - gap * (cols - 1)) / cols);
+  const cellH = Math.max(minCellH, (areaH - gap * (rows - 1)) / rows);
 
   return sessions.map((session, i) => {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
+    // Stacked mode fills each column top-to-bottom before starting the next.
+    const col = mode === 'vertical' ? Math.floor(i / rows) : i % cols;
+    const row = mode === 'vertical' ? i % rows : Math.floor(i / cols);
 
     return {
       id: session.id,

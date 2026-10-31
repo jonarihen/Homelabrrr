@@ -156,6 +156,9 @@ export default function Login() {
             >
               {'←'} Back to login
             </button>
+            <p className="text-[11px] text-gray-600 font-mono leading-relaxed text-center">
+              Lost your device? {methods.includes('recovery') ? 'Use a recovery code, or ask' : 'Ask'} an admin to reset your 2FA.
+            </p>
           </form>
         ) : (
           <form onSubmit={submitRecovery} className="border border-gray-800 bg-gray-900 p-6 space-y-4">
