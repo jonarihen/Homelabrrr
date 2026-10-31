@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-28 — Concurrent deploys can't overbook a node
+
+- A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
+- When a deploy is refused for space, the message says how much is held by other deploys still in progress.
 ## 2026-10-28 — SSH works with fewer steps after deploy
 
 - The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
