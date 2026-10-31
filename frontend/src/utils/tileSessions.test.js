@@ -70,3 +70,12 @@ test('grid mode keeps every tile inside the viewport', () => {
     assert.ok(tile.x + tile.width <= 1440 && tile.y + tile.height <= 900 - 72, `tile ${tile.id} exceeds the viewport`);
   }
 });
+
+test('stacked tiling fills each column top-to-bottom before wrapping', () => {
+  const [a, b, c, d] = computeTileLayout(vms(4), 'vertical', { width: 1440, height: 900 });
+  assert.equal(a.x, b.x);
+  assert.equal(b.x, c.x);
+  assert.ok(a.y < b.y && b.y < c.y);
+  assert.ok(d.x > a.x);
+  assert.equal(d.y, a.y);
+});

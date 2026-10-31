@@ -47,8 +47,9 @@ export function computeTileLayout(sessions, mode, viewport) {
   const cellH = Math.max(minCellH, (areaH - gap * (rows - 1)) / rows);
 
   return sessions.map((session, i) => {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
+    // Stacked mode fills each column top-to-bottom before starting the next.
+    const col = mode === 'vertical' ? Math.floor(i / rows) : i % cols;
+    const row = mode === 'vertical' ? i % rows : Math.floor(i / cols);
 
     return {
       id: session.id,

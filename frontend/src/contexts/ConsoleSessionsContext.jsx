@@ -283,6 +283,8 @@ function ConsoleSessionWindow({ session, zIndex, onFocus, onMinimize, onClose, o
 
   const startDrag = useCallback((event) => {
     if (event.button !== 0) return;
+    // Capturing the pointer would redirect the click away from title-bar buttons.
+    if (event.target.closest('button, a, input, select, textarea')) return;
     const pointerId = event.pointerId;
 
     onFocus(session.id);
