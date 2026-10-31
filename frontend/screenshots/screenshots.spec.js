@@ -70,7 +70,10 @@ function respond(url, method) {
   if (p === '/vms/my-vlans') return vlans.slice(0, 4);
   if (p === '/provision/quota') return {};
   if (p === '/portal/status') return { maintenance: [] };
-  if (p.endsWith('/storages')) return [{ storage: 'local-lvm', content: 'images,rootdir', avail: 400 * GB, total: 900 * GB }];
+  if (p.endsWith('/storages')) return [
+    { storage: 'local-lvm', type: 'lvmthin', content: 'images,rootdir', avail: 400 * GB, total: 900 * GB },
+    { storage: 'tank', type: 'zfspool', content: 'images,rootdir', avail: 1800 * GB, total: 3600 * GB },
+  ];
   if (p.endsWith('/networks')) return [{ iface: 'vmbr0' }];
   return [];
 }
