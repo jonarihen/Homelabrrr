@@ -45,7 +45,7 @@ function buildSampleContext(trigger, fw, inputs, settings) {
   const firewall = buildFirewallContext(fw);
   const trunkConfigured = !!(fw.trunk_switch_serial && fw.trunk_switch_port);
 
-  if (trigger === 'vlan_provision' || trigger === 'vlan_deprovision') {
+  if (trigger === 'vlan_provision') {
     const tag = parseInt(inputs.tag, 10) || fw.vlan_range_start || 1001;
     const subnet = deriveSubnet(tag, settings) || {};
     return {
@@ -56,7 +56,7 @@ function buildSampleContext(trigger, fw, inputs, settings) {
     };
   }
 
-  if (trigger === 'port_forward_create' || trigger === 'port_forward_delete') {
+  if (trigger === 'port_forward_create') {
     const name = inputs.name || 'sample-forward';
     const protocol = (inputs.protocol || 'tcp').toLowerCase();
     const internalPort = inputs.internalPort || 22;
@@ -80,7 +80,7 @@ function buildSampleContext(trigger, fw, inputs, settings) {
     };
   }
 
-  if (trigger === 'policy_create' || trigger === 'policy_delete') {
+  if (trigger === 'policy_create') {
     const srcIf = inputs.srcInterface || `vlan${inputs.srcTag || 1126}`;
     const dstIf = inputs.dstInterface || `vlan${inputs.dstTag || 1127}`;
     return {

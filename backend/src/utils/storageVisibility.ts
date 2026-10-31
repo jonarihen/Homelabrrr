@@ -71,10 +71,11 @@ export async function filterExposedStorages(node: string, storages: Array<{ stor
 // Shared server-side guard. Call this on EVERY create/edit path that names a
 // storage pool — never trust the dropdown. Throws a 4xx-tagged error when a
 // non-admin names an unexposed pool. Admins bypass the check.
-export async function assertStorageExposed(node: string, storage: string | null | undefined, user: unknown): Promise<void> {
+export async function assertStorageExposed(node: string, storage: string | null | undefined, user: unknown, vmid?: number | string): Promise<void> {
+  if (storage && typeof storage !== 'string') throw httpError(400, 'Invalid storage');
   if (isAdminUser(user)) return;
   if (!storage) return; // nothing named ⇒ nothing to check
-  const hostId = await getHostIdForNode(node);
+  const hostId = await getHostIdForNode(node, vmid ?? null);
   if (!(await storageExposedForHost(hostId, storage))) {
     throw httpError(403, `Storage pool "${storage}" is not available for provisioning. Pick an exposed pool.`);
   }
