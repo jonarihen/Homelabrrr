@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-31 — SSH targets and website upstreams no longer trust guest-reported addresses
+
+- Browser SSH/SFTP now reaches only addresses in your assigned VLANs and addresses an admin assigned to your VM. Addresses a guest reports itself (guest agent, cloud-init) no longer grant access.
+- Website upstreams for non-admins are limited to the same set. Existing sites whose upstream no longer qualifies are unpublished by the periodic maintenance pass (not deleted); re-save them with an address in your VLAN.
+- Legacy admin-assigned address rows that store only a node name now count only for the Proxmox host they were recorded on, so a same-named node on another cluster no longer inherits them.
+
 ## 2026-10-28 — Revoking a session closes its open consoles
 
 - Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.
