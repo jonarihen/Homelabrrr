@@ -653,6 +653,15 @@ async function reclaimReleased(siteId) {
     .returning({ id: caddySites.id });
 }
 
+// A pass that died mid-detach leaves its row in RELEASING_CLAIMED, which no
+// later pass picks up. Called once at startup (no pass is running yet) to hand
+// those rows back to the retry queue.
+export async function recoverClaimedReleases() {
+  return db.update(caddySites).set({ status_detail: RELEASING_DETAIL })
+    .where(and(eq(caddySites.status, 'error'), eq(caddySites.status_detail, RELEASING_CLAIMED_DETAIL)))
+    .returning({ id: caddySites.id });
+}
+
 async function unpublishDisallowedSites(server, hostResolutionMemo: HostResolutionMemo = new Map()) {
   await markSitesUnpublished(await findDisallowedSites(server.id, hostResolutionMemo), hostResolutionMemo);
   await finishRevocations(server);
@@ -724,6 +733,7 @@ let reconcileStartTimer = null;
 
 export function startWebsiteMaintenance() {
   if (reconcileTimer) return;
+  recoverClaimedReleases().catch(() => { /* next restart retries */ });
   reconcileTimer = setInterval(() => { websiteMaintenanceTick(); }, RECONCILE_MS);
   reconcileTimer.unref?.();
   reconcileStartTimer = setTimeout(() => { websiteMaintenanceTick(); }, RECONCILE_START_DELAY_MS);

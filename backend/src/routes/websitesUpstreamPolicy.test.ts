@@ -666,3 +666,16 @@ test('a revocation completed during the certificate poll blocks the inspection a
     });
   }
 });
+
+test('a certificate release claimed by a pass that died is handed back for retry on startup', async () => {
+  const claimed = 'Being unpublished (releasing its certificate slot now): this upstream is no longer one you are allowed to proxy to. Point the site at an address in your VLAN and save it again.';
+  const [row] = await testDb.db.insert(caddySites).values({
+    server_id: serverId, domain: 'dead-claim.example.test', upstream_host: '192.168.9.9', upstream_port: 80,
+    owner_user_id: ownerId, managed: true, status: 'error', status_detail: claimed,
+  }).returning({ id: caddySites.id });
+  const recovered = await websites.recoverClaimedReleases();
+  assert.ok(recovered.some((r) => r.id === row.id));
+  const [after] = await testDb.db.select().from(caddySites).where(eq(caddySites.id, row.id));
+  assert.ok(after.status_detail.startsWith('Being unpublished (releasing its certificate slot):'));
+  assert.deepEqual(await websites.recoverClaimedReleases(), [], 'nothing left to recover');
+});
