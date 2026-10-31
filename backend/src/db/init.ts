@@ -87,6 +87,25 @@ export async function planEncryptedSecretRotation() {
   return plan;
 }
 
+// Unlike the rotation plan this also tries values that already carry the current
+// key id, so a swapped key with an unchanged id is caught. Sampled per column to stay cheap.
+export async function countUndecryptableSecrets(sampleSize = 20): Promise<number> {
+  let bad = 0;
+  for (const entry of ENCRYPTED_COLUMNS) {
+    const rows = await db
+      .select({ value: entry.column })
+      .from(entry.table)
+      .where(and(isNotNull(entry.column), ne(entry.column, '')))
+      .limit(sampleSize);
+    for (const row of rows) {
+      const value = row.value as string;
+      if (!isEncryptedSecret(value)) continue;
+      try { decryptSecret(value); } catch { bad += 1; }
+    }
+  }
+  return bad;
+}
+
 export async function rotateEncryptedSecrets(): Promise<Record<string, number>> {
   return db.transaction(async (tx) => {
     const counts: Record<string, number> = {};
@@ -236,10 +255,10 @@ export async function initDatabase(): Promise<void> {
   }
 
   // A wrong or lost SECRET_ENCRYPTION_KEY otherwise only shows up later as failed upstream calls and 2FA lockouts.
-  const rotation = await planEncryptedSecretRotation();
-  if (rotation.undecryptable > 0) {
+  const undecryptable = Math.max((await planEncryptedSecretRotation()).undecryptable, await countUndecryptableSecrets());
+  if (undecryptable > 0) {
     log('error', 'secrets_undecryptable', {
-      count: rotation.undecryptable,
+      count: undecryptable,
       hint: 'SECRET_ENCRYPTION_KEY does not match the key these secrets were encrypted with; add the old key to SECRET_ENCRYPTION_PREVIOUS_KEYS',
     });
   }
