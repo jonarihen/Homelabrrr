@@ -12,7 +12,6 @@ const saved = { id: 11, node_ref: '1~pve01', target_host: '10.0.40.11', target_p
 async function mockApi(page, { connections = [] } = {}) {
   const writes = [];
   let current = connections;
-  page.on('dialog', (dialog) => dialog.accept());
   await page.route('**/api/**', (route) => route.fulfill({ json: route.request().method() === 'GET' ? [] : {} }));
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: admin }));
   await page.route('**/api/admin/pve-hosts', (route) => route.fulfill({ json: [host] }));

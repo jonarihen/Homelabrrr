@@ -2,6 +2,7 @@ import { useCallback, useState, useEffect } from 'react';
 import Layout from '../components/Layout.jsx';
 import PrereqCallout from '../components/PrereqCallout.jsx';
 import ErrorCallout from '../components/ErrorCallout.jsx';
+import { decodeNodeRef, routeNode, vmIdentityKey } from '../utils/nodeRef.js';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
@@ -38,8 +39,14 @@ export default function WebsitesPage() {
       // Names come from Proxmox; until (or unless) they load, chips show the VMID.
       if (up.data?.vms?.length) {
         api.get('/vms').then((r) => {
-          const names = new Map((r.data || []).map((vm) => [vm.vmid, vm.name]));
-          setUpstream((u) => ({ ...u, vms: u.vms.map((vm) => ({ ...vm, name: names.get(vm.vmid) })) }));
+          // Key by node+vmid (VMIDs repeat across clusters); legacy rows store a bare node name.
+          const names = new Map();
+          for (const vm of r.data || []) {
+            names.set(vmIdentityKey(vm), vm.name);
+            names.set(`${decodeNodeRef(routeNode(vm)).nodeName}-${vm.vmid}`, vm.name);
+          }
+          const nameOf = (vm) => names.get(vmIdentityKey(vm));
+          setUpstream((u) => ({ ...u, vms: u.vms.map((vm) => ({ ...vm, name: nameOf(vm) })) }));
         }).catch(() => {});
       }
     } catch (e) { setLoadError(e); }

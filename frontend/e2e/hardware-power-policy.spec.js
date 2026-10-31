@@ -23,7 +23,6 @@ const preview = { at: '2026-10-12T13:59:00Z', draft: true, observedMode: 'low', 
 
 async function mockHosts(page, state = record()) {
   const writes = [];
-  page.on('dialog', (dialog) => dialog.accept());
   await page.route('**/api/**', (route) => {
     const request = route.request();
     if (request.method() !== 'GET') writes.push({ method: request.method(), path: new URL(request.url()).pathname, body: request.postDataJSON?.() ?? null });

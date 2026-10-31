@@ -157,12 +157,17 @@ const router = createBrowserRouter(createRoutesFromElements(
   </Route>,
 ));
 
+function FeedbackBoundary({ children }) {
+  const { user } = useAuth();
+  return <FeedbackProvider resetKey={user?.id ?? user?.username ?? null}>{children}</FeedbackProvider>;
+}
+
 export default function App() {
   return (
     <AuthProvider>
-      <FeedbackProvider>
+      <FeedbackBoundary>
         <RouterProvider router={router} />
-      </FeedbackProvider>
+      </FeedbackBoundary>
     </AuthProvider>
   );
 }

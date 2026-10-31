@@ -6,11 +6,13 @@ import Modal from './Modal.jsx';
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
 export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
+  // Display value only; an untouched field submits the exact MB (see saveCpuMem).
+  const initialGb = vm.maxmem ? Math.round(vm.maxmem / 1024 ** 3 * 100) / 100 : 2;
   const vmNode = routeNode(vm);
   const [tab, setTab] = useState('cpu-mem');
   const [cores, setCores] = useState(vm.maxcpu || vm.cpus || 2);
   // Memory is edited in GB to match the deploy forms; the API still takes MB.
-  const [memory, setMemory] = useState(vm.maxmem ? Math.round(vm.maxmem / 1024 ** 3 * 100) / 100 : 2);
+  const [memory, setMemory] = useState(initialGb);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -31,7 +33,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
       const currentCores = vm.maxcpu || vm.cpus;
       const currentMemMb = vm.maxmem ? Math.round(vm.maxmem / 1024 / 1024) : null;
 
-      const memoryMb = Math.round(parseFloat(memory) * 1024);
+      const memoryMb = parseFloat(memory) === initialGb && currentMemMb ? currentMemMb : Math.round(parseFloat(memory) * 1024);
       if (!(memoryMb > 0)) {
         setError('Enter a valid memory size');
         setSaving(false);

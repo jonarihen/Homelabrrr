@@ -26,3 +26,8 @@ test('confirm options accept a string or an object', () => {
   assert.equal(o.danger, true);
   assert.equal(confirmOptions({ title: 'T', danger: true }).title, 'T');
 });
+
+test('clear empties all toasts', () => {
+  const s = toastReducer([{ id: 1, kind: 'error', message: 'x' }], { type: 'clear' });
+  assert.deepEqual(s, []);
+});

@@ -147,14 +147,15 @@ test('browser Back asks before discarding staged user changes', async ({ page })
   await mockUsersPage(page);
   await page.route('**/api/admin/audit-log**', (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
   await page.goto('/admin/audit-log');
-  await page.goto('/admin/users');
+  await page.locator('a[href="/admin/users"]').first().click(); // client-side, so Back is a router POP
   await page.getByRole('button', { name: 'Manage' }).click();
   await page.getByText('Manage PVE Hosts').click();
 
-  let prompts = 0;
-  page.on('dialog', (d) => { prompts += 1; d.dismiss(); });
   await page.evaluate(() => window.history.back());
-  await expect.poll(() => prompts).toBe(1);
+  const discard = page.getByRole('dialog', { name: 'Are you sure?' });
+  await expect(discard.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await discard.getByRole('button', { name: 'Cancel' }).click();
+  await expect(discard).toHaveCount(0);
   await expect(page).toHaveURL(/\/admin\/users$/);
   await expect(page.getByText('1 pending change')).toBeVisible();
 });

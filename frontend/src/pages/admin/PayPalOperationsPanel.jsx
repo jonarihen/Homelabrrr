@@ -52,7 +52,7 @@ export default function PayPalOperationsPanel({ environment, act, busy }) {
     run(`dismiss-${item.id}`, () => api.post(`/payments/admin/review/${encodeURIComponent(item.id)}/dismiss`, { environment, note }));
   };
   const cancel = async (item) => {
-    if (!await confirm('Request cancellation at PayPal? A payment already in flight may still complete.')) return;
+    if (!await confirm({ message: 'Request cancellation at PayPal? A payment already in flight may still complete.', confirmLabel: 'Request cancellation', danger: true })) return;
     run(`cancel-${item.id}`, () => api.post(`/payments/admin/subscriptions/${encodeURIComponent(item.id)}/cancel`, { environment }));
   };
   const decideManual = async (item, action) => {
@@ -60,7 +60,7 @@ export default function PayPalOperationsPanel({ environment, act, busy }) {
     const label = action === 'confirm' ? 'Evidence (statement line, bank reference) for this transfer:' : `Reason to ${action} this entry:`;
     const value = window.prompt(label);
     if (!value || value.trim().length < 3) return;
-    const acknowledgeSimilar = action === 'confirm' && await confirm('Only press OK if you already checked this is not the same money as an imported PayPal payment. Cancel keeps the duplicate check.');
+    const acknowledgeSimilar = action === 'confirm' && await confirm({ message: 'Only confirm if you already checked this is not the same money as an imported PayPal payment. Cancel keeps the duplicate check.', confirmLabel: 'Confirm', danger: true });
     run(`manual-${action}-${item.id}`, () => api.post(`/payments/admin/manual/${item.id}/${action}`, { [field]: value, acknowledgeSimilar }));
   };
   const metrics = health ? [

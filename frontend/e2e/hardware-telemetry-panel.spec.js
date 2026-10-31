@@ -17,7 +17,6 @@ async function mockApi(page, { me = admin, connection = base, telemetryBody = te
   const writes = [];
   const hardwareRequests = [];
   let current = connection ? [connection] : [];
-  page.on('dialog', (dialog) => dialog.accept());
   await page.route('**/api/**', (route) => route.fulfill({ json: route.request().method() === 'GET' ? [] : {} }));
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: me }));
   await page.route('**/api/admin/pve-hosts', (route) => route.fulfill({ json: [{ id: 1, name: 'lab', host: 'pve.test', port: 8006, token_id: 'root@pam!t', verify_tls: true }] }));
@@ -85,6 +84,7 @@ test('rebind moves the iLO binding to another node with the current config versi
   const pve01 = dialog.locator('div.rounded-xl', { has: page.getByText('pve01', { exact: true }) });
   await pve01.getByLabel(/Rebind to node/).selectOption('1~pve03');
   await pve01.getByRole('button', { name: 'Rebind' }).click();
+  await page.getByRole('dialog', { name: 'Confirm' }).getByRole('button', { name: 'Confirm' }).click();
   await expect(pve01.getByText('not configured', { exact: true })).toBeVisible();
   const pve03 = dialog.locator('div.rounded-xl', { has: page.getByText('pve03', { exact: true }) });
   await expect(pve03.getByLabel('Management host')).toHaveValue('10.0.40.11');

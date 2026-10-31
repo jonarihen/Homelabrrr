@@ -32,7 +32,7 @@ function Toast({ toast, dispatch }) {
 }
 
 // Provides useToast() and useConfirm(); mounted once in App.jsx.
-export function FeedbackProvider({ children }) {
+export function FeedbackProvider({ children, resetKey }) {
   const [toasts, dispatch] = useReducer(toastReducer, []);
   const nextId = useRef(0);
 
@@ -47,10 +47,26 @@ export function FeedbackProvider({ children }) {
     setQueue((q) => [...q, { ...confirmOptions(arg), id: ++nextId.current, resolve }]);
   }), []);
   const current = queue[0];
+  // Idempotent per request: a double-click must not also drop the next queued confirm.
+  const settled = useRef(new Set());
   const settle = (result) => {
+    if (settled.current.has(current.id)) return;
+    settled.current.add(current.id);
     current.resolve(result);
-    setQueue((q) => q.slice(1));
+    setQueue((q) => q.filter((r) => r.id !== current.id));
   };
+
+  // Persistent toasts and pending confirms must not leak to the next user.
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  const firstKey = useRef(resetKey);
+  useEffect(() => {
+    if (firstKey.current === resetKey) return;
+    firstKey.current = resetKey;
+    dispatch({ type: 'clear' });
+    queueRef.current.forEach((r) => { settled.current.add(r.id); r.resolve(false); });
+    setQueue([]);
+  }, [resetKey]);
 
   return (
     <ToastContext.Provider value={toast}>

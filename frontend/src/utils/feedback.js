@@ -11,6 +11,7 @@ export function toastReducer(toasts, action) {
   switch (action.type) {
     case 'add': return [...toasts, action.toast];
     case 'dismiss': return toasts.filter((t) => t.id !== action.id);
+    case 'clear': return [];
     default: return toasts;
   }
 }
