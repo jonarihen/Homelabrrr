@@ -5,10 +5,54 @@
 - Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.
 - Small uppercase labels, table headers and metadata are now at least 11px (the sidebar section labels were 9px). Compact status chips and badges stay at 10px.
 
+## 2026-10-28 — Phone and tablet layout
+
+- Below laptop width the sidebar moves into a slide-in drawer opened from a **menu** button in a new top bar. It traps focus, closes on Escape, a tap outside or navigation, and returns focus to the button. Desktop layout is unchanged.
+- Data tables (users, roles, VLANs, templates, assignments, audit log, snapshots, SSH keys, websites, recent provisions) scroll sideways inside their panel instead of being cut off.
+- The **My VMs** header and summary bar wrap on narrow screens.
+- Console windows are shrunk and moved to fit the screen when opened, tiled or when the window is resized.
+## 2026-10-28 — Audit log filters and CSV export
+
+- The **Audit Log** action filter now lists every action that has actually been recorded, instead of a fixed list of about 25.
+- New filters for **user** and a **date range** (the end date counts in full). They combine with the action and target filters.
+- **Export CSV** downloads the filtered log (newest first, up to 50,000 rows). Spreadsheet formulas in exported text are neutralised, and each export is recorded in the audit log.
+## 2026-10-28 — Failed background deploy steps no longer leave a VM stuck "in progress"
+
+- If background work after a deploy fails unexpectedly (for example recording ownership or tagging), the VM moves to **needs review** with the cause shown, instead of staying in "creating" indefinitely with the error only in the server log. A more specific status already recorded by a deploy step is kept.
+- Deploy failures, VLAN-tag failures and auto-placement skips are now structured log events (`provision_*_background_failed`, `provision_vlan_tag_failed`, `placement_node_skipped`) with the provision ID and VMID.
+## 2026-10-28 — VM page sticky header, section nav and IP
+
+- The **VM page** identity header (name and status) and section nav (Overview, Performance, Snapshots, Backups, IP, SSH) stay pinned while you scroll. Power and connect actions scroll away to keep the sticky area compact on small screens.
+- The VM's IP address is shown next to the VMID, taken from cloud-init, DHCP or the guest agent, with a **copy** button.
+- The app is now called **Homelabrrr** everywhere in the UI (browser tab, sidebar, sign-in screen).
+- Firewall policy service colours use the design-language accent and status colours instead of a rainbow palette.
 ## 2026-10-28 — Readable primary buttons and labelled form fields
 
 - Primary (orange) buttons and active tabs now use dark text instead of white, so their labels meet contrast guidelines. They also show a clear focus ring when reached by keyboard.
 - Form labels in the SSH key, SSH connect and user management forms are now linked to their inputs: screen readers announce them, and clicking a label focuses its field.
+## 2026-10-28 — Frontend container runs without root
+
+- The frontend container now runs nginx as its unprivileged `nginx` user and listens on port 8080 inside the container. The published host port (8181) is unchanged. If you have a compose override that targets the container's port 80, change it to 8080.
+- The frontend container has its own health check.
+## 2026-10-28 — Switching a Caddy server to API-only mode removes its old routes
+
+- Clearing a Caddy server's SSH host (switching from Caddyfile sync to API-only mode) now empties the Homelabrrr snippet and reloads Caddy first, then re-publishes the sites through the admin API. Before, the old Caddyfile routes stayed live and came back on every reload, out of reach of API-mode unpublish and delete.
+- If the snippet can't be cleared (SSH unreachable, validation fails), the switch is refused and the server stays in Caddyfile mode, with the reason shown.
+## 2026-10-28 — SSH works with fewer steps after deploy
+
+- The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
+- SSH connection failures now say what to check (wrong username or key, VM still booting, SSH not running) instead of showing the raw error.
+## 2026-10-28 — Revoking a session closes its open consoles
+
+- Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.
+## 2026-10-28 — VLAN access follows the subnets firewalls actually provisioned
+
+- Browser SSH targets, website upstreams and public-IP targets now check your VLANs against the subnet each firewall sync recorded, so deployments that don't use the `10.x` scheme no longer refuse addresses in your own VLAN — and no longer accept the unused `10.x` range.
+- A VLAN synced to several firewalls covers each firewall's recorded subnet. Firewalls synced before subnets were recorded keep the previous behaviour (configured subnet or default scheme) until re-synced.
+
+## 2026-10-28 — A slow iLO no longer delays its neighbours
+
+- Hardware telemetry now polls each node independently (still at most two at a time), so one slow or unresponsive iLO no longer holds back the next node's power reading for up to a minute.
 
 ## 2026-10-28 — Search and filter on the Websites page
 

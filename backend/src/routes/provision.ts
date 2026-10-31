@@ -14,6 +14,8 @@ import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth
 import { sendError, hasHttpStatus, tagStatus } from '../utils/httpError.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { logAudit } from '../utils/audit.ts';
+import { log } from '../utils/logger.ts';
+import { recordBackgroundProvisionFailure } from '../services/provisionFailure.ts';
 import { notifyDeployment } from '../services/deploymentNotification.ts';
 import { decodeNodeRef } from '../utils/nodeRef.ts';
 import { imageDeployTargets, defaultStorageForHost } from '../utils/cloudImageTargets.ts';
@@ -305,6 +307,13 @@ router.post('/clone', async (req: any, res: any) => {
     : [];
   if (!template) return res.status(404).json({ error: 'Template not found' });
 
+  // Charged and sent to PVE as-is, so only plain positive integers: "0" would
+  // be charged as 0 but built as 2 vCPUs, "+500" would become a relative resize.
+  const finalCores = cores ?? template.default_cores;
+  const finalDisk = diskGb ?? template.default_disk_gb;
+  if (!/^[1-9]\d*$/.test(String(finalCores))) return res.status(400).json({ error: 'Cores must be a positive integer' });
+  if (!/^[1-9]\d*$/.test(String(finalDisk))) return res.status(400).json({ error: 'Disk size must be a positive whole number of GB' });
+
   // Cloud-init guest settings (only honored for cloud-init templates)
   let cloudInitOpts: any = {};
   if (template.cloud_init) {
@@ -335,19 +344,18 @@ router.post('/clone', async (req: any, res: any) => {
   }
 
   // Validate CPU count against node's physical cores before cloning
-  const finalCores = cores || template.default_cores;
+  let cpuLayout;
   try {
-    await computeCpuTopology(template.node, finalCores);
+    cpuLayout = await computeCpuTopology(template.node, finalCores);
   } catch (err) {
     if (hasHttpStatus(err)) return sendError(res, err);
-    // Non-validation errors are fine — we'll fall back in pollAndConfigure
+    throw err;
   }
 
   // Refuse requests the node can't fit. Storage is a hard limit; memory is
   // advisory by default (capacity policy — see utils/capacityPolicy.js) and
   // comes back as a note recorded on the deployment.
   const finalMem = memoryGb ? Math.round(parseFloat(memoryGb) * 1024) : template.default_memory;
-  const finalDisk = diskGb || template.default_disk_gb;
   let capacityNote = '';
   let cloneDiskGb: number;
   let resizeDisk: string | null;
@@ -363,7 +371,7 @@ router.post('/clone', async (req: any, res: any) => {
     capacityNote = capacity?.memoryWarning || '';
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
-      addCores: parseInt(finalCores, 10) || 0,
+      addCores: cpuLayout.totalVcpus,
       addMemoryMb: finalMem,
       addDiskGb: cloneDiskGb,
     });
@@ -401,21 +409,21 @@ router.post('/clone', async (req: any, res: any) => {
       template_id: template.id, source_type: 'template', steps, status: 'cloning', request_id: req.requestId || '',
     }, {
       userId: targetUser, createdBy: req.session.username,
-      cores: Number(finalCores), memoryMb: finalMem, diskGb: cloneDiskGb,
+      cores: cpuLayout.totalVcpus, memoryMb: finalMem, diskGb: cloneDiskGb,
     }, submit);
 
     // Do config changes after clone finishes — poll in background
     startBackgroundWork(() => pollAndConfigure(provisionId, template.node, newVmid, upid, {
-      cores: finalCores,
+      cores: Number(finalCores),
       memory: finalMem,
-      diskGb: finalDisk,
+      diskGb: Number(finalDisk),
       resizeDisk,
       cloudInit: template.cloud_init,
       ...cloudInitOpts,
       description,
       vlanTag: vlanTag ? parseInt(vlanTag) : null,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-      .catch((err: any) => console.error(`Post-clone config failed for VM ${newVmid}:`, err.message));
+      .catch((err: any) => recordBackgroundProvisionFailure(provisionId, newVmid, 'provision_clone_background_failed', err));
 
     await logAudit(req, 'vm_clone', `${template.node}/${newVmid}`, `template:${template.name}`);
     res.json({
@@ -486,7 +494,7 @@ async function autoPlaceImage(image: any, { memoryMb, diskGb }: any) {
   const skip = (nodeValue: any, reason: string) => {
     const label = decodeNodeRef(nodeValue).nodeName || String(nodeValue);
     skipped.push(`${label} — ${reason}`);
-    console.warn(`[placement] skipping ${nodeValue}: ${reason}`);
+    log('warn', 'placement_node_skipped', { node: nodeValue, reason });
   };
 
   for (const cand of ranked) {
@@ -667,7 +675,7 @@ router.post('/from-image', async (req: any, res: any) => {
     capacityNote = capacity?.memoryWarning || '';
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
-      addCores: parseInt(cores, 10) || 0,
+      addCores: cpuLayout.sockets * cpuLayout.cores,
       addMemoryMb: memoryMb,
       addDiskGb: imageDiskGb,
     });
@@ -722,7 +730,7 @@ router.post('/from-image', async (req: any, res: any) => {
       ...cloudInitOpts,
       start: startNow,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-      .catch((err: any) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message));
+      .catch((err: any) => recordBackgroundProvisionFailure(provisionId, vmid, 'provision_image_background_failed', err));
 
     await logAudit(req, 'vm_from_image', `${targetImage.node}/${vmid}`, `image:${targetImage.name}${user.is_admin ? '' : ' (auto-placed)'}`);
     res.json({
@@ -775,6 +783,11 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
     return res.status(400).json({ error: 'Name must contain letters or digits' });
   }
 
+  // Parsed once so capacity, quota and the PVE size all agree ("1.5G" used to become 15 GB).
+  const diskMatch = /^([1-9]\d*)G?$/i.exec(String(diskSize));
+  if (!diskMatch) return res.status(400).json({ error: 'Disk size must be a positive whole number of GB' });
+  const diskGb = Number(diskMatch[1]);
+
   // Non-admins can't pick a bridge (the networks list is admin-only) — pin them
   // to vmbr0. This also blocks a `bridge=vmbr0,tag=N` injection that would put
   // the NIC on a VLAN the user has no access to, bypassing the VLAN check below.
@@ -784,11 +797,14 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
   // /from-image and /clone. (`name` is not one of them: it is a DNS label, not
   // an identifier, and is validated by toPveVmName above.)
   for (const [field, value] of Object.entries({ storage, bridge, ostype, bios, scsihw })) {
-    if (!/^[a-zA-Z0-9._-]+$/.test(String(value))) {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(value)) {
       return res.status(400).json({ error: `Invalid ${field}` });
     }
   }
-  if (iso && !/^[a-zA-Z0-9._/:-]+$/.test(String(iso))) {
+  // Only an ISO volume ("<storage>:iso/<file>"); no other volume type and no
+  // extra property-string options.
+  const isoMatch = typeof iso === 'string' ? /^([a-zA-Z0-9._-]+):iso\/[^,]+$/.exec(iso) : null;
+  if (iso && !isoMatch) {
     return res.status(400).json({ error: 'Invalid iso' });
   }
 
@@ -803,6 +819,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
   // even by naming it directly.
   try {
     await assertStorageExposed(node, storage, { isAdmin });
+    if (isoMatch) await assertStorageExposed(node, isoMatch[1], { isAdmin });
   } catch (err) {
     if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
@@ -818,7 +835,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
     // advisory by default and comes back as a note on the deployment.
     const capacity = await assertNodeCapacity(node, {
       memoryMb: Math.round(parseFloat(memoryGb) * 1024),
-      diskGb: String(diskSize).replace(/[^0-9]/g, ''),
+      diskGb,
       storage,
     });
     const capacityNote = capacity?.memoryWarning || '';
@@ -826,9 +843,9 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
     // the route is open to can_create_vms holders, this rail actually bounds
     // non-admin from-scratch builds.
     await assertUserQuota(req.session.userId, {
-      addCores: parseInt(cores, 10) || 0,
+      addCores: cpuLayout.totalVcpus,
       addMemoryMb: Math.round(parseFloat(memoryGb) * 1024),
-      addDiskGb: parseFloat(String(diskSize).replace(/[^0-9.]/g, '')) || 0,
+      addDiskGb: diskGb,
     });
 
     const config = {
@@ -840,7 +857,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
       ostype,
       bios,
       scsihw,
-      scsi0: `${storage}:${diskSize.toString().replace(/[^0-9]/g, '')}`,
+      scsi0: `${storage}:${diskGb}`,
       net0: vlanTag ? `virtio,bridge=${bridge},tag=${parseInt(vlanTag)}` : `virtio,bridge=${bridge}`,
       ...(iso && { ide2: `${iso},media=cdrom` }),
       ...(description && { description }),
@@ -863,7 +880,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
     }, {
       userId: targetUser, createdBy: req.session.username,
       cores: cpuLayout.sockets * cpuLayout.cores,
-      memoryMb: config.memory, diskGb: Number(String(diskSize).replace(/[^0-9]/g, '')) || 0,
+      memoryMb: config.memory, diskGb,
     }, (onReserved, marker) => withFreshVmid((id: number) => createVM(node, id, {
       ...config, description: `${description}\n${marker}`,
     }), { onReserved }));
@@ -881,7 +898,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
           await db.update(provisionedVms).set({ status: 'ready', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
           await notifyDeployment(provisionId);
         }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-        .catch((err: any) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
+        .catch((err: any) => recordBackgroundProvisionFailure(provisionId, vmid, 'provision_create_background_failed', err));
     } else {
       await setStep(provisionId, 'create', 'done');
       await recordProvisionOwnership(provisionId);
@@ -890,7 +907,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
       startBackgroundWork(
         () => syncVmTagsSafe(node, vmid).finally(() => setStep(provisionId, 'tags', 'done')),
         { kind: 'tag-sync', id: provisionId, requestId: req.requestId },
-      ).catch((err: any) => console.error(`Post-create tag sync failed for VM ${vmid}:`, err.message));
+      ).catch((err: any) => log('warn', 'provision_tag_sync_failed', { provisionId, vmid, error: err }));
       await notifyDeployment(provisionId);
     }
 
@@ -1174,7 +1191,7 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
           await updateVMConfig(node, vmid, { net0: parts.join(',') });
         }
       } catch (err: any) {
-        console.error(`Failed to set VLAN tag ${opts.vlanTag} on VM ${vmid}:`, err.message);
+        log('error', 'provision_vlan_tag_failed', { provisionId, vmid, vlanTag: opts.vlanTag, error: err });
         throw err;
       }
     }
@@ -1192,7 +1209,7 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
     }
     await notifyDeployment(provisionId);
   } catch (err: any) {
-    console.error(`Post-clone config failed for VM ${vmid}:`, err.message);
+    log('error', 'provision_post_clone_failed', { provisionId, vmid, error: err });
     await setStep(provisionId, 'configure', 'error', err.message);
     await db.update(provisionedVms)
       .set({ status: 'needs_review', status_detail: 'Post-clone configuration or ownership failed — verify credentials, VLAN and resources before assigning this VM' })

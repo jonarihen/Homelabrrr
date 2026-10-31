@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# One self-hosted runner: a new push to a PR supersedes its still-running/queued run.
+# Main pushes are never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   backend:
     runs-on: [self-hosted, dev-ci]

@@ -7,6 +7,7 @@ import { useAuth } from './AuthContext.jsx';
 import { displayNode, routeNode, vmIdentityKey } from '../utils/nodeRef.js';
 import { computeTileLayout } from '../utils/tileSessions.js';
 import { consoleSessionUrl } from '../utils/consolePopOut.js';
+import { fitToViewport } from '../utils/fitToViewport.js';
 
 const ConsoleSessionsContext = createContext(null);
 
@@ -46,12 +47,12 @@ function createSessionGeometry(type, openCount) {
   const cascadeX = (openCount % 4) * 34;
   const cascadeY = (openCount % 4) * 26;
 
-  return {
+  return fitToViewport({
     width: windowWidth,
     height: windowHeight,
     x: clamp(sidebarOffset + 20 + cascadeX, 12, width - windowWidth - 12),
     y: clamp(68 + cascadeY, 12, height - windowHeight - 72),
-  };
+  }, { width, height });
 }
 
 function normalizeVm(vm) {
@@ -77,6 +78,16 @@ export function ConsoleSessionsProvider({ children }) {
       setSessions([]);
     }
   }, [user]);
+
+  // Keep every window reachable when the viewport shrinks (phone rotation, small screens).
+  useEffect(() => {
+    const refit = () => setSessions((current) => {
+      const fitted = current.map((session) => fitToViewport(session, getViewport()));
+      return fitted.some((session, i) => session !== current[i]) ? fitted : current;
+    });
+    window.addEventListener('resize', refit);
+    return () => window.removeEventListener('resize', refit);
+  }, []);
 
   const focusSession = useCallback((id) => {
     setSessions((current) => {
@@ -142,7 +153,7 @@ export function ConsoleSessionsProvider({ children }) {
       const visible = current.filter((s) => !s.minimized);
       if (visible.length < 2) return current;
 
-      const layout = computeTileLayout(visible, mode, getViewport());
+      const layout = computeTileLayout(visible, mode, getViewport()).map((rect) => fitToViewport(rect, getViewport()));
       const updates = new Map(layout.map((l) => [l.id, l]));
 
       return current.map((session) => {
