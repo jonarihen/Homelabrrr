@@ -4,12 +4,11 @@ import { execFile } from 'child_process';
 import { writeFile, readFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { sshKeys, vmSshConfigs, vmSshUserConfigs } from '../db/schema/index.ts';
 import { requireAuth } from '../middleware/auth.ts';
 import { userCanPerformVmOp } from '../utils/vmAccess.ts';
-import { nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { normalizeSshHostFingerprint, scanSshHostFingerprint } from '../utils/sshHostKey.ts';
 import { decryptSecret, encryptSecret } from '../utils/secrets.ts';
 import { derivePublicKey } from '../utils/sshPublicKey.ts';
@@ -19,6 +18,8 @@ import { authorizeSshTarget, sshConnectionRateLimited } from '../services/sshTar
 import { sshClientError } from '../utils/sshError.ts';
 import { log } from '../utils/logger.ts';
 import { withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
+import { getVMConfig } from '../proxmox.ts';
+import { getGlobalSshConfig, getUserSshConfig } from '../utils/sshConfigLookup.ts';
 
 // Convert a PPK key (any version) to OpenSSH PEM using puttygen.
 // passphrase is the PPK decryption passphrase (empty string if unencrypted).
@@ -64,46 +65,7 @@ function sendSshError(req, res, err) {
 // SSH session store (token → { host, port, username, privateKey, expires })
 export const sshSessions = new Map();
 
-async function getGlobalSshConfig(node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
-  const candidates = nodeLookupCandidates(node);
-  if (candidates.length === 0) return null;
-  // Legacy rows may store the bare node name — match any candidate in one query,
-  // then honour the candidate order (full ref preferred over bare name).
-  const rows = await db
-    .select({
-      node: vmSshConfigs.node,
-      host: vmSshConfigs.host,
-      port: vmSshConfigs.port,
-      host_fingerprint: vmSshConfigs.host_fingerprint,
-    })
-    .from(vmSshConfigs)
-    .where(and(inArray(vmSshConfigs.node, candidates), eq(vmSshConfigs.vmid, parsedVmid)));
-  for (const candidate of candidates) {
-    const row = rows.find((r) => r.node === candidate);
-    if (row) return row;
-  }
-  return null;
-}
 
-async function getUserSshConfig(userId, node, vmid) {
-  const parsedVmid = parseInt(vmid, 10);
-  const candidates = nodeLookupCandidates(node);
-  if (candidates.length === 0) return null;
-  const rows = await db
-    .select({ node: vmSshUserConfigs.node, username: vmSshUserConfigs.username })
-    .from(vmSshUserConfigs)
-    .where(and(
-      eq(vmSshUserConfigs.user_id, userId),
-      inArray(vmSshUserConfigs.node, candidates),
-      eq(vmSshUserConfigs.vmid, parsedVmid),
-    ));
-  for (const candidate of candidates) {
-    const row = rows.find((r) => r.node === candidate);
-    if (row) return row;
-  }
-  return null;
-}
 
 // ─── SSH Keys ────────────────────────────────────────────────────────────────
 
@@ -222,12 +184,20 @@ router.get('/config/:node/:vmid', async (req, res) => {
   }
   const global = await getGlobalSshConfig(node, vmid);
   const userRow = await getUserSshConfig(req.session.userId, node, vmid);
-  if (!global && !userRow) return res.json(null);
+  // No saved login yet: suggest the cloud-init user the VM was deployed with,
+  // since that is the account its SSH key went to (#288).
+  // Best-effort and bounded: skipped once host+fingerprint are saved, and never waits on a slow Proxmox.
+  const needCiuser = !userRow?.username && !(global?.host && global?.host_fingerprint);
+  const ciuser = needCiuser ? await Promise.race([
+    getVMConfig(node, vmid).then((c) => String(c?.ciuser || ''), () => ''),
+    new Promise<string>((resolve) => setTimeout(resolve, 2000, '')),
+  ]) : '';
+  if (!global && !userRow && !ciuser) return res.json(null);
   res.json({
     host: global?.host || null,
     port: global?.port || 22,
     hostFingerprint: global?.host_fingerprint || '',
-    username: userRow?.username || 'root',
+    username: userRow?.username || ciuser || 'root',
   });
 });
 

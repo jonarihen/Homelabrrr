@@ -1112,6 +1112,13 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
+        },
+        "credentials_version": {
+          "name": "credentials_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         }
       },
       "indexes": {
@@ -4374,6 +4381,12 @@
         "artifacts": {
           "name": "artifacts",
           "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subnet_cidr": {
+          "name": "subnet_cidr",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
