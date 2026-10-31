@@ -2364,19 +2364,24 @@ router.put('/pve-hosts/:id', pHosts, async (req, res) => {
     return res.status(400).json({ error: 'Name, host and tokenId are required' });
   }
 
-  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
+  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== false : !!verifyTls;
   if (!verifyTlsEnabled && !pin && !ALLOW_INSECURE_UPSTREAM_TLS) {
     return res.status(400).json({ error: PVE_INSECURE_TLS_ERROR });
   }
-  // Setting, replacing or clearing the pin, or switching verification off,
-  // changes which server the stored token is trusted to: a blank secret is
-  // not enough.
+  // A blank secret keeps the stored one only while the upstream target and its
+  // TLS trust are unchanged; otherwise the stored secret would be sent to a
+  // different server (new address, token id, pin, or verification switched off).
   const oldPin = existing.tls_fingerprint || null;
   const trustChanged = pin !== oldPin || (!verifyTlsEnabled && existing.verify_tls !== false);
-  if (!tokenSecret && trustChanged) {
-    return res.status(400).json({ error: 'Re-enter the API token secret when changing TLS trust', field: 'tokenSecret' });
+  const targetChanged = host !== existing.host || port !== Number(existing.port) || tokenId !== existing.token_id;
+  if (!tokenSecret && (trustChanged || targetChanged)) {
+    return res.status(400).json({ error: 'Re-enter the API token secret when changing the address or TLS trust', field: 'tokenSecret' });
   }
-  // If tokenSecret is empty, keep the existing one
+  const sshHostNew = sshHost === undefined ? undefined : String(sshHost || '').trim();
+  if (sshHostNew && !sshSecret && existing.ssh_secret
+    && (sshHostNew !== (existing.ssh_host || '') || (parseInt(sshPort, 10) || 22) !== Number(existing.ssh_port || 22))) {
+    return res.status(400).json({ error: 'Re-enter the SSH secret when changing the address', field: 'sshSecret' });
+  }
   const secret = tokenSecret ? encryptSecret(tokenSecret) : existing.token_secret;
   await db.update(pveHosts).set({
     name, host, port, token_id: tokenId, token_secret: secret, verify_tls: verifyTlsEnabled, tls_fingerprint: pin,
@@ -2620,6 +2625,11 @@ router.put('/firewalls/:id', pFirewalls, async (req, res) => {
   const existing = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!existing) return res.status(404).json({ error: 'Firewall not found' });
 
+  // A blank API key keeps the stored one only while the upstream target is unchanged.
+  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== false : !!verifyTls;
+  if (!apiKey && (String(host) !== existing.host || Number(port) !== Number(existing.port) || (!verifyTlsEnabled && existing.verify_tls !== false))) {
+    return res.status(400).json({ error: 'Re-enter the API key when changing the address', field: 'apiKey' });
+  }
   const key = apiKey ? encryptSecret(apiKey) : existing.api_key;
   const rangeStart    = req.body.vlanRangeStart ?? existing.vlan_range_start;
   const rangeEnd      = req.body.vlanRangeEnd   ?? existing.vlan_range_end;
@@ -2629,7 +2639,6 @@ router.put('/firewalls/:id', pFirewalls, async (req, res) => {
   const routeGw       = req.body.routeGateway   || existing.route_gateway   || '10.255.254.2';
   const trunkSerial   = req.body.trunkSwitchSerial ?? existing.trunk_switch_serial ?? '';
   const trunkPort     = req.body.trunkSwitchPort   ?? existing.trunk_switch_port   ?? '';
-  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
   const extIp       = req.body.externalIp   ?? existing.external_ip   ?? '';
   const wanZone     = req.body.rootWanZone  ?? existing.root_wan_zone ?? 'underlay';
   if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {

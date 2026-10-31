@@ -59,7 +59,7 @@ export default function PVEHostsPage() {
   const openEdit = (h) => {
     setEditId(h.id);
     setForm({
-      name: h.name, host: h.host, port: h.port, tokenId: h.token_id, tokenSecret: '', verifyTls: !!h.verify_tls,
+      name: h.name, host: h.host, port: h.port, tokenId: h.token_id, tokenSecret: '', verifyTls: h.verify_tls !== false,
       sshHost: h.ssh_host || '', sshPort: h.ssh_port || 22, sshUser: h.ssh_user || 'root',
       sshAuthType: h.ssh_auth_type || 'key', sshSecret: '', hasSsh: !!h.has_ssh,
     });
@@ -208,7 +208,7 @@ export default function PVEHostsPage() {
         </div>
         <button
           onClick={openAdd}
-          className="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20"
+          className="flex items-center gap-2 text-sm btn-primary px-4 py-2.5 rounded-xl font-medium shadow-lg shadow-blue-600/20"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
@@ -430,7 +430,7 @@ export default function PVEHostsPage() {
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                  API Token Secret {editId && <span className="text-gray-600">(leave empty to keep current; required when TLS trust changes)</span>}
+                  API Token Secret {editId && <span className="text-gray-600">(leave empty to keep current; required if the address or TLS trust changes)</span>}
                 </label>
                 <input
                   type="password" required={!editId} value={form.tokenSecret}
@@ -524,7 +524,7 @@ export default function PVEHostsPage() {
                 <div>
                   <label className="block text-xs text-gray-400 mb-1.5 font-medium">
                     {form.sshAuthType === 'password' ? 'Password' : 'Private key'}
-                    {form.hasSsh && <span className="text-gray-600"> (leave empty to keep current)</span>}
+                    {form.hasSsh && <span className="text-gray-600"> (leave empty to keep current; required if the address changes)</span>}
                   </label>
                   {form.sshAuthType === 'password' ? (
                     <input
@@ -556,7 +556,7 @@ export default function PVEHostsPage() {
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">
                   Cancel
                 </button>
-                <button type="submit" disabled={saving} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors shadow-lg shadow-blue-600/20">
+                <button type="submit" disabled={saving} className="flex-1 btn-primary rounded-xl py-2.5 text-sm font-semibold shadow-lg shadow-blue-600/20">
                   {saving ? 'Saving...' : editId ? 'Update' : 'Add Host'}
                 </button>
               </div>
@@ -733,7 +733,7 @@ function CapacityPolicySection() {
           </div>
           <button
             type="submit" disabled={saving}
-            className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl font-medium transition-colors"
+            className="text-sm btn-primary px-4 py-2.5 rounded-xl font-medium"
           >
             {saving ? 'Saving...' : 'Save policy'}
           </button>
