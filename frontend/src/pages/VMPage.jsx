@@ -303,6 +303,8 @@ export default function VMPage() {
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
     el.focus({ preventScroll: true });
+    // Keep the fragment so the section can be copied/reloaded; replace so Back isn't flooded.
+    window.history.replaceState(window.history.state, '', `#${id}`);
   };
   const cpuData = rrd?.map(d => d.cpu != null ? d.cpu * 100 : null) || [];
   const memData = rrd?.map(d => d.mem != null && d.maxmem ? (d.mem / d.maxmem) * 100 : null) || [];
@@ -367,11 +369,12 @@ export default function VMPage() {
                     <button
                       type="button"
                       onClick={copyIp}
-                      aria-label={`Copy IP address ${detectedIp}`}
+                      aria-label={ipCopied ? `Copied IP address ${detectedIp}` : `Copy IP address ${detectedIp}`}
                       className="ml-1.5 align-middle text-gray-500 hover:text-orange-400 transition-colors"
                     >
                       {ipCopied ? 'copied' : 'copy'}
                     </button>
+                    <span role="status" aria-live="polite" className="sr-only">{ipCopied ? 'IP address copied' : ''}</span>
                   </>
                 )}
               </p>

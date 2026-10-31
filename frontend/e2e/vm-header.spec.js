@@ -96,4 +96,5 @@ test('section links focus the target with a visible focus ring', async ({ page, 
   const target = page.locator('#vm-snapshots');
   await expect(target).toBeFocused();
   await expect(target).toHaveCSS('box-shadow', /rgb\(255, 122, 68\)/);
+  await expect(page).toHaveURL(/#vm-snapshots$/);
 });
