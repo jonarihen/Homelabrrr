@@ -65,7 +65,7 @@ export default function FirewallsPage() {
 
   const openEdit = (fw) => {
     setEditId(fw.id);
-    setForm({ name: fw.name, host: fw.host, port: fw.port, apiKey: '', vdom: fw.vdom, parentInterface: fw.parent_interface, wanInterface: fw.wan_interface, vlanRangeStart: fw.vlan_range_start || 1001, vlanRangeEnd: fw.vlan_range_end || 1999, labVdomLink: fw.lab_vdom_link || 'lab-root0', rootVdom: fw.root_vdom || 'root', rootVdomLink: fw.root_vdom_link || 'lab-root1', routeGateway: fw.route_gateway || '10.255.254.2', trunkSwitchSerial: fw.trunk_switch_serial || '', trunkSwitchPort: fw.trunk_switch_port || '', verifyTls: !!fw.verify_tls });
+    setForm({ name: fw.name, host: fw.host, port: fw.port, apiKey: '', vdom: fw.vdom, parentInterface: fw.parent_interface, wanInterface: fw.wan_interface, vlanRangeStart: fw.vlan_range_start || 1001, vlanRangeEnd: fw.vlan_range_end || 1999, labVdomLink: fw.lab_vdom_link || 'lab-root0', rootVdom: fw.root_vdom || 'root', rootVdomLink: fw.root_vdom_link || 'lab-root1', routeGateway: fw.route_gateway || '10.255.254.2', trunkSwitchSerial: fw.trunk_switch_serial || '', trunkSwitchPort: fw.trunk_switch_port || '', verifyTls: fw.verify_tls !== false });
     setError('');
     setShowForm(true);
     loadSwitches(fw.id);
@@ -104,7 +104,7 @@ export default function FirewallsPage() {
           <h1 className="aaris-display text-xl text-gray-100">Firewalls</h1>
           <p className="text-sm text-gray-500 mt-1">Manage FortiGate and other firewall appliances</p>
         </div>
-        <button onClick={openAdd} className="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20">
+        <button onClick={openAdd} className="flex items-center gap-2 text-sm btn-primary px-4 py-2.5 rounded-xl font-medium shadow-lg shadow-blue-600/20">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
           </svg>
@@ -144,7 +144,7 @@ export default function FirewallsPage() {
                       <div>
                         <h3 className="text-white font-semibold">{fw.name}</h3>
                         <p className="text-xs text-gray-500 font-mono">{fw.host}:{fw.port}</p>
-                        <p className="text-[10px] text-gray-600 mt-0.5">{fw.verify_tls ? 'TLS verification on' : 'TLS verification off'}</p>
+                        <p className="text-[10px] text-gray-600 mt-0.5">{fw.verify_tls !== false ? 'TLS verification on' : 'TLS verification off'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -236,7 +236,7 @@ export default function FirewallsPage() {
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                  API Key {editId && <span className="text-gray-600">(leave empty to keep current)</span>}
+                  API Key {editId && <span className="text-gray-600">(leave empty to keep current; required if the address changes)</span>}
                 </label>
                 <input type="password" required={!editId} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} className={inputCls} placeholder="REST API administrator token" />
                 <p className="text-xs text-gray-600 mt-1">Create in FortiGate: System &gt; Administrators &gt; REST API</p>
@@ -355,7 +355,7 @@ export default function FirewallsPage() {
               {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
               <div className="flex gap-3 pt-1">
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">Cancel</button>
-                <button type="submit" disabled={saving} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors shadow-lg shadow-blue-600/20">
+                <button type="submit" disabled={saving} className="flex-1 btn-primary rounded-xl py-2.5 text-sm font-semibold shadow-lg shadow-blue-600/20">
                   {saving ? 'Saving...' : editId ? 'Update' : 'Add Firewall'}
                 </button>
               </div>

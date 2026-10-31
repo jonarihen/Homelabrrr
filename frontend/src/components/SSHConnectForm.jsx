@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import PrereqCallout from './PrereqCallout.jsx';
 import { routeNode } from '../utils/nodeRef.js';
+import Field from './Field.jsx';
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
-const btnCls = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors';
+const btnCls = 'w-full btn-primary rounded-lg py-2.5 text-sm font-medium';
 
 // Provenance labels for /vms/:node/:vmid/detected-ips candidates.
 const IP_SOURCE_LABELS = {
@@ -204,7 +204,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         <select
           value={form.keyId}
           onChange={(e) => setForm((current) => ({ ...current, keyId: Number.parseInt(e.target.value, 10) }))}
-          className={inputCls}
+          className="input"
         >
           {keys.map((key) => (
             <option key={key.id} value={key.id}>{key.name}</option>
@@ -232,7 +232,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
               required
               value={form.host}
               onChange={(e) => setForm((current) => ({ ...current, host: e.target.value }))}
-              className={inputCls}
+              className="input"
               placeholder="192.168.1.100"
             />
           </div>
@@ -242,7 +242,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
               type="number"
               value={form.port}
               onChange={(e) => setForm((current) => ({ ...current, port: Number.parseInt(e.target.value, 10) || 22 }))}
-              className={inputCls}
+              className="input"
             />
           </Field>
         </div>
@@ -287,7 +287,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
             type="text"
             value={form.username}
             onChange={(e) => setForm((current) => ({ ...current, username: e.target.value }))}
-            className={inputCls}
+            className="input"
           />
         </Field>
 
@@ -296,7 +296,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
             type="password"
             value={form.passphrase}
             onChange={(e) => setForm((current) => ({ ...current, passphrase: e.target.value }))}
-            className={inputCls}
+            className="input"
             placeholder="Leave empty if none"
           />
         </Field>
@@ -320,7 +320,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
           required
           value={form.hostFingerprint}
           onChange={(e) => setForm((current) => ({ ...current, hostFingerprint: e.target.value }))}
-          className={inputCls}
+          className="input"
           placeholder="SHA256:..."
         />
 
@@ -335,14 +335,5 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         {connecting ? 'Connecting...' : submitLabel}
       </button>
     </form>
-  );
-}
-
-function Field({ label, children }) {
-  return (
-    <div>
-      <label className="block text-xs text-gray-400 mb-1.5">{label}</label>
-      {children}
-    </div>
   );
 }

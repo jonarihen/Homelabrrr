@@ -7,6 +7,7 @@ import { isUniqueViolation } from '../db/errors.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { logAudit, logAuditEntry } from '../utils/audit.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
+import { httpError } from '../utils/httpError.ts';
 import { encryptSecret } from '../utils/secrets.ts';
 import { createClient } from '../fortigate.ts';
 import { certNameToSubject, certWildcardCovers, stripCertDateSuffix, SERVER_CERT_MAX } from '../utils/certSlots.ts';
@@ -396,8 +397,41 @@ async function managedSitesForSnippet(serverId) {
     .orderBy(caddySites.domain);
 }
 
+// Snippet writes and server edits take turns per server, and writers re-read
+// the row in their turn: a row loaded before a switch to API mode must not
+// refill the emptied snippet. The backend is single-process, so an in-process
+// queue is enough.
+const serverSnippetWrites = new Map<number, Promise<void>>();
+const SNIPPET_MODE_CHANGED = 'caddy_snippet_mode_changed';
+
+async function withServerSnippetLock<T>(id, action: () => Promise<T>): Promise<T> {
+  const key = Number.parseInt(id, 10);
+  const previous = serverSnippetWrites.get(key) || Promise.resolve();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  serverSnippetWrites.set(key, promise);
+  await previous;
+  try {
+    return await action();
+  } finally {
+    resolve();
+    if (serverSnippetWrites.get(key) === promise) serverSnippetWrites.delete(key);
+  }
+}
+
 // Regenerate + push the snippet, pinning the SSH host key on first use.
 async function syncServerSnippet(server, excludeIds = new Set()) {
+  return withServerSnippetLock(server.id, async () => {
+    const current = await getServerRow(server.id);
+    if (!sshConfigured(current)) {
+      const err = httpError(409, 'This Caddy server is no longer in Caddyfile mode, so its snippet was left untouched. Retry the operation.');
+      err.code = SNIPPET_MODE_CHANGED;
+      throw err;
+    }
+    return syncLockedServerSnippet(current, excludeIds);
+  });
+}
+
+async function syncLockedServerSnippet(server, excludeIds = new Set()) {
   const sites = (await managedSitesForSnippet(server.id)).filter((site) => !excludeIds.has(site.id));
   const result = await deploySnippet(server, sites);
   if (!server.ssh_host_key && result.fingerprint) {
@@ -426,10 +460,13 @@ async function detectWildcard(caddy, serverId, domain) {
 // The re-push is conflict-checked exactly like the publish path. Self-healing a
 // route back into a position where it is shadowed would restore the config and
 // none of the behaviour, which is the failure this whole check exists to catch.
-export async function reconcileManagedRoutes(server, hostResolutionMemo: HostResolutionMemo = new Map()) {
+const ROUTE_STATUSES = ['live', 'warning', 'blocked'];
+// Mid-publish rows already hold a snippet route that the mode switch just emptied.
+const IN_FLIGHT_STATUSES = ['pushing', 'issuing', 'inspecting'];
+export async function reconcileManagedRoutes(server, hostResolutionMemo: HostResolutionMemo = new Map(), statuses = ROUTE_STATUSES) {
   const sites = await db.select().from(caddySites)
     .where(and(eq(caddySites.server_id, server.id), eq(caddySites.managed, true),
-      inArray(caddySites.status, ['live', 'warning', 'blocked'])));
+      inArray(caddySites.status, statuses)));
   if (sites.length === 0) return { repaired: [], conflicted: [] };
   const caddy = createCaddyClient(server);
   const liveIds = new Set(await caddy.listManagedRouteIds());
@@ -809,6 +846,7 @@ export async function runSiteFlow(siteId) {
       }
     }
   } catch (err) {
+    if (err.code === SNIPPET_MODE_CHANGED) return runSiteFlow(siteId);
     // A plaintext-only http server is the operator's to fix on the Caddy host or
     // the server record — retrying the same push cannot change the outcome.
     if (err.code === 'caddy_no_https_server') {
@@ -1035,7 +1073,7 @@ router.post('/servers', pWebsites, async (req, res) => {
   }
 });
 
-router.put('/servers/:id', pWebsites, async (req, res) => {
+router.put('/servers/:id', pWebsites, async (req, res) => withServerSnippetLock(req.params.id, async () => {
   const existing = await getServerRow(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Caddy server not found' });
   const merged = {
@@ -1073,23 +1111,55 @@ router.put('/servers/:id', pWebsites, async (req, res) => {
   const snippetPath = merged.snippetPath || '/etc/caddy/homelabrrr.caddy';
   const caddyfilePath = merged.caddyfilePath || '/etc/caddy/Caddyfile';
 
-  await db.update(caddyServers).set({
-    name, api_url: apiUrl, auth_type: authType, auth_secret: authSecret, server_name: serverName,
-    verify_tls: !!verifyTls, wan_ip: wanIp, fortigate_id: fortigateId, inspection_profile: inspectionProfile,
-    inspection_bundle_cert: inspectionBundleCert, ssh_host: sshHost, ssh_port: sshPort, ssh_user: sshUser,
-    ssh_auth_type: sshAuthType, ssh_secret: sshSecret, ssh_host_key: sshHostKey,
-    snippet_path: snippetPath, caddyfile_path: caddyfilePath,
-  }).where(eq(caddyServers.id, Number(req.params.id)));
+  // Leaving Caddyfile mode: snippet routes carry no managed @id, so API-mode
+  // cleanup can't see them and every Caddyfile reload would restore them.
+  // Empty the snippet first, and refuse the switch if that can't be done.
+  // Without a stored credential Homelabrrr never deployed a snippet there.
+  const leavingSnippetMode = sshConfigured(existing) && !sshConfigured({ ssh_host: sshHost, ssh_user: sshUser });
+  if (leavingSnippetMode && existing.ssh_secret) {
+    try {
+      await deploySnippet(existing, [], { restoreOnReloadFailure: true });
+    } catch (e) {
+      return res.status(409).json({
+        error: `Could not clear the Homelabrrr snippet on the Caddy host, so the server was left in Caddyfile mode: ${sanitizeError(e.message)}`,
+      });
+    }
+  }
+
+  try {
+    await db.update(caddyServers).set({
+      name, api_url: apiUrl, auth_type: authType, auth_secret: authSecret, server_name: serverName,
+      verify_tls: !!verifyTls, wan_ip: wanIp, fortigate_id: fortigateId, inspection_profile: inspectionProfile,
+      inspection_bundle_cert: inspectionBundleCert, ssh_host: sshHost, ssh_port: sshPort, ssh_user: sshUser,
+      ssh_auth_type: sshAuthType, ssh_secret: sshSecret, ssh_host_key: sshHostKey,
+      snippet_path: snippetPath, caddyfile_path: caddyfilePath,
+    }).where(eq(caddyServers.id, Number(req.params.id)));
+  } catch (e) {
+    // The row stays in Caddyfile mode, so put the routes back rather than leave them down.
+    let restored = '';
+    if (leavingSnippetMode && existing.ssh_secret) {
+      try {
+        await deploySnippet(existing, await managedSitesForSnippet(existing.id));
+        restored = ' The snippet was regenerated.';
+      } catch (re) { restored = ` Could not regenerate the snippet (${sanitizeError(re.message)}); re-sync this server.`; }
+    }
+    return res.status(500).json({ error: `Could not save the server.${restored} ${sanitizeError(e.message)}`.trim() });
+  }
   await logAudit(req, 'website_update_caddy_server', name, apiUrl);
 
   let syncWarning = '';
   const updated = await getServerRow(req.params.id);
   if (sshConfigured(updated)) {
-    try { await syncServerSnippet(updated); }
+    try { await syncLockedServerSnippet(updated); }
     catch (e) { syncWarning = `Saved, but the Caddyfile sync failed: ${sanitizeError(e.message)}`; }
+  } else if (leavingSnippetMode) {
+    // The emptied snippet took the sites down; bring them back as API routes now
+    // rather than on the next maintenance pass.
+    try { await reconcileManagedRoutes(updated, new Map(), [...ROUTE_STATUSES, ...IN_FLIGHT_STATUSES]); }
+    catch (e) { syncWarning = `Saved, but re-publishing the sites through the Caddy API failed: ${sanitizeError(e.message)}`; }
   }
   res.json({ ok: true, syncWarning });
-});
+}));
 
 router.delete('/servers/:id', pWebsites, async (req, res) => {
   const server = await getServerRow(req.params.id);
@@ -1143,6 +1213,7 @@ router.post('/servers/:id/sync', pWebsites, async (req, res) => {
       `${repaired.length ? repaired.join(', ') : 'no drift'}${conflicted.length ? ` — shadowed: ${conflicted.join(', ')}` : ''}`);
     res.json({ mode: 'api', repaired, conflicted });
   } catch (e) {
+    if (e.code === SNIPPET_MODE_CHANGED) return res.status(409).json({ error: e.message });
     res.status(500).json({ error: sanitizeError(e.message) });
   }
 });
@@ -1675,16 +1746,22 @@ async function releaseInspectionSlot(site, req) {
 // permanently costs a slot that the next publish needs.
 async function removeSite(site, req = null) {
   await releaseInspectionSlot(site, req);
-  const server = await getServerRow(site.server_id);
+  let server = await getServerRow(site.server_id);
   if (server && site.managed && sshConfigured(server)) {
     // Caddyfile mode: drop the row, then regenerate the snippet without it.
     await db.delete(caddySites).where(eq(caddySites.id, site.id));
     try {
       await syncServerSnippet(server);
+      return;
     } catch (err) {
-      console.warn(`[websites] snippet sync after deleting site ${site.id} failed (route stays until the next sync/reload): ${err.message}`);
+      if (err.code !== SNIPPET_MODE_CHANGED) {
+        console.warn(`[websites] snippet sync after deleting site ${site.id} failed (route stays until the next successful sync): ${err.message}`);
+        return;
+      }
+      // The server switched to API mode meanwhile and may have re-pushed this
+      // site as an API route; delete that instead.
+      server = await getServerRow(site.server_id);
     }
-    return;
   }
   if (server && site.managed) {
     try {
