@@ -1183,7 +1183,7 @@ function SnapshotsSection({ node, vmid }) {
         </div>
       )}
 
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
         {loading ? (
           <div className="p-6 text-center text-gray-500 text-sm">Loading snapshots...</div>
         ) : snapshots.length === 0 ? (

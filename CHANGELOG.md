@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-28 — Phone and tablet layout
+
+- Below laptop width the sidebar moves into a slide-in drawer opened from a **menu** button in a new top bar. It traps focus, closes on Escape, a tap outside or navigation, and returns focus to the button. Desktop layout is unchanged.
+- Data tables (users, roles, VLANs, templates, assignments, audit log, snapshots, SSH keys, websites, recent provisions) scroll sideways inside their panel instead of being cut off.
+- The **My VMs** header and summary bar wrap on narrow screens.
+- Console windows are shrunk and moved to fit the screen when opened, tiled or when the window is resized.
 ## 2026-10-28 — Audit log filters and CSV export
 
 - The **Audit Log** action filter now lists every action that has actually been recorded, instead of a fixed list of about 25.

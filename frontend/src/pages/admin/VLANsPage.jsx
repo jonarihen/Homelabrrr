@@ -163,7 +163,7 @@ export default function VLANsPage() {
           <p className="text-sm mt-1">{user?.isAdmin ? 'Create a VLAN and then assign it to users.' : 'Create a new VLAN or ask an admin to assign one to you.'}</p>
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
