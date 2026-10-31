@@ -5,6 +5,10 @@
 - The **Audit Log** action filter now lists every action that has actually been recorded, instead of a fixed list of about 25.
 - New filters for **user** and a **date range** (the end date counts in full). They combine with the action and target filters.
 - **Export CSV** downloads the filtered log (newest first, up to 50,000 rows). Spreadsheet formulas in exported text are neutralised, and each export is recorded in the audit log.
+## 2026-10-28 — SSH works with fewer steps after deploy
+
+- The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
+- SSH connection failures now say what to check (wrong username or key, VM still booting, SSH not running) instead of showing the raw error.
 ## 2026-10-28 — Revoking a session closes its open consoles
 
 - Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.

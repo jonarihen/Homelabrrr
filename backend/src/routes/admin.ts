@@ -28,7 +28,9 @@ import { logAudit, logAuditTx } from '../utils/audit.ts';
 import { csvLine } from '../utils/csv.ts';
 import { encryptSecret } from '../utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
-import { shortenVipName, PORT_FORWARD_NAME_MAX } from '../utils/vipName.ts';
+import {
+  shortenVipName, PORT_FORWARD_NAME_MAX, buildManagedVipServiceName, buildManagedVipAddressName,
+} from '../utils/vipName.ts';
 import { findPortConflict, portConflictMessage } from '../utils/portEndpoints.ts';
 import { normalizeIpv4 } from '../utils/publicIpPools.ts';
 import { checkPublicIpUsage, describeAssignmentProvisioning } from '../utils/publicIpAccess.ts';
@@ -3139,15 +3141,6 @@ function getRootClient(fw) {
   return { client, rootVdom: fw.root_vdom || 'root' };
 }
 
-function buildManagedVipServiceName(vipName, protocol, extPort) {
-  const safeName = String(vipName || 'vip')
-    .trim()
-    .replace(/[^A-Za-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 32) || 'vip';
-  return `VMM-PF-${protocol.toUpperCase()}-${extPort}-${safeName}`;
-}
-
 function managedVipServiceMatches(service, protocol, portNumber) {
   const port = String(portNumber);
   const tcpRange = String(service?.['tcp-portrange'] || '').trim();
@@ -3157,20 +3150,6 @@ function managedVipServiceMatches(service, protocol, portNumber) {
     return udpRange === port && !tcpRange;
   }
   return tcpRange === port && !udpRange;
-}
-
-function buildManagedVipAddressName(vipName, mappedIp) {
-  const safeName = String(vipName || 'vip')
-    .trim()
-    .replace(/[^A-Za-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 24) || 'vip';
-  const safeIp = String(mappedIp || '')
-    .trim()
-    .replace(/[^A-Za-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 24) || 'host';
-  return `VMM-PF-HOST-${safeIp}-${safeName}`;
 }
 
 function managedVipAddressMatches(address, mappedIp) {
