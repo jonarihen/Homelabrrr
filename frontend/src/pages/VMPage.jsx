@@ -606,7 +606,7 @@ export default function VMPage() {
                     onClick={() => setTimeframe(tf.key)}
                     className={`text-xs px-3 py-1.5 rounded-md transition-all ${
                       timeframe === tf.key
-                        ? 'bg-blue-600 text-white shadow-sm'
+                        ? 'bg-blue-600 text-gray-950 shadow-sm'
                         : 'text-gray-400 hover:text-white'
                     }`}
                   >
@@ -688,7 +688,7 @@ export default function VMPage() {
               <button
                 onClick={saveSshConfig}
                 disabled={!sshCfg.host || !sshCfg.hostFingerprint}
-                className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors"
+                className="text-xs px-5 py-2 btn-primary disabled:opacity-40 rounded-lg font-medium"
               >
                 Save Config
               </button>
@@ -811,7 +811,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
             </div>
           )}
           <div className="flex items-center justify-end">
-            <button onClick={onClose} className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors">Done</button>
+            <button onClick={onClose} className="text-xs px-5 py-2 btn-primary rounded-lg font-medium">Done</button>
           </div>
         </div>
       </Modal>
@@ -926,7 +926,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
           <button
             onClick={submit}
             disabled={submitting}
-            className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors inline-flex items-center gap-2"
+            className="text-xs px-5 py-2 btn-primary disabled:opacity-40 rounded-lg font-medium inline-flex items-center gap-2"
           >
             {submitting && (
               <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
@@ -1176,7 +1176,7 @@ function SnapshotsSection({ node, vmid }) {
               Include RAM state (VM must be running)
             </label>
             <button onClick={create} disabled={creating}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50">
+              className="px-4 py-2 btn-primary text-xs font-medium rounded-lg">
               {creating ? 'Creating...' : 'Create Snapshot'}
             </button>
           </div>
@@ -1604,7 +1604,7 @@ function BackupsSection({ node, vmid }) {
           </div>
           <div className="flex items-center gap-3">
             <button onClick={createBackup} disabled={creating || !form.storage}
-              className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors">
+              className="text-xs px-5 py-2 btn-primary disabled:opacity-40 rounded-lg font-medium">
               {creating ? 'Starting...' : 'Start Backup'}
             </button>
             <button onClick={() => setShowForm(false)} className="text-xs px-4 py-2 text-gray-400 hover:text-white transition-colors">Cancel</button>

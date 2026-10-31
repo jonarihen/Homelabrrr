@@ -2,7 +2,6 @@ import { useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
 export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
   const vmNode = routeNode(vm);
@@ -91,13 +90,13 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
           <button
             onClick={() => setTab('cpu-mem')}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              tab === 'cpu-mem' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'
+              tab === 'cpu-mem' ? 'bg-blue-600 text-gray-950' : 'text-gray-400 hover:text-white hover:bg-gray-800'
             }`}
           >CPU &amp; Memory</button>
           <button
             onClick={() => setTab('disk')}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              tab === 'disk' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'
+              tab === 'disk' ? 'bg-blue-600 text-gray-950' : 'text-gray-400 hover:text-white hover:bg-gray-800'
             }`}
           >Disk Resize</button>
         </div>
@@ -124,7 +123,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                     max="128"
                     value={cores}
                     onChange={(e) => setCores(e.target.value)}
-                    className={inputCls}
+                    className="input"
                   />
                   <p className="text-[11px] text-gray-500 mt-1">Topology auto-calculated to match host</p>
                 </div>
@@ -136,7 +135,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                     step="128"
                     value={memory}
                     onChange={(e) => setMemory(e.target.value)}
-                    className={inputCls}
+                    className="input"
                   />
                   <p className="text-[11px] text-gray-500 mt-1">
                     {memory >= 1024 ? `${(memory / 1024).toFixed(1)} GB` : `${memory} MB`}
@@ -165,7 +164,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
               <button
                 onClick={saveCpuMem}
                 disabled={saving}
-                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+                className="w-full btn-primary rounded-lg py-2.5 text-sm font-medium"
               >
                 {saving ? 'Saving...' : 'Save CPU & Memory'}
               </button>
@@ -183,7 +182,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                     <select
                       value={selectedDisk}
                       onChange={(e) => setSelectedDisk(e.target.value)}
-                      className={inputCls}
+                      className="input"
                     >
                       {disks.map((d) => (
                         <option key={d.name} value={d.name}>
@@ -200,7 +199,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                       min="1"
                       value={diskAddGb}
                       onChange={(e) => setDiskAddGb(e.target.value)}
-                      className={inputCls}
+                      className="input"
                     />
                     <p className="text-[11px] text-gray-500 mt-1">Disk resize is incremental and cannot be undone</p>
                   </div>
@@ -208,7 +207,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                   <button
                     onClick={resizeDisk}
                     disabled={diskSaving}
-                    className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+                    className="w-full btn-primary rounded-lg py-2.5 text-sm font-medium"
                   >
                     {diskSaving ? 'Resizing...' : `Expand ${selectedDisk} by +${diskAddGb}G`}
                   </button>
