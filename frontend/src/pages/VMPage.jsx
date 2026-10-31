@@ -152,6 +152,9 @@ export default function VMPage() {
   const [deleteModal, setDeleteModal] = useState(false);
   const [credModal, setCredModal] = useState(false);
   const [cloudInit, setCloudInit] = useState({ canReset: false, ciuser: '' });
+  const [detectedIp, setDetectedIp] = useState('');
+  const [ipCopied, setIpCopied] = useState(false);
+  const stickyRef = useRef(null);
   const { user } = useAuth();
 
   useDocumentTitle(vm ? (vm.name || `VM ${vm.vmid}`) : 'VM Details');
@@ -212,6 +215,43 @@ export default function VMPage() {
 
   useEffect(() => { loadCloudInit(); }, [loadCloudInit]);
 
+  const vmStatus = vm?.status;
+  useEffect(() => {
+    setDetectedIp('');
+    if (!vmStatus) return undefined;
+    let cancelled = false;
+    let retryTimer;
+    let attempts = 0;
+    const controller = new AbortController();
+    const discover = async () => {
+      attempts += 1;
+      let ip = '';
+      try {
+        const r = await api.get(`/vms/${node}/${vmid}/detected-ips`, { signal: controller.signal });
+        ip = r.data?.candidates?.[0]?.ip || '';
+      } catch {}
+      if (cancelled) return;
+      setDetectedIp(ip);
+      if (!ip && vmStatus === 'running' && attempts < 20) {
+        retryTimer = setTimeout(discover, 15000);
+      }
+    };
+    discover();
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearTimeout(retryTimer);
+    };
+  }, [node, vmid, vmStatus]);
+
+  const copyIp = async () => {
+    try {
+      await navigator.clipboard.writeText(detectedIp);
+      setIpCopied(true);
+      setTimeout(() => setIpCopied(false), 1500);
+    } catch { /* clipboard blocked (insecure context) — the IP is still selectable */ }
+  };
+
   useEffect(() => {
     let cancelled = false;
     setRrdLoading(true);
@@ -243,6 +283,29 @@ export default function VMPage() {
   };
 
   const isRunning = vm?.status === 'running';
+
+  // Anchor nav for the long single-scroll page; every panel stays mounted.
+  const sections = [
+    { id: 'vm-overview', label: 'Overview' },
+    isRunning && { id: 'vm-performance', label: 'Performance' },
+    { id: 'vm-snapshots', label: 'Snapshots' },
+    { id: 'vm-backups', label: 'Backups' },
+    { id: 'vm-ip', label: 'IP' },
+    { id: 'vm-ssh', label: 'SSH' },
+  ].filter(Boolean);
+
+  const jumpTo = (e, id) => {
+    e.preventDefault();
+    const el = document.getElementById(id);
+    if (!el) return;
+    // Land below the sticky header, whose height varies as the action bar wraps.
+    el.style.scrollMarginTop = `${(stickyRef.current?.offsetHeight || 0) + 16}px`;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    el.focus({ preventScroll: true });
+    // Keep the fragment so the section can be copied/reloaded; replace so Back isn't flooded.
+    window.history.replaceState(window.history.state, '', `#${id}`);
+  };
   const cpuData = rrd?.map(d => d.cpu != null ? d.cpu * 100 : null) || [];
   const memData = rrd?.map(d => d.mem != null && d.maxmem ? (d.mem / d.maxmem) * 100 : null) || [];
   const netInData = rrd?.map(d => d.netin ?? null) || [];
@@ -286,7 +349,8 @@ export default function VMPage() {
     <Layout>
       <div className="p-6 lg:p-8 max-w-6xl mx-auto space-y-6">
 
-        {/* ── Header ── */}
+        {/* ── Sticky header: identity, status, section nav (actions scroll away to keep it slim) ── */}
+        <div ref={stickyRef} className="sticky top-0 z-20 -mx-6 lg:-mx-8 px-6 lg:px-8 py-3 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <button onClick={() => navigate('/dashboard')} className="text-gray-500 hover:text-white transition-colors p-2 rounded-xl hover:bg-gray-800">
@@ -298,6 +362,21 @@ export default function VMPage() {
                 VMID {vm.vmid} / {displayNode(vm.node)}
                 {vm.hostName && <span className="text-gray-600"> · host </span>}
                 {vm.hostName && <span className="text-blue-400/80">{vm.hostName}</span>}
+                {detectedIp && (
+                  <>
+                    <span className="text-gray-600"> · ip </span>
+                    <span className="text-gray-300 normal-case select-all">{detectedIp}</span>
+                    <button
+                      type="button"
+                      onClick={copyIp}
+                      aria-label={ipCopied ? `Copied IP address ${detectedIp}` : `Copy IP address ${detectedIp}`}
+                      className="ml-1.5 align-middle text-gray-500 hover:text-orange-400 transition-colors"
+                    >
+                      {ipCopied ? 'copied' : 'copy'}
+                    </button>
+                    <span role="status" aria-live="polite" className="sr-only">{ipCopied ? 'IP address copied' : ''}</span>
+                  </>
+                )}
               </p>
               {vm.lease && <LeaseBadge lease={vm.lease} className="mt-2" />}
             </div>
@@ -315,6 +394,20 @@ export default function VMPage() {
             )}
             <StatusBadge status={vm.status} />
           </div>
+        </div>
+
+        <nav aria-label="VM sections" className="flex flex-wrap gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em]">
+          {sections.map(s => (
+            <a
+              key={s.id}
+              href={`#${s.id}`}
+              onClick={e => jumpTo(e, s.id)}
+              className="px-2.5 py-1 border border-gray-800 text-gray-400 hover:text-orange-400 hover:border-orange-600 transition-colors"
+            >
+              {s.label}
+            </a>
+          ))}
+        </nav>
         </div>
 
         {/* ── Action Bar ── */}
@@ -415,7 +508,7 @@ export default function VMPage() {
         </div>
 
         {/* ── Stats Grid ── */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div id="vm-overview" tabIndex={-1} className="grid grid-cols-2 sm:grid-cols-4 gap-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
           <StatCard
             label="vCPUs" value={vm.maxcpu || vm.cpus || '—'}
             icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25z" /></svg>}
@@ -499,7 +592,7 @@ export default function VMPage() {
 
         {/* ── Performance Charts ── */}
         {isRunning && (
-          <div className="space-y-4">
+          <div id="vm-performance" tabIndex={-1} className="space-y-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
             <div className="flex items-center justify-between">
               <h2 className="aaris-display text-sm text-gray-100">Performance</h2>
               <div className="flex gap-1 bg-gray-800/50 rounded-lg p-0.5">
@@ -513,7 +606,7 @@ export default function VMPage() {
                     onClick={() => setTimeframe(tf.key)}
                     className={`text-xs px-3 py-1.5 rounded-md transition-all ${
                       timeframe === tf.key
-                        ? 'bg-blue-600 text-white shadow-sm'
+                        ? 'bg-blue-600 text-gray-950 shadow-sm'
                         : 'text-gray-400 hover:text-white'
                     }`}
                   >
@@ -541,21 +634,27 @@ export default function VMPage() {
         )}
 
         {/* ── Snapshots ── */}
-        <SnapshotsSection node={node} vmid={vmid} />
+        <div id="vm-snapshots" tabIndex={-1} className="focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
+          <SnapshotsSection node={node} vmid={vmid} />
+        </div>
 
         {/* ── Backups ── */}
-        <BackupsSection node={node} vmid={vmid} />
+        <div id="vm-backups" tabIndex={-1} className="focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
+          <BackupsSection node={node} vmid={vmid} />
+        </div>
 
         {/* ── IP Management ── */}
-        <VMIPManagementPanel
-          node={node}
-          vmid={vmid}
-          currentSshHost={sshCfg.host}
-          onSshHostUpdate={(host) => setSshCfg((current) => ({ ...current, host }))}
-        />
+        <div id="vm-ip" tabIndex={-1} className="focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
+          <VMIPManagementPanel
+            node={node}
+            vmid={vmid}
+            currentSshHost={sshCfg.host}
+            onSshHostUpdate={(host) => setSshCfg((current) => ({ ...current, host }))}
+          />
+        </div>
 
         {/* ── SSH Config ── */}
-        <div className="space-y-3">
+        <div id="vm-ssh" tabIndex={-1} className="space-y-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950">
           <h2 className="aaris-display text-sm text-gray-100">SSH Configuration</h2>
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -589,7 +688,7 @@ export default function VMPage() {
               <button
                 onClick={saveSshConfig}
                 disabled={!sshCfg.host || !sshCfg.hostFingerprint}
-                className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors"
+                className="text-xs px-5 py-2 btn-primary disabled:opacity-40 rounded-lg font-medium"
               >
                 Save Config
               </button>
@@ -712,7 +811,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
             </div>
           )}
           <div className="flex items-center justify-end">
-            <button onClick={onClose} className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors">Done</button>
+            <button onClick={onClose} className="text-xs px-5 py-2 btn-primary rounded-lg font-medium">Done</button>
           </div>
         </div>
       </Modal>
@@ -827,7 +926,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
           <button
             onClick={submit}
             disabled={submitting}
-            className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors inline-flex items-center gap-2"
+            className="text-xs px-5 py-2 btn-primary disabled:opacity-40 rounded-lg font-medium inline-flex items-center gap-2"
           >
             {submitting && (
               <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
@@ -1077,14 +1176,14 @@ function SnapshotsSection({ node, vmid }) {
               Include RAM state (VM must be running)
             </label>
             <button onClick={create} disabled={creating}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50">
+              className="px-4 py-2 btn-primary text-xs font-medium rounded-lg">
               {creating ? 'Creating...' : 'Create Snapshot'}
             </button>
           </div>
         </div>
       )}
 
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
         {loading ? (
           <div className="p-6 text-center text-gray-500 text-sm">Loading snapshots...</div>
         ) : snapshots.length === 0 ? (
@@ -1505,7 +1604,7 @@ function BackupsSection({ node, vmid }) {
           </div>
           <div className="flex items-center gap-3">
             <button onClick={createBackup} disabled={creating || !form.storage}
-              className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors">
+              className="text-xs px-5 py-2 btn-primary disabled:opacity-40 rounded-lg font-medium">
               {creating ? 'Starting...' : 'Start Backup'}
             </button>
             <button onClick={() => setShowForm(false)} className="text-xs px-4 py-2 text-gray-400 hover:text-white transition-colors">Cancel</button>

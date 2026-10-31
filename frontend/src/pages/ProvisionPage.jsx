@@ -1,3 +1,4 @@
+import { PROVISION_TERMINAL, PROVISION_FAILED } from '../utils/provisionStatus';
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
@@ -12,7 +13,7 @@ import { isUsableKey, unusableKeyReason, cloudInitLoginMissing, NO_LOGIN_MESSAGE
 import { normalizeApiError } from '../utils/apiError.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
-const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-all ${active ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`;
+const tabCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-all ${active ? 'bg-blue-600 text-gray-950 shadow-sm' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`;
 
 // Live preview of the name Proxmox will actually get. Every provisioning route
 // sanitizes the typed name to a DNS label (lowercase, hyphenated, 63 chars max,
@@ -195,7 +196,7 @@ function DeploymentProgress({ job, onDeployAnother }) {
         if (!active) return;
         setRow(r.data);
         setFailedPoll(false);
-        const done = ['ready', 'warning', 'error', 'timeout'].includes(r.data.status);
+        const done = PROVISION_TERMINAL.includes(r.data.status);
         if (!done) timer = setTimeout(tick, 2000);
       } catch {
         if (!active) return;
@@ -209,7 +210,7 @@ function DeploymentProgress({ job, onDeployAnother }) {
 
   const status = row?.status;
   const steps = row?.steps || [];
-  const isError = status === 'error' || status === 'timeout';
+  const isError = PROVISION_FAILED.includes(status);
   const isReady = status === 'ready' || status === 'warning';
   const isWarning = status === 'warning';
   const doneCount = steps.filter((s) => ['done', 'skipped'].includes(s.status)).length;
@@ -288,7 +289,7 @@ function DeploymentProgress({ job, onDeployAnother }) {
         {(isReady || isError) && (
           <div className="flex gap-2 mt-6">
             {(isReady || isWarning) && (
-              <button onClick={openVm} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white rounded-xl py-2.5 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20">
+              <button onClick={openVm} className="flex-1 btn-primary rounded-xl py-2.5 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20">
                 Open VM
               </button>
             )}
@@ -311,6 +312,7 @@ function StatusPill({ status }) {
     warning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
     error: 'bg-red-500/10 text-red-400 ring-red-500/20',
     timeout: 'bg-red-500/10 text-red-400 ring-red-500/20',
+    needs_review: 'bg-red-500/10 text-red-400 ring-red-500/20',
   }[status] || 'bg-gray-500/10 text-gray-400 ring-gray-500/20';
   const inFlight = ['creating', 'cloning', 'configuring'].includes(status);
   return (
@@ -795,7 +797,7 @@ function CloudImageForm({ onStarted }) {
             type="submit"
             disabled={saving || (user?.isAdmin && !form.storage) || loginMissing}
             title={loginMissing ? NO_LOGIN_MESSAGE : undefined}
-            className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
+            className="w-full btn-primary rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
           >
             {saving ? 'Starting deployment...' : 'Deploy VM'}
           </button>
@@ -1065,7 +1067,7 @@ function CloneForm({ onStarted }) {
             type="submit"
             disabled={saving || loginMissing}
             title={loginMissing ? NO_LOGIN_MESSAGE : undefined}
-            className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
+            className="w-full btn-primary rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
           >
             {saving ? 'Creating VM...' : 'Create VM'}
           </button>
@@ -1307,7 +1309,7 @@ function CreateForm({ onStarted }) {
 
         {error && <ErrorCallout error={error} />}
 
-        <button type="submit" disabled={saving || !form.node || !form.name} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20">
+        <button type="submit" disabled={saving || !form.node || !form.name} className="w-full btn-primary rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20">
           {saving ? 'Creating VM...' : 'Create VM'}
         </button>
       </form>
@@ -1344,7 +1346,7 @@ function RecentProvisions() {
   return (
     <div className="space-y-3">
       <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Recent Provisions</h2>
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
