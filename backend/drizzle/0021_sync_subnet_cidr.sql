@@ -1,0 +1,1 @@
+ALTER TABLE "firewall_vlan_sync" ADD COLUMN "subnet_cidr" text;

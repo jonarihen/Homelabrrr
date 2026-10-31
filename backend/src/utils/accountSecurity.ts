@@ -1,9 +1,10 @@
 import crypto from 'node:crypto';
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client.ts';
-import { recoveryCodes, sessions, webauthnCredentials } from '../db/schema/index.ts';
+import { recoveryCodes, sessions, users, webauthnCredentials } from '../db/schema/index.ts';
 import { revokeSftpSession } from './sftpSessions.ts';
 import { closeSessionConsoles } from './consoleSockets.ts';
+import { log } from './logger.ts';
 
 interface WebauthnConfigOptions {
   configuredOrigin?: string;
@@ -92,6 +93,26 @@ export async function revokeStoredSession(database: DbOrTx, userId: number, sess
   revokeSftpSession(row.sid);
   closeSessionConsoles(row.sid);
   return { ok: true, session: parsed };
+}
+
+// Writes a credential change and bumps users.credentials_version in ONE
+// statement, so new credentials can never commit with the old generation.
+// loadSessionUser rejects any session holding an older version — including a
+// login that read the old row and is not stored yet. Revoking the other stored
+// sessions afterwards is best-effort cleanup; the bump already invalidated them.
+// The caller stores the returned version on its own session to stay signed in.
+export async function changeCredentials(
+  database: DbOrTx, userId: number, set: Partial<typeof users.$inferInsert>, currentSid: string,
+): Promise<{ version: number; revoked: number }> {
+  const [row] = await database
+    .update(users)
+    .set({ ...set, credentials_version: sql`${users.credentials_version} + 1` })
+    .where(eq(users.id, userId))
+    .returning({ version: users.credentials_version });
+  let revoked = 0;
+  try { revoked = await revokeOtherStoredSessions(database, userId, currentSid); }
+  catch (err: any) { log('warn', 'session_revocation_failed', { userId, error: err?.message }); }
+  return { version: row?.version ?? 0, revoked };
 }
 
 export async function revokeOtherStoredSessions(database: DbOrTx, userId: number, currentSid: string): Promise<number> {

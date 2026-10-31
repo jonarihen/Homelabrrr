@@ -4,12 +4,11 @@ import { eq } from 'drizzle-orm';
 import { db, closeDb } from './db/client.ts';
 import { initDatabase } from './db/init.ts';
 import { DrizzleSessionStore } from './db/sessionStore.ts';
-import { users, sshKeys } from './db/schema/index.ts';
+import { sshKeys } from './db/schema/index.ts';
 import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import https from 'https';
-import { Client as SSHClient } from 'ssh2';
 import { execFile } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { writeFile, readFile, unlink } from 'fs/promises';
@@ -47,7 +46,7 @@ import paymentsRoutes from './routes/payments.ts';
 import { startPaypalInboxWorker, stopPaypalInboxWorker, startPaypalReconciliation, stopPaypalReconciliation } from './services/paypal.ts';
 import { startPaypalAllocationWorker, stopPaypalAllocationWorker } from './services/paypalAllocation.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
-import { normalizeSshHostFingerprint, sshHostFingerprint } from './utils/sshHostKey.ts';
+import { proxySshShell } from './utils/sshConnect.ts';
 import { decryptSecret, encryptSecret } from './utils/secrets.ts';
 import { sendableCloseCode } from './utils/wsClose.ts';
 import { decodeNodeRef } from './utils/nodeRef.ts';
@@ -55,12 +54,11 @@ import { sweepExpiredMaintenance } from './utils/nodeMaintenance.ts';
 import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.ts';
 import { logAuditEntry } from './utils/audit.ts';
 import { authenticateApiToken, enforceApiTokenScope } from './middleware/apiToken.ts';
-import { requireAdmin, requireAuth } from './middleware/auth.ts';
+import { loadSessionUser, requireAdmin, requireAuth } from './middleware/auth.ts';
 import { parseTrustProxy } from './utils/proxyChain.ts';
 import { trustProxyCheck, inspectProxyChain } from './middleware/trustProxyCheck.ts';
 import { buildConfigReport, formatConfigReport } from './utils/configReport.ts';
 import { startScheduler, stopScheduler, waitForSchedulerIdle } from './scheduler.ts';
-import { sshClientError } from './utils/sshError.ts';
 import { collectBoundedBody } from './utils/boundedBody.ts';
 import { trackConsoleSocket } from './utils/consoleSockets.ts';
 import { installConsoleRedaction, log, redactText, requestContext } from './utils/logger.ts';
@@ -151,30 +149,7 @@ app.use((req, res, next) => {
 app.use(enforceApiTokenScope);
 app.use(csrfProtection({ allowedOrigin: ALLOWED_ORIGIN || '' }));
 
-app.use(async (req, res, next) => {
-  if (!req.session?.userId) return next();
-  // Token auth already resolved the live user; don't re-hydrate (and never try
-  // to destroy) the plain token session object.
-  if (req.apiToken) return next();
-
-  const [user] = await db
-    .select({ username: users.username, is_admin: users.is_admin })
-    .from(users)
-    .where(eq(users.id, req.session.userId))
-    .limit(1);
-  if (!user) {
-    return req.session.destroy(() => next());
-  }
-
-  req.session.username = user.username;
-  req.session.isAdmin = user.is_admin === true;
-  if (!req.session.lastSeenAt || Date.now() - Number(req.session.lastSeenAt) > 5 * 60 * 1000) {
-    req.session.lastSeenAt = Date.now();
-    req.session.clientIp = String(req.ip || '').slice(0, 128);
-    req.session.userAgent = String(req.headers['user-agent'] || '').slice(0, 256);
-  }
-  next();
-});
+app.use(loadSessionUser);
 
 // Compare the observed X-Forwarded-For hop count against TRUST_PROXY on the
 // first few authenticated requests and warn once if they disagree — a wrong
@@ -263,6 +238,25 @@ const sshWss = new WebSocketServer({
     return false;
   },
 });
+
+// Heartbeat: a console whose browser vanished without a FIN never fires
+// 'close', so ping every 30s and terminate peers that missed the last pong.
+// Terminating runs the connection's close handlers, which end the upstream.
+const wsAlive = new WeakSet();
+const wsHeartbeatTimer = setInterval(() => {
+  for (const ws of [...vncWss.clients, ...sshWss.clients]) {
+    if (!wsAlive.has(ws)) { ws.terminate(); continue; }
+    wsAlive.delete(ws);
+    ws.ping();
+  }
+}, 30_000);
+wsHeartbeatTimer.unref?.();
+for (const wss of [vncWss, sshWss]) {
+  wss.on('connection', (ws) => {
+    wsAlive.add(ws);
+    ws.on('pong', () => wsAlive.add(ws));
+  });
+}
 
 function rejectUpgrade(socket, code, message) {
   socket.write(`HTTP/1.1 ${code} ${message}\r\nConnection: close\r\n\r\n`);
@@ -481,122 +475,25 @@ vncWss.on('connection', async (clientWs, vncSession) => {
     }
   });
 
-  clientWs.on('close', () => {
-    if (proxmoxWs.readyState === WebSocket.OPEN) proxmoxWs.close();
-  });
+  // Terminate in any state: a CONNECTING upstream would otherwise open later and never close.
+  const closeUpstream = () => {
+    if (proxmoxWs.readyState !== WebSocket.CLOSED) proxmoxWs.terminate();
+  };
+  clientWs.on('close', closeUpstream);
 
   clientWs.on('error', (err) => {
     console.error('Client WS error:', err.message);
-    if (proxmoxWs.readyState === WebSocket.OPEN) proxmoxWs.close();
+    closeUpstream();
   });
 });
 
 // ─── SSH connection handler ──────────────────────────────────────────────────
 
 sshWss.on('connection', (clientWs, sshSession) => {
-  const { host, port, username, privateKey, passphrase, hostFingerprint, requestId, node, vmid } = sshSession;
-  const conn = new SSHClient();
-  const expectedHostFingerprint = normalizeSshHostFingerprint(hostFingerprint);
-  let hostVerificationError = '';
-
-  // Installed before connecting: a console revoked mid-handshake must still end the SSH session.
-  clientWs.on('close', () => conn.end());
-
-  conn.on('ready', () => {
-    if (clientWs.readyState !== WebSocket.OPEN) {
-      conn.end();
-      return;
-    }
-    log('info', 'ssh_connected', { requestId, node, vmid, port });
-    clientWs.send(JSON.stringify({ type: 'status', status: 'connected' }));
-
-    conn.shell({ term: 'xterm-256color' }, (err, stream) => {
-      if (err) {
-        clientWs.send(JSON.stringify({ type: 'error', ...sshClientError(err) }));
-        clientWs.close();
-        return;
-      }
-      if (clientWs.readyState !== WebSocket.OPEN) {
-        stream.close();
-        conn.end();
-        return;
-      }
-
-      stream.on('data', (data) => {
-        if (clientWs.readyState === 1) {
-          clientWs.send(JSON.stringify({ type: 'data', data: data.toString('base64') }));
-        }
-      });
-
-      stream.on('close', () => {
-        if (clientWs.readyState === 1) {
-          clientWs.send(JSON.stringify({ type: 'status', status: 'disconnected' }));
-          clientWs.close();
-        }
-      });
-
-      stream.stderr.on('data', (data) => {
-        if (clientWs.readyState === 1) {
-          clientWs.send(JSON.stringify({ type: 'data', data: data.toString('base64') }));
-        }
-      });
-
-      clientWs.on('message', (raw) => {
-        try {
-          const msg = JSON.parse(raw);
-          if (msg.type === 'data') {
-            stream.write(Buffer.from(msg.data, 'base64'));
-          } else if (msg.type === 'resize' && msg.cols && msg.rows) {
-            stream.setWindow(msg.rows, msg.cols, 0, 0);
-          }
-        } catch { /* ignore bad messages */ }
-      });
-
-      clientWs.on('close', () => {
-        stream.close();
-        conn.end();
-      });
-    });
+  proxySshShell(clientWs, sshSession).catch((err) => {
+    log('error', 'ssh_proxy_failed', { errorName: err?.name || 'Error' });
+    try { clientWs.close(); } catch { /* already gone */ }
   });
-
-  conn.on('error', (err) => {
-    const message = hostVerificationError || err.message;
-    const clientError = sshClientError(message);
-    log('error', 'ssh_connection_failed', { code: clientError.code, errorName: err?.name || 'Error' });
-    if (clientWs.readyState === 1) {
-      clientWs.send(JSON.stringify({ type: 'error', ...clientError }));
-      clientWs.close();
-    }
-  });
-
-  conn.on('close', () => {
-    if (clientWs.readyState === 1) clientWs.close();
-  });
-
-  try {
-    conn.connect({
-      host,
-      port,
-      username,
-      privateKey,
-      passphrase: passphrase || undefined,
-      readyTimeout: 10000,
-      hostVerifier: (key) => {
-        const presentedFingerprint = sshHostFingerprint(key);
-        if (presentedFingerprint !== expectedHostFingerprint) {
-          hostVerificationError = `SSH host key mismatch. Expected ${expectedHostFingerprint}, got ${presentedFingerprint}`;
-          return false;
-        }
-        return true;
-      },
-    });
-  } catch (err) {
-    log('error', 'ssh_connect_threw', { requestId, node, vmid, error: err });
-    if (clientWs.readyState === 1) {
-      clientWs.send(JSON.stringify({ type: 'error', ...sshClientError(err) }));
-      clientWs.close();
-    }
-  }
 });
 
 // ─── Migrate any stored PPK keys to OpenSSH at startup ───────────────────────
@@ -781,6 +678,7 @@ async function shutdown(signal) {
   stopAcceptingBackgroundWork();
 
   clearInterval(maintenanceTimer);
+  clearInterval(wsHeartbeatTimer);
   clearInterval(tagSyncTimer);
   clearTimeout(leaseStartTimer);
   clearInterval(leaseTimer);
