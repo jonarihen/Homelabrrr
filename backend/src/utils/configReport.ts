@@ -181,6 +181,11 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'grace period a scheduled shutdown waits before the hard-stop fallback',
   },
   {
+    name: 'CADDY_SSH_OP_TIMEOUT_MS',
+    defaultValue: '60000',
+    effect: 'deadline for one Caddyfile snippet deploy over SSH; a stalled host fails the sync instead of blocking the server queue',
+  },
+  {
     name: 'AUDIT_RETENTION_DAYS',
     defaultValue: '365',
     effect: 'retention window for security audit records',

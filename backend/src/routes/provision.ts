@@ -14,6 +14,8 @@ import { requireAuth, requireAdmin, requirePermission } from '../middleware/auth
 import { sendError, hasHttpStatus, tagStatus } from '../utils/httpError.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { logAudit } from '../utils/audit.ts';
+import { log } from '../utils/logger.ts';
+import { recordBackgroundProvisionFailure } from '../services/provisionFailure.ts';
 import { notifyDeployment } from '../services/deploymentNotification.ts';
 import { decodeNodeRef } from '../utils/nodeRef.ts';
 import { imageDeployTargets, defaultStorageForHost } from '../utils/cloudImageTargets.ts';
@@ -421,7 +423,7 @@ router.post('/clone', async (req: any, res: any) => {
       description,
       vlanTag: vlanTag ? parseInt(vlanTag) : null,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-      .catch((err: any) => console.error(`Post-clone config failed for VM ${newVmid}:`, err.message));
+      .catch((err: any) => recordBackgroundProvisionFailure(provisionId, newVmid, 'provision_clone_background_failed', err));
 
     await logAudit(req, 'vm_clone', `${template.node}/${newVmid}`, `template:${template.name}`);
     res.json({
@@ -492,7 +494,7 @@ async function autoPlaceImage(image: any, { memoryMb, diskGb }: any) {
   const skip = (nodeValue: any, reason: string) => {
     const label = decodeNodeRef(nodeValue).nodeName || String(nodeValue);
     skipped.push(`${label} — ${reason}`);
-    console.warn(`[placement] skipping ${nodeValue}: ${reason}`);
+    log('warn', 'placement_node_skipped', { node: nodeValue, reason });
   };
 
   for (const cand of ranked) {
@@ -728,7 +730,7 @@ router.post('/from-image', async (req: any, res: any) => {
       ...cloudInitOpts,
       start: startNow,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-      .catch((err: any) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message));
+      .catch((err: any) => recordBackgroundProvisionFailure(provisionId, vmid, 'provision_image_background_failed', err));
 
     await logAudit(req, 'vm_from_image', `${targetImage.node}/${vmid}`, `image:${targetImage.name}${user.is_admin ? '' : ' (auto-placed)'}`);
     res.json({
@@ -896,7 +898,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
           await db.update(provisionedVms).set({ status: 'ready', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
           await notifyDeployment(provisionId);
         }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-        .catch((err: any) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message));
+        .catch((err: any) => recordBackgroundProvisionFailure(provisionId, vmid, 'provision_create_background_failed', err));
     } else {
       await setStep(provisionId, 'create', 'done');
       await recordProvisionOwnership(provisionId);
@@ -905,7 +907,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
       startBackgroundWork(
         () => syncVmTagsSafe(node, vmid).finally(() => setStep(provisionId, 'tags', 'done')),
         { kind: 'tag-sync', id: provisionId, requestId: req.requestId },
-      ).catch((err: any) => console.error(`Post-create tag sync failed for VM ${vmid}:`, err.message));
+      ).catch((err: any) => log('warn', 'provision_tag_sync_failed', { provisionId, vmid, error: err }));
       await notifyDeployment(provisionId);
     }
 
@@ -1189,7 +1191,7 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
           await updateVMConfig(node, vmid, { net0: parts.join(',') });
         }
       } catch (err: any) {
-        console.error(`Failed to set VLAN tag ${opts.vlanTag} on VM ${vmid}:`, err.message);
+        log('error', 'provision_vlan_tag_failed', { provisionId, vmid, vlanTag: opts.vlanTag, error: err });
         throw err;
       }
     }
@@ -1207,7 +1209,7 @@ async function pollAndConfigure(provisionId: number, node: string, vmid: number,
     }
     await notifyDeployment(provisionId);
   } catch (err: any) {
-    console.error(`Post-clone config failed for VM ${vmid}:`, err.message);
+    log('error', 'provision_post_clone_failed', { provisionId, vmid, error: err });
     await setStep(provisionId, 'configure', 'error', err.message);
     await db.update(provisionedVms)
       .set({ status: 'needs_review', status_detail: 'Post-clone configuration or ownership failed — verify credentials, VLAN and resources before assigning this VM' })

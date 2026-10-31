@@ -93,7 +93,7 @@ function UsernameSection({ user, setUser }) {
         <div className="flex-1">
           <input type="text" required value={username} onChange={e => { setUsername(e.target.value); setMsg(''); }} className={inputCls} />
         </div>
-        <button type="submit" disabled={saving || username === user?.username} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium rounded-xl transition-colors shrink-0">
+        <button type="submit" disabled={saving || username === user?.username} className="px-5 py-2.5 btn-primary disabled:opacity-40 text-sm font-medium rounded-xl shrink-0">
           {saving ? 'Saving...' : 'Update'}
         </button>
       </form>
@@ -153,7 +153,7 @@ function PasswordSection() {
           </div>
         </div>
         {msg && <p className={`text-xs ${isError ? 'text-red-400' : 'text-green-400'}`}>{isError ? msg.slice(6) : msg}</p>}
-        <button type="submit" disabled={saving} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium rounded-xl transition-colors">
+        <button type="submit" disabled={saving} className="px-5 py-2.5 btn-primary disabled:opacity-40 text-sm font-medium rounded-xl">
           {saving ? 'Updating...' : 'Change Password'}
         </button>
       </form>
@@ -399,7 +399,7 @@ function TwoFactorSection({ user, setUser }) {
           <button
             onClick={startSetup}
             disabled={saving}
-            className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-medium transition-colors shadow-lg shadow-blue-600/20"
+            className="text-sm btn-primary px-5 py-2.5 rounded-xl font-medium shadow-lg shadow-blue-600/20"
           >
             {saving ? 'Setting up...' : 'Enable 2FA'}
           </button>
@@ -431,7 +431,7 @@ function TwoFactorSection({ user, setUser }) {
           </div>
           {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
           <div className="flex gap-3">
-            <button type="submit" disabled={saving || code.length !== 6} className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+            <button type="submit" disabled={saving || code.length !== 6} className="flex-1 btn-primary rounded-xl py-2.5 text-sm font-semibold">
               {saving ? 'Activating...' : 'Activate 2FA'}
             </button>
             <button type="button" onClick={cancel} className="px-5 text-sm text-gray-400 hover:text-white border border-gray-700 rounded-xl transition-colors">
@@ -622,7 +622,7 @@ function ApiTokensSection() {
         <button
           type="submit"
           disabled={creating || !name.trim()}
-          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium rounded-xl transition-colors shrink-0"
+          className="px-5 py-2.5 btn-primary disabled:opacity-40 text-sm font-medium rounded-xl shrink-0"
         >
           {creating ? 'Creating...' : 'Create Token'}
         </button>

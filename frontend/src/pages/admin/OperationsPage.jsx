@@ -96,7 +96,7 @@ export default function OperationsPage() {
           <p className="text-xs text-gray-500 mt-1">Last full restore: {data.backups.lastFullRestoreVerifiedAt ? new Date(data.backups.lastFullRestoreVerifiedAt).toLocaleString() : 'Never'}</p>
           {data.backups.latest?.detail && <p className="text-xs text-red-400 mt-1">{data.backups.latest.detail}</p>}
           <p className="text-xs text-gray-500 mt-1">Each backup restores the off-host copy into a disposable database. Requires CREATEDB and temporary disk space.</p>
-          <button onClick={() => act('backup', () => api.post('/admin/operations/backups'))} disabled={!!busy || !data.backups.enabled} className="mt-4 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs text-white">{busy === 'backup' ? 'Backing up…' : 'Back up & restore-test'}</button>
+          <button onClick={() => act('backup', () => api.post('/admin/operations/backups'))} disabled={!!busy || !data.backups.enabled} className="mt-4 px-3 py-2 rounded-lg btn-primary disabled:opacity-40 text-xs">{busy === 'backup' ? 'Backing up…' : 'Back up & restore-test'}</button>
         </section>
         <section className={card}>
           <p className="text-xs uppercase tracking-wide text-gray-500">Encryption keyring</p>
@@ -122,7 +122,7 @@ export default function OperationsPage() {
                   <p className="text-xs text-gray-500 mt-1">{operation.status} · {operation.detail || 'No detail'} · {operation.upid ? 'UPID saved' : 'manual verification required'}{operation.request_id ? ` · request ${operation.request_id}` : ''}</p>
                 </div>
                 <div className="flex gap-2">
-                  {operation.upid && <button disabled={!!busy} onClick={() => act(`reconcile-${operation.type}-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/reconcile`))} className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs text-white">Check upstream</button>}
+                  {operation.upid && <button disabled={!!busy} onClick={() => act(`reconcile-${operation.type}-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/reconcile`))} className="px-3 py-2 rounded-lg btn-primary disabled:opacity-40 text-xs">Check upstream</button>}
                   {operationNeedsReview(operation) && <>
                     <button disabled={!!busy || (operation.type === 'provision' && operation.source_type !== 'create')} onClick={() => resolveReady(operation)} className="px-3 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40 text-xs text-white">Verified ready</button>
                     <button disabled={!!busy} onClick={() => act(`error-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, { status: 'error' }))} className="px-3 py-2 rounded-lg bg-red-900 hover:bg-red-800 disabled:opacity-40 text-xs text-white">Mark failed</button>
