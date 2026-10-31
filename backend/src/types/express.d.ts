@@ -11,6 +11,8 @@ declare module 'express-session' {
     twoFactorUserId?: number;
     pendingUserId?: number;
     reauthenticatedAt?: number;
+    credentialsVersion?: number;
+    pendingCredentialsVersion?: number;
     lastSeenAt?: number;
     clientIp?: string;
     userAgent?: string;

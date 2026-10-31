@@ -509,8 +509,9 @@ export async function getStorages(node) {
 
 // Resolve a node ref to the id of the pve_hosts row that owns it. Used by the
 // storage-visibility guard, which is keyed by (pve_host_id, storage).
-export async function getHostIdForNode(node) {
-  const host = await hostForNode(node);
+export async function getHostIdForNode(node, vmid = null) {
+  // vmid disambiguates a legacy bare node name shared by several hosts.
+  const host = await hostForNode(node, { vmid });
   return host.id;
 }
 
