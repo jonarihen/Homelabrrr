@@ -60,6 +60,7 @@ import { trustProxyCheck, inspectProxyChain } from './middleware/trustProxyCheck
 import { buildConfigReport, formatConfigReport } from './utils/configReport.ts';
 import { startScheduler, stopScheduler, waitForSchedulerIdle } from './scheduler.ts';
 import { collectBoundedBody } from './utils/boundedBody.ts';
+import { trackConsoleSocket } from './utils/consoleSockets.ts';
 import { installConsoleRedaction, log, redactText, requestContext } from './utils/logger.ts';
 import { csrfProtection } from './middleware/requestSecurity.ts';
 import { liveness, metricsText, observeRequests, readiness } from './utils/observability.ts';
@@ -355,8 +356,9 @@ server.on('upgrade', async (request, socket, head) => {
     // Mark as consumed immediately to prevent parallel replays, but keep the
     // entry until the upgrade completes so a failed upgrade doesn't lose data.
     sess._consumed = true;
-    vncWss.handleUpgrade(request, socket, head, (ws) => {
+    vncWss.handleUpgrade(request, socket, head, async (ws) => {
       vncSessions.delete(token);
+      if (!await trackConsoleSocket(ws, request.sessionID, request.session.userId, sessionStore)) return;
       vncWss.emit('connection', ws, sess);
     });
   } else if (url.pathname === '/api/ssh') {
@@ -371,8 +373,9 @@ server.on('upgrade', async (request, socket, head) => {
       return;
     }
     sess._consumed = true;
-    sshWss.handleUpgrade(request, socket, head, (ws) => {
+    sshWss.handleUpgrade(request, socket, head, async (ws) => {
       sshSessions.delete(token);
+      if (!await trackConsoleSocket(ws, request.sessionID, request.session.userId, sessionStore)) return;
       sshWss.emit('connection', ws, sess);
     });
   } else {

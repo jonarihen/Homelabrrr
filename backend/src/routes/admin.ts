@@ -56,6 +56,7 @@ import { deriveSubnet, interfaceCidr, syncedSubnet } from '../workflows/subnet.t
 import { deletePveHost, pveHostDependencies } from '../services/pveHostLifecycle.ts';
 import { boundedString, isValidUpstreamHost, validateHost, validateObject, validatePassword, validatePort, validateUsername } from '../utils/validation.ts';
 import { revokeUserSftpSessions } from '../utils/sftpSessions.ts';
+import { closeUserConsoles } from '../utils/consoleSockets.ts';
 import { changeCredentials } from '../utils/accountSecurity.ts';
 import { assertUserCanBeDeleted } from '../services/provisionOwnership.ts';
 import { cancelSubscriptionsBeforeUserDeletion } from '../services/paypal.ts';
@@ -1378,6 +1379,7 @@ router.delete('/users/:id', pUsers, async (req, res) => {
   } catch (err) { return sendError(res, err); }
   const { target, orphanedVms } = deleted;
   revokeUserSftpSessions(Number(req.params.id));
+  closeUserConsoles(Number(req.params.id));
   await logAudit(req, 'admin_delete_user', req.params.id, '');
   for (const vm of orphanedVms) {
     await syncVmTagsSafe(vm.node, vm.vmid, { retired: [target?.username].filter(Boolean) });

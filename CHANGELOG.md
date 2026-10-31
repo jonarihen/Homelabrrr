@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-10-28 — Revoking a session closes its open consoles
+
+- Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.
 ## 2026-10-28 — VLAN access follows the subnets firewalls actually provisioned
 
 - Browser SSH targets, website upstreams and public-IP targets now check your VLANs against the subnet each firewall sync recorded, so deployments that don't use the `10.x` scheme no longer refuse addresses in your own VLAN — and no longer accept the unused `10.x` range.

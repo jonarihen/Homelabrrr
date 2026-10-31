@@ -1,9 +1,10 @@
 import session from 'express-session';
-import { eq, lt, sql } from 'drizzle-orm';
+import { and, eq, exists, gt, lt, sql } from 'drizzle-orm';
 import { db } from './client.ts';
-import { sessions } from './schema/index.ts';
+import { sessions, users } from './schema/index.ts';
 import { log } from '../utils/logger.ts';
 import { revokeSftpSession } from '../utils/sftpSessions.ts';
+import { closeSessionConsoles } from '../utils/consoleSockets.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 15 * 60 * 1000;
@@ -33,6 +34,7 @@ export class DrizzleSessionStore extends session.Store {
         if (!row) return cb(null, null);
         if (row.expire.getTime() <= Date.now()) {
           // Expired — remove lazily and report a miss.
+          closeSessionConsoles(sid);
           return db.delete(sessions).where(eq(sessions.sid, sid)).then(() => cb(null, null), () => cb(null, null));
         }
         // A row in the store is persisted by definition (covers rows stored
@@ -63,7 +65,24 @@ export class DrizzleSessionStore extends session.Store {
 
   destroy(sid: string, cb?: (err?: unknown) => void): void {
     revokeSftpSession(sid);
+    closeSessionConsoles(sid);
     db.delete(sessions).where(eq(sessions.sid, sid)).then(() => cb?.(), (err) => cb?.(err));
+  }
+
+  // Console upgrades re-check their session after registering (see
+  // utils/consoleSockets.ts); a deleted user keeps its session rows until the
+  // next HTTP request, so the user must still exist too.
+  async hasLiveSession(sid: string, userId: number): Promise<boolean> {
+    const [row] = await db.select({ sess: sessions.sess })
+      .from(sessions)
+      .where(and(
+        eq(sessions.sid, sid),
+        gt(sessions.expire, sql`now()`),
+        exists(db.select({ id: users.id }).from(users).where(eq(users.id, userId))),
+      ))
+      .limit(1);
+    const stored = row?.sess as session.SessionData | undefined;
+    return stored?.userId === userId && !stored.twoFactorEnrollmentOnly;
   }
 
   touch(sid: string, sess: session.SessionData, cb?: (err?: unknown) => void): void {
@@ -73,10 +92,18 @@ export class DrizzleSessionStore extends session.Store {
       .then(() => cb?.(), (err) => cb?.(err));
   }
 
+  async pruneExpired(): Promise<number> {
+    const removed = await db.delete(sessions)
+      .where(lt(sessions.expire, sql`now()`))
+      .returning({ sid: sessions.sid });
+    for (const { sid } of removed) closeSessionConsoles(sid);
+    return removed.length;
+  }
+
   startPruning(intervalMs = PRUNE_INTERVAL_MS): void {
     if (this.pruneTimer) return;
     this.pruneTimer = setInterval(() => {
-      db.delete(sessions).where(lt(sessions.expire, sql`now()`)).catch((err) => {
+      this.pruneExpired().catch((err) => {
         log('warn', 'session_prune_failed', { error: err?.message });
       });
     }, intervalMs);
