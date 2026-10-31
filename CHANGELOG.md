@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-28 — Frontend container runs without root
+
+- The frontend container now runs nginx as its unprivileged `nginx` user and listens on port 8080 inside the container. The published host port (8181) is unchanged. If you have a compose override that targets the container's port 80, change it to 8080.
+- The frontend container has its own health check.
 ## 2026-10-28 — Switching a Caddy server to API-only mode removes its old routes
 
 - Clearing a Caddy server's SSH host (switching from Caddyfile sync to API-only mode) now empties the Homelabrrr snippet and reloads Caddy first, then re-publishes the sites through the admin API. Before, the old Caddyfile routes stayed live and came back on every reload, out of reach of API-mode unpublish and delete.
