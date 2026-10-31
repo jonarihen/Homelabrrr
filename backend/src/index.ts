@@ -8,7 +8,6 @@ import { sshKeys } from './db/schema/index.ts';
 import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import https from 'https';
 import { execFile } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { writeFile, readFile, unlink } from 'fs/promises';
@@ -423,13 +422,12 @@ vncWss.on('connection', async (clientWs, vncSession) => {
   const vncUrl = `wss://${pveHost.host}:${pveHost.port}/api2/json/nodes/${proxmoxNode}/${vmtype}/${vmid}/vncwebsocket`
     + `?port=${port}&vncticket=${encodeURIComponent(ticket)}`;
 
-  log('info', 'vnc_upstream_connecting', { node: proxmoxNode, vmtype, vmid, port, verifyTls: pveHost.verifyTls });
+  log('info', 'vnc_upstream_connecting', { node: proxmoxNode, vmtype, vmid, port, verifyTls: pveHost.verifyTls, pinned: pveHost.pinned });
 
-  const agent = new https.Agent({ rejectUnauthorized: pveHost.verifyTls });
-
+  // Same TLS policy as every other PVE call (pinned certificate or CA/verify_tls).
   const proxmoxWs = new WebSocket(vncUrl, ['binary'], {
     headers: { Authorization: TOKEN },
-    agent,
+    agent: pveHost.agent,
   });
 
   proxmoxWs.on('open', () => {

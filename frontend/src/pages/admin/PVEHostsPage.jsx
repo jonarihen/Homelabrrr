@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import HardwareConnection from './HardwareConnection.jsx';
@@ -13,6 +13,17 @@ export default function PVEHostsPage() {
   const [form, setForm] = useState({ name: '', host: '', port: 8006, tokenId: '', tokenSecret: '', verifyTls: true, sshHost: '', sshPort: 22, sshUser: 'root', sshAuthType: 'key', sshSecret: '', hasSsh: false });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  // Certificate pinning: the stored pin, a freshly fetched certificate the
+  // admin may confirm, and an explicit "remove pin".
+  const [currentPin, setCurrentPin] = useState(null);
+  const [probe, setProbe] = useState(null);
+  const [pinConfirmed, setPinConfirmed] = useState(false);
+  const [clearPin, setClearPin] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  // Bumped whenever the probe target can change (form edits, dialog reopen):
+  // responses from an older target/dialog session must not install its probe.
+  const probeGeneration = useRef(0);
   // Node maintenance drain form: { hostId, nodeRef, nodeName } | null
   const [maintTarget, setMaintTarget] = useState(null);
   const [maintForm, setMaintForm] = useState({ reason: '', until: '' });
@@ -40,6 +51,7 @@ export default function PVEHostsPage() {
   const openAdd = () => {
     setEditId(null);
     setForm({ name: '', host: '', port: 8006, tokenId: '', tokenSecret: '', verifyTls: true, sshHost: '', sshPort: 22, sshUser: 'root', sshAuthType: 'key', sshSecret: '', hasSsh: false });
+    resetTrust(null);
     setError('');
     setShowForm(true);
   };
@@ -51,18 +63,59 @@ export default function PVEHostsPage() {
       sshHost: h.ssh_host || '', sshPort: h.ssh_port || 22, sshUser: h.ssh_user || 'root',
       sshAuthType: h.ssh_auth_type || 'key', sshSecret: '', hasSsh: !!h.has_ssh,
     });
+    resetTrust(h.tls_fingerprint || null);
     setError('');
     setShowForm(true);
+  };
+
+  const resetTrust = (pin) => {
+    setCurrentPin(pin); setProbe(null); setPinConfirmed(false); setClearPin(false); setTestResult(null);
+    probeGeneration.current += 1;
+  };
+  // The pin to save or test with: a confirmed new certificate, an explicit
+  // removal, or else whatever is stored.
+  const pinValue = () => (probe && pinConfirmed ? probe.fingerprint256 : clearPin ? null : currentPin);
+  const setTarget = (patch) => { setForm(f => ({ ...f, ...patch })); setProbe(null); setPinConfirmed(false); setTestResult(null); probeGeneration.current += 1; };
+
+  const fetchCertificate = async () => {
+    setBusy('probe'); setError(''); setProbe(null); setPinConfirmed(false);
+    const generation = probeGeneration.current;
+    const host = form.host, port = form.port;
+    try {
+      const { data } = await api.post('/admin/pve-hosts/certificate-probe', { host, port });
+      if (generation !== probeGeneration.current || form.host !== host || form.port !== port) return;
+      setProbe(data);
+    } catch (e) {
+      if (generation !== probeGeneration.current || form.host !== host || form.port !== port) return;
+      setError(e.response?.data?.error || 'Could not read the host certificate');
+    } finally {
+      if (generation === probeGeneration.current) setBusy((b) => (b === 'probe' ? false : b));
+    }
+  };
+
+  // A result only describes the inputs it was run with; editing any of them hides it.
+  const testInputs = () => JSON.stringify([form, pinValue()]);
+
+  const testConnection = async () => {
+    setBusy('test'); setError(''); setTestResult(null);
+    const testedFor = testInputs();
+    try {
+      const { data } = await api.post('/admin/pve-hosts/test', { ...form, id: editId, tlsFingerprint: pinValue() });
+      setTestResult({ ...data, testedFor });
+    } catch (e) {
+      setTestResult({ ok: false, error: e.response?.data?.error || 'Connection test failed', testedFor });
+    } finally { setBusy(false); }
   };
 
   const save = async (e) => {
     e.preventDefault();
     setSaving(true); setError('');
     try {
+      const payload = { ...form, tlsFingerprint: pinValue() };
       if (editId) {
-        await api.put(`/admin/pve-hosts/${editId}`, form);
+        await api.put(`/admin/pve-hosts/${editId}`, payload);
       } else {
-        await api.post('/admin/pve-hosts', form);
+        await api.post('/admin/pve-hosts', payload);
       }
       setShowForm(false);
       load();
@@ -203,7 +256,7 @@ export default function PVEHostsPage() {
                       <div>
                         <h3 className="text-white font-semibold">{h.name}</h3>
                         <p className="text-xs text-gray-500 font-mono">{h.host}:{h.port}</p>
-                        <p className="text-[10px] text-gray-600 mt-0.5">{h.verify_tls ? 'TLS verification on' : 'TLS verification off'}</p>
+                        <p className="text-[10px] text-gray-600 mt-0.5">{h.tls_fingerprint ? 'TLS certificate pinned' : h.verify_tls ? 'TLS verification on' : 'TLS verification off'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -353,7 +406,7 @@ export default function PVEHostsPage() {
                   <label className="block text-xs text-gray-400 mb-1.5 font-medium">Host / IP</label>
                   <input
                     type="text" required value={form.host}
-                    onChange={e => setForm(f => ({ ...f, host: e.target.value }))}
+                    onChange={e => setTarget({ host: e.target.value })}
                     className={inputCls} placeholder="192.168.1.10"
                   />
                 </div>
@@ -361,7 +414,7 @@ export default function PVEHostsPage() {
                   <label className="block text-xs text-gray-400 mb-1.5 font-medium">Port</label>
                   <input
                     type="number" value={form.port}
-                    onChange={e => setForm(f => ({ ...f, port: parseInt(e.target.value) || 8006 }))}
+                    onChange={e => setTarget({ port: parseInt(e.target.value) || 8006 })}
                     className={inputCls}
                   />
                 </div>
@@ -377,7 +430,7 @@ export default function PVEHostsPage() {
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                  API Token Secret {editId && <span className="text-gray-600">(leave empty to keep current)</span>}
+                  API Token Secret {editId && <span className="text-gray-600">(leave empty to keep current; required when TLS trust changes)</span>}
                 </label>
                 <input
                   type="password" required={!editId} value={form.tokenSecret}
@@ -394,9 +447,33 @@ export default function PVEHostsPage() {
                 />
                 <div>
                   <p className="text-sm text-white">Verify TLS certificate</p>
-                  <p className="text-xs text-gray-500 mt-0.5">Enable this if the Proxmox host uses a trusted certificate. Disable only for self-signed/internal lab certs.</p>
+                  <p className="text-xs text-gray-500 mt-0.5">Enable this if the Proxmox host uses a trusted certificate (public CA, or a private CA added via NODE_EXTRA_CA_CERTS). For self-signed certs, pin the certificate below instead.</p>
                 </div>
               </label>
+              <div className="rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3 space-y-2 text-xs">
+                <p className="text-sm text-white">Pinned certificate <span className="text-gray-600">(recommended for self-signed certs)</span></p>
+                <p className="text-gray-500">Only the confirmed certificate is trusted; it replaces CA verification. If the host ever presents a different one, every connection stops before the API token is sent, until you confirm the new certificate here.</p>
+                {currentPin && (
+                  <div className="flex items-start justify-between gap-3">
+                    <p className={`font-mono break-all ${clearPin ? 'text-gray-600 line-through' : 'text-gray-300'}`}>SHA-256 {currentPin}</p>
+                    <label className="flex items-center gap-1.5 text-gray-400 shrink-0">
+                      <input type="checkbox" checked={clearPin} onChange={e => setClearPin(e.target.checked)} className="accent-red-500" /> Remove pin
+                    </label>
+                  </div>
+                )}
+                <button type="button" disabled={busy || !form.host} onClick={fetchCertificate} className="border border-gray-600 rounded-lg px-3 py-1.5 text-gray-200 hover:border-blue-400 disabled:opacity-50">
+                  {currentPin ? 'Fetch current certificate' : 'Fetch certificate'}
+                </button>
+                {probe && (
+                  <div className="border-l-2 border-blue-500/40 pl-2 text-gray-300 space-y-1">
+                    <p>Subject {probe.subject || 'unknown'} · Issuer {probe.issuer || 'unknown'}{probe.selfSigned ? ' (self-signed)' : ''}{probe.validTo ? ` · Valid until ${probe.validTo}` : ''}</p>
+                    <p className="font-mono break-all">SHA-256 {probe.fingerprint256}</p>
+                    {currentPin === probe.fingerprint256
+                      ? <p className="text-green-400">Matches the pinned certificate.</p>
+                      : <label className="flex items-start gap-2 text-yellow-300"><input type="checkbox" checked={pinConfirmed} onChange={e => setPinConfirmed(e.target.checked)} className="mt-0.5" /> This is my Proxmox host’s certificate. I compared the fingerprint with the PVE web UI (node → System → Certificates).</label>}
+                  </div>
+                )}
+              </div>
               <div className="rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3 space-y-3">
                 <div>
                   <p className="text-sm text-white">Root SSH <span className="text-gray-600">(optional)</span></p>
@@ -465,8 +542,17 @@ export default function PVEHostsPage() {
                   )}
                 </div>
               </div>
+              {testResult && testResult.testedFor === testInputs() && (
+                <div role="status" className={`text-xs rounded-xl p-3 border ${testResult.ok ? 'text-green-400 bg-green-900/20 border-green-800/30' : 'text-red-400 bg-red-900/20 border-red-800/30'}`}>
+                  {testResult.ok ? `Connected${testResult.version ? ` — PVE ${testResult.version}` : ''}.` : testResult.error}
+                  {testResult.presentedFingerprint && <p className="font-mono break-all mt-1">Presented SHA-256 {testResult.presentedFingerprint}</p>}
+                </div>
+              )}
               {error && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{error}</p>}
               <div className="flex gap-3 pt-1">
+                <button type="button" disabled={busy || !form.host || !form.tokenId} onClick={testConnection} className="flex-1 border border-gray-600 hover:border-blue-400 disabled:opacity-50 text-gray-200 rounded-xl py-2.5 text-sm transition-colors">
+                  {busy === 'test' ? 'Working...' : 'Test connection'}
+                </button>
                 <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white rounded-xl py-2.5 text-sm transition-colors">
                   Cancel
                 </button>

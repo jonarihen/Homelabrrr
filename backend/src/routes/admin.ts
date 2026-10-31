@@ -15,7 +15,8 @@ import {
 } from '../db/schema/index.ts';
 import { isUniqueViolation, isForeignKeyViolation } from '../db/errors.ts';
 import { setSetting } from '../db/settings.ts';
-import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools } from '../proxmox.ts';
+import { getAllVMs, getHostStatus, getHosts, getHost, getVMConfig, getHostStoragePools, testHostConnection } from '../proxmox.ts';
+import { IloError, normalizeTlsFingerprint, probeIloCertificate } from '../services/iloAdapter.ts';
 import { setStorageExposed, storageVisibilityMap } from '../utils/storageVisibility.ts';
 import { createClient, vlanTagToSubnet } from '../fortigate.ts';
 import {
@@ -2217,7 +2218,7 @@ router.post('/leases/backfill', requireAdmin, async (req, res) => {
 router.get('/pve-hosts', pHosts, async (req, res) => {
   const hosts = (await getHosts()).map(h => ({
     id: h.id, name: h.name, host: h.host, port: h.port,
-    token_id: h.token_id, verify_tls: h.verify_tls, created_at: h.created_at,
+    token_id: h.token_id, verify_tls: h.verify_tls, tls_fingerprint: h.tls_fingerprint || null, created_at: h.created_at,
     // Don't send token_secret / ssh_secret to frontend
     ssh_host: h.ssh_host || '', ssh_port: h.ssh_port || 22,
     ssh_user: h.ssh_user || 'root', ssh_auth_type: h.ssh_auth_type || 'key',
@@ -2243,26 +2244,91 @@ router.get('/pve-hosts/:id/status', pHosts, async (req, res) => {
   res.json(status);
 });
 
+// A pinned certificate replaces CA verification, so it may stand in for
+// verify_tls without the ALLOW_INSECURE_UPSTREAM_TLS break-glass.
+const PVE_INSECURE_TLS_ERROR = 'Disabling Proxmox TLS verification is blocked unless the host certificate is pinned or ALLOW_INSECURE_UPSTREAM_TLS=true is set';
+const pveTlsLabel = (verifyTls, pin) => (pin ? 'pinned' : verifyTls ? 'verify' : 'insecure');
+
+// undefined keeps `existing`; null or '' means no pin; anything else must be
+// a SHA-256 fingerprint (throws a 400-able error otherwise).
+function pinFromBody(raw, existing = null) {
+  if (raw === undefined) return existing;
+  if (raw === null || raw === '') return null;
+  const pin = normalizeTlsFingerprint(raw);
+  if (!pin) throw Object.assign(new Error('The pinned certificate must be a SHA-256 fingerprint'), { field: 'tlsFingerprint' });
+  return pin;
+}
+
+// Reads the certificate a PVE host presents so an admin can confirm and pin
+// it. TLS handshake only: no HTTP request, so no token is ever sent.
+router.post('/pve-hosts/certificate-probe', pHosts, async (req, res) => {
+  let host, port;
+  try {
+    host = validateHost(req.body?.host);
+    port = validatePort(req.body?.port ?? 8006);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, code: err.code, field: err.field });
+  }
+  try {
+    // PVE hosts are admin-registered targets reached by name like every other
+    // PVE call, so the iLO-specific address guard does not apply here.
+    const certificate = await probeIloCertificate(host, port, { validateTarget: async (h) => h });
+    res.set('Cache-Control', 'no-store').json(certificate);
+  } catch (err) {
+    if (err instanceof IloError) return res.status(502).json({ code: err.code, error: 'Could not read the host certificate' });
+    res.status(500).json({ error: sanitizeError(err.message) });
+  }
+});
+
+// Tries host/port/token with the given trust settings without saving
+// anything. For an existing host (`id`) a blank secret reuses the stored one,
+// but only while address, token ID and trust are unchanged.
+router.post('/pve-hosts/test', pHosts, async (req, res) => {
+  let host, port, pin;
+  const { tokenId, tokenSecret, verifyTls = true, id } = req.body || {};
+  try {
+    host = validateHost(req.body?.host);
+    port = validatePort(req.body?.port ?? 8006);
+    pin = pinFromBody(req.body?.tlsFingerprint ?? null);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, code: err.code, field: err.field });
+  }
+  if (!host || !tokenId) return res.status(400).json({ error: 'Host and tokenId are required' });
+  if (!verifyTls && !pin && !ALLOW_INSECURE_UPSTREAM_TLS) return res.status(400).json({ error: PVE_INSECURE_TLS_ERROR });
+  let secret = tokenSecret ? encryptSecret(tokenSecret) : null;
+  if (!secret && id != null) {
+    const existing = await getHost(Number.parseInt(id, 10));
+    if (!existing) return res.status(404).json({ error: 'Host not found' });
+    const unchanged = host === existing.host && port === Number(existing.port) && tokenId === existing.token_id
+      && pin === (existing.tls_fingerprint || null) && (!!verifyTls || existing.verify_tls === false);
+    if (unchanged) secret = existing.token_secret;
+  }
+  if (!secret) return res.status(400).json({ error: 'Enter the API token secret to test this connection', field: 'tokenSecret' });
+  const result = await testHostConnection({ name: host, host, port, token_id: tokenId, token_secret: secret, verify_tls: !!verifyTls, tls_fingerprint: pin });
+  res.set('Cache-Control', 'no-store').json(result);
+});
+
 router.post('/pve-hosts', pHosts, async (req, res) => {
-  let name, host, port;
+  let name, host, port, pin;
   const { tokenId, tokenSecret, verifyTls = true } = req.body;
   try {
     name = boundedString(req.body?.name, { field: 'name', min: 1, max: 80 });
     host = validateHost(req.body?.host);
     port = validatePort(req.body?.port ?? 8006);
     if (req.body?.sshHost) validateHost(req.body.sshHost);
+    pin = pinFromBody(req.body?.tlsFingerprint ?? null);
   } catch (err) {
     return res.status(400).json({ error: err.message, code: err.code, field: err.field });
   }
   if (!name || !host || !tokenId || !tokenSecret) {
     return res.status(400).json({ error: 'Name, host, tokenId and tokenSecret are required' });
   }
-  if (!verifyTls && !ALLOW_INSECURE_UPSTREAM_TLS) {
-    return res.status(400).json({ error: 'Disabling Proxmox TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
+  if (!verifyTls && !pin && !ALLOW_INSECURE_UPSTREAM_TLS) {
+    return res.status(400).json({ error: PVE_INSECURE_TLS_ERROR });
   }
   try {
     const [r] = await db.insert(pveHosts).values({
-      name, host, port, token_id: tokenId, token_secret: encryptSecret(tokenSecret), verify_tls: !!verifyTls,
+      name, host, port, token_id: tokenId, token_secret: encryptSecret(tokenSecret), verify_tls: !!verifyTls, tls_fingerprint: pin,
     }).returning({ id: pveHosts.id });
     const { sshHost, sshPort, sshUser, sshAuthType, sshSecret } = req.body;
     if (String(sshHost || '').trim() && sshSecret) {
@@ -2272,7 +2338,7 @@ router.post('/pve-hosts', pHosts, async (req, res) => {
         ssh_auth_type: sshAuthType === 'password' ? 'password' : 'key', ssh_secret: encryptSecret(sshSecret),
       }).where(eq(pveHosts.id, r.id));
     }
-    await logAudit(req, 'pve_host_created', String(r.id), `name=${name}; host=${host}; port=${port}; tls=${verifyTls ? 'verify' : 'insecure'}`);
+    await logAudit(req, 'pve_host_created', String(r.id), `name=${name}; host=${host}; port=${port}; tls=${pveTlsLabel(verifyTls, pin)}${pin ? `; pin=${pin}` : ''}`);
     res.json({ id: r.id, name, host, port });
   } catch (err) {
     res.status(500).json({ error: sanitizeError(err.message) });
@@ -2280,32 +2346,44 @@ router.post('/pve-hosts', pHosts, async (req, res) => {
 });
 
 router.put('/pve-hosts/:id', pHosts, async (req, res) => {
-  let name, host, port;
+  let name, host, port, pin;
   const { tokenId, tokenSecret, verifyTls, sshHost, sshPort, sshUser, sshAuthType, sshSecret } = req.body;
+  const existing = await getHost(parseInt(req.params.id));
+  if (!existing) return res.status(404).json({ error: 'Host not found' });
   try {
     name = boundedString(req.body?.name, { field: 'name', min: 1, max: 80 });
     host = validateHost(req.body?.host);
     port = validatePort(req.body?.port ?? 8006);
     if (sshHost) validateHost(sshHost);
     if (sshPort !== undefined) validatePort(sshPort);
+    pin = pinFromBody(req.body?.tlsFingerprint, existing.tls_fingerprint || null);
   } catch (err) {
     return res.status(400).json({ error: err.message, code: err.code, field: err.field });
   }
   if (!name || !host || !tokenId) {
     return res.status(400).json({ error: 'Name, host and tokenId are required' });
   }
-  const existing = await getHost(parseInt(req.params.id));
-  if (!existing) return res.status(404).json({ error: 'Host not found' });
 
+  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
+  if (!verifyTlsEnabled && !pin && !ALLOW_INSECURE_UPSTREAM_TLS) {
+    return res.status(400).json({ error: PVE_INSECURE_TLS_ERROR });
+  }
+  // Setting, replacing or clearing the pin, or switching verification off,
+  // changes which server the stored token is trusted to: a blank secret is
+  // not enough.
+  const oldPin = existing.tls_fingerprint || null;
+  const trustChanged = pin !== oldPin || (!verifyTlsEnabled && existing.verify_tls !== false);
+  if (!tokenSecret && trustChanged) {
+    return res.status(400).json({ error: 'Re-enter the API token secret when changing TLS trust', field: 'tokenSecret' });
+  }
   // If tokenSecret is empty, keep the existing one
   const secret = tokenSecret ? encryptSecret(tokenSecret) : existing.token_secret;
-  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
-  if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {
-    return res.status(400).json({ error: 'Disabling Proxmox TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
-  }
   await db.update(pveHosts).set({
-    name, host, port, token_id: tokenId, token_secret: secret, verify_tls: verifyTlsEnabled,
+    name, host, port, token_id: tokenId, token_secret: secret, verify_tls: verifyTlsEnabled, tls_fingerprint: pin,
   }).where(eq(pveHosts.id, Number(req.params.id)));
+  if (pin !== oldPin) {
+    await logAudit(req, 'pve_host_tls_pin_changed', String(req.params.id), `name=${name}; from=${oldPin || 'none'}; to=${pin || 'none'}`);
+  }
 
   // Optional root SSH (used only for post-migration source-config cleanup).
   // Empty sshHost clears the whole SSH config; an empty sshSecret keeps the
@@ -2324,7 +2402,7 @@ router.put('/pve-hosts/:id', pHosts, async (req, res) => {
       }).where(eq(pveHosts.id, Number(req.params.id)));
     }
   }
-  await logAudit(req, 'pve_host_updated', String(req.params.id), `name=${name}; host=${host}; port=${port}; tls=${verifyTlsEnabled ? 'verify' : 'insecure'}`);
+  await logAudit(req, 'pve_host_updated', String(req.params.id), `name=${name}; host=${host}; port=${port}; tls=${pveTlsLabel(verifyTlsEnabled, pin)}`);
   res.json({ ok: true });
 });
 

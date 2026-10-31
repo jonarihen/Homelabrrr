@@ -1,5 +1,7 @@
 import https from 'https';
 import tls from 'tls';
+import { isIP } from 'node:net';
+import { timingSafeEqual } from 'node:crypto';
 import { eq, inArray } from 'drizzle-orm';
 import { db, type DbOrTx } from './db/client.ts';
 import { pveHosts, provisionedVms } from './db/schema/index.ts';
@@ -7,21 +9,80 @@ import { decryptSecret } from './utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.ts';
 import { pickVmid, isVmidTakenError, VmidReservations, VMID_MIN } from './utils/vmidAllocator.ts';
 import { ADMIN_PVE_HOSTS_HREF } from './utils/upstreamError.ts';
+import { normalizeTlsFingerprint } from './services/iloAdapter.ts';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
 // verify_tls is a real boolean now; the only insecure state is an explicit
 // `false` (the `=== false` / `!== false` form preserves the old `=== 0` /
 // `!== 0` semantics — a null verify_tls still verifies, i.e. stays secure).
+// A pinned certificate replaces CA verification, so it is not insecure.
 function assertSecureTls(host, label = 'Proxmox host') {
-  if (host.verify_tls === false && !ALLOW_INSECURE_UPSTREAM_TLS) {
-    throw new Error(`${label} TLS verification is disabled. Re-enable TLS verification or set ALLOW_INSECURE_UPSTREAM_TLS=true as a temporary exception.`);
+  if (host.verify_tls === false && !host.tls_fingerprint && !ALLOW_INSECURE_UPSTREAM_TLS) {
+    throw new Error(`${label} TLS verification is disabled. Re-enable TLS verification, pin the host certificate, or set ALLOW_INSECURE_UPSTREAM_TLS=true as a temporary exception.`);
   }
 }
 
-function agentForHost(host) {
-  assertSecureTls(host);
-  return new https.Agent({ rejectUnauthorized: host.verify_tls !== false });
+// The host's pinned SHA-256 fingerprint in canonical form, or null when the
+// host is not pinned. A malformed stored pin fails closed.
+function hostPin(host) {
+  if (!host.tls_fingerprint) return null;
+  const pin = normalizeTlsFingerprint(host.tls_fingerprint);
+  if (!pin) throw new Error(`Proxmox host ${host.name || host.host} has an invalid pinned certificate fingerprint`);
+  return pin;
+}
+
+// SNI only makes sense for DNS names — RFC 6066 forbids IP literals.
+function sniForHost(host) {
+  return isIP(host.host) ? undefined : host.host;
+}
+
+function fingerprintMatches(presented, pin) {
+  const a = Buffer.from(String(presented || ''));
+  const b = Buffer.from(pin);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function pinMismatchError(host, presented, pin) {
+  return Object.assign(
+    new Error(`Proxmox host ${host.name || host.host} certificate changed: it presented SHA-256 ${presented || 'none'}, but ${pin} is pinned. If the change is expected, confirm the new certificate under Admin → PVE Hosts.`),
+    { code: 'PVE_TLS_PIN_MISMATCH', presentedFingerprint: presented || null },
+  );
+}
+
+// https agent for every connection to a PVE host (REST, file download and the
+// noVNC websocket). With a pin, the socket is handed to the request only after
+// the presented leaf certificate matched it, so the API token is never written
+// to an impostor; CA validation is replaced by the pin, not skipped.
+export function agentForHost(host) {
+  const pin = hostPin(host);
+  if (!pin) {
+    assertSecureTls(host);
+    return new https.Agent({ rejectUnauthorized: host.verify_tls !== false });
+  }
+  const agent = new https.Agent({ keepAlive: false });
+  (agent as unknown as { createConnection: unknown }).createConnection = (options, callback) => {
+    let done = false;
+    const finish = (err) => { if (!done) { done = true; callback(err, socket); } };
+    const socket = tls.connect({ ...options, servername: sniForHost(host), rejectUnauthorized: false });
+    socket.setTimeout(15000, () => socket.destroy(new Error('Proxmox TLS handshake timeout')));
+    socket.once('error', finish);
+    socket.once('secureConnect', () => {
+      const presented = socket.getPeerCertificate()?.fingerprint256;
+      if (!fingerprintMatches(presented, pin)) {
+        socket.destroy();
+        finish(pinMismatchError(host, presented, pin));
+        return;
+      }
+      socket.setTimeout(0);
+      // The handshake is already over when the request gets this socket, and
+      // `authorized` is false for a pinned self-signed cert: tell makeRequest.
+      (socket as unknown as { pinVerified: boolean }).pinVerified = true;
+      finish(null);
+    });
+    return undefined;
+  };
+  return agent;
 }
 
 async function getHostById(hostId, database: DbOrTx = db) {
@@ -91,7 +152,7 @@ function makeRequest(host, method, path, body) {
 
     req.on('socket', socket => {
       const ready = () => { submissionStarted = true; };
-      if (req.reusedSocket || (!socket.connecting && socket.encrypted && socket.authorized)) ready();
+      if (req.reusedSocket || socket.pinVerified || (!socket.connecting && socket.encrypted && socket.authorized)) ready();
       else socket.once('secureConnect', ready);
     });
     req.on('error', fail);
@@ -169,6 +230,8 @@ async function resolveNode(nodeRef, opts = {}) {
 // ── Proxmox API wrappers ─────────────────────────────────────────────────────
 
 export const hostGet = (host, path) => makeRequest(host, 'GET', path);
+export const hostPost = (host, path, body) => makeRequest(host, 'POST', path, body ?? {});
+export const hostDelete = (host, path) => makeRequest(host, 'DELETE', path);
 
 // Short-lived cache for getAllVMs — avoids hammering Proxmox on every poll
 let _vmCache = { data: null, expires: 0 };
@@ -805,14 +868,16 @@ export async function waitForTask(node, upid, { timeoutMs = 4 * 60 * 60 * 1000, 
 // colon-separated form `remote_migrate` expects. The source PVE host pins the
 // target's certificate by this fingerprint, so it must come from a live
 // connection. The connection follows the same TLS policy as every other call
-// to the host (assertSecureTls + per-host verify_tls).
+// to the host (pin, else assertSecureTls + per-host verify_tls).
 export function getHostCertFingerprint(host) {
-  assertSecureTls(host);
+  const pin = hostPin(host);
+  if (!pin) assertSecureTls(host);
   return new Promise((resolve, reject) => {
     const socket = tls.connect({
       host: host.host,
       port: host.port,
-      rejectUnauthorized: host.verify_tls !== false,
+      servername: sniForHost(host),
+      rejectUnauthorized: pin ? false : host.verify_tls !== false,
     }, () => {
       const cert = socket.getPeerCertificate();
       socket.end();
@@ -820,11 +885,54 @@ export function getHostCertFingerprint(host) {
         reject(new Error(`Could not read the TLS certificate fingerprint of ${host.name || host.host}`));
         return;
       }
+      if (pin && !fingerprintMatches(cert.fingerprint256, pin)) {
+        reject(pinMismatchError(host, cert.fingerprint256, pin));
+        return;
+      }
       resolve(cert.fingerprint256);
     });
     socket.setTimeout(10000, () => socket.destroy(new Error(`Timed out reading the TLS certificate of ${host.name || host.host}`)));
     socket.on('error', reject);
   });
+}
+
+const TLS_TRUST_CODE = /CERT|SELF_SIGNED|SIGNATURE|ISSUER|ALTNAME/;
+const UNREACHABLE_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET', 'EPIPE']);
+
+// Buckets a failed connection attempt for the "Test connection" result.
+export function classifyConnectionError(err) {
+  const code = String(err?.code || '');
+  if (code === 'PVE_TLS_PIN_MISMATCH') return 'fingerprint_mismatch';
+  if (TLS_TRUST_CODE.test(code) || /TLS verification is disabled/.test(err?.message || '')) return 'tls_untrusted';
+  if (err?.upstreamStatus === 401 || err?.upstreamStatus === 403) return 'auth_failed';
+  if (code === 'ETIMEDOUT' || /timeout/i.test(err?.message || '')) return 'timeout';
+  if (UNREACHABLE_CODES.has(code)) return 'unreachable';
+  return 'error';
+}
+
+const TEST_MESSAGES = {
+  fingerprint_mismatch: 'The host presented a different certificate than the pinned one.',
+  tls_untrusted: 'The host certificate is not trusted. Pin its certificate, or add its CA via NODE_EXTRA_CA_CERTS.',
+  auth_failed: 'The host rejected the API token (check token ID, secret and its permissions).',
+  timeout: 'The host did not answer in time.',
+  unreachable: 'The host could not be reached (check host, port and firewall).',
+  error: 'The connection test failed.',
+};
+
+// One authenticated GET /version with the given (unsaved) settings. Never
+// echoes upstream text, which can contain addresses or token fragments.
+export async function testHostConnection(host) {
+  try {
+    const version = await makeRequest(host, 'GET', '/version');
+    return { ok: true, version: version?.version || null };
+  } catch (err) {
+    const category = classifyConnectionError(err);
+    return {
+      ok: false, category, error: TEST_MESSAGES[category],
+      ...(category === 'fingerprint_mismatch' ? { presentedFingerprint: err.presentedFingerprint } : {}),
+      ...(err?.upstreamStatus ? { status: err.upstreamStatus } : {}),
+    };
+  }
 }
 
 // Start a cross-cluster migration (PVE `remote_migrate`, 7.3+ / experimental —
@@ -991,12 +1099,13 @@ export async function downloadBackupFile(node, storage, volid, filepath) {
 
 export async function getHostForNode(nodeName) {
   const host = await hostForNode(nodeName);
-  assertSecureTls(host, `Proxmox node host ${host.name || host.host}`);
   return {
     host: host.host,
     port: host.port,
     tokenId: host.token_id,
     tokenSecret: decryptSecret(host.token_secret),
     verifyTls: host.verify_tls !== false,
+    pinned: !!host.tls_fingerprint,
+    agent: agentForHost(host),
   };
 }
