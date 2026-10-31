@@ -6,6 +6,10 @@
 - Data tables (users, roles, VLANs, templates, assignments, audit log, snapshots, SSH keys, websites, recent provisions) scroll sideways inside their panel instead of being cut off.
 - The **My VMs** header and summary bar wrap on narrow screens.
 - Console windows are shrunk and moved to fit the screen when opened, tiled or when the window is resized.
+## 2026-10-28 — SSH works with fewer steps after deploy
+
+- The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
+- SSH connection failures now say what to check (wrong username or key, VM still booting, SSH not running) instead of showing the raw error.
 ## 2026-10-28 — Revoking a session closes its open consoles
 
 - Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.
