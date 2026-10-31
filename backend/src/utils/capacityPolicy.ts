@@ -97,6 +97,8 @@ function toFiniteBytes(value, { min = 0 } = {}) {
  * @param nodeTotalBytes  physical RAM of the node (getNodeStatus → memory.total)
  * @param allocatedBytes  sum of configured guest RAM already on the node, or
  *                        null when the guest list couldn't be read
+ * @param pendingBytes    RAM held by deploys still in flight; added to whichever
+ *                        allocation figure is used, including the free-based fallback
  * @param freeBytes       node memory.free — only a fallback estimate + context
  * @param mode            off | warn | block
  * @param ratio           overcommit ratio, e.g. 1.5
@@ -107,6 +109,7 @@ export function evaluateMemoryCapacity({
   requestedMb,
   nodeTotalBytes,
   allocatedBytes,
+  pendingBytes = 0,
   freeBytes,
   mode,
   ratio,
@@ -148,6 +151,7 @@ export function evaluateMemoryCapacity({
       allocated = 0;
     }
   }
+  allocated += Math.max(0, Number(pendingBytes) || 0);
 
   const name = nodeName ? String(nodeName) : 'this node';
   const physical = `${fmtGb(totalBytes)} GB physical × ${fmtRatio(resolvedRatio)} overcommit`;

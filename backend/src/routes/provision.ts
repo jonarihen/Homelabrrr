@@ -20,7 +20,7 @@ import { imageDeployTargets, defaultStorageForHost } from '../utils/cloudImageTa
 import { checkVlanAssignment } from '../utils/vlanAccess.ts';
 import { assertStorageExposed, filterExposedStorages } from '../utils/storageVisibility.ts';
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
-import { assertNodeCapacity } from '../utils/capacity.ts';
+import { assertNodeCapacity, releaseWhenTaskStops } from '../utils/capacity.ts';
 import { assertNodeAvailable } from '../utils/nodeMaintenance.ts';
 import { assertUserQuota, cloneDiskAllocation, getUserQuota, getUserResourceUsage } from '../utils/quota.ts';
 import { syncVmTagsSafe } from '../utils/vmTags.ts';
@@ -427,7 +427,7 @@ router.post('/clone', async (req: any, res: any) => {
       vlanTag: vlanTag ? parseInt(vlanTag) : null,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
       .catch((err: any) => console.error(`Post-clone config failed for VM ${newVmid}:`, err.message))
-      .finally(releaseCapacity);
+      .finally(() => releaseCapacityAfter(template.node, upid, releaseCapacity));
 
     await logAudit(req, 'vm_clone', `${template.node}/${newVmid}`, `template:${template.name}`);
     res.json({
@@ -518,6 +518,7 @@ async function autoPlaceImage(image: any, { memoryMb, diskGb }: any) {
         skip(cand.node, 'no VM storage pool is exposed to you on this host');
         continue;
       }
+      // shortcut: this check does not reserve, so two concurrent auto-placed deploys can pick the same host and the loser fails at the reserving check in /from-image instead of moving to the next candidate; reserve here (and release on the early returns) if that shows up in practice.
       await assertNodeCapacity(cand.node, { memoryMb, diskGb, storage: pick.storage });
       return { image: { ...image, node: cand.node, volid: cand.volid }, storage: pick.storage };
     } catch (err) {
@@ -740,7 +741,7 @@ router.post('/from-image', async (req: any, res: any) => {
       start: startNow,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
       .catch((err: any) => console.error(`Cloud-image provision failed for VM ${vmid}:`, err.message))
-      .finally(releaseCapacity);
+      .finally(() => releaseCapacityAfter(targetImage.node, upid, releaseCapacity));
 
     await logAudit(req, 'vm_from_image', `${targetImage.node}/${vmid}`, `image:${targetImage.name}${user.is_admin ? '' : ' (auto-placed)'}`);
     res.json({
@@ -914,7 +915,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
           await notifyDeployment(provisionId);
         }), { kind: 'provision', id: provisionId, requestId: req.requestId })
         .catch((err: any) => console.error(`Post-create polling failed for VM ${vmid}:`, err.message))
-        .finally(releaseCapacity);
+        .finally(() => releaseCapacityAfter(node, upid, releaseCapacity));
     } else {
       // No task to wait on: the VM already exists in Proxmox.
       releaseCapacity();
@@ -1119,6 +1120,16 @@ router.delete('/admin/templates/:id', requirePermission('can_manage_templates'),
 // it writes a terminal status + detail so the error is visible; on success it
 // leaves the status untouched so the caller can finalize after its own
 // post-task work (configure, resize, tags, start).
+// Tasks whose monitoring gave up while Proxmox may still be running them.
+const timedOutTasks = new Set<string>();
+
+// Release a deploy's capacity reservation; if its task outlived the polling,
+// hold it until Proxmox reports the task stopped (or the reservation TTL).
+function releaseCapacityAfter(node: string, upid: string | undefined, release: () => void) {
+  if (!upid || !timedOutTasks.delete(upid)) return release();
+  releaseWhenTaskStops(release, async () => (await getTaskStatus(node, upid)).status === 'stopped');
+}
+
 async function pollTaskCompletion(provisionId: number, node: string, upid: string, { maxAttempts = 120 } = {}) {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, 5000));
@@ -1134,6 +1145,7 @@ async function pollTaskCompletion(provisionId: number, node: string, upid: strin
       }
     } catch { /* keep polling */ }
   }
+  timedOutTasks.add(upid);
   await db.update(provisionedVms)
     .set({ status: 'needs_review', status_detail: 'Monitoring timed out — check the saved Proxmox task in Admin Operations before releasing or recovering the reservation' })
     .where(eq(provisionedVms.id, provisionId));

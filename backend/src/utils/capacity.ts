@@ -1,7 +1,8 @@
 import { httpError } from './httpError.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
-import { getNodeStatus, getStorageStatus, getAllVMs } from '../proxmox.ts';
+import { getNodeStatus, getStorageStatus, getAllVMs, getHost, getStorageDefs } from '../proxmox.ts';
 import { decodeNodeRef } from './nodeRef.ts';
+import { sharedStorageKey } from './sharedStorage.ts';
 import {
   DEFAULT_MEMORY_MODE, DEFAULT_OVERCOMMIT_RATIO,
   evaluateMemoryCapacity, guestsOnNode, normalizeMemoryMode,
@@ -71,29 +72,46 @@ async function allocatedMemoryOnNode(node: string): Promise<number | null> {
 // window is one deploy, and a restart reconciles interrupted deploys anyway.
 // shortcut: per-process only, revisit if the backend ever runs more than one replica.
 
-interface Reservation { node: string; storage: string; memoryBytes: number; diskBytes: number; expiresAt: number }
+interface Reservation { node: string; diskKey: string; memoryBytes: number; diskBytes: number; expiresAt: number }
 
 // Safety net for a path that forgets to release; a deploy job is far shorter.
 const RESERVATION_TTL_MS = 60 * 60 * 1000;
 const reservations = new Map<symbol, Reservation>();
 
-export function pendingReservations(node: string, storage?: string, now = Date.now()): { memoryBytes: number; diskBytes: number } {
+// Disk is held against the backing pool, not the node: nodes that mount the
+// same shared storage (Ceph/NFS/CIFS, even across registered hosts) draw on one
+// pool, so their deploys must see each other. Anything else is node-local.
+export const localDiskKey = (node: string, storage: string) => `local:${node}:${storage}`;
+
+async function diskKeyFor(node: string, storage: string | undefined, sharedFlag: unknown): Promise<string> {
+  if (!storage) return '';
+  const { hostId } = decodeNodeRef(node);
+  try {
+    const host = hostId ? await getHost(hostId) : null;
+    const def = host ? ((await getStorageDefs(host)) || []).find((d: any) => d.storage === storage) : null;
+    const backend = sharedStorageKey(def);
+    if (backend) return `shared:${backend}`;
+    if (def?.shared || sharedFlag) return `shared:${hostId}:${storage}`;
+  } catch { /* storage defs unreadable — treat as node-local */ }
+  return sharedFlag ? `shared:${hostId}:${storage}` : localDiskKey(node, storage);
+}
+
+export function pendingReservations(node: string, diskKey?: string, now = Date.now()): { memoryBytes: number; diskBytes: number } {
   let memoryBytes = 0;
   let diskBytes = 0;
   for (const [key, r] of reservations) {
     if (r.expiresAt <= now) { reservations.delete(key); continue; }
-    if (r.node !== node) continue;
-    memoryBytes += r.memoryBytes;
-    if (storage && r.storage === storage) diskBytes += r.diskBytes;
+    if (r.node === node) memoryBytes += r.memoryBytes;
+    if (diskKey && r.diskKey === diskKey) diskBytes += r.diskBytes;
   }
   return { memoryBytes, diskBytes };
 }
 
-export function reserveCapacity(node: string, { memoryMb, diskGb, storage }: { memoryMb?: unknown; diskGb?: unknown; storage?: string }, now = Date.now()): () => void {
+export function reserveCapacity(node: string, { memoryMb, diskGb, storage, diskKey }: { memoryMb?: unknown; diskGb?: unknown; storage?: string; diskKey?: string }, now = Date.now()): () => void {
   const key = Symbol(node);
   reservations.set(key, {
     node,
-    storage: storage || '',
+    diskKey: diskKey || (storage ? localDiskKey(node, storage) : ''),
     memoryBytes: Math.max(0, Number(memoryMb) || 0) * 1024 ** 2,
     diskBytes: Math.max(0, parseFloat(diskGb as string) || 0) * GB,
     expiresAt: now + RESERVATION_TTL_MS,
@@ -133,23 +151,26 @@ export async function assertNodeCapacity(node: string, { memoryMb, diskGb, stora
 
   const requestedDiskGb = parseFloat(diskGb as string);
   let storageStatus = null;
+  let diskKey = storage ? localDiskKey(node, storage) : '';
   if (storage && Number.isFinite(requestedDiskGb) && requestedDiskGb > 0) {
     try {
       storageStatus = await getStorageStatus(node, storage);
     } catch (err: any) {
       console.warn(`[capacity] could not read storage "${storage}" on ${node}: ${err.message}`);
     }
+    diskKey = await diskKeyFor(node, storage, storageStatus?.shared);
   }
 
   // No awaits from here on: reading the pending reservations, deciding and
   // reserving happen in one tick, so a concurrent deploy sees this one.
-  const pending = pendingReservations(node, storage);
+  const pending = pendingReservations(node, diskKey);
 
   if (checkMemory && memoryMode !== 'off') {
     const verdict = evaluateMemoryCapacity({
       requestedMb,
       nodeTotalBytes: nodeStatus.memory?.total,
-      allocatedBytes: allocatedBytes === null ? null : allocatedBytes + pending.memoryBytes,
+      allocatedBytes,
+      pendingBytes: pending.memoryBytes,
       freeBytes: nodeStatus.memory?.free,
       mode: memoryMode,
       ratio: overcommitRatio,
@@ -173,6 +194,20 @@ export async function assertNodeCapacity(node: string, { memoryMb, diskGb, stora
     }
   }
 
-  const release = reserve ? reserveCapacity(node, { memoryMb, diskGb, storage }) : () => {};
+  const release = reserve ? reserveCapacity(node, { memoryMb, diskGb, storage, diskKey }) : () => {};
   return { warnings, memoryWarning: warnings[0] || '', release };
+}
+
+// A task whose monitoring gave up may still be running in Proxmox. Keep its
+// reservation until the task is seen stopped, or the reservation's own TTL
+// lapses, so the next deploy does not count the space as free.
+export function releaseWhenTaskStops(release: () => void, isStopped: () => Promise<boolean>, { intervalMs = 30_000, maxMs = RESERVATION_TTL_MS } = {}): void {
+  const deadline = Date.now() + maxMs;
+  const tick = async () => {
+    let stopped = false;
+    try { stopped = await isStopped(); } catch { /* keep holding */ }
+    if (stopped || Date.now() >= deadline) return release();
+    setTimeout(tick, intervalMs).unref();
+  };
+  setTimeout(tick, intervalMs).unref();
 }
