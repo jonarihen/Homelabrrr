@@ -6,8 +6,11 @@ import useUnsavedChangesGuard from '../../hooks/useUnsavedChangesGuard.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { displayNode, vmIdentityKey } from '../../utils/nodeRef.js';
 import { draftFromState, buildUserPatch, describeUserChanges, invalidQuotaKeys, oversizedAssignmentSections } from '../../utils/userDraft.js';
+import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
 
 export default function UsersPage() {
+  const confirm = useConfirm();
+  const toast = useToast();
   useDocumentTitle('Users');
   const { user: currentUser } = useAuth();
   const canGrantPrivileges = !!currentUser?.isAdmin;
@@ -53,12 +56,12 @@ export default function UsersPage() {
   useEffect(() => { load(); }, []);
 
   const deleteUser = async (id) => {
-    if (!confirm('Delete this user? This will also remove their VM and VLAN assignments.')) return;
+    if (!await confirm({ message: 'Delete this user? This will also remove their VM and VLAN assignments.', confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/admin/users/${id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      toast.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -67,7 +70,7 @@ export default function UsersPage() {
       await api.post(`/admin/users/${id}/unlock`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to unlock');
+      toast.error(e.response?.data?.error || 'Failed to unlock');
     }
   };
 
@@ -321,6 +324,7 @@ const PERM_DEFS = [
 ];
 
 function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usage, onClose }) {
+  const confirm = useConfirm();
   const canGrantPrivileges = !!currentUser?.isAdmin;
   const [tab, setTab]           = useState(() => canGrantPrivileges ? 'permissions' : 'vms');
   const [state, setState]       = useState(null);
@@ -357,8 +361,8 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
   useUnsavedChangesGuard(pending > 0, `Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${state?.username || user.username}?`);
 
-  const requestClose = () => {
-    if (pending && !confirm(`Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${state?.username || user.username}?`)) return;
+  const requestClose = async () => {
+    if (pending && !await confirm({ message: `Discard ${pending} pending change${pending === 1 ? '' : 's'} to ${state?.username || user.username}?`, confirmLabel: 'Discard', danger: true })) return;
     onClose();
   };
 
@@ -378,7 +382,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   useEffect(() => { if (tab === 'tokens') loadTokens(); }, [tab, loadTokens]);
 
   const revokeToken = async (token) => {
-    if (!window.confirm(`Revoke "${token.name}" belonging to ${user.username}? Any script using it loses access immediately.`)) return;
+    if (!await confirm({ message: `Revoke "${token.name}" belonging to ${user.username}? Any script using it loses access immediately.`, confirmLabel: 'Revoke', danger: true })) return;
     setTokenMsg('');
     try {
       await api.delete(`/admin/tokens/${token.id}`);
@@ -411,7 +415,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
   };
 
   const resetTwoFactor = async () => {
-    if (!confirm(`Disable 2FA for "${user.username}"? They will be able to sign in with only their password until they re-enroll.`)) return;
+    if (!await confirm({ message: `Disable 2FA for "${user.username}"? They will be able to sign in with only their password until they re-enroll.`, confirmLabel: 'Disable', danger: true })) return;
     try {
       await api.post(`/admin/users/${user.id}/reset-2fa`);
       setTwoFaMsg('2FA has been disabled for this user.');
@@ -420,7 +424,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
 
   const changeUsername = async (e) => {
     e.preventDefault();
-    if (pending && !confirm(`Changing the username applies immediately and discards ${pending} pending change${pending === 1 ? '' : 's'}. Continue?`)) return;
+    if (pending && !await confirm(`Changing the username applies immediately and discards ${pending} pending change${pending === 1 ? '' : 's'}. Continue?`)) return;
     try {
       await api.put(`/admin/users/${user.id}/username`, { username: newUsername });
       await loadState();

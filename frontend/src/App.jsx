@@ -3,6 +3,7 @@ import {
 } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
 import { ConsoleSessionsProvider } from './contexts/ConsoleSessionsContext.jsx';
+import { FeedbackProvider } from './contexts/FeedbackContext.jsx';
 import Login from './pages/Login.jsx';
 import AcceptInvite from './pages/AcceptInvite.jsx';
 import WelcomePage from './pages/WelcomePage.jsx';
@@ -156,10 +157,17 @@ const router = createBrowserRouter(createRoutesFromElements(
   </Route>,
 ));
 
+function FeedbackBoundary({ children }) {
+  const { user } = useAuth();
+  return <FeedbackProvider resetKey={user?.id ?? user?.username ?? null}>{children}</FeedbackProvider>;
+}
+
 export default function App() {
   return (
     <AuthProvider>
-      <RouterProvider router={router} />
+      <FeedbackBoundary>
+        <RouterProvider router={router} />
+      </FeedbackBoundary>
     </AuthProvider>
   );
 }

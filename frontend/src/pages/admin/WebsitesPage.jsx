@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import Modal from '../../components/Modal.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 const selectCls = inputCls;
@@ -319,18 +320,9 @@ export default function AdminWebsitesPage() {
 
       {/* ── Import modal ── */}
       {importSrv && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={(e) => { if (e.target === e.currentTarget && !importing) setImportSrv(null); }}>
-          <div className="w-full max-w-2xl bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-h-[90vh] flex flex-col">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700 shrink-0">
-              <div>
-                <h2 className="text-white font-semibold">Import sites from {importSrv.name}</h2>
-                <p className="text-xs text-gray-500 mt-0.5">Sites found in the running Caddy config. Imported sites are tracked read-only — Homelabrrr never changes routes it didn't create.</p>
-              </div>
-              <button type="button" onClick={() => setImportSrv(null)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors" aria-label="Close">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-              </button>
-            </div>
-            <div className="p-5 overflow-y-auto space-y-1.5">
+        <Modal title={`Import sites from ${importSrv.name}`} onClose={() => { if (!importing) setImportSrv(null); }} size="lg">
+            <p className="text-xs text-gray-500 px-5 pt-4">Sites found in the running Caddy config. Imported sites are tracked read-only — Homelabrrr never changes routes it didn't create.</p>
+            <div className="p-5 space-y-1.5">
               {importData.loading ? (
                 <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="bg-gray-800 rounded-xl h-11 animate-pulse" />)}</div>
               ) : importData.error ? (
@@ -354,7 +346,7 @@ export default function AdminWebsitesPage() {
                 </label>
               ))}
             </div>
-            <div className="px-5 py-4 border-t border-gray-700 shrink-0 flex items-center justify-between gap-3">
+            <div className="px-5 py-4 border-t border-gray-700 flex items-center justify-between gap-3">
               <p className="text-xs text-gray-500">
                 {importData.loading ? 'Reading Caddy config…' : `${importSel.size} of ${importData.sites.filter((s) => s.importable).length} selectable site(s) chosen${importData.managedCount ? ` · ${importData.managedCount} Homelabrrr route(s) skipped` : ''}`}
               </p>
@@ -365,20 +357,13 @@ export default function AdminWebsitesPage() {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* ── Server form modal ── */}
       {showForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={(e) => { if (e.target === e.currentTarget) setShowForm(false); }}>
-          <form onSubmit={save} className="w-full max-w-lg bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-              <h2 className="text-white font-semibold">{editId ? 'Edit Caddy Server' : 'Add Caddy Server'}</h2>
-              <button type="button" onClick={() => setShowForm(false)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors" aria-label="Close">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-              </button>
-            </div>
+        <Modal title={editId ? 'Edit Caddy Server' : 'Add Caddy Server'} onClose={() => setShowForm(false)}>
+          <form onSubmit={save}>
             <div className="p-5 space-y-4">
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">Name</label>
@@ -524,7 +509,7 @@ export default function AdminWebsitesPage() {
               </div>
             </div>
           </form>
-        </div>
+        </Modal>
       )}
     </div>
   );

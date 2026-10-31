@@ -15,6 +15,7 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
 import { sleepLabel, describeDays } from '../utils/schedule.js';
+import { useConfirm, useToast } from '../contexts/FeedbackContext.jsx';
 
 // ── Formatters ───────────────────────────────────────────────────────────────
 
@@ -135,7 +136,9 @@ export default function VMPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
+  const [pendingAction, setPendingAction] = useState('');
   const [actionError, setActionError] = useState('');
+  const confirm = useConfirm();
 
   const [rrd, setRrd] = useState(null);
   const [rrdLoading, setRrdLoading] = useState(true);
@@ -223,12 +226,20 @@ export default function VMPage() {
   }, [node, vmid, timeframe]);
 
   const action = async (act) => {
-    setActionLoading(true); setActionError('');
+    if (act === 'stop' && !await confirm({
+      title: 'Stop VM',
+      message: `Hard power-off ${vm?.name || `VM ${vmid}`}? Unsaved data in the guest is lost. Use Shutdown for a clean stop.`,
+      confirmLabel: 'Stop',
+      danger: true,
+    })) return;
+    setActionLoading(true); setActionError(''); setPendingAction(act);
     try {
       await api.post(`/vms/${node}/${vmid}/action`, { action: act });
-      setTimeout(loadVm, 1500);
+      // Keep the pending label until the refreshed status lands.
+      setTimeout(() => loadVm().finally(() => setPendingAction('')), 1500);
     } catch (e) {
       setActionError(e.response?.data?.error || 'Action failed');
+      setPendingAction('');
     } finally { setActionLoading(false); }
   };
 
@@ -325,21 +336,21 @@ export default function VMPage() {
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" /></svg>
             } text="Power" />
             {!isRunning && (
-              <ActionBtn color="green" onClick={() => action('start')} disabled={actionLoading} icon={
+              <ActionBtn color="green" onClick={() => action('start')} disabled={actionLoading || !!pendingAction} icon={
                 <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
-              }>Start</ActionBtn>
+              }>{pendingAction === 'start' ? 'Starting…' : 'Start'}</ActionBtn>
             )}
             {isRunning && (
               <>
-                <ActionBtn color="yellow" onClick={() => action('reboot')} disabled={actionLoading} icon={
+                <ActionBtn color="yellow" onClick={() => action('reboot')} disabled={actionLoading || !!pendingAction} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                }>Reboot</ActionBtn>
-                <ActionBtn color="orange" onClick={() => action('shutdown')} disabled={actionLoading} icon={
+                }>{pendingAction === 'reboot' ? 'Rebooting…' : 'Reboot'}</ActionBtn>
+                <ActionBtn color="orange" onClick={() => action('shutdown')} disabled={actionLoading || !!pendingAction} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" /></svg>
-                }>Shutdown</ActionBtn>
-                <ActionBtn color="red" onClick={() => action('stop')} disabled={actionLoading} icon={
+                }>{pendingAction === 'shutdown' ? 'Shutting down…' : 'Shutdown'}</ActionBtn>
+                <ActionBtn color="red" onClick={() => action('stop')} disabled={actionLoading || !!pendingAction} icon={
                   <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1" /></svg>
-                }>Stop</ActionBtn>
+                }>{pendingAction === 'stop' ? 'Stopping…' : 'Stop'}</ActionBtn>
               </>
             )}
 
@@ -405,11 +416,13 @@ export default function VMPage() {
               </>
             )}
 
+            {vm.canDelete !== false && <>
             <Divider />
 
             <ActionBtn color="red" onClick={() => setDeleteModal(true)} icon={
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
             }>Delete</ActionBtn>
+            </>}
           </div>
           {actionError && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5 mt-3">{actionError}</p>}
         </div>
@@ -843,6 +856,7 @@ function CloudInitCredentialsModal({ vm, node, vmid, ciuser, onClose, onApplied 
 // ── Delete VM Modal ─────────────────────────────────────────────────────────
 
 function DeleteVMModal({ vm, node, onClose }) {
+  const toast = useToast();
   const navigate = useNavigate();
   const [confirmText, setConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
@@ -856,7 +870,7 @@ function DeleteVMModal({ vm, node, onClose }) {
       const r = await api.delete(`/vms/${node}/${vm.vmid}`);
       const failed = r.data?.failedBackups?.length || 0;
       if (failed > 0) {
-        alert(`VM deleted, but ${failed} backup(s) could not be removed. Check the Proxmox storage manually.`);
+        toast.error(`VM deleted, but ${failed} backup(s) could not be removed. Check the Proxmox storage manually.`);
       }
       navigate('/dashboard');
     } catch (e) {
@@ -1157,6 +1171,7 @@ function BackupTag({ led, children, title }) {
 }
 
 function BackupsSection({ node, vmid }) {
+  const confirm = useConfirm();
   const [backups, setBackups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [storages, setStorages] = useState([]);
@@ -1289,7 +1304,7 @@ function BackupsSection({ node, vmid }) {
   };
 
   const deleteBackup = async (storage, volid) => {
-    if (!confirm('Delete this backup? This cannot be undone.')) return;
+    if (!await confirm({ message: 'Delete this backup? This cannot be undone.', confirmLabel: 'Delete', danger: true })) return;
     setDeleting(volid); setError('');
     try {
       await api.delete(`/vms/${node}/${vmid}/backups/${storage}/${volid}`);

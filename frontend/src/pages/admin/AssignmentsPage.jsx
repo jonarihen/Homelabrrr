@@ -5,6 +5,7 @@ import MigrateVMModal from '../../components/MigrateVMModal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode, vmIdentityKey } from '../../utils/nodeRef.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
 
 function formatDuration(ms) {
   if (!ms || ms < 0) return '—';
@@ -267,6 +268,8 @@ function TagSyncCard() {
 }
 
 export default function AssignmentsPage() {
+  const confirm = useConfirm();
+  const toast = useToast();
   useDocumentTitle('Assignments');
   const { user } = useAuth();
   const [vms, setVms]       = useState([]);
@@ -329,12 +332,12 @@ export default function AssignmentsPage() {
   }, [load, loadMigrations, user?.isAdmin]);
 
   const unassign = async (assignment) => {
-    if (!confirm('Remove this VM assignment?')) return;
+    if (!await confirm({ message: 'Remove this VM assignment?', confirmLabel: 'Remove', danger: true })) return;
     try {
       await api.delete(`/admin/assignments/${assignment.id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed');
+      toast.error(e.response?.data?.error || 'Failed');
     }
   };
 
@@ -345,7 +348,7 @@ export default function AssignmentsPage() {
       await api.post('/admin/assignments', { userId: user.id, node: routeNode(vm), vmid: vm.vmid });
       await load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to claim VM');
+      toast.error(e.response?.data?.error || 'Failed to claim VM');
     } finally {
       setClaiming(false);
     }
@@ -354,7 +357,7 @@ export default function AssignmentsPage() {
   const claimAllUnassigned = async () => {
     const targets = vms.filter(v => !v.assignment);
     if (targets.length === 0) return;
-    if (!confirm(`Assign all ${targets.length} unassigned VMs to ${user.username}?`)) return;
+    if (!await confirm(`Assign all ${targets.length} unassigned VMs to ${user.username}?`)) return;
     setClaiming(true);
     let ok = 0;
     let failed = 0;
@@ -385,12 +388,12 @@ export default function AssignmentsPage() {
   );
 
   const cleanupSource = async (m) => {
-    if (!confirm(`Remove the leftover source config of ${m.name || `VM ${m.vmid}`} from ${m.sourceHostName || m.sourceNodeName}? Its disks are never touched — the .conf file is archived under /root/ on the node.`)) return;
+    if (!await confirm({ message: `Remove the leftover source config of ${m.name || `VM ${m.vmid}`} from ${m.sourceHostName || m.sourceNodeName}? Its disks are never touched — the .conf file is archived under /root/ on the node.`, confirmLabel: 'Remove', danger: true })) return;
     try {
       await api.post(`/migrate/${m.id}/cleanup-source`);
       loadMigrations();
     } catch (e) {
-      alert(e.response?.data?.error || 'Cleanup failed');
+      toast.error(e.response?.data?.error || 'Cleanup failed');
     }
   };
 

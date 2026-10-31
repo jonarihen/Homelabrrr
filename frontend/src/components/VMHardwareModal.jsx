@@ -1,14 +1,18 @@
 import { useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
+import Modal from './Modal.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
 export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
+  // Display value only; an untouched field submits the exact MB (see saveCpuMem).
+  const initialGb = vm.maxmem ? Math.round(vm.maxmem / 1024 ** 3 * 100) / 100 : 2;
   const vmNode = routeNode(vm);
   const [tab, setTab] = useState('cpu-mem');
   const [cores, setCores] = useState(vm.maxcpu || vm.cpus || 2);
-  const [memory, setMemory] = useState(vm.maxmem ? Math.round(vm.maxmem / 1024 / 1024) : 2048);
+  // Memory is edited in GB to match the deploy forms; the API still takes MB.
+  const [memory, setMemory] = useState(initialGb);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -29,8 +33,15 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
       const currentCores = vm.maxcpu || vm.cpus;
       const currentMemMb = vm.maxmem ? Math.round(vm.maxmem / 1024 / 1024) : null;
 
+      const memoryMb = parseFloat(memory) === initialGb && currentMemMb ? currentMemMb : Math.round(parseFloat(memory) * 1024);
+      if (!(memoryMb > 0)) {
+        setError('Enter a valid memory size');
+        setSaving(false);
+        return;
+      }
+
       if (parseInt(cores) !== currentCores) body.cores = parseInt(cores);
-      if (parseInt(memory) !== currentMemMb) body.memory = parseInt(memory);
+      if (memoryMb !== currentMemMb) body.memory = memoryMb;
 
       if (!body.cores && !body.memory) {
         setError('No changes to save');
@@ -71,20 +82,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div
-        className="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-lg mx-4"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800">
-          <h2 className="text-white font-semibold text-sm">Edit Hardware — {vm.name || `VM ${vm.vmid}`}</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
+    <Modal title={`Edit Hardware — ${vm.name || `VM ${vm.vmid}`}`} onClose={onClose}>
 
         {/* Tabs */}
         <div className="flex gap-1 px-5 pt-4">
@@ -129,17 +127,17 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                   <p className="text-[11px] text-gray-500 mt-1">Topology auto-calculated to match host</p>
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5">Memory (MB)</label>
+                  <label className="block text-xs text-gray-400 mb-1.5">Memory (GB)</label>
                   <input
                     type="number"
-                    min="128"
-                    step="128"
+                    min="0.5"
+                    step="0.5"
                     value={memory}
                     onChange={(e) => setMemory(e.target.value)}
                     className={inputCls}
                   />
                   <p className="text-[11px] text-gray-500 mt-1">
-                    {memory >= 1024 ? `${(memory / 1024).toFixed(1)} GB` : `${memory} MB`}
+                    {Math.round(parseFloat(memory) * 1024) || 0} MB
                   </p>
                 </div>
               </div>
@@ -150,9 +148,9 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                   <button
                     key={mb}
                     type="button"
-                    onClick={() => setMemory(mb)}
+                    onClick={() => setMemory(mb / 1024)}
                     className={`text-[11px] px-2 py-1 rounded-md border transition-colors ${
-                      parseInt(memory) === mb
+                      parseFloat(memory) === mb / 1024
                         ? 'border-blue-500 bg-blue-500/15 text-blue-300'
                         : 'border-gray-700 text-gray-500 hover:text-white hover:border-gray-600'
                     }`}
@@ -220,7 +218,6 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
           {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
           {success && <p className="text-xs text-green-400 bg-green-900/20 rounded-lg p-2.5">{success}</p>}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

@@ -63,8 +63,10 @@ test('keyboard Review and Back refocus a reused role dialog without losing its o
   expect(await editor.evaluate(() => document.activeElement.value)).toBe('Operator');
   await expect(editor.getByRole('textbox').first()).toBeFocused();
   expect(await editor.getAttribute('aria-labelledby')).toBe(titleId);
-  page.once('dialog', (dialog) => dialog.accept());
   await page.keyboard.press('Escape');
+  const discard = page.getByRole('dialog', { name: 'Are you sure?' });
+  await expect(discard.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await discard.getByRole('button', { name: 'Discard' }).click();
   await expect(editor).toHaveCount(0);
   await expect(trigger).toBeFocused();
 });
@@ -155,14 +157,15 @@ test('in-app navigation away from a dirty role editor asks first', async ({ page
   await mockRoles(page);
   await page.route('**/api/admin/audit-log**', (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
   await page.goto('/admin/audit-log');
-  await page.goto('/admin/roles');
+  await page.locator('a[href="/admin/roles"]').first().click(); // client-side, so Back is a router POP
   await page.getByRole('row', { name: /Operator/ }).getByRole('button', { name: 'Manage' }).click();
   await page.getByText('Manage PVE Hosts').click();
 
-  let prompts = 0;
-  page.on('dialog', (d) => { prompts += 1; d.dismiss(); });
   await page.evaluate(() => window.history.back());
-  await expect.poll(() => prompts).toBe(1);
+  const discard = page.getByRole('dialog', { name: 'Are you sure?' });
+  await expect(discard.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await discard.getByRole('button', { name: 'Cancel' }).click();
+  await expect(discard).toHaveCount(0);
   await expect(page).toHaveURL(/\/admin\/roles$/);
   await expect(page.getByRole('button', { name: 'Review 1 change' })).toBeVisible();
 });

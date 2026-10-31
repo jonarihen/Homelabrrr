@@ -4,8 +4,11 @@ import Modal from '../components/Modal.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
 import { isUsableKey, unusableKeyReason, NO_PUBLIC_KEY_LABEL } from '../utils/cloudInitCredentials.js';
+import { useConfirm, useToast } from '../contexts/FeedbackContext.jsx';
 
 export default function SSHKeysPage() {
+  const confirm = useConfirm();
+  const toast = useToast();
   useDocumentTitle('SSH Keys');
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -22,12 +25,12 @@ export default function SSHKeysPage() {
   useEffect(() => { load(); }, []);
 
   const deleteKey = async (id, name) => {
-    if (!confirm(`Delete SSH key "${name}"?`)) return;
+    if (!await confirm({ message: `Delete SSH key "${name}"?`, confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/ssh/keys/${id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      toast.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 

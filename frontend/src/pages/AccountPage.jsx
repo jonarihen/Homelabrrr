@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
 import AccountSecuritySection from '../components/account/AccountSecuritySection.jsx';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 
@@ -485,6 +486,7 @@ function fmtDate(v) {
 }
 
 function ApiTokensSection() {
+  const confirm = useConfirm();
   const { user } = useAuth();
   const [tokens, setTokens] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -539,7 +541,7 @@ function ApiTokensSection() {
   };
 
   const revoke = async (token) => {
-    if (!window.confirm(`Revoke "${token.name}"? Any script using it will immediately lose access.`)) return;
+    if (!await confirm({ message: `Revoke "${token.name}"? Any script using it will immediately lose access.`, confirmLabel: 'Revoke', danger: true })) return;
     setMsg('');
     try {
       await api.delete(`/auth/tokens/${token.id}`);

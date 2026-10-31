@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import changelogMarkdown from '../../../CHANGELOG.md?raw';
 import { parseChangelog } from '../utils/changelog.js';
+import Modal from './Modal.jsx';
 
 function formatDateLabel(date) {
   return new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', {
@@ -24,28 +25,8 @@ export default function ChangelogPanel() {
   if (!latestEntry) return null;
 
   const modal = open ? (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) setOpen(false);
-      }}
-    >
-      <div className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden border border-gray-800 bg-gray-950">
-        <div className="flex items-center justify-between border-b border-gray-800 px-5 py-4">
-          <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-gray-500">Changelog</p>
-            <h2 className="aaris-display mt-1 text-sm text-gray-100">Recent platform changes</h2>
-          </div>
-          <button
-            type="button"
-            onClick={() => setOpen(false)}
-            className="border border-gray-700 bg-gray-900 px-3 py-2 font-mono text-xs uppercase tracking-[0.12em] text-gray-300 transition-colors hover:bg-gray-800 hover:text-white"
-          >
-            Close
-          </button>
-        </div>
-
-        <div className="space-y-5 overflow-y-auto px-5 py-5">
+    <Modal title="Recent platform changes" onClose={() => setOpen(false)} size="xl">
+        <div className="space-y-5 px-5 py-5">
           {entries.map((entry) => (
             <section key={`${entry.date}-${entry.title}`} className="border border-gray-800 bg-gray-900/70 p-4">
               <div className="flex flex-col gap-2 border-b border-gray-800 pb-3 sm:flex-row sm:items-start sm:justify-between">
@@ -80,8 +61,7 @@ export default function ChangelogPanel() {
             </section>
           ))}
         </div>
-      </div>
-    </div>
+    </Modal>
   ) : null;
 
   return (
