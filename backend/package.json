@@ -22,14 +22,14 @@
     "busboy": "^1.6.0",
     "cors": "^2.8.5",
     "drizzle-orm": "^0.45.4",
-    "express": "^5.1.0",
-    "express-rate-limit": "^8.7.0",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
     "express-session": "^1.17.3",
     "otplib": "^13.5.0",
-    "pg": "^8.23.0",
+    "pg": "^8.23.1",
     "qrcode": "^1.5.3",
     "ssh2": "^1.16.0",
-    "uuid": "^14.0.2",
+    "uuid": "^14.0.3",
     "ws": "^8.22.0"
   },
   "overrides": {
@@ -39,7 +39,7 @@
     }
   },
   "devDependencies": {
-    "@types/busboy": "^1.5.4",
+    "@types/busboy": "^1.5.5",
     "@types/express": "^5.0.0",
     "@types/express-session": "^1.18.0",
     "@types/node": "^26.6.5",
@@ -47,11 +47,11 @@
     "@types/qrcode": "^1.5.5",
     "@types/ssh2": "^1.15.6",
     "@types/supertest": "^7.2.1",
-    "@types/ws": "^8.18.0",
+    "@types/ws": "^8.18.2",
     "better-sqlite3": "^13.0.2",
     "drizzle-kit": "^0.31.11",
     "eslint": "^10.13.0",
-    "globals": "^17.12.0",
+    "globals": "^17.13.0",
     "supertest": "^7.3.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.72.1"
