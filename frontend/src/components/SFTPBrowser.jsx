@@ -332,7 +332,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
           type="button"
           onClick={() => fileInputRef.current?.click()}
           disabled={mutationsDisabled || uploading}
-          className="text-xs px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-colors"
+          className="text-xs px-3 py-1 rounded btn-primary"
         >
           {uploading ? 'Uploading...' : 'Upload'}
         </button>
@@ -363,7 +363,7 @@ export default function SFTPBrowser({ token, onReconnect }) {
             type="button"
             onClick={createDir}
             disabled={mutationsDisabled}
-            className="text-xs px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-colors"
+            className="text-xs px-3 py-1 rounded btn-primary"
           >Create</button>
           <button
             type="button"

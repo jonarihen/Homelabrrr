@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { createHash } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import {
-  and, eq, ne, or, isNull, desc, inArray, sql, count, getTableColumns,
+  and, eq, ne, or, isNull, desc, gte, lt, asc, inArray, sql, count, getTableColumns,
 } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import {
@@ -25,6 +25,7 @@ import { sanitizeError } from '../utils/sanitize.ts';
 import { ipv4InCidr } from '../utils/ipPolicy.ts';
 import { sendError } from '../utils/httpError.ts';
 import { logAudit, logAuditTx } from '../utils/audit.ts';
+import { csvLine } from '../utils/csv.ts';
 import { encryptSecret } from '../utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import {
@@ -2297,12 +2298,23 @@ router.put('/pve-hosts/:id', pHosts, async (req, res) => {
   const existing = await getHost(parseInt(req.params.id));
   if (!existing) return res.status(404).json({ error: 'Host not found' });
 
-  // If tokenSecret is empty, keep the existing one
-  const secret = tokenSecret ? encryptSecret(tokenSecret) : existing.token_secret;
-  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
+  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== false : !!verifyTls;
   if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {
     return res.status(400).json({ error: 'Disabling Proxmox TLS verification is blocked unless ALLOW_INSECURE_UPSTREAM_TLS=true is set' });
   }
+  // A blank secret keeps the stored one only while the upstream target is
+  // unchanged; otherwise the stored secret would be sent to the new address.
+  const targetChanged = host !== existing.host || port !== Number(existing.port)
+    || tokenId !== existing.token_id || (!verifyTlsEnabled && existing.verify_tls !== false);
+  if (!tokenSecret && targetChanged) {
+    return res.status(400).json({ error: 'Re-enter the API token secret when changing the address', field: 'tokenSecret' });
+  }
+  const sshHostNew = sshHost === undefined ? undefined : String(sshHost || '').trim();
+  if (sshHostNew && !sshSecret && existing.ssh_secret
+    && (sshHostNew !== (existing.ssh_host || '') || (parseInt(sshPort, 10) || 22) !== Number(existing.ssh_port || 22))) {
+    return res.status(400).json({ error: 'Re-enter the SSH secret when changing the address', field: 'sshSecret' });
+  }
+  const secret = tokenSecret ? encryptSecret(tokenSecret) : existing.token_secret;
   await db.update(pveHosts).set({
     name, host, port, token_id: tokenId, token_secret: secret, verify_tls: verifyTlsEnabled,
   }).where(eq(pveHosts.id, Number(req.params.id)));
@@ -2542,6 +2554,11 @@ router.put('/firewalls/:id', pFirewalls, async (req, res) => {
   const existing = (await db.select().from(firewalls).where(eq(firewalls.id, Number(req.params.id))).limit(1))[0];
   if (!existing) return res.status(404).json({ error: 'Firewall not found' });
 
+  // A blank API key keeps the stored one only while the upstream target is unchanged.
+  const verifyTlsEnabled = verifyTls === undefined ? existing.verify_tls !== false : !!verifyTls;
+  if (!apiKey && (String(host) !== existing.host || Number(port) !== Number(existing.port) || (!verifyTlsEnabled && existing.verify_tls !== false))) {
+    return res.status(400).json({ error: 'Re-enter the API key when changing the address', field: 'apiKey' });
+  }
   const key = apiKey ? encryptSecret(apiKey) : existing.api_key;
   const rangeStart    = req.body.vlanRangeStart ?? existing.vlan_range_start;
   const rangeEnd      = req.body.vlanRangeEnd   ?? existing.vlan_range_end;
@@ -2551,7 +2568,6 @@ router.put('/firewalls/:id', pFirewalls, async (req, res) => {
   const routeGw       = req.body.routeGateway   || existing.route_gateway   || '10.255.254.2';
   const trunkSerial   = req.body.trunkSwitchSerial ?? existing.trunk_switch_serial ?? '';
   const trunkPort     = req.body.trunkSwitchPort   ?? existing.trunk_switch_port   ?? '';
-  const verifyTlsEnabled = verifyTls === undefined ? !!existing.verify_tls : !!verifyTls;
   const extIp       = req.body.externalIp   ?? existing.external_ip   ?? '';
   const wanZone     = req.body.rootWanZone  ?? existing.root_wan_zone ?? 'underlay';
   if (!verifyTlsEnabled && !ALLOW_INSECURE_UPSTREAM_TLS) {
@@ -3842,14 +3858,29 @@ router.get('/vlans/subnet/:tag', pVlans, async (req, res) => {
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────
 
-router.get('/audit-log', pAudit, async (req, res) => {
-  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-  const limit = Math.max(Math.min(parseInt(req.query.limit, 10) || 50, 200), 1);
-  const offset = (page - 1) * limit;
-  const action = typeof req.query.action === 'string' ? req.query.action : '';
-  const target = typeof req.query.target === 'string' ? req.query.target : '';
-  const targetRef = typeof req.query.targetRef === 'string' ? req.query.targetRef : '';
-  const legacy = req.query.legacy === 'true';
+// Shared by the paged list and the CSV export so both always apply the same
+// filters. Dates are calendar days (YYYY-MM-DD, UTC); `to` includes its whole day.
+const AUDIT_DAY = /^\d{4}-\d{2}-\d{2}$/;
+// Date.parse rolls 2026-02-30 into March, so round-trip the day instead.
+const isRealDay = (day) => {
+  const d = new Date(`${day}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === day;
+};
+function auditLogWhere(query) {
+  const str = (v) => (typeof v === 'string' ? v : '');
+  const action = str(query.action);
+  const target = str(query.target);
+  const targetRef = str(query.targetRef);
+  const user = str(query.user).trim();
+  const from = str(query.from);
+  const to = str(query.to);
+  const legacy = query.legacy === 'true';
+  for (const day of [from, to]) {
+    if (day && (!AUDIT_DAY.test(day) || !isRealDay(day))) {
+      return { error: 'Dates must be YYYY-MM-DD' };
+    }
+  }
+  const dayAfter = (day) => new Date(Date.parse(`${day}T00:00:00Z`) + 24 * 60 * 60 * 1000);
 
   // Legacy role events predate stable refs and cannot always be attributed to
   // a specific role after a rename/name reuse. Keep them in a separate, clearly
@@ -3858,13 +3889,51 @@ router.get('/audit-log', pAudit, async (req, res) => {
     action ? eq(auditLog.action, action) : undefined,
     target ? eq(auditLog.target, target) : undefined,
     targetRef ? eq(auditLog.target_ref, targetRef) : undefined,
+    user ? eq(auditLog.username, user) : undefined,
+    from ? gte(auditLog.created_at, new Date(`${from}T00:00:00Z`)) : undefined,
+    to ? lt(auditLog.created_at, dayAfter(to)) : undefined,
     legacy ? and(sql`${auditLog.target_ref} IS NULL`, inArray(auditLog.action, ['admin_create_role', 'admin_update_role', 'admin_delete_role'])) : undefined,
   ].filter(Boolean);
-  const whereClause = filters.length ? and(...filters) : undefined;
+  return { where: filters.length ? and(...filters) : undefined };
+}
+
+router.get('/audit-log', pAudit, async (req, res) => {
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.max(Math.min(parseInt(req.query.limit, 10) || 50, 200), 1);
+  const offset = (page - 1) * limit;
+  const { where: whereClause, error } = auditLogWhere(req.query);
+  if (error) return res.status(400).json({ error });
   const [{ total }] = await db.select({ total: count() }).from(auditLog).where(whereClause);
   const rows = await db.select().from(auditLog).where(whereClause)
     .orderBy(desc(auditLog.created_at)).limit(limit).offset(offset);
   res.json({ rows, total, page, limit });
+});
+
+// Every action actually recorded, for the filter dropdown (the code emits far
+// more action names than any hand-kept list).
+router.get('/audit-log/actions', pAudit, async (_req, res) => {
+  const rows = await db.selectDistinct({ action: auditLog.action }).from(auditLog).orderBy(asc(auditLog.action));
+  res.json(rows.map((r) => r.action));
+});
+
+// shortcut: capped at AUDIT_EXPORT_MAX rows (newest first); page through with from/to if an export is truncated.
+const AUDIT_EXPORT_MAX = 50_000;
+router.get('/audit-log.csv', pAudit, async (req, res) => {
+  const { where, error } = auditLogWhere(req.query);
+  if (error) return res.status(400).json({ error });
+  // One extra row tells a truncated export from one that exactly fills the cap.
+  const fetched = await db.select().from(auditLog).where(where).orderBy(desc(auditLog.created_at)).limit(AUDIT_EXPORT_MAX + 1);
+  const truncated = fetched.length > AUDIT_EXPORT_MAX;
+  const rows = truncated ? fetched.slice(0, AUDIT_EXPORT_MAX) : fetched;
+  const lines = [csvLine(['time', 'user', 'action', 'target', 'detail', 'ip', 'outcome', 'request_id'])];
+  for (const r of rows) lines.push(csvLine([r.created_at, r.username, r.action, r.target, r.detail, r.ip, r.outcome, r.request_id]));
+  await logAudit(req, 'admin_export_audit_log', '', `${rows.length} row(s)${truncated ? ' (truncated)' : ''}`);
+  res.set({
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': 'attachment; filename="audit-log.csv"',
+    'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff',
+  }).send(`${lines.join('\r\n')}\r\n`);
 });
 
 export default router;

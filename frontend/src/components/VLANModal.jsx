@@ -136,7 +136,7 @@ export default function VLANModal({ vm, onClose, onSaved }) {
             <button
               onClick={() => setStep('confirm')}
               disabled={vlans.length === 0 || (!isAdmin && selectedTag === '')}
-              className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+              className="w-full btn-primary disabled:opacity-40 rounded-lg py-2.5 text-sm font-medium"
             >
               Continue
             </button>
@@ -181,7 +181,7 @@ export default function VLANModal({ vm, onClose, onSaved }) {
               <button
                 onClick={apply}
                 disabled={saving}
-                className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+                className="flex-1 btn-primary rounded-lg py-2.5 text-sm font-medium"
               >
                 {saving ? 'Applying...' : reboot ? 'Apply & Reboot' : 'Apply'}
               </button>
