@@ -18,14 +18,18 @@ export function computeTileLayout(sessions, mode, viewport) {
 
   const areaX = sidebarOffset + margin;
   const areaY = topOffset + margin;
-  const areaW = Math.max(360, viewport.width - sidebarOffset - margin * 2);
-  const areaH = Math.max(300, viewport.height - topOffset - bottomReserve - margin);
+  // The tile area is the real space the viewport leaves for windows. The old
+  // 360x300 floor made the area wider than narrow viewports, and fitting each
+  // resulting rectangle afterwards only moved the last column back on top of
+  // the first — so compute from the actual available width/height instead.
+  const areaW = Math.max(0, viewport.width - sidebarOffset - margin * 2);
+  const areaH = Math.max(0, viewport.height - topOffset - bottomReserve - margin);
 
   // Cells never shrink below the resizable-window minimum, so a row/column
   // count that assumed smaller cells would push later windows past the area.
   // Cap the count by how many minimum cells fit and wrap the overflow onto
   // the next row/column instead.
-  const minCellW = 320;
+  const minCellW = Math.min(320, areaW);
   const minCellH = 240;
   const maxCols = Math.max(1, Math.floor((areaW + gap) / (minCellW + gap)));
   const maxRows = Math.max(1, Math.floor((areaH + gap) / (minCellH + gap)));

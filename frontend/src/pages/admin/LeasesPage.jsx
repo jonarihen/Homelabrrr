@@ -5,7 +5,6 @@ import LeaseBadge from '../../components/LeaseBadge.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { routeNode } from '../../utils/nodeRef.js';
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 const btnPrimary = 'font-mono text-xs font-semibold uppercase tracking-[0.12em] text-gray-950 bg-orange-600 hover:bg-orange-500 border border-orange-600 px-4 py-2 transition-colors disabled:opacity-50';
 const btnGhost = 'font-mono text-xs uppercase tracking-[0.12em] text-gray-400 hover:text-gray-100 bg-transparent hover:bg-gray-800 border border-gray-700 px-3 py-1.5 transition-colors disabled:opacity-50';
 
@@ -136,7 +135,7 @@ export default function LeasesPage() {
           <input
             type="number" min="0" value={settingsForm.defaultDays}
             onChange={(e) => setSettingsForm(f => ({ ...f, defaultDays: e.target.value }))}
-            className={`${inputCls} w-40`}
+            className={`input w-40`}
           />
           <p className="text-[10px] text-gray-600 mt-1">0 = unlimited (no expiry)</p>
         </div>
@@ -145,7 +144,7 @@ export default function LeasesPage() {
           <input
             type="number" min="0" value={settingsForm.graceDays}
             onChange={(e) => setSettingsForm(f => ({ ...f, graceDays: e.target.value }))}
-            className={`${inputCls} w-40`}
+            className={`input w-40`}
           />
           <p className="text-[10px] text-gray-600 mt-1">After expiry, before reclaimable</p>
         </div>
@@ -272,7 +271,7 @@ function AdjustLeaseModal({ row, onClose, onSaved, onError }) {
           <label className="block font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Set new duration (days)</label>
           <input
             type="number" min="0" value={leaseDays} placeholder={`current: ${row.leaseDays || 'unlimited'}`}
-            onChange={(e) => setLeaseDays(e.target.value)} className={inputCls}
+            onChange={(e) => setLeaseDays(e.target.value)} className="input"
           />
           <p className="text-[10px] text-gray-600 mt-1">Resets the clock from now. 0 = unlimited. Leave blank to keep.</p>
         </div>
@@ -281,7 +280,7 @@ function AdjustLeaseModal({ row, onClose, onSaved, onError }) {
           <label className="block font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Extend by (days)</label>
           <input
             type="number" value={extendDays} placeholder="e.g. 30"
-            onChange={(e) => setExtendDays(e.target.value)} className={inputCls}
+            onChange={(e) => setExtendDays(e.target.value)} className="input"
           />
           <p className="text-[10px] text-gray-600 mt-1">Adds days to the current expiry. Leave blank to skip.</p>
         </div>
