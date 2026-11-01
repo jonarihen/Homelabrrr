@@ -23,6 +23,8 @@ services:
   backend:
     build: ./backend
     container_name: proxmox-frontend-backend
+    # Reaps zombies (ssh2/puttygen children) and forwards SIGTERM to node.
+    init: true
     restart: unless-stopped
     depends_on:
       postgres:

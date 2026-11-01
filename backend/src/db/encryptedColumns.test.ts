@@ -40,3 +40,15 @@ test('power and energy credentials take part in secret rotation', async () => {
   assert.equal(decryptSecret(meter.refresh_token!), 'plain-refresh-token');
   assert.equal(decryptSecret(paypal.client_secret!), 'plain-client-secret');
 });
+
+test('startup check flags a secret encrypted under a different key with the same key id', async () => {
+  const { countUndecryptableSecrets } = await import('./init.ts');
+  const { encryptSecret } = await import('../utils/secrets.ts');
+  assert.equal(await countUndecryptableSecrets(), 0);
+  // Right envelope and current key id, but ciphertext made with another key.
+  const good = encryptSecret('x');
+  const [iv, , ct] = good.split('.');
+  const forged = `${iv}.${Buffer.alloc(16, 7).toString('base64url')}.${ct}`;
+  await testDb.db.update(paypalConfigs).set({ client_secret: forged }).where(eq(paypalConfigs.environment, 'sandbox'));
+  assert.equal(await countUndecryptableSecrets(), 1);
+});

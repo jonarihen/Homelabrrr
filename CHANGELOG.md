@@ -5,6 +5,17 @@
 - Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.
 - Small uppercase labels, table headers and metadata are now at least 11px (the sidebar section labels were 9px). Compact status chips and badges stay at 10px.
 
+## 2026-10-28 — Louder startup warnings for key and bootstrap mistakes
+
+- The backend now logs `secrets_undecryptable` at startup when stored secrets can't be decrypted with the configured `SECRET_ENCRYPTION_KEY`, instead of failing later on upstream calls and 2FA logins.
+- A warning is logged when `INITIAL_ADMIN_PASSWORD` is still set after the first admin exists.
+- The backend container runs with an init process, so child processes are reaped and shutdown signals are forwarded.
+- The README backup section now says the encryption keyring must be kept alongside database backups.
+## 2026-10-28 — Upstream calls can no longer hang or balloon
+
+- Proxmox and FortiGate API calls now have a 60-second total deadline and a 32 MB response limit, on top of the 15-second idle timeout. A slow-drip or oversized response fails the request instead of tying it up indefinitely.
+- Waiting for a Proxmox task (clones, migrations) still rides out short outages, but gives up with the real error after 5 minutes of failed status checks instead of silently retrying for up to 4 hours.
+- VMID allocation and node lookups query all Proxmox hosts in parallel, so one dead host costs one timeout instead of one per host. Unreachable hosts are logged as `pve_host_unreachable` with the host name, so "node not found" has a visible cause.
 ## 2026-10-28 — Phone and tablet layout
 
 - Below laptop width the sidebar moves into a slide-in drawer opened from a **menu** button in a new top bar. It traps focus, closes on Escape, a tap outside or navigation, and returns focus to the button. Desktop layout is unchanged.
