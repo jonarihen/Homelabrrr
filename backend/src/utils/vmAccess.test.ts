@@ -30,6 +30,7 @@ const {
 await testDb.db.insert(users).values([
   { id: 10, username: 'assignee', password: 'x' },
   { id: 11, username: 'db-admin', password: 'x', is_admin: true },
+  { id: 12, username: 'fleet-viewer', password: 'x', see_all_vms: true },
 ]);
 await testDb.db.insert(vmAssignments).values([
   { user_id: 10, node: 'pve1', vmid: 100 }, // legacy bare node name
@@ -69,6 +70,11 @@ test('userCanAccessVm: admin bypass, assignment grant, default deny', async () =
   assert.equal(await userCanAccessVm(999, 'pve1', 100, true), true);
   assert.equal(await userCanAccessVm(10, 'pve1', 100, false), true);
   assert.equal(await userCanAccessVm(10, 'pve1', 999, false), false);
+});
+
+test('see_all_vms without an assignment can access but does not own', async () => {
+  assert.equal(await userCanAccessVm(12, 'pve1', 100, false), true);
+  assert.equal(await userOwnsVm(12, 'pve1', 100), false);
 });
 
 test('vmOpContext short-circuits admins and resolves facts for the rest', async () => {
