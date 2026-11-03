@@ -6,6 +6,10 @@
 - If a fetch fails, the affected section shows a dash and a clear "unavailable" message instead of "Unknown" everywhere, and a late response from an older month can no longer overwrite a newer one.
 - The page now matches the rest of the portal: standard panel padding and borders, even spacing between sections, a smaller page heading, consistent button styles for the month picker, range toggle and CSV download, and a two-column-then-four-column tile grid that no longer cramps values on laptop widths.
 
+## 2026-10-28 — Concurrent deploys can't overbook a node
+
+- A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
+- When a deploy is refused for space, the message says how much is held by other deploys still in progress.
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 
 - Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
