@@ -6,6 +6,10 @@
 - Bill corrections (record payment, revise, void) open in their own row under the bill instead of squeezed into the actions cell.
 - Values no longer read "Unknown" or "Unavailable" while data is still loading: the page now shows placeholders until the answer arrives, and "Unknown" only appears when a value is genuinely missing. Success and error messages are now styled differently.
 
+## 2026-10-28 — Concurrent deploys can't overbook a node
+
+- A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
+- When a deploy is refused for space, the message says how much is held by other deploys still in progress.
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 
 - Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
