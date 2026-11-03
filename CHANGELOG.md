@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-03 — Energy & Budget page: loading states and tidier layout
+
+- Figures no longer show "Unknown" while the page is still loading. Each tile, row and chart shows a pulsing placeholder until its data arrives, and "Unknown" appears only when a finished fetch genuinely has no value. Switching month or history range shows placeholders instead of the previous selection's numbers; background refreshes stay silent.
+- If a fetch fails, the affected section shows a dash and a clear "unavailable" message instead of "Unknown" everywhere, and a late response from an older month can no longer overwrite a newer one.
+- The page now matches the rest of the portal: standard panel padding and borders, even spacing between sections, a smaller page heading, consistent button styles for the month picker, range toggle and CSV download, and a two-column-then-four-column tile grid that no longer cramps values on laptop widths.
+
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 
 - Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
