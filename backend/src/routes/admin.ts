@@ -2714,7 +2714,7 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         results.push({ firewall: fw.name, status: 'ok', ...result });
       } catch (err) {
         console.error(`[sync] Error provisioning VLAN ${vlan.tag} on ${fw.name}:`, err.message);
-        results.push({ firewall: fw.name, status: 'error', error: sanitizeError(err.message) });
+        results.push({ firewall: fw.name, status: 'error', error: err.message });
       }
     }
     res.json(results);
