@@ -14,7 +14,8 @@ import { and, count, eq, sql } from 'drizzle-orm';
 import { db, pool, type DbOrTx } from './db/client.ts';
 import { vmSchedules } from './db/schema/index.ts';
 import { getAllVMs, scheduledStopVM, scheduledStartVM } from './proxmox.ts';
-import { logSystemAudit } from './utils/audit.ts';
+import { logSystemAudit, logAuditEntry } from './utils/audit.ts';
+import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.ts';
 import { decodeNodeRef, nodeLookupCandidates } from './utils/nodeRef.ts';
 import { withMigrationSafeSchedule } from './utils/vmMigrationLock.ts';
 import {
@@ -239,12 +240,55 @@ export async function runScheduleTick() {
   }
 }
 
+// ─── Background PVE tag auto-sync ticker ──────────────────────────────────────
+//
+// Periodically walks the fleet and corrects owner/VLAN tag drift (VMs re-tagged
+// in the raw PVE UI, renamed VLANs, migrations/restores, lost assignment writes).
+// The tick is coarse (every few minutes); each tick checks whether a full run is
+// actually due based on the persisted interval and last-run time, so the cadence
+// survives restarts and honours the DB-backed pause switch. A run is skipped when
+// paused or when one is already in flight (in-memory single-run lock lives in
+// utils/vmTags — the backend is single-process). Shares the exact fleet loop
+// used by POST /admin/sync-vm-tags via runFullTagSync().
+const TAG_SYNC_TICK_MS = 5 * 60 * 1000;   // re-evaluate whether a run is due
+const tagSyncSchedulerStart = Date.now();
+let tagSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+async function tagSyncTick() {
+  try {
+    if (isTagSyncRunning()) return;
+    const settings = await getTagSyncSettings();
+    if (settings.paused) return;
+
+    // Anchor the cadence to the last completed run (persisted) so restarts don't
+    // reset the clock; fall back to process start when nothing has run yet.
+    const lastRunAt = settings.lastRun?.time ? Date.parse(settings.lastRun.time) : NaN;
+    const anchor = Number.isFinite(lastRunAt) ? lastRunAt : tagSyncSchedulerStart;
+    const dueAt = anchor + settings.intervalHours * 60 * 60 * 1000;
+    if (Date.now() < dueAt) return;
+
+    const summary = await runFullTagSync({ trigger: 'scheduled' });
+    await logAuditEntry({
+      username: 'system',
+      action: 'vm_tags_sync_scheduled',
+      target: 'all',
+      detail: `${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed`,
+    });
+    console.log(`[tag-sync] scheduled run: ${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed (${summary.durationMs}ms)`);
+  } catch (err: any) {
+    if (err.code === 'TAG_SYNC_BUSY') return;   // manual run raced us — fine
+    console.warn(`[tag-sync] scheduled run failed: ${err.message}`);
+  }
+}
+
 export function startScheduler() {
   stopping = false;
   firstRunTimer = setTimeout(() => {
     runScheduleTick();
     intervalTimer = setInterval(runScheduleTick, TICK_MS);
   }, FIRST_RUN_DELAY_MS);
+  tagSyncTimer = setInterval(() => { tagSyncTick(); }, TAG_SYNC_TICK_MS);
+  tagSyncTimer.unref?.();   // don't keep the process alive just for the ticker
   console.log('[scheduler] VM power schedule loop armed');
   return stopScheduler;
 }
@@ -253,6 +297,8 @@ export function stopScheduler() {
   stopping = true;
   if (firstRunTimer) clearTimeout(firstRunTimer);
   if (intervalTimer) clearInterval(intervalTimer);
+  if (tagSyncTimer) clearInterval(tagSyncTimer);
+  tagSyncTimer = null;
   firstRunTimer = null;
   intervalTimer = null;
 }
