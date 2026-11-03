@@ -168,6 +168,7 @@ beforeEach(async t => {
             data = liveVms;
           }
           else if (path === '/api2/json/cluster/nextid') data = 100;
+          else if (path === '/api2/json/storage') data = [];
           else if (path === '/api2/json/nodes/pve/status') {
             data = { cpuinfo: { sockets: 1, cores: 8 }, memory: { total: 64 * 1024 ** 3 } };
           } else if (path === '/api2/json/nodes/pve/storage/local-lvm/status') data = { avail: 1024 ** 4 };
