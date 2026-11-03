@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-03 — 2FA backup codes at enrollment, lockout covers recovery codes
+
+- Enabling 2FA now shows 10 single-use backup codes once. The 2FA login step reminds you that a backup code (or an admin) can get you back in.
+- Wrong backup codes now count against the same 2FA lockout as wrong authenticator codes.
+- An admin 2FA reset also deletes the user's backup codes.
+
 ## 2026-10-28 — Concurrent deploys can't overbook a node
 
 - A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.

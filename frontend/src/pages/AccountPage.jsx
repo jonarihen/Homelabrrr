@@ -308,6 +308,7 @@ function ConnectionSection() {
 
 function TwoFactorSection({ user, setUser }) {
   const [step, setStep] = useState('idle');
+  const [backupCodes, setBackupCodes] = useState([]);
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [secret, setSecret] = useState('');
   const [code, setCode] = useState('');
@@ -330,10 +331,11 @@ function TwoFactorSection({ user, setUser }) {
   const enable = async (e) => {
     e.preventDefault(); setError(''); setSaving(true);
     try {
-      await api.post('/auth/2fa/enable', { code });
+      const { data } = await api.post('/auth/2fa/enable', { code });
+      setBackupCodes(data.recoveryCodes || []);
       setUser(u => ({ ...u, twoFactorEnabled: true, twoFactorSetupRequired: false }));
       setStep('idle'); setCode('');
-      setSuccess('Two-factor authentication enabled.');
+      setSuccess('Two-factor authentication enabled. Save your backup codes now — they will not be shown again.');
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to enable 2FA');
     } finally { setSaving(false); }
@@ -404,6 +406,14 @@ function TwoFactorSection({ user, setUser }) {
             {saving ? 'Setting up...' : 'Enable 2FA'}
           </button>
         )
+      )}
+
+      {backupCodes.length > 0 && (
+        <div className="border border-yellow-800/40 bg-yellow-900/10 rounded-xl p-3 space-y-2">
+          <p className="text-xs text-yellow-400">Backup codes (each works once if you lose your device):</p>
+          <p className="text-xs font-mono text-gray-200 select-all whitespace-pre-line">{backupCodes.join('\n')}</p>
+          <button onClick={() => setBackupCodes([])} className="text-xs text-gray-400 hover:text-gray-200">I've saved them</button>
+        </div>
       )}
 
       {step === 'setup' && (

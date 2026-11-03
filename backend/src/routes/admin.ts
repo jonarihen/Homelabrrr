@@ -11,7 +11,7 @@ import {
   vlans, userVlans, firewalls, pveHosts,
   firewallVlanSync, managedVips, publicIps, publicIpPools, publicIpAssignments,
   caddyServers, caddySites, notificationWebhooks, vmTemplates, cloudImages,
-  vmLeases, auditLog, settings, loginAttempts,
+  vmLeases, auditLog, settings, loginAttempts, recoveryCodes,
 } from '../db/schema/index.ts';
 import { isUniqueViolation, isForeignKeyViolation } from '../db/errors.ts';
 import { setSetting } from '../db/settings.ts';
@@ -410,6 +410,7 @@ router.post('/users/:id/reset-2fa', requireAdmin, async (req, res) => {
   // Credential reset ends the target's sessions (the admin's own is kept if self-targeted).
   const { version, revoked } = await changeCredentials(db, user.id, { totp_enabled: false, totp_secret: null }, req.sessionID);
   if (user.id === req.session.userId) req.session.credentialsVersion = version;
+  await db.delete(recoveryCodes).where(eq(recoveryCodes.user_id, user.id));
   await logAudit(req, 'admin_reset_2fa', req.params.id, `revoked_sessions=${revoked}`);
   res.json({ ok: true });
 });
