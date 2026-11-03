@@ -4,6 +4,15 @@
 
 - Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.
 - Small uppercase labels, table headers and metadata are now at least 11px (the sidebar section labels were 9px). Compact status chips and badges stay at 10px.
+## 2026-11-03 — Time-of-day grid tariffs from Datahub
+
+- Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
+- New `npm run import-datahub-tariffs` reads published charges from Energi Data Service (DatahubPricelist) and stores them as contiguous Europe/Copenhagen hour blocks on a contract, with DST and season changes handled and gaps rejected. Dry run by default; `--apply` writes. Transmission + system tariff and elafgift stay separate components, rates are stored excluding VAT (applied once by the contract), and fixed subscriptions stay in the contract's monthly fee.
+- The contract tariff list shows the most recent 500 intervals, so current and future rates stay visible.
+
+## 2026-11-03 — Energy data forms ask for identity confirmation
+
+- Saving an ElOverblik token, selecting a meter, disconnecting, and adding electricity contracts or tariffs now open the password + authenticator dialog when a recent confirmation is required, and retry the save afterwards. Before, they only showed "Please confirm your password and second factor before continuing" with no way to confirm.
 
 ## 2026-10-28 — Louder startup warnings for key and bootstrap mistakes
 

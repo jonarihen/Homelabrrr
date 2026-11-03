@@ -14,6 +14,7 @@
     "test": "node --test",
     "restore-backup": "node src/scripts/restoreBackup.ts",
     "import-sqlite": "node src/scripts/importSqlite.ts",
+    "import-datahub-tariffs": "node src/scripts/importDatahubTariffs.ts",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
