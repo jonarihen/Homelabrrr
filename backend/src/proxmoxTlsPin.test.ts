@@ -116,6 +116,15 @@ test('the noVNC websocket path honours the pin', async () => {
   assert.match(err.message, /certificate changed/);
 });
 
+test('a verified pinned socket keeps no handshake timeout listener', async () => {
+  // A leftover listener would win a later idle timeout and replace makeRequest's
+  // "Proxmox request timeout" with the handshake error.
+  const agent = agentForHost(host()) as unknown as { createConnection: (o: object, cb: (err: Error | null, s: tls.TLSSocket) => void) => void };
+  const socket = await new Promise<tls.TLSSocket>((resolve, reject) => agent.createConnection({ host: '127.0.0.1', port }, (err, s) => (err ? reject(err) : resolve(s))));
+  assert.equal(socket.listenerCount('timeout'), 0);
+  socket.destroy();
+});
+
 test('remote-migrate fingerprint read checks the pin', async () => {
   assert.equal(await getHostCertFingerprint(host()), pinA);
   await assert.rejects(getHostCertFingerprint(host({ tls_fingerprint: pinB })), { code: 'PVE_TLS_PIN_MISMATCH' });

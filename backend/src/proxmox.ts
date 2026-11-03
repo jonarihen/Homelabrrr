@@ -67,7 +67,9 @@ export function agentForHost(host) {
     let done = false;
     const finish = (err) => { if (!done) { done = true; callback(err, socket); } };
     const socket = tls.connect({ ...options, servername: sniForHost(host), rejectUnauthorized: false });
-    socket.setTimeout(15000, () => socket.destroy(new Error('Proxmox TLS handshake timeout')));
+    // "request timeout" wording so upstreamError/readiness classify it like any other PVE timeout.
+    const onHandshakeTimeout = () => socket.destroy(new Error('Proxmox request timeout (TLS handshake)'));
+    socket.setTimeout(15000, onHandshakeTimeout);
     socket.once('error', finish);
     socket.once('secureConnect', () => {
       const presented = socket.getPeerCertificate()?.fingerprint256;
@@ -76,7 +78,9 @@ export function agentForHost(host) {
         finish(pinMismatchError(host, presented, pin));
         return;
       }
-      socket.setTimeout(0);
+      // Drop the handshake listener too, or a later idle timeout on this
+      // socket would fire it ahead of makeRequest's own request timeout.
+      socket.setTimeout(0, onHandshakeTimeout);
       // The handshake is already over when the request gets this socket, and
       // `authorized` is false for a pinned self-signed cert: tell makeRequest.
       (socket as unknown as { pinVerified: boolean }).pinVerified = true;

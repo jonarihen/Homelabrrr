@@ -256,7 +256,7 @@ export default function PVEHostsPage() {
                       <div>
                         <h3 className="text-white font-semibold">{h.name}</h3>
                         <p className="text-xs text-gray-500 font-mono">{h.host}:{h.port}</p>
-                        <p className="text-[10px] text-gray-600 mt-0.5">{h.tls_fingerprint ? 'TLS certificate pinned' : h.verify_tls ? 'TLS verification on' : 'TLS verification off'}</p>
+                        <p className="text-[10px] text-gray-600 mt-0.5">{h.tls_fingerprint ? 'TLS certificate pinned' : h.verify_tls !== false ? 'TLS verification on' : 'TLS verification off'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
