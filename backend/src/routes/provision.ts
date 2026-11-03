@@ -22,7 +22,7 @@ import { imageDeployTargets, defaultStorageForHost } from '../utils/cloudImageTa
 import { checkVlanAssignment } from '../utils/vlanAccess.ts';
 import { assertStorageExposed, filterExposedStorages } from '../utils/storageVisibility.ts';
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
-import { assertNodeCapacity } from '../utils/capacity.ts';
+import { assertNodeCapacity, releaseWhenTaskStops } from '../utils/capacity.ts';
 import { assertNodeAvailable } from '../utils/nodeMaintenance.ts';
 import { assertUserQuota, cloneDiskAllocation, getUserQuota, getUserResourceUsage } from '../utils/quota.ts';
 import { syncVmTagsSafe } from '../utils/vmTags.ts';
@@ -359,6 +359,8 @@ router.post('/clone', async (req: any, res: any) => {
   let capacityNote = '';
   let cloneDiskGb: number;
   let resizeDisk: string | null;
+  // Held from the capacity check until the deploy job ends (#284).
+  let releaseCapacity = () => {};
   try {
     const allocation = cloneDiskAllocation(await getVMConfigCurrent(template.node, template.vmid), Number(finalDisk));
     cloneDiskGb = allocation.diskGb;
@@ -367,8 +369,10 @@ router.post('/clone', async (req: any, res: any) => {
       memoryMb: finalMem,
       diskGb: cloneDiskGb,
       storage: storage || template.default_storage,
+      reserve: true,
     });
-    capacityNote = capacity?.memoryWarning || '';
+    capacityNote = capacity.memoryWarning;
+    releaseCapacity = capacity.release;
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
       addCores: cpuLayout.totalVcpus,
@@ -376,6 +380,7 @@ router.post('/clone', async (req: any, res: any) => {
       addDiskGb: cloneDiskGb,
     });
   } catch (err) {
+    releaseCapacity();
     if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
   }
@@ -423,7 +428,8 @@ router.post('/clone', async (req: any, res: any) => {
       description,
       vlanTag: vlanTag ? parseInt(vlanTag) : null,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-      .catch((err: any) => recordBackgroundProvisionFailure(provisionId, newVmid, 'provision_clone_background_failed', err));
+      .catch((err: any) => recordBackgroundProvisionFailure(provisionId, newVmid, 'provision_clone_background_failed', err))
+      .finally(() => releaseCapacityAfter(template.node, upid, releaseCapacity));
 
     await logAudit(req, 'vm_clone', `${template.node}/${newVmid}`, `template:${template.name}`);
     res.json({
@@ -434,6 +440,7 @@ router.post('/clone', async (req: any, res: any) => {
       upid,
     });
   } catch (err: any) {
+    releaseCapacity();
     // An unreachable host makes VMID allocation unsafe rather than broken —
     // report it as "try again later" instead of a flat 500.
     if (!hasHttpStatus(err) && err.message?.includes('globally unique VMID')) tagStatus(err, 503);
@@ -513,6 +520,7 @@ async function autoPlaceImage(image: any, { memoryMb, diskGb }: any) {
         skip(cand.node, 'no VM storage pool is exposed to you on this host');
         continue;
       }
+      // shortcut: this check does not reserve, so two concurrent auto-placed deploys can pick the same host and the loser fails at the reserving check in /from-image instead of moving to the next candidate; reserve here (and release on the early returns) if that shows up in practice.
       await assertNodeCapacity(cand.node, { memoryMb, diskGb, storage: pick.storage });
       return { image: { ...image, node: cand.node, volid: cand.volid }, storage: pick.storage };
     } catch (err) {
@@ -670,9 +678,12 @@ router.post('/from-image', async (req: any, res: any) => {
   }
 
   let capacityNote = '';
+  // Held from the capacity check until the deploy job ends (#284).
+  let releaseCapacity = () => {};
   try {
-    const capacity = await assertNodeCapacity(targetImage.node, { memoryMb, diskGb: imageDiskGb, storage: targetStorage });
-    capacityNote = capacity?.memoryWarning || '';
+    const capacity = await assertNodeCapacity(targetImage.node, { memoryMb, diskGb: imageDiskGb, storage: targetStorage, reserve: true });
+    capacityNote = capacity.memoryWarning;
+    releaseCapacity = capacity.release;
     // Per-user resource quota (skips admins / users without quotas)
     await assertUserQuota(req.session.userId, {
       addCores: cpuLayout.sockets * cpuLayout.cores,
@@ -680,6 +691,7 @@ router.post('/from-image', async (req: any, res: any) => {
       addDiskGb: imageDiskGb,
     });
   } catch (err) {
+    releaseCapacity();
     if (hasHttpStatus(err)) return sendError(res, err);
     throw err;
   }
@@ -730,7 +742,8 @@ router.post('/from-image', async (req: any, res: any) => {
       ...cloudInitOpts,
       start: startNow,
     }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-      .catch((err: any) => recordBackgroundProvisionFailure(provisionId, vmid, 'provision_image_background_failed', err));
+      .catch((err: any) => recordBackgroundProvisionFailure(provisionId, vmid, 'provision_image_background_failed', err))
+      .finally(() => releaseCapacityAfter(targetImage.node, upid, releaseCapacity));
 
     await logAudit(req, 'vm_from_image', `${targetImage.node}/${vmid}`, `image:${targetImage.name}${user.is_admin ? '' : ' (auto-placed)'}`);
     res.json({
@@ -741,6 +754,7 @@ router.post('/from-image', async (req: any, res: any) => {
       upid,
     });
   } catch (err: any) {
+    releaseCapacity();
     // An unreachable host makes VMID allocation unsafe rather than broken —
     // report it as "try again later" instead of a flat 500.
     if (!hasHttpStatus(err) && err.message?.includes('globally unique VMID')) tagStatus(err, 503);
@@ -825,6 +839,8 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
     throw err;
   }
 
+  // Held from the capacity check until the deploy job ends (#284).
+  let releaseCapacity = () => {};
   try {
     // Refuse deployment to a node the admin has drained for maintenance
     await assertNodeAvailable(node);
@@ -837,8 +853,10 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
       memoryMb: Math.round(parseFloat(memoryGb) * 1024),
       diskGb,
       storage,
+      reserve: true,
     });
-    const capacityNote = capacity?.memoryWarning || '';
+    releaseCapacity = capacity.release;
+    const capacityNote = capacity.memoryWarning;
     // Per-user resource quota (skips admins / users without quotas). Now that
     // the route is open to can_create_vms holders, this rail actually bounds
     // non-admin from-scratch builds.
@@ -898,8 +916,11 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
           await db.update(provisionedVms).set({ status: 'ready', status_detail: '' }).where(eq(provisionedVms.id, provisionId));
           await notifyDeployment(provisionId);
         }), { kind: 'provision', id: provisionId, requestId: req.requestId })
-        .catch((err: any) => recordBackgroundProvisionFailure(provisionId, vmid, 'provision_create_background_failed', err));
+        .catch((err: any) => recordBackgroundProvisionFailure(provisionId, vmid, 'provision_create_background_failed', err))
+        .finally(() => releaseCapacityAfter(node, upid, releaseCapacity));
     } else {
+      // No task to wait on: the VM already exists in Proxmox.
+      releaseCapacity();
       await setStep(provisionId, 'create', 'done');
       await recordProvisionOwnership(provisionId);
       await setStep(provisionId, 'tags', 'active');
@@ -914,6 +935,7 @@ router.post('/create', requirePermission('can_create_vms'), async (req: any, res
     await logAudit(req, 'vm_create', `${node}/${vmid}`, vmName);
     res.json({ id: provisionId, vmid, ...serializeNodeIdentity(node), status: 'creating', upid });
   } catch (err: any) {
+    releaseCapacity();
     // An unreachable host makes VMID allocation unsafe rather than broken —
     // report it as "try again later" instead of a flat 500.
     if (!hasHttpStatus(err) && err.message?.includes('globally unique VMID')) tagStatus(err, 503);
@@ -1100,6 +1122,16 @@ router.delete('/admin/templates/:id', requirePermission('can_manage_templates'),
 // it writes a terminal status + detail so the error is visible; on success it
 // leaves the status untouched so the caller can finalize after its own
 // post-task work (configure, resize, tags, start).
+// Tasks whose monitoring gave up while Proxmox may still be running them.
+const timedOutTasks = new Set<string>();
+
+// Release a deploy's capacity reservation; if its task outlived the polling,
+// hold it until Proxmox reports the task stopped (or the reservation TTL).
+function releaseCapacityAfter(node: string, upid: string | undefined, release: () => void) {
+  if (!upid || !timedOutTasks.delete(upid)) return release();
+  releaseWhenTaskStops(release, async () => (await getTaskStatus(node, upid)).status === 'stopped');
+}
+
 async function pollTaskCompletion(provisionId: number, node: string, upid: string, { maxAttempts = 120 } = {}) {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, 5000));
@@ -1115,6 +1147,7 @@ async function pollTaskCompletion(provisionId: number, node: string, upid: strin
       }
     } catch { /* keep polling */ }
   }
+  timedOutTasks.add(upid);
   await db.update(provisionedVms)
     .set({ status: 'needs_review', status_detail: 'Monitoring timed out — check the saved Proxmox task in Admin Operations before releasing or recovering the reservation' })
     .where(eq(provisionedVms.id, provisionId));
