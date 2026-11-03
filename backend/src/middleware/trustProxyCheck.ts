@@ -18,12 +18,29 @@ export function inspectProxyChain(req) {
   });
 }
 
+let warnedInsecure = false;
+
+/**
+ * Secure cookies are never set on a request Express sees as plain HTTP, so a
+ * proxy that drops X-Forwarded-Proto causes a silent login loop. Warn once.
+ */
+export function warnIfInsecureWithSecureCookies(req) {
+  if (warnedInsecure || process.env.COOKIE_SECURE === 'false' || req?.secure) return false;
+  warnedInsecure = true;
+  console.warn(
+    'Request arrived over plain HTTP while COOKIE_SECURE is enabled: the session cookie will not be set and logins will loop. ' +
+      'Make the reverse proxy send "X-Forwarded-Proto: https" (and check TRUST_PROXY), or set COOKIE_SECURE=false for local HTTP-only testing.',
+  );
+  return true;
+}
+
 /**
  * Warn about a broken proxy chain, at most once for the lifetime of the
  * process. Cheap to call on a hot path: after the first warning (or if there is
  * nothing wrong) it does no work at all. Returns true if this call logged.
  */
 export function warnIfProxyMismatch(req) {
+  warnIfInsecureWithSecureCookies(req);
   if (warned) return false;
   const message = mismatchWarning(inspectProxyChain(req));
   if (!message) return false;

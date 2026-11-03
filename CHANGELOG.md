@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-03 — Warning when the proxy drops X-Forwarded-Proto
+
+- If a request arrives over plain HTTP while secure cookies are on, the backend now logs a one-time warning explaining the cause of the silent login loop. The README's reverse-proxy notes spell out the requirement.
+
 ## 2026-10-28 — Concurrent deploys can't overbook a node
 
 - A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
