@@ -20,6 +20,7 @@ let adminId: number;
 let ownerId: number;
 let otherId: number;
 let isAdmin = true;
+let sessionUserId: number | null = null;
 let upid: string | null = 'UPID:test-create';
 let task: Record<string, unknown> = { status: 'stopped', exitstatus: 'OK' };
 let taskCalls = 0;
@@ -92,7 +93,7 @@ before(async () => {
   app.use(express.json());
   app.use((req, _res, next) => {
     req.session = {
-      userId: isAdmin ? adminId : ownerId,
+      userId: sessionUserId ?? (isAdmin ? adminId : ownerId),
       username: isAdmin ? 'create-admin' : 'create-owner',
       isAdmin,
       reauthenticatedAt: Date.now(),
@@ -110,6 +111,7 @@ before(async () => {
 
 beforeEach(async t => {
   isAdmin = true;
+  sessionUserId = null;
   upid = 'UPID:test-create';
   task = { status: 'stopped', exitstatus: 'OK' };
   taskCalls = 0;
@@ -868,4 +870,117 @@ test('successful upstream reconciliation does not classify existing ownership as
   assert.equal(response.body.status, 'needs_review');
   assert.equal(response.body.ownershipReview, null);
   assert.deepEqual(await ownership(901), before);
+});
+
+test('clone and create accept only whole positive cores and disk sizes, charged as built', async () => {
+  const [template] = await testDb.db.insert(vmTemplates).values({ name: 'strict-size-template', node, vmid: 532, default_disk_gb: 20 })
+    .returning({ id: vmTemplates.id });
+  const clone = (extra: Record<string, unknown>) => request(app).post('/provision/clone')
+    .send({ templateId: template.id, name: 'new-vm', assignTo: ownerId, ...extra });
+  for (const bad of [{ cores: 0 }, { cores: '0' }, { cores: '2.5' }, { diskGb: '+500' }, { diskGb: 1.5 }, { diskGb: 0 }]) {
+    assert.equal((await clone(bad)).status, 400, JSON.stringify(bad));
+  }
+  const create = (diskSize: unknown) => request(app).post('/provision/create').send({ node, name: 'new-vm', assignTo: ownerId, diskSize });
+  assert.equal((await create('1.5G')).status, 400);
+  assert.equal((await create('+5G')).status, 400);
+  assert.equal(submittedVmids.length, 0);
+
+  const cloned = await clone({ cores: '4', diskGb: '40' });
+  assert.equal(cloned.status, 200, JSON.stringify(cloned.body));
+  const allocation = provisionAllocation((await provision(cloned.body.id)).steps);
+  assert.equal(allocation?.cores, 4);
+  assert.equal(allocation?.diskGb, 40);
+  await waitForBackgroundWork();
+  assert.deepEqual(diskResizes, [{ disk: 'scsi0', size: '40G' }]);
+
+  const created = await create('30G');
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  assert.equal(provisionAllocation((await provision(created.body.id)).steps)?.diskGb, 30);
+});
+
+test('operator hardware edits and disk growth are charged to the VM owner and keep counting', async () => {
+  await testDb.db.update(users).set({ can_edit_vm_hardware: true, can_operate_all_vms: true }).where(eq(users.id, otherId));
+  await testDb.db.update(users).set({ max_cores: 4, max_storage_gb: 100 }).where(eq(users.id, ownerId));
+  await testDb.db.insert(vmAssignments).values({ user_id: ownerId, node, vmid: 960 });
+  sourceDisks = { scsi0: 'local-lvm:vm-960-disk-0,size=20G', scsi1: 'local-lvm:vm-960-disk-1,size=10G' };
+  isAdmin = false;
+  sessionUserId = otherId;
+  const resize = (size: string) => request(app).put(`/vms/${node}/960/resize-disk`).send({ disk: 'scsi1', size });
+  assert.equal((await resize('+50G')).status, 200);
+  assert.equal((await quota.getUserResourceUsage(ownerId, testDb.db, [])).diskGb, 80);
+  // A second growth of a non-boot disk must not slip past the owner's storage quota.
+  assert.equal((await resize('+50G')).status, 403);
+  assert.equal(diskResizes.length, 1);
+  // The operator has no quota of their own; the owner's CPU quota still applies.
+  assert.equal((await request(app).put(`/vms/${node}/960/hardware`).send({ cores: 8 })).status, 403);
+  await testDb.db.update(users).set({ can_edit_vm_hardware: false, can_operate_all_vms: false }).where(eq(users.id, otherId));
+});
+
+test('absolute resizes measure fresh sizes and conflicting owner aliases fail closed', async () => {
+  await testDb.db.update(users).set({ can_edit_vm_hardware: true, can_operate_all_vms: true }).where(eq(users.id, otherId));
+  await testDb.db.update(users).set({ max_storage_gb: 100 }).where(eq(users.id, ownerId));
+  await testDb.db.insert(vmAssignments).values({ user_id: ownerId, node, vmid: 961 });
+  sourceDisks = { scsi0: 'local-lvm:vm-961-disk-0,size=20G', scsi1: 'local-lvm:vm-961-disk-1,size=10G' };
+  isAdmin = false;
+  sessionUserId = otherId;
+  const resize = (vmid: number, size: string) => request(app).put(`/vms/${node}/${vmid}/resize-disk`).send({ disk: 'scsi1', size });
+  assert.equal((await resize(961, '30G')).status, 200);
+  sourceDisks = { ...sourceDisks, scsi1: 'local-lvm:vm-961-disk-1,size=30G' };
+  assert.equal((await resize(961, '40G')).status, 200);
+  // 30 GB of disks at the start plus 30 GB of growth, not a delta from a stale cached size.
+  assert.equal((await quota.getUserResourceUsage(ownerId, testDb.db, [])).diskGb, 60);
+
+  await testDb.db.insert(vmAssignments).values([
+    { user_id: ownerId, node, vmid: 962 },
+    { user_id: otherId, node: 'pve', vmid: 962 },
+  ]);
+  assert.equal((await resize(962, '+1G')).status, 409);
+  assert.equal(diskResizes.length, 2);
+  await testDb.db.update(users).set({ can_edit_vm_hardware: false, can_operate_all_vms: false }).where(eq(users.id, otherId));
+});
+
+test('admin resize and hardware edit with conflicting owner aliases answer 409 and charge nobody', async () => {
+  await testDb.db.insert(vmAssignments).values([
+    { user_id: ownerId, node, vmid: 963, resource_allocation: { cores: 2, memoryMb: 2048, diskGb: 30 } },
+    { user_id: otherId, node: 'pve', vmid: 963, resource_allocation: { cores: 2, memoryMb: 2048, diskGb: 30 } },
+  ]);
+  sourceDisks = { scsi0: 'local-lvm:vm-963-disk-0,size=20G', scsi1: 'local-lvm:vm-963-disk-1,size=10G' };
+  assert.equal((await request(app).put(`/vms/${node}/963/resize-disk`).send({ disk: 'scsi1', size: '+10G' })).status, 409);
+  assert.equal((await request(app).put(`/vms/${node}/963/hardware`).send({ cores: 4 })).status, 409);
+  assert.equal(diskResizes.length, 0);
+  assert.equal(tagWrites.length, 0);
+  const rows = await testDb.db.select().from(vmAssignments).where(eq(vmAssignments.vmid, 963));
+  assert.deepEqual(rows.map(row => row.resource_allocation?.diskGb), [30, 30]);
+});
+
+test('disk growth is checked against every existing disk, not just the boot disk', async () => {
+  await testDb.db.update(users).set({ can_edit_vm_hardware: true }).where(eq(users.id, ownerId));
+  await testDb.db.update(users).set({ max_storage_gb: 100 }).where(eq(users.id, ownerId));
+  await testDb.db.insert(vmAssignments).values({ user_id: ownerId, node, vmid: 964 });
+  sourceDisks = { scsi0: 'local-lvm:vm-964-disk-0,size=20G', scsi1: 'local-lvm:vm-964-disk-1,size=70G' };
+  liveVms = [{ vmid: 964, node: 'pve', type: 'qemu', maxcpu: 2, maxmem: 2 * 1024 ** 3, maxdisk: 20 * 1024 ** 3 }];
+  isAdmin = false;
+  const resize = (size: string) => request(app).put(`/vms/${node}/964/resize-disk`).send({ disk: 'scsi1', size });
+  assert.equal((await resize('+20G')).status, 403);
+  assert.equal(diskResizes.length, 0);
+  assert.equal((await testDb.db.select().from(vmAssignments).where(eq(vmAssignments.vmid, 964)))[0].resource_allocation, null);
+  assert.equal((await resize('+10G')).status, 200);
+  assert.equal((await quota.getUserResourceUsage(ownerId, testDb.db, [])).diskGb, 100);
+  await testDb.db.update(users).set({ can_edit_vm_hardware: false }).where(eq(users.id, ownerId));
+});
+
+test('a disk without a readable size blocks member growth but admins still record the measurable total', async () => {
+  await testDb.db.update(users).set({ can_edit_vm_hardware: true }).where(eq(users.id, ownerId));
+  await testDb.db.update(users).set({ max_storage_gb: 1000 }).where(eq(users.id, ownerId));
+  await testDb.db.insert(vmAssignments).values({ user_id: ownerId, node, vmid: 965 });
+  sourceDisks = { scsi0: 'local-lvm:vm-965-disk-0,size=20G', scsi1: '/dev/disk/by-id/ata-passthrough' };
+  isAdmin = false;
+  const resize = () => request(app).put(`/vms/${node}/965/resize-disk`).send({ disk: 'scsi0', size: '+10G' });
+  assert.equal((await resize()).status, 409);
+  assert.equal(diskResizes.length, 0);
+  assert.equal((await testDb.db.select().from(vmAssignments).where(eq(vmAssignments.vmid, 965)))[0].resource_allocation, null);
+  isAdmin = true;
+  assert.equal((await resize()).status, 200);
+  assert.equal((await quota.getUserResourceUsage(ownerId, testDb.db, [])).diskGb, 30);
+  await testDb.db.update(users).set({ can_edit_vm_hardware: false }).where(eq(users.id, ownerId));
 });

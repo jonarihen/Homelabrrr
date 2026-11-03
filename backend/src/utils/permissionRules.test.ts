@@ -3,7 +3,7 @@
 // Run with:  node --test src/utils/permissionRules.test.js   (from backend/)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolvePermissionCheck, resolveEffectivePermissions } from './permissionRules.ts';
+import { resolvePermissionCheck, resolveEffectivePermissions, withImpliedPermissions } from './permissionRules.ts';
 
 const KEYS = ['can_manage_firewalls', 'can_manage_vlans', 'see_all_vms'];
 
@@ -86,4 +86,15 @@ test('effective map: a missing user row yields all false', () => {
     can_manage_vlans: false,
     see_all_vms: false,
   });
+});
+
+test('withImpliedPermissions adds implied keys and never removes or reverses them', () => {
+  assert.deepEqual(withImpliedPermissions({ can_operate_all_vms: true, see_all_vms: false }),
+    { can_operate_all_vms: true, see_all_vms: true });
+  assert.deepEqual(withImpliedPermissions({ can_manage_firewalls: true }),
+    { can_manage_firewalls: true, can_manage_port_forwards: true });
+  // Implication is one-way.
+  assert.deepEqual(withImpliedPermissions({ see_all_vms: true, can_operate_all_vms: false }),
+    { see_all_vms: true, can_operate_all_vms: false });
+  assert.deepEqual(withImpliedPermissions({ can_manage_port_forwards: true }), { can_manage_port_forwards: true });
 });

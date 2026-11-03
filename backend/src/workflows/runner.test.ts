@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { previewWorkflow, runWorkflow } from './engine.ts';
 
 process.env.DATABASE_URL ||= 'postgres://test:test@127.0.0.1:5432/test';
-const { runBundle } = await import('./runner.ts');
+const { runBundle, ProvisioningTargetGoneError, WorkflowDisabledError } = await import('./runner.ts');
 
 const args = {
   bundle: { workflow: { id: 12, trigger: 'vlan_provision' }, steps: [{ id: 1 }] },
@@ -14,6 +15,33 @@ const args = {
   subjectId: 1015,
   subjectLabel: 'VLAN 1015',
 };
+
+test('previewWorkflow renders dependent interface outputs exactly as execution does', async () => {
+  const steps = [
+    {
+      position: 0, step_key: 'iface', action: 'create_vlan_interface',
+      params: { name: 1234, vlanId: '1234', parentInterface: 'fortilink', ip: '192.168.50.254', netmask: '255.255.255.0' },
+    },
+    {
+      position: 1, step_key: 'dependent', action: 'custom_api_call', condition: '{{steps.iface.vlanId}}',
+      params: {
+        method: 'POST', path: '/api/v2/cmdb/firewall/address',
+        body: {
+          interfaceName: '{{steps.iface.interfaceName}}', vlanId: '{{steps.iface.vlanId}}',
+          ip: '{{steps.iface.ip}}', netmask: '{{steps.iface.netmask}}',
+        },
+      },
+    },
+  ];
+  const client = { vdom: 'lab', getInterface: async () => null, request: async () => ({}) };
+  const preview = previewWorkflow({ steps, context: {}, client });
+  const run = await runWorkflow({ steps, context: {}, client });
+  const expected = { interfaceName: '1234', vlanId: 1234, ip: '192.168.50.254', netmask: '255.255.255.0' };
+  assert.deepEqual(run.outputs.iface, expected);
+  assert.equal(preview[1].skipped, undefined);
+  assert.deepEqual(preview[1].params.body, expected);
+  assert.deepEqual(preview[1].calls[0].body, run.log[1].calls[0].body);
+});
 
 test('runBundle awaits successful run recording and returns a numeric run ID', async () => {
   let recordingFinished = false;
@@ -46,6 +74,35 @@ test('runBundle records a failed workflow before rethrowing it', async () => {
   );
   assert.equal(recorded.status, 'failed');
   assert.deepEqual(recorded.artifacts, original.workflowRun.artifacts);
+});
+
+test('runBundle tears down created objects when the run cannot be recorded because its firewall is gone', async () => {
+  const deleted = [];
+  const client = { deleteAddressObject: async (name) => { deleted.push(name); } };
+  let saves = 0;
+  await assert.rejects(
+    runBundle({ ...args, client }, {
+      executeWorkflow: async () => ({ status: 'success', outputs: {}, artifacts: [{ type: 'address', name: 'NET-x' }], log: [] }),
+      saveRun: async () => { saves += 1; throw Object.assign(new Error('fk'), { code: '23503' }); },
+    }),
+    (err) => err instanceof ProvisioningTargetGoneError && err.status === 409,
+  );
+  assert.deepEqual(deleted, ['NET-x']);
+  assert.equal(saves, 1);
+});
+
+test('runBundle refuses a disabled workflow without running or recording it', async () => {
+  let ran = false;
+  let recorded = false;
+  await assert.rejects(
+    runBundle({ ...args, bundle: { ...args.bundle, workflow: { ...args.bundle.workflow, enabled: false } } }, {
+      executeWorkflow: async () => { ran = true; return { status: 'success', outputs: {}, artifacts: [], log: [] }; },
+      saveRun: async () => { recorded = true; return 1; },
+    }),
+    (err) => err instanceof WorkflowDisabledError && err.status === 409,
+  );
+  assert.equal(ran, false);
+  assert.equal(recorded, false);
 });
 
 test('failed-run recording errors do not mask the workflow error', async (t) => {

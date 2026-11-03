@@ -3,7 +3,7 @@ import { db, type DbOrTx } from '../db/client.ts';
 import { vmLeases, provisionedVms, vmAssignments, pveHosts } from '../db/schema/index.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
 import { withVmMigrationLock, vmMigrationPending, withVmPolicyWrite, type PolicyActor } from './vmMigrationLock.ts';
-import { logAuditEntry } from './audit.ts';
+import { logSystemAudit } from './audit.ts';
 import { getAllVMs, vmAction, lxcAction, guestPresence } from '../proxmox.ts';
 import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
 
@@ -225,13 +225,6 @@ export async function summarizeLease(node: unknown, vmid: unknown, graceDays?: n
   const row = await getLeaseRow(node, vmid);
   if (!row) return null;
   return computeLeaseView(row, graceDays);
-}
-
-// Fire-and-forget system audit entry (no `req` in the background loop).
-export async function logSystemAudit(action: string, target = '', detail = ''): Promise<void> {
-  try {
-    await logAuditEntry({ userId: null, username: 'system', action, target, detail });
-  } catch { /* audit is best-effort */ }
 }
 
 // Background sweep: find leases past their expiry (not exempt, not already

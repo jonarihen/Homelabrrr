@@ -7,7 +7,7 @@ import { renderParams, evaluateCondition } from './template.ts';
  * Runs the enabled steps of a workflow in order against a live FortiGate client,
  * recording every created artifact. On a non-`continue_on_error` step failure it
  * rolls back everything created so far (reverse order) — the same guarantee as
- * the old hardcoded `provisionVlan`. Returns a structured run object (log +
+ * the old hardcoded VLAN provisioning sequence. Returns a structured run object (log +
  * artifacts + per-step outputs). On rollback it throws the original error with
  * the run attached as `err.workflowRun`.
  */
@@ -113,6 +113,9 @@ async function rollback(client, artifacts, log) {
 // FortiGate "already gone" responses — treated as success so a retried
 // teardown (e.g. after a partial first pass) is idempotent.
 const ARTIFACT_GONE_RE = /not found|does not exist|no such|404/i;
+export function isArtifactGone(e) {
+  return e?.statusCode === 404 || ARTIFACT_GONE_RE.test(e?.message || '');
+}
 
 /**
  * Artifact-based teardown for deprovision. Deletes the recorded artifacts of a
@@ -128,7 +131,7 @@ export async function teardownArtifacts(client, artifacts) {
     try {
       await deleteArtifact(client, a);
     } catch (e) {
-      if (e.statusCode === 404 || ARTIFACT_GONE_RE.test(e.message)) {
+      if (isArtifactGone(e)) {
         entry.status = 'already_gone';
       } else if (a.type === 'switch_controller_vlan') {
         // FortiLink auto-manages this entry alongside the interface; a refusal
@@ -184,7 +187,7 @@ export function previewWorkflow({ steps, context, client }) {
 
 function predictOutput(action, p) {
   switch (action) {
-    case 'create_vlan_interface': return { interfaceName: p.name };
+    case 'create_vlan_interface': return { interfaceName: String(p.name), vlanId: Number(p.vlanId), ip: String(p.ip), netmask: String(p.netmask) };
     case 'create_address_object': return { name: p.name };
     case 'create_service_object': return { name: p.name };
     case 'create_vip': return { name: p.name };

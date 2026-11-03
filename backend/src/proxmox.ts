@@ -7,6 +7,8 @@ import { decryptSecret } from './utils/secrets.ts';
 import { decodeNodeRef, encodeNodeRef, isValidNodeName } from './utils/nodeRef.ts';
 import { pickVmid, isVmidTakenError, VmidReservations, VMID_MIN } from './utils/vmidAllocator.ts';
 import { ADMIN_PVE_HOSTS_HREF } from './utils/upstreamError.ts';
+import { limitUpstreamRequest, capUpstreamBody } from './utils/upstreamLimits.ts';
+import { log } from './utils/logger.ts';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
@@ -74,7 +76,7 @@ function makeRequest(host, method, path, body) {
       },
     }, (res) => {
       let text = '';
-      res.on('data', (chunk) => { text += chunk; });
+      capUpstreamBody(req, res, 'Proxmox', (chunk) => { text += chunk; });
       res.on('end', () => {
         if (res.statusCode >= 400) {
           const error = Object.assign(new Error(`Proxmox ${method} ${path} → ${res.statusCode}: ${text}`), { upstreamStatus: res.statusCode });
@@ -96,12 +98,11 @@ function makeRequest(host, method, path, body) {
     });
     req.on('error', fail);
     req.setTimeout(15000, () => req.destroy(new Error('Proxmox request timeout')));
+    limitUpstreamRequest(req, 'Proxmox');
     if (payload) req.write(payload);
     req.end();
   });
 }
-
-export const hostDelete = (host, path) => makeRequest(host, 'DELETE', path);
 
 // ── Host helpers ─────────────────────────────────────────────────────────────
 
@@ -114,23 +115,20 @@ export async function getHost(id) {
   return host;
 }
 
-// Get first host (backwards compat for single-host usage)
-async function defaultHost() {
-  const [host] = await db.select().from(pveHosts).orderBy(pveHosts.id).limit(1);
-  if (!host) throw new Error('No PVE hosts configured');
-  return host;
+function logUnreachableHost(host, during: string, err) {
+  log('warn', 'pve_host_unreachable', { host: host?.name || host?.host, during, error: err });
 }
 
 async function findHostsForNodeName(nodeName, database: DbOrTx = db) {
   const hosts = await getHosts(database);
-  const matches = [];
-  for (const h of hosts) {
-    try {
-      const nodes = await makeRequest(h, 'GET', '/nodes');
-      if (nodes.some(n => n.node === nodeName)) matches.push(h);
-    } catch { /* skip unreachable host */ }
-  }
-  return matches;
+  const results = await Promise.allSettled(hosts.map((h) => makeRequest(h, 'GET', '/nodes')));
+  // Unreachable hosts are skipped (and logged, or "node not found" has no visible cause);
+  // matches keep the hosts' name order.
+  return hosts.filter((h, i) => {
+    const result = results[i];
+    if (result.status === 'rejected') logUnreachableHost(h, 'node_lookup', result.reason);
+    return result.status === 'fulfilled' && result.value.some(n => n.node === nodeName);
+  });
 }
 
 async function hostForNode(nodeRef, opts = {}) {
@@ -152,7 +150,7 @@ async function hostForNode(nodeRef, opts = {}) {
         if (resources.some(r => r.node === nodeName && Number.parseInt(r.vmid, 10) === Number.parseInt(vmid, 10))) {
           vmMatches.push(h);
         }
-      } catch { /* skip unreachable host */ }
+      } catch (err) { logUnreachableHost(h, 'vm_lookup', err); }
     }
     if (vmMatches.length === 1) return vmMatches[0];
     if (vmMatches.length > 1) {
@@ -177,14 +175,7 @@ async function resolveNode(nodeRef, opts = {}) {
 
 // ── Proxmox API wrappers ─────────────────────────────────────────────────────
 
-export const proxmoxGet  = async (path)       => makeRequest(await defaultHost(), 'GET', path);
-export const proxmoxPost = async (path, body) => makeRequest(await defaultHost(), 'POST', path, body ?? {});
-export const proxmoxPut  = async (path, body) => makeRequest(await defaultHost(), 'PUT', path, body ?? {});
-
-// Host-aware variants
-export const hostGet  = (host, path)       => makeRequest(host, 'GET', path);
-export const hostPost = (host, path, body) => makeRequest(host, 'POST', path, body ?? {});
-export const hostPut  = (host, path, body) => makeRequest(host, 'PUT', path, body ?? {});
+export const hostGet = (host, path) => makeRequest(host, 'GET', path);
 
 // Short-lived cache for getAllVMs — avoids hammering Proxmox on every poll
 let _vmCache = { data: null, expires: 0 };
@@ -410,14 +401,15 @@ export async function getNextVmid() {
   // Collect all used VMIDs across every connected host so IDs are globally unique
   const usedIds = new Set();
   const failedHosts = [];
-  for (const h of hosts) {
-    try {
-      const resources = await makeRequest(h, 'GET', '/cluster/resources?type=vm');
-      for (const r of resources) usedIds.add(r.vmid);
-    } catch {
-      failedHosts.push(h.name || h.host);
+  // In parallel: a dead host costs one timeout, not one per host in the list.
+  const results = await Promise.allSettled(hosts.map((h) => makeRequest(h, 'GET', '/cluster/resources?type=vm')));
+  results.forEach((result, i) => {
+    if (result.status === 'fulfilled') for (const r of result.value) usedIds.add(r.vmid);
+    else {
+      failedHosts.push(hosts[i].name || hosts[i].host);
+      logUnreachableHost(hosts[i], 'vmid_allocation', result.reason);
     }
-  }
+  });
   if (failedHosts.length > 0) {
     throw new Error(`Cannot allocate a globally unique VMID while these Proxmox hosts are unreachable: ${failedHosts.join(', ')}`);
   }
@@ -509,8 +501,9 @@ export async function getStorages(node) {
 
 // Resolve a node ref to the id of the pve_hosts row that owns it. Used by the
 // storage-visibility guard, which is keyed by (pve_host_id, storage).
-export async function getHostIdForNode(node) {
-  const host = await hostForNode(node);
+export async function getHostIdForNode(node, vmid = null) {
+  // vmid disambiguates a legacy bare node name shared by several hosts.
+  const host = await hostForNode(node, { vmid });
   return host.id;
 }
 
@@ -793,23 +786,36 @@ export async function moveVmDisk(node, vmid, disk, opts = {}) {
 // Public task-wait helper for multi-step orchestration (migration adopt flow).
 // Throws on task failure or timeout. `onPoll` runs once per tick while the task
 // is still going (progress reporting) — its failures never abort the wait.
-export async function waitForTask(node, upid, { timeoutMs = 4 * 60 * 60 * 1000, intervalMs = 4000, onPoll = null } = {}) {
+// Poll errors are retried (a host can blip during a long migration), but only
+// for maxErrorMs of continuous failure; after that the last error is surfaced.
+// Thrown errors carry `exitstatus` (the PVE exit status, or 'timeout').
+export async function waitForTask(node, upid, { timeoutMs = 4 * 60 * 60 * 1000, intervalMs = 4000, onPoll = null, maxErrorMs = 5 * 60 * 1000 } = {}) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  let failingSince = null;
+  for (;;) {
+    // Poll once more after the deadline so a task finishing in the last interval isn't reported as a timeout.
+    const expired = Date.now() >= deadline;
     let task = null;
     try {
       task = await getTaskStatus(node, upid);
-    } catch { /* transient — keep waiting */ }
+      failingSince = null;
+    } catch (err) {
+      failingSince ??= Date.now();
+      if (Date.now() - failingSince >= maxErrorMs) {
+        throw new Error(`Lost track of Proxmox task: status polls kept failing for ${Math.round(maxErrorMs / 1000)}s (${err.message})`, { cause: err });
+      }
+    }
     if (onPoll && !(task && task.status === 'stopped')) {
       try { await onPoll(); } catch { /* progress is best-effort */ }
     }
     if (task && task.status === 'stopped') {
-      if (task.exitstatus !== 'OK') throw new Error(`Proxmox task failed: ${task.exitstatus}`);
+      if (task.exitstatus !== 'OK') throw Object.assign(new Error(`Proxmox task failed: ${task.exitstatus}`), { exitstatus: task.exitstatus || '' });
       return;
     }
+    if (expired) break;
     await sleep(intervalMs);
   }
-  throw new Error('Timed out waiting for Proxmox task to complete');
+  throw Object.assign(new Error('Timed out waiting for Proxmox task to complete'), { exitstatus: 'timeout' });
 }
 
 // SHA-256 fingerprint of the TLS certificate a host actually serves, in the

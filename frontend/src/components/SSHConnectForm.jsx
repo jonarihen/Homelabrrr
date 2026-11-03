@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import PrereqCallout from './PrereqCallout.jsx';
 import { routeNode } from '../utils/nodeRef.js';
+import Field from './Field.jsx';
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
-const btnCls = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors';
+const btnCls = 'w-full btn-primary rounded-lg py-2.5 text-sm font-medium';
 
 // Provenance labels for /vms/:node/:vmid/detected-ips candidates.
 const IP_SOURCE_LABELS = {
@@ -65,12 +65,14 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
       if (cfg) {
         setForm((current) => ({
           ...current,
-          host: cfg.host,
+          host: cfg.host || '',
           port: cfg.port,
           username: cfg.username,
           hostFingerprint: cfg.hostFingerprint || '',
         }));
       }
+      // Nothing saved yet: fill in the VM's address instead of making the user type it.
+      if (!cfg?.host) detectIp({ quiet: true, isStale: () => cancelled });
 
       if (keysRes.data.length > 0) {
         setForm((current) => ({
@@ -87,6 +89,8 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
     });
 
     return () => { cancelled = true; };
+    // detectIp is recreated each render but only reads vmNode/vm.vmid.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vmNode, vm.vmid]);
 
   const connect = async (e) => {
@@ -127,23 +131,28 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
   // The portal usually already knows this address (DHCP reservation/lease,
   // cloud-init, guest agent) — asking beats making the user go find it in
   // Proxmox and type it back in.
-  const detectIp = async () => {
+  // quiet: the automatic run on open — never clobber a host the user has
+  // started typing, and don't greet them with an error.
+  const detectIp = async ({ quiet = false, isStale = () => false } = {}) => {
     setDetectingIp(true);
-    setError('');
+    if (!quiet) setError('');
 
     try {
       const { data } = await api.get(`/vms/${vmNode}/${vm.vmid}/detected-ips`);
+      if (isStale()) return;
       const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+      if (quiet && candidates.length === 0) return; // nothing found yet: stay quiet on the automatic run
       setDetected({ ...data, candidates });
 
       if (candidates.length > 0) {
-        setForm((current) => ({ ...current, host: candidates[0].ip }));
+        setForm((current) => (quiet && current.host ? current : { ...current, host: candidates[0].ip }));
       }
     } catch (e) {
+      if (isStale()) return;
       setDetected(null);
-      setError(e.response?.data?.error || 'Failed to detect an IP address');
+      if (!quiet) setError(e.response?.data?.error || 'Failed to detect an IP address');
     } finally {
-      setDetectingIp(false);
+      if (!isStale()) setDetectingIp(false);
     }
   };
 
@@ -195,7 +204,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         <select
           value={form.keyId}
           onChange={(e) => setForm((current) => ({ ...current, keyId: Number.parseInt(e.target.value, 10) }))}
-          className={inputCls}
+          className="input"
         >
           {keys.map((key) => (
             <option key={key.id} value={key.id}>{key.name}</option>
@@ -210,7 +219,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
               <label className="block text-xs text-gray-400">Host / IP</label>
               <button
                 type="button"
-                onClick={detectIp}
+                onClick={() => detectIp()}
                 disabled={detectingIp}
                 className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
               >
@@ -223,7 +232,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
               required
               value={form.host}
               onChange={(e) => setForm((current) => ({ ...current, host: e.target.value }))}
-              className={inputCls}
+              className="input"
               placeholder="192.168.1.100"
             />
           </div>
@@ -233,7 +242,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
               type="number"
               value={form.port}
               onChange={(e) => setForm((current) => ({ ...current, port: Number.parseInt(e.target.value, 10) || 22 }))}
-              className={inputCls}
+              className="input"
             />
           </Field>
         </div>
@@ -278,7 +287,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
             type="text"
             value={form.username}
             onChange={(e) => setForm((current) => ({ ...current, username: e.target.value }))}
-            className={inputCls}
+            className="input"
           />
         </Field>
 
@@ -287,7 +296,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
             type="password"
             value={form.passphrase}
             onChange={(e) => setForm((current) => ({ ...current, passphrase: e.target.value }))}
-            className={inputCls}
+            className="input"
             placeholder="Leave empty if none"
           />
         </Field>
@@ -311,7 +320,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
           required
           value={form.hostFingerprint}
           onChange={(e) => setForm((current) => ({ ...current, hostFingerprint: e.target.value }))}
-          className={inputCls}
+          className="input"
           placeholder="SHA256:..."
         />
 
@@ -326,14 +335,5 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
         {connecting ? 'Connecting...' : submitLabel}
       </button>
     </form>
-  );
-}
-
-function Field({ label, children }) {
-  return (
-    <div>
-      <label className="block text-xs text-gray-400 mb-1.5">{label}</label>
-      {children}
-    </div>
   );
 }

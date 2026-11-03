@@ -1,3 +1,6 @@
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client.ts';
+import { users } from '../db/schema/index.ts';
 import { userHasPermission } from '../utils/permissions.ts';
 import { logAudit } from '../utils/audit.ts';
 import { log } from '../utils/logger.ts';
@@ -8,6 +11,35 @@ import { log } from '../utils/logger.ts';
 function auditDenial(req, action: string, target: string, detail: string): void {
   logAudit(req, action, target, detail)
     .catch((err) => log('warn', 'audit_write_failed', { action, error: err?.message }));
+}
+
+// Re-hydrates the cookie session from the live user row on every request, and
+// drops sessions whose user is gone or that were authenticated against an
+// older credentials_version (closes the login-vs-credential-change race).
+export async function loadSessionUser(req, res, next) {
+  if (!req.session?.userId) return next();
+  // Token auth already resolved the live user; don't re-hydrate (and never try
+  // to destroy) the plain token session object.
+  if (req.apiToken) return next();
+
+  const [user] = await db
+    .select({ username: users.username, is_admin: users.is_admin, credentials_version: users.credentials_version })
+    .from(users)
+    .where(eq(users.id, req.session.userId))
+    .limit(1);
+  // Sessions from before credentials_version existed count as version 0.
+  if (!user || Number(req.session.credentialsVersion ?? 0) < user.credentials_version) {
+    return req.session.destroy(() => next());
+  }
+
+  req.session.username = user.username;
+  req.session.isAdmin = user.is_admin === true;
+  if (!req.session.lastSeenAt || Date.now() - Number(req.session.lastSeenAt) > 5 * 60 * 1000) {
+    req.session.lastSeenAt = Date.now();
+    req.session.clientIp = String(req.ip || '').slice(0, 128);
+    req.session.userAgent = String(req.headers['user-agent'] || '').slice(0, 256);
+  }
+  next();
 }
 
 export function requireAuth(req, res, next) {

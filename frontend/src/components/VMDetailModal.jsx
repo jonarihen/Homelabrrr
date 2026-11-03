@@ -210,7 +210,7 @@ export default function VMDetailModal({ vm, onClose }) {
                     onClick={() => setTimeframe(tf.key)}
                     className={`text-xs px-2.5 py-1 rounded transition-colors ${
                       timeframe === tf.key
-                        ? 'bg-blue-600 text-white'
+                        ? 'bg-blue-600 text-gray-950'
                         : 'bg-gray-800 text-gray-400 hover:text-white'
                     }`}
                   >
@@ -329,7 +329,7 @@ export default function VMDetailModal({ vm, onClose }) {
               <button
                 onClick={saveSshConfig}
                 disabled={!sshCfg.host || !sshCfg.hostFingerprint}
-                className="text-xs px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded transition-colors"
+                className="text-xs px-4 py-1.5 btn-primary disabled:opacity-40 rounded"
               >
                 Save
               </button>

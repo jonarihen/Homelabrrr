@@ -146,6 +146,8 @@ export const firewallVlanSync = pgTable(
     dhcp_server_id: integer('dhcp_server_id'),
     synced_at: timestamp('synced_at', { withTimezone: true, mode: 'date' }).defaultNow(),
     artifacts: jsonb('artifacts'),
+    // Network the sync actually provisioned (e.g. 10.11.26.0/24); null on rows from before it was recorded.
+    subnet_cidr: text('subnet_cidr'),
     workflow_run_id: integer('workflow_run_id').references(() => workflowRuns.id, {
       onDelete: 'set null',
     }),

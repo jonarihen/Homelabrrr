@@ -521,7 +521,7 @@ export default function MigrateVMModal({ vm, onClose, onDone }) {
                 onClick={start}
                 disabled={starting || loadingTarget || !targetNode || !bridge || blockedByRunning
                   || !!storageIssue || splitBlocked || missingDiskTarget || (!adopt && !storage)}
-                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+                className="w-full btn-primary rounded-lg py-2.5 text-sm font-medium"
               >
                 {starting ? 'Starting…' : adopt ? 'Start shared-storage migration' : 'Start migration'}
               </button>

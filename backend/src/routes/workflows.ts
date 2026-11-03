@@ -13,6 +13,7 @@ import {
 } from '../workflows/store.ts';
 import { previewBundle, buildFirewallContext } from '../workflows/runner.ts';
 import { deriveSubnet } from '../workflows/subnet.ts';
+import { buildManagedVipServiceName, buildManagedVipAddressName } from '../utils/vipName.ts';
 
 const router = Router();
 router.use(requireAuth);
@@ -27,16 +28,6 @@ async function getFirewall(id: any) {
   return row;
 }
 
-// Preview-only VIP naming (mirrors admin.js; display-only, never used for real runs).
-function previewServiceName(vipName, protocol, port) {
-  const safeName = String(vipName || 'vip').trim().replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'vip';
-  return `VMM-PF-${String(protocol || 'tcp').toUpperCase()}-${port}-${safeName}`;
-}
-function previewAddressName(vipName, mappedIp) {
-  const safeName = String(vipName || 'vip').trim().replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'vip';
-  const safeIp = String(mappedIp || '').trim().replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'host';
-  return `VMM-PF-HOST-${safeIp}-${safeName}`;
-}
 
 /**
  * Build a sample run context for a dry-run against user-supplied inputs.
@@ -45,7 +36,7 @@ function buildSampleContext(trigger, fw, inputs, settings) {
   const firewall = buildFirewallContext(fw);
   const trunkConfigured = !!(fw.trunk_switch_serial && fw.trunk_switch_port);
 
-  if (trigger === 'vlan_provision' || trigger === 'vlan_deprovision') {
+  if (trigger === 'vlan_provision') {
     const tag = parseInt(inputs.tag, 10) || fw.vlan_range_start || 1001;
     const subnet = deriveSubnet(tag, settings) || {};
     return {
@@ -56,7 +47,7 @@ function buildSampleContext(trigger, fw, inputs, settings) {
     };
   }
 
-  if (trigger === 'port_forward_create' || trigger === 'port_forward_delete') {
+  if (trigger === 'port_forward_create') {
     const name = inputs.name || 'sample-forward';
     const protocol = (inputs.protocol || 'tcp').toLowerCase();
     const internalPort = inputs.internalPort || 22;
@@ -70,8 +61,8 @@ function buildSampleContext(trigger, fw, inputs, settings) {
       dstInterface: inputs.dstInterface || fw.root_vdom_link || 'lab-root1',
       vlanInterface,
       srcAddresses: Array.isArray(inputs.srcAddresses) && inputs.srcAddresses.length ? inputs.srcAddresses : ['all'],
-      serviceName: previewServiceName(name, protocol, internalPort),
-      labAddressName: vlanInterface ? previewAddressName(name, internalIp) : '',
+      serviceName: buildManagedVipServiceName(name, protocol, internalPort),
+      labAddressName: vlanInterface ? buildManagedVipAddressName(name, internalIp) : '',
       externalIp: fw.external_ip || '203.0.113.10',
       wanZone: fw.root_wan_zone || 'underlay',
       rootVdom: fw.root_vdom || 'root',
@@ -80,7 +71,7 @@ function buildSampleContext(trigger, fw, inputs, settings) {
     };
   }
 
-  if (trigger === 'policy_create' || trigger === 'policy_delete') {
+  if (trigger === 'policy_create') {
     const srcIf = inputs.srcInterface || `vlan${inputs.srcTag || 1126}`;
     const dstIf = inputs.dstInterface || `vlan${inputs.dstTag || 1127}`;
     return {

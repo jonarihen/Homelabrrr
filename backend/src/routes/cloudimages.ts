@@ -4,10 +4,12 @@ import { db } from '../db/client.ts';
 import { cloudImages, pveHosts, vmTemplates } from '../db/schema/index.ts';
 import {
   downloadUrlToStorage, deleteVolume, convertToTemplate,
-  getTaskStatus, getStorageContent, withFreshVmid, createVM, resizeVMDisk, getHost,
+  waitForTask, getStorageContent, withFreshVmid, createVM, resizeVMDisk, getHost,
 } from '../proxmox.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
+import { sendError } from '../utils/httpError.ts';
+import { assertStorageExposed } from '../utils/storageVisibility.ts';
 import { logAudit } from '../utils/audit.ts';
 import { decodeNodeRef } from '../utils/nodeRef.ts';
 import { assertPublicDownloadUrl } from '../utils/urlGuard.ts';
@@ -28,19 +30,6 @@ function serializeImage(row: any) {
 
 async function setImageStatus(id: number, status: string, detail = '') {
   await db.update(cloudImages).set({ status, status_detail: detail }).where(eq(cloudImages.id, id));
-}
-
-async function waitForTask(node: string, upid: string, { attempts = 240, intervalMs = 5000 } = {}) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    try {
-      const task = await getTaskStatus(node, upid);
-      if (task.status === 'stopped') {
-        return { ok: task.exitstatus === 'OK', exitstatus: task.exitstatus || '' };
-      }
-    } catch { /* keep polling */ }
-  }
-  return { ok: false, exitstatus: 'timeout' };
 }
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -114,11 +103,13 @@ router.post('/', async (req, res) => {
 
     // Poll in the background; the row's status is the source of truth for the UI
     startBackgroundWork(async () => {
-      const result = await waitForTask(node, upid);
-      if (!result.ok) {
-        await setImageStatus(id, 'error', result.exitstatus === 'timeout'
+      try {
+        // Shared poller; the old per-route copy waited 240 × 5s too.
+        await waitForTask(node, upid, { timeoutMs: 20 * 60_000, intervalMs: 5000 });
+      } catch (err: any) {
+        await setImageStatus(id, 'error', err.exitstatus === 'timeout'
           ? 'Timed out waiting for the download'
-          : `Download failed: ${result.exitstatus}`);
+          : `Download failed: ${err.exitstatus ?? ''}`);
         return;
       }
       try {
@@ -333,6 +324,17 @@ router.post('/:id/template', async (req, res) => {
   if (!name || !storage) {
     return res.status(400).json({ error: 'Template name and target storage are required' });
   }
+  // Both land in PVE property strings — strict identifiers only.
+  for (const [field, value] of Object.entries({ storage, bridge })) {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(value)) {
+      return res.status(400).json({ error: `Invalid ${field}` });
+    }
+  }
+  try {
+    await assertStorageExposed(image.node, storage, { isAdmin: req.session.isAdmin });
+  } catch (err) {
+    return sendError(res, err);
+  }
   const baseDiskGb = parseInt(diskGb, 10);
   const memoryMb = Math.round(parseFloat(memoryGb) * 1024);
   if (!Number.isInteger(baseDiskGb) || baseDiskGb < 3) {
@@ -363,9 +365,10 @@ router.post('/:id/template', async (req, res) => {
     await logAudit(req, 'cloud_image_template', `${image.node}/${vmid}`, `image:${image.name} name:${name}`);
 
     startBackgroundWork(async () => {
-      const result = await waitForTask(image.node, upid);
-      if (!result.ok) {
-        await setImageStatus(image.id, 'ready', `Template creation failed (VMID ${vmid}): ${result.exitstatus}`);
+      try {
+        await waitForTask(image.node, upid, { timeoutMs: 20 * 60_000, intervalMs: 5000 });
+      } catch (err: any) {
+        await setImageStatus(image.id, 'ready', `Template creation failed (VMID ${vmid}): ${err.exitstatus ?? ''}`);
         return;
       }
       const warnings = [];

@@ -5,6 +5,7 @@ import { resolvePermissionCheck, resolveEffectivePermissions } from './permissio
 import { PERMISSION_KEYS } from './permissionKeys.ts';
 
 export { PERMISSION_KEYS } from './permissionKeys.ts';
+export { withImpliedPermissions } from './permissionRules.ts';
 
 // Every granular permission the portal knows. These are simultaneously the
 // legacy per-user column names on `users` and the permission key strings

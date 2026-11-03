@@ -109,3 +109,11 @@ test('sizeToGb parses PVE disk size strings', () => {
   assert.equal(quota.sizeToGb('bogus'), null);
   assert.equal(quota.sizeToGb(undefined), null);
 });
+
+test('diskSizeGb reads the size= field of a PVE disk config value', () => {
+  assert.equal(quota.diskSizeGb('local-lvm:vm-100-disk-0,size=32G'), 32);
+  assert.equal(quota.diskSizeGb('local:100/vm-100-disk-0.qcow2,cache=none,size=512M,ssd=1'), 0.5);
+  assert.equal(quota.diskSizeGb('size=1.5T'), 1536);
+  assert.equal(quota.diskSizeGb('local-lvm:vm-100-disk-0,discard=on'), null);
+  assert.equal(quota.diskSizeGb(undefined), null);
+});

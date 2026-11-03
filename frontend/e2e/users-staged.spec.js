@@ -145,7 +145,8 @@ test('nested review keeps focus and scroll locked until the final modal closes',
 
 test('browser Back asks before discarding staged user changes', async ({ page }) => {
   await mockUsersPage(page);
-  await page.route('**/api/admin/audit-log**', (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
+  await page.route(/\/api\/admin\/audit-log(\?.*)?$/, (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
+  await page.route('**/api/admin/audit-log/actions', (route) => route.fulfill({ json: [] }));
   await page.goto('/admin/audit-log');
   await page.goto('/admin/users');
   await page.getByRole('button', { name: 'Manage' }).click();

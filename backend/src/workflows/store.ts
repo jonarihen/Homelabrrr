@@ -1,6 +1,7 @@
 import { eq, and, desc, inArray, count } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import type { DbOrTx } from '../db/client.ts';
+import { isUniqueViolation } from '../db/errors.ts';
 import { workflows, workflowSteps, workflowRuns, firewalls } from '../db/schema/index.ts';
 import { defaultSteps, defaultWorkflowName, TRIGGERS, TRIGGER_MAP } from './definitions.ts';
 
@@ -99,7 +100,8 @@ export async function getWorkflowRow(firewallId: number, trigger: string) {
 export async function getWorkflowBundle(firewallId: number, trigger: string) {
   let workflow = await getWorkflowRow(firewallId, trigger);
   if (!workflow) {
-    await seedWorkflowsForFirewall(firewallId);
+    // A concurrent caller may seed the same firewall first; its rows win.
+    await seedWorkflowsForFirewall(firewallId).catch((err) => { if (!isUniqueViolation(err)) throw err; });
     workflow = await getWorkflowRow(firewallId, trigger);
   }
   if (!workflow) return null;
@@ -124,11 +126,13 @@ export async function getWorkflowById(id: number) {
 
 export async function listWorkflowsForFirewall(firewallId: number) {
   await seedWorkflowsForFirewall(firewallId);
-  const rows = await db
+  const rows = (await db
     .select()
     .from(workflows)
     .where(eq(workflows.firewall_id, firewallId))
-    .orderBy(workflows.trigger);
+    .orderBy(workflows.trigger))
+    // Older installs seeded delete triggers that never ran; hide rows for triggers we no longer offer.
+    .filter((w) => TRIGGER_MAP[w.trigger]);
   if (rows.length === 0) return [];
   // Single grouped count instead of a COUNT(*) per workflow (was an N+1 loop).
   const ids = rows.map((w) => w.id);

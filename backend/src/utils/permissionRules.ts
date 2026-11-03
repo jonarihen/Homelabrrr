@@ -43,3 +43,20 @@ export function resolveEffectivePermissions(userRow, rolePermissions, permission
   }
   return out;
 }
+
+// Keys a permission strictly implies: every route gate that accepts the implied
+// key also accepts the implying one (operating all VMs includes seeing them;
+// firewall managers pass every port-forward gate).
+const IMPLIED_PERMISSIONS = {
+  can_operate_all_vms: ['see_all_vms'],
+  can_manage_firewalls: ['can_manage_port_forwards'],
+};
+
+/** Copy of an effective permission map with implied keys switched on. */
+export function withImpliedPermissions(perms) {
+  const out = { ...perms };
+  for (const [key, implied] of Object.entries(IMPLIED_PERMISSIONS)) {
+    if (perms[key]) for (const k of implied) out[k] = true;
+  }
+  return out;
+}

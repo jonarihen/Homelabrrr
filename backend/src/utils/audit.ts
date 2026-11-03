@@ -35,6 +35,14 @@ export async function logAuditEntry(entry: AuditEntry): Promise<void> {
   await db.insert(auditLog).values(auditRow(entry));
 }
 
+// Best-effort audit entry for background jobs with no `req`. Never rejects, so
+// callers may fire and forget — an audit failure must not break a sweep/loop.
+export async function logSystemAudit(action: string, target = '', detail = '', username = 'system'): Promise<void> {
+  try {
+    await logAuditEntry({ userId: null, username, action, target, detail });
+  } catch { /* audit is best-effort */ }
+}
+
 function requestEntry(req: any, action: string, target: string, detail: string, outcome: string, targetRef: string | null): AuditEntry {
   let username = req.session?.username || 'anonymous';
   // Attribute token-authenticated requests so scripted actions are traceable
