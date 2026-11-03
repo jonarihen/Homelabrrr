@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-03 — Support page polish
+
+- The Support the lab page now uses the same card, input and button styling as the rest of the portal, with more breathing room between boxes, a consistent two-column layout that stacks on small screens, and bigger, evenly spaced buttons aligned at the bottom of each card.
+- Amounts, subscriptions and history show loading placeholders until your data has arrived, instead of briefly flashing empty or "No ... recorded" text.
+- Clearer states: PayPal buttons say "Opening PayPal…" while busy, returning from PayPal shows a verifying message, and success, pending/cancelled and error messages have distinct colours.
+
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 
 - Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
