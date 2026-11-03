@@ -6,6 +6,33 @@
 - Website upstreams for non-admins are limited to the same set. Existing sites whose upstream no longer qualifies are unpublished by the periodic maintenance pass (not deleted); re-save them with an address in your VLAN.
 - Legacy admin-assigned address rows that store only a node name now count only for the Proxmox host they were recorded on, so a same-named node on another cluster no longer inherits them.
 
+## 2026-11-03 — Time-of-day grid tariffs from Datahub
+
+- Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
+- New `npm run import-datahub-tariffs` reads published charges from Energi Data Service (DatahubPricelist) and stores them as contiguous Europe/Copenhagen hour blocks on a contract, with DST and season changes handled and gaps rejected. Dry run by default; `--apply` writes. Transmission + system tariff and elafgift stay separate components, rates are stored excluding VAT (applied once by the contract), and fixed subscriptions stay in the contract's monthly fee.
+- The contract tariff list shows the most recent 500 intervals, so current and future rates stay visible.
+
+## 2026-11-03 — Energy data forms ask for identity confirmation
+
+- Saving an ElOverblik token, selecting a meter, disconnecting, and adding electricity contracts or tariffs now open the password + authenticator dialog when a recent confirmation is required, and retry the save afterwards. Before, they only showed "Please confirm your password and second factor before continuing" with no way to confirm.
+
+## 2026-10-28 — Louder startup warnings for key and bootstrap mistakes
+
+- The backend now logs `secrets_undecryptable` at startup when stored secrets can't be decrypted with the configured `SECRET_ENCRYPTION_KEY`, instead of failing later on upstream calls and 2FA logins.
+- A warning is logged when `INITIAL_ADMIN_PASSWORD` is still set after the first admin exists.
+- The backend container runs with an init process, so child processes are reaped and shutdown signals are forwarded.
+- The README backup section now says the encryption keyring must be kept alongside database backups.
+## 2026-10-28 — Upstream calls can no longer hang or balloon
+
+- Proxmox and FortiGate API calls now have a 60-second total deadline and a 32 MB response limit, on top of the 15-second idle timeout. A slow-drip or oversized response fails the request instead of tying it up indefinitely.
+- Waiting for a Proxmox task (clones, migrations) still rides out short outages, but gives up with the real error after 5 minutes of failed status checks instead of silently retrying for up to 4 hours.
+- VMID allocation and node lookups query all Proxmox hosts in parallel, so one dead host costs one timeout instead of one per host. Unreachable hosts are logged as `pve_host_unreachable` with the host name, so "node not found" has a visible cause.
+## 2026-10-28 — Phone and tablet layout
+
+- Below laptop width the sidebar moves into a slide-in drawer opened from a **menu** button in a new top bar. It traps focus, closes on Escape, a tap outside or navigation, and returns focus to the button. Desktop layout is unchanged.
+- Data tables (users, roles, VLANs, templates, assignments, audit log, snapshots, SSH keys, websites, recent provisions) scroll sideways inside their panel instead of being cut off.
+- The **My VMs** header and summary bar wrap on narrow screens.
+- Console windows are shrunk and moved to fit the screen when opened, tiled or when the window is resized.
 ## 2026-10-28 — Audit log filters and CSV export
 
 - The **Audit Log** action filter now lists every action that has actually been recorded, instead of a fixed list of about 25.

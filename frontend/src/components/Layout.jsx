@@ -1,7 +1,9 @@
-import { NavLink, useNavigate } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import { makeCan, visibleSections } from '../utils/navSections.js';
 import ChangelogPanel from './ChangelogPanel.jsx';
+import { activateModal } from '../utils/modalFocus.js';
 
 const navItem = 'group flex items-center gap-2.5 pl-3 pr-3 py-2 border-l-2 font-mono text-[11px] uppercase tracking-[0.08em] text-gray-400 hover:text-gray-100 hover:bg-gray-800 transition-colors';
 const activeNav = 'border-l-orange-600 bg-gray-800 text-gray-100';
@@ -10,6 +12,32 @@ const inactiveNav = 'border-l-transparent';
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  // The drawer is open only for the path it was opened on, so any navigation closes it.
+  const [drawerPath, setDrawerPath] = useState(null);
+  const drawerOpen = drawerPath === pathname;
+  const drawerRef = useRef(null);
+  const navRef = useRef(null);
+  const menuButtonRef = useRef(null);
+
+  // Any navigation — including Back/forward onto the path the drawer was
+  // opened on — closes the drawer and forgets the stored path.
+  useEffect(() => {
+    setDrawerPath(null);
+  }, [pathname]);
+
+  // Below lg the open drawer is a modal: focus trap, Escape, scroll lock and
+  // focus return to the menu button all come from the shared Modal helper.
+  // A passive effect, so React's post-commit focus restore cannot undo the return.
+  useEffect(() => {
+    if (!drawerOpen) return undefined;
+    const close = () => setDrawerPath(null);
+    const desktop = window.matchMedia('(min-width: 64rem)');
+    if (desktop.matches) { close(); return undefined; }
+    desktop.addEventListener('change', close);
+    const release = activateModal({ dialog: drawerRef.current, content: navRef.current, trigger: menuButtonRef.current, onClose: close });
+    return () => { desktop.removeEventListener('change', close); release(); };
+  }, [drawerOpen]);
 
   const handleLogout = async () => {
     await logout();
@@ -19,9 +47,38 @@ export default function Layout({ children }) {
   return (
     // No bg on the shell — body paints the page color and the AARIS grid sits
     // behind it; an opaque wrapper here would blank the grid on every page.
-    <div className="flex h-screen overflow-hidden">
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col">
+    <div className="flex flex-col lg:flex-row h-screen overflow-hidden">
+      {/* Top bar — below lg only; opens the sidebar as an off-canvas drawer */}
+      <header className="lg:hidden shrink-0 flex items-center gap-3 px-4 py-2.5 bg-gray-900 border-b border-gray-800">
+        <button
+          ref={menuButtonRef}
+          type="button"
+          onClick={() => setDrawerPath(pathname)}
+          aria-expanded={drawerOpen}
+          aria-controls="app-sidebar"
+          aria-label="Open navigation"
+          className="w-9 h-9 border border-gray-700 text-gray-300 hover:text-gray-100 hover:border-orange-600 flex items-center justify-center transition-colors"
+        >
+          <Icon d="M4 6h16M4 12h16M4 18h16" />
+        </button>
+        <span className="aaris-display text-gray-100 text-sm leading-none">VM Manager</span>
+      </header>
+
+      {/* Backdrop above the console layer (z-40) so console windows cannot
+          intercept taps meant to dismiss the drawer, and below app modals
+          (z-50) which stay on top of both. */}
+      {drawerOpen && <div className="lg:hidden fixed inset-0 z-[45] bg-black/70" aria-hidden="true" onClick={() => setDrawerPath(null)} />}
+
+      {/* Sidebar — static column at lg+, off-canvas drawer below */}
+      <aside
+        ref={drawerRef}
+        id="app-sidebar"
+        role={drawerOpen ? 'dialog' : undefined}
+        aria-modal={drawerOpen || undefined}
+        aria-label={drawerOpen ? 'Navigation' : undefined}
+        tabIndex={drawerOpen ? -1 : undefined}
+        className={`w-56 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-[48] max-lg:motion-safe:duration-200 ${drawerOpen ? 'max-lg:motion-safe:transition-[translate]' : 'max-lg:motion-safe:transition-[translate,visibility] max-lg:-translate-x-full max-lg:invisible'}`}
+      >
         <div className="px-4 py-4 border-b border-gray-800">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 border border-orange-600 text-orange-600 flex items-center justify-center">
@@ -39,7 +96,7 @@ export default function Layout({ children }) {
           </div>
         </div>
 
-        <nav className="flex-1 py-3 space-y-0.5 overflow-y-auto">
+        <nav ref={navRef} onClick={() => setDrawerPath(null)} className="flex-1 py-3 space-y-0.5 overflow-y-auto">
           <NavLink to="/welcome" className={({ isActive }) => `${navItem} ${isActive ? activeNav : inactiveNav}`}>
             <Icon d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /> Overview
           </NavLink>
@@ -113,7 +170,7 @@ export default function Layout({ children }) {
       </aside>
 
       {/* Main */}
-      <main className="flex-1 overflow-y-auto">
+      <main className={`flex-1 min-h-0 min-w-0 overflow-y-auto ${drawerOpen ? 'max-lg:overflow-hidden' : ''}`}>
         {children}
       </main>
     </div>
