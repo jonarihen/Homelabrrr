@@ -635,11 +635,14 @@ router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecent
   // No budget reset here: this code is for a factor the caller just enrolled,
   // which proves nothing about the account's existing credentials.
 
-  const { version, revoked } = await changeCredentials(db, req.session.userId, { totp_enabled: true }, req.sessionID);
+  // One transaction: 2FA is never on without its backup codes.
+  const { version, revoked, codes } = await db.transaction(async (tx) => ({
+    ...(await changeCredentials(tx, req.session.userId, { totp_enabled: true }, req.sessionID)),
+    codes: await replaceRecoveryCodes(req.session.userId, tx),
+  }));
   req.session.credentialsVersion = version;
   req.session.twoFactorEnrollmentOnly = false;
   await logAudit(req, '2fa_enabled', req.session.username, `revoked_sessions=${revoked}`);
-  const codes = await replaceRecoveryCodes(req.session.userId);
   res.json({ ok: true, revokedSessions: revoked, recoveryCodes: codes });
 });
 
@@ -836,12 +839,12 @@ router.post('/passkeys/authentication/verify', verifyTwoFactorLimiter, async (re
 });
 
 // Replaces the user's recovery codes with 10 fresh ones; only hashes are stored.
-async function replaceRecoveryCodes(userId: number): Promise<string[]> {
+async function replaceRecoveryCodes(userId: number, database: Pick<typeof db, 'transaction'> = db): Promise<string[]> {
   const codes = Array.from({ length: 10 }, () => {
     const raw = crypto.randomBytes(8).toString('hex').toUpperCase();
     return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}-${raw.slice(12)}`;
   });
-  await db.transaction(async (tx) => {
+  await database.transaction(async (tx) => {
     await tx.delete(recoveryCodes).where(eq(recoveryCodes.user_id, userId));
     await tx.insert(recoveryCodes).values(codes.map((code) => ({ user_id: userId, code_hash: hashRecoveryCode(code) })));
   });
