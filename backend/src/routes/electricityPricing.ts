@@ -34,7 +34,10 @@ router.get('/contracts', async (_req, res) => { res.json(await db.select().from(
 router.get('/contracts/:id/tariffs', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'INVALID_CONTRACT' });
-  res.json(await db.select().from(electricityTariffs).where(eq(electricityTariffs.contract_id, id)).orderBy(electricityTariffs.valid_from).limit(500));
+  // Time-of-day tariffs are stored as many short intervals; list the most
+  // recent 500 (oldest first) so current and future rates stay visible.
+  const rows = await db.select().from(electricityTariffs).where(eq(electricityTariffs.contract_id, id)).orderBy(desc(electricityTariffs.valid_from), desc(electricityTariffs.id)).limit(500);
+  res.json(rows.reverse());
 });
 function parseContractBody(b: any) {
   if (!['spot', 'fixed_all_in'].includes(b.kind) || !['DK1', 'DK2'].includes(b.area) || typeof b.label !== 'string' || !b.label.trim() || typeof b.provenance !== 'string' || !b.provenance.trim()) throw new Error('INVALID_CONTRACT');
