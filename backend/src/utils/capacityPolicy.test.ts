@@ -207,3 +207,11 @@ test('guestsOnNode matches encoded and legacy node values, not other hosts', () 
   assert.deepEqual(guestsOnNode(vms, ''), []);
   assert.deepEqual(guestsOnNode(null, '1~pve1'), []);
 });
+
+test('pending bytes count against the free-based fallback when the guest list is unavailable', () => {
+  const base = { requestedMb: 4096, nodeTotalBytes: 16 * 1024 ** 3, allocatedBytes: null, freeBytes: 8 * 1024 ** 3, mode: 'block', ratio: 1 };
+  assert.equal(evaluateMemoryCapacity(base).decision, 'allow');
+  const held = evaluateMemoryCapacity({ ...base, pendingBytes: 6 * 1024 ** 3 });
+  assert.equal(held.decision, 'block');
+  assert.equal(held.estimatedFromFree, true);
+});

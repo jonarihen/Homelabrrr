@@ -92,6 +92,19 @@ test('a valid non-expiring token authenticates and resolves the live user', asyn
   assert.fail('last_used_at was never stamped');
 });
 
+test('last_used_at is not rewritten within a minute but refreshes when stale', async () => {
+  const recent = new Date(Date.now() - 10 * 1000);
+  const fresh = await createToken({ last_used_at: recent });
+  const stale = await createToken({ last_used_at: new Date(Date.now() - 5 * 60 * 1000) });
+  await run(fakeReq(`Bearer ${fresh.raw}`, '203.0.113.12'));
+  await run(fakeReq(`Bearer ${stale.raw}`, '203.0.113.12'));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const [f] = await testDb.db.select().from(apiTokens).where(eq(apiTokens.id, fresh.id));
+  const [st] = await testDb.db.select().from(apiTokens).where(eq(apiTokens.id, stale.id));
+  assert.equal(f.last_used_at.getTime(), recent.getTime());
+  assert.ok(Date.now() - st.last_used_at.getTime() < 10 * 1000);
+});
+
 test('a future-dated expiry still authenticates; an expired token is rejected and recorded', async () => {
   const ip = '203.0.113.11';
   const future = await createToken({ expires_at: new Date(Date.now() + 60 * 60 * 1000) });
