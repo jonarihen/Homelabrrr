@@ -95,7 +95,7 @@ export default function AccountSecuritySection() {
         <h3 className="text-xs uppercase tracking-wide text-gray-500">Passkeys</h3>
         <div className="flex gap-2">
           <input value={passkeyName} maxLength={64} onChange={(event) => setPasskeyName(event.target.value)} className={inputCls} aria-label="Passkey name" />
-          <button disabled={!!busy} onClick={registerPasskey} className="px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-sm text-white whitespace-nowrap">{busy === 'passkey' ? 'Waiting…' : 'Add passkey'}</button>
+          <button disabled={!!busy} onClick={registerPasskey} className="px-4 rounded-xl btn-primary disabled:opacity-40 text-sm whitespace-nowrap">{busy === 'passkey' ? 'Waiting…' : 'Add passkey'}</button>
         </div>
         {passkeys.length === 0 ? <p className="text-xs text-gray-600">No passkeys registered.</p> : <ul className="space-y-2">{passkeys.map((passkey) => (
           <li key={passkey.id} className="flex justify-between gap-3 bg-gray-800/50 rounded-lg px-3 py-2">

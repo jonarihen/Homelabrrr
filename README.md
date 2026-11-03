@@ -336,6 +336,8 @@ BACKUP_OFFSITE_HOST_PATH=/mnt/nas/homelabrrr
 
 Keep `BACKUP_ENCRYPTION_KEY` in a password manager or secrets system separate from the database, staging directory, and off-host destination. Scheduled failure/success events use the existing configurable backup notification channels. **Admin → Operations** shows whether backups are configured, the last outcome/failure reason, size, and the last successful full-restore time (even if a later run failed); it can also run one immediately. Historical TOC-only verification runs are labelled `toc_checked`, not full-restore verified.
 
+Keep `SECRET_ENCRYPTION_KEY` (and any `SECRET_ENCRYPTION_PREVIOUS_KEYS`) with the backup key as well: the database stores PVE tokens, FortiGate keys, SSH keys and TOTP secrets encrypted with it, so a restored database is unusable without the matching keyring. The backend logs `secrets_undecryptable` at startup when stored secrets don't match the configured key.
+
 #### Disaster-recovery restore
 
 Restore is a two-step operation: `restore-backup` turns the encrypted archive back into a decrypted, TOC-checked plain `pg_dump` custom-format file (this alone does not verify its data), and then `pg_restore` loads that file into a **new, empty database** — never over a live one.
@@ -466,7 +468,7 @@ Every variable in this table is passed into the backend container by `docker-com
 Useful implementation defaults:
 
 - backend listens on port `3000` inside Docker
-- frontend nginx listens on port `80` inside Docker and publishes host port `8181`
+- frontend nginx listens on port `8080` inside Docker and publishes host port `8181`
 - PostgreSQL data is stored in the `pg_data` Docker volume; the old `db_data` volume is retained for one release only, as the SQLite import source / rollback artifact, and the running server no longer writes to it
 - SFTP uploads stream directly to the guest without an application-level size cap; available space and limits on the remote host are the effective ceiling. Other API requests are capped by nginx at 105 MB
 
