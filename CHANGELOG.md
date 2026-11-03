@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-03 — PayPal admin page tidy-up
+
+- The PayPal administration page now follows the same layout as the other admin pages: centred page width, consistent card padding, one set of button sizes, labelled form fields in a two-column grid, and an environment switcher with a "Live · real charges" badge in the page header.
+- Review queue, manual transfers, subscriptions, offered amounts and configuration history are proper scrollable tables with status badges instead of tightly packed rows. Setup actions are grouped into four labelled steps.
+- Figures show loading placeholders instead of "Unknown" or empty text while data loads, lists say "Unavailable" (with a retry) if loading fails, and error and success messages stay visible while you work further down the page.
+
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 
 - Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.

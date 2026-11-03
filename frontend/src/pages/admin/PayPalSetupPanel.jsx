@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
+import { Actions, Badge, Cell, DataTable, EmptyState, Row, RowsSkeleton, Section, SubHead, btnSecondary, btnSm, btnSmDanger, inputCls, money, when } from './PayPalOperationsPanel.jsx';
 
-const card = 'border border-gray-800 bg-gray-900/90 p-5';
-const button = 'border border-gray-700 px-3 py-1.5 text-xs text-gray-200 disabled:opacity-40';
-const when = (value) => value ? new Intl.DateTimeFormat('da-DK', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) : '—';
+const step = 'bg-gray-950/50 border border-gray-800 rounded-xl p-4 flex flex-col gap-3';
 
 // Explicit setup actions: a read-only connection test and idempotent creation
 // of the product, monthly plan and webhook registration. Created IDs are only
@@ -14,13 +13,15 @@ export default function PayPalSetupPanel({ environment, act, busy, configVersion
   const [planAmount, setPlanAmount] = useState('50.00');
   const [history, setHistory] = useState([]);
   const [plans, setPlans] = useState([]);
+  const [loaded, setLoaded] = useState(false);
   const loadHistory = useCallback(async () => {
     try { const { data } = await api.get('/payments/admin/config/history', { params: { environment } }); setHistory(data.items); }
     catch { setHistory([]); }
     try { const { data } = await api.get('/payments/admin/monthly-plans', { params: { environment } }); setPlans(data.items); }
     catch { setPlans([]); }
+    setLoaded(true);
   }, [environment]);
-  useEffect(() => { setChecks(null); setCreated({}); loadHistory(); }, [loadHistory, configVersion]);
+  useEffect(() => { setChecks(null); setCreated({}); setLoaded(false); loadHistory(); }, [loadHistory, configVersion]);
   const testConnection = () => act('test', async () => {
     const { data } = await api.post('/payments/admin/test-connection', { environment }); setChecks(data);
   });
@@ -35,33 +36,62 @@ export default function PayPalSetupPanel({ environment, act, busy, configVersion
     if (!window.confirm('Stop offering this amount to new subscribers? Existing subscriptions keep billing until cancelled.')) return;
     act('retire-plan', async () => { const { data } = await api.post(`/payments/admin/monthly-plans/${plan.id}/deactivate`, { environment }); setPlans(data.items); });
   };
-  return <section className={card}>
-    <h2 className="aaris-display text-lg text-gray-100">Setup · {environment}</h2>
-    <p className="text-xs text-gray-500 mt-1">Nothing here charges anyone. Creation is explicit, scoped to this environment and REST app, and safe to repeat.</p>
-    <div className="flex flex-wrap gap-2 mt-4">
-      <button type="button" disabled={!!busy} onClick={testConnection} className={button}>Test connection</button>
-      <button type="button" disabled={!!busy} onClick={() => provision('webhook')} className={button}>Register webhook</button>
-      <button type="button" disabled={!!busy} onClick={() => provision('product')} className={button}>Create product</button>
-      <label className="flex items-center gap-2 text-xs text-gray-400">Plan DKK
-        <input value={planAmount} onChange={(event) => setPlanAmount(event.target.value)} inputMode="decimal" className="w-24 bg-gray-950 border border-gray-700 px-2 py-1 text-white" /></label>
-      <button type="button" disabled={!!busy || !/^\d{1,6}(\.\d{2})?$/.test(planAmount)} onClick={() => provision('plan')} className={button}>Create monthly plan</button>
+  const planValid = /^\d{1,6}(\.\d{2})?$/.test(planAmount);
+  return <Section title={`Setup · ${environment}`}
+    description="Nothing here charges anyone. Creation is explicit, scoped to this environment and REST app, and safe to repeat. Created IDs are only copied into the form; saving them is a separate, versioned step.">
+    <div className="grid sm:grid-cols-2 gap-3">
+      <div className={step}>
+        <div><h3 className="text-sm text-white font-medium">Connection</h3><p className="text-xs text-gray-500 mt-1">Read-only test of the saved credentials.</p></div>
+        <div className="mt-auto"><button type="button" disabled={!!busy} onClick={testConnection} className={btnSecondary}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button></div>
+      </div>
+      <div className={step}>
+        <div><h3 className="text-sm text-white font-medium">Webhook</h3><p className="text-xs text-gray-500 mt-1">Register this app's webhook with PayPal.</p></div>
+        <div className="mt-auto"><button type="button" disabled={!!busy} onClick={() => provision('webhook')} className={btnSecondary}>{busy === 'setup-webhook' ? 'Registering…' : 'Register webhook'}</button></div>
+      </div>
+      <div className={step}>
+        <div><h3 className="text-sm text-white font-medium">Product</h3><p className="text-xs text-gray-500 mt-1">Create the PayPal product that plans belong to.</p></div>
+        <div className="mt-auto"><button type="button" disabled={!!busy} onClick={() => provision('product')} className={btnSecondary}>{busy === 'setup-product' ? 'Creating…' : 'Create product'}</button></div>
+      </div>
+      <div className={step}>
+        <div><h3 className="text-sm text-white font-medium">Monthly plan</h3><p className="text-xs text-gray-500 mt-1">Create a plan for one monthly amount.</p></div>
+        <div className="mt-auto flex flex-wrap items-end gap-3">
+          <div className="w-32">
+            <label htmlFor="paypal-plan-amount" className="block text-xs text-gray-400 mb-1.5">Plan amount (DKK)</label>
+            <input id="paypal-plan-amount" value={planAmount} onChange={(event) => setPlanAmount(event.target.value)} inputMode="decimal" aria-invalid={!planValid} className={inputCls} />
+          </div>
+          <button type="button" disabled={!!busy || !planValid} onClick={() => provision('plan')} className={btnSecondary}>{busy === 'setup-plan' ? 'Creating…' : 'Create monthly plan'}</button>
+        </div>
+      </div>
     </div>
-    {checks && <ul className="mt-4 space-y-1 font-mono text-xs">{checks.checks.map((item) => <li key={item.name} className={item.ok ? 'text-green-300' : 'text-red-300'}>
-      {item.ok ? 'OK' : 'FAIL'} · {item.name}{item.code ? ` · ${item.code}` : ''}</li>)}</ul>}
-    {Object.entries(created).map(([kind, data]) => <p key={kind} className="mt-3 text-xs text-gray-300">
-      {kind}: <span className="font-mono">{data.providerId}</span> {data.created ? '(created)' : '(existing)'}
-      {kind === 'webhook' && <button type="button" className={`${button} ml-2`} onClick={() => onUseId('webhookId', data.providerId)}>Use in form</button>}
-      {kind === 'plan' && <button type="button" disabled={!!busy} className={`${button} ml-2`} onClick={() => offerPlan(data.providerId, (data.amountOre / 100).toFixed(2))}>Offer this amount</button>}
-    </p>)}
-    <h3 className="font-mono text-[10px] uppercase tracking-[0.2em] text-gray-500 mt-5">Offered monthly amounts</h3>
-    {plans.length === 0 ? <p className="text-xs text-gray-500 mt-2">No validated plans beyond the configured default.</p> :
-      <ul className="mt-2 divide-y divide-gray-800 text-xs">{plans.map((plan) => <li key={plan.id} className="py-2 flex justify-between gap-3 text-gray-300">
-        <span>{new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(plan.amountOre / 100)} · <span className="font-mono">{plan.planId}</span> · {plan.active ? 'offered' : 'retired'}</span>
-        {plan.active && <button type="button" disabled={!!busy} className={button} onClick={() => retirePlan(plan)}>Stop offering</button>}</li>)}</ul>}
-    <h3 className="font-mono text-[10px] uppercase tracking-[0.2em] text-gray-500 mt-5">Configuration history</h3>
-    {history.length === 0 ? <p className="text-xs text-gray-500 mt-2">No recorded changes.</p> :
-      <ul className="mt-2 divide-y divide-gray-800 text-xs">{history.map((item) => <li key={`${item.configVersion}-${item.action}-${item.createdAt}`} className="py-2 text-gray-300">
-        v{item.configVersion} · {item.action} · {when(item.createdAt)} · merchant {item.merchantId || '—'} · webhook {item.webhookId || '—'}
-        {item.monthlyPlanId ? ` · plan ${item.monthlyPlanId}` : ''}{item.secretChanged ? ' · secret replaced' : ''} · {item.enabled ? 'enabled' : 'disabled'}</li>)}</ul>}
-  </section>;
+
+    {checks && <ul className="mt-4 space-y-1.5 font-mono text-xs" aria-label="Connection test results">{checks.checks.map((item) => <li key={item.name} className="flex items-center gap-2">
+      <Badge tone={item.ok ? 'ok' : 'bad'}>{item.ok ? 'OK' : 'FAIL'}</Badge><span className="text-gray-300">{item.name}{item.code ? ` · ${item.code}` : ''}</span></li>)}</ul>}
+    {Object.keys(created).length > 0 && <ul className="mt-4 space-y-2">{Object.entries(created).map(([kind, data]) => <li key={kind} className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-gray-300 bg-gray-950/50 border border-gray-800 rounded-xl px-4 py-3">
+      <span className="text-gray-500 capitalize">{kind}</span><span className="font-mono break-all">{data.providerId}</span><Badge tone={data.created ? 'ok' : 'neutral'}>{data.created ? 'created' : 'existing'}</Badge>
+      {kind === 'webhook' && <button type="button" className={btnSm} onClick={() => onUseId('webhookId', data.providerId)}>Use in form</button>}
+      {kind === 'plan' && <button type="button" disabled={!!busy} className={btnSm} onClick={() => offerPlan(data.providerId, (data.amountOre / 100).toFixed(2))}>Offer this amount</button>}
+    </li>)}</ul>}
+
+    <SubHead>Offered monthly amounts</SubHead>
+    {!loaded ? <RowsSkeleton /> : plans.length === 0 ? <EmptyState>No validated plans beyond the configured default.</EmptyState> :
+      <DataTable columns={['Amount', 'Plan ID', 'State', 'Actions']}>{plans.map((plan) => <Row key={plan.id}>
+        <Cell className="text-gray-100 whitespace-nowrap">{money(plan.amountOre)}</Cell>
+        <Cell className="font-mono text-gray-300 break-all">{plan.planId}</Cell>
+        <Cell><Badge tone={plan.active ? 'ok' : 'neutral'}>{plan.active ? 'offered' : 'retired'}</Badge></Cell>
+        <Cell>{plan.active && <Actions><button type="button" disabled={!!busy} className={btnSmDanger} onClick={() => retirePlan(plan)}>Stop offering</button></Actions>}</Cell>
+      </Row>)}</DataTable>}
+
+    <SubHead>Configuration history</SubHead>
+    {!loaded ? <RowsSkeleton /> : history.length === 0 ? <EmptyState>No recorded changes.</EmptyState> :
+      <DataTable columns={['Version', 'Action', 'When', 'Merchant', 'Webhook', 'Plan', 'Checkout', 'Notes']}>{history.map((item) => <Row key={`${item.configVersion}-${item.action}-${item.createdAt}`}>
+        <Cell className="font-mono text-gray-100">v{item.configVersion}</Cell>
+        <Cell className="text-gray-300">{item.action}</Cell>
+        <Cell className="text-gray-400 whitespace-nowrap">{when(item.createdAt)}</Cell>
+        <Cell className="font-mono text-gray-400 break-all">{item.merchantId || '—'}</Cell>
+        <Cell className="font-mono text-gray-400 break-all">{item.webhookId || '—'}</Cell>
+        <Cell className="font-mono text-gray-400 break-all">{item.monthlyPlanId || '—'}</Cell>
+        <Cell><Badge tone={item.enabled ? 'ok' : 'neutral'}>{item.enabled ? 'enabled' : 'disabled'}</Badge></Cell>
+        <Cell className="text-gray-400">{item.secretChanged ? 'secret replaced' : '—'}</Cell>
+      </Row>)}</DataTable>}
+  </Section>;
 }
