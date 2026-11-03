@@ -4,6 +4,16 @@
 
 - A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
 - When a deploy is refused for space, the message says how much is held by other deploys still in progress.
+## 2026-11-03 — Time-of-day grid tariffs from Datahub
+
+- Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
+- New `npm run import-datahub-tariffs` reads published charges from Energi Data Service (DatahubPricelist) and stores them as contiguous Europe/Copenhagen hour blocks on a contract, with DST and season changes handled and gaps rejected. Dry run by default; `--apply` writes. Transmission + system tariff and elafgift stay separate components, rates are stored excluding VAT (applied once by the contract), and fixed subscriptions stay in the contract's monthly fee.
+- The contract tariff list shows the most recent 500 intervals, so current and future rates stay visible.
+
+## 2026-11-03 — Energy data forms ask for identity confirmation
+
+- Saving an ElOverblik token, selecting a meter, disconnecting, and adding electricity contracts or tariffs now open the password + authenticator dialog when a recent confirmation is required, and retry the save afterwards. Before, they only showed "Please confirm your password and second factor before continuing" with no way to confirm.
+
 ## 2026-10-28 — Louder startup warnings for key and bootstrap mistakes
 
 - The backend now logs `secrets_undecryptable` at startup when stored secrets can't be decrypted with the configured `SECRET_ENCRYPTION_KEY`, instead of failing later on upstream calls and 2FA logins.
