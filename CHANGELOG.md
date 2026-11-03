@@ -7,6 +7,48 @@
 - Setting, replacing or removing a pin requires re-entering the API token secret, and pin changes are recorded in the audit log.
 - A **Test connection** button tries the host, port, token and trust settings in the form without saving them, and reports whether the certificate is untrusted or changed, the token was rejected, the host is unreachable, or it timed out.
 - Hosts with a certificate from an internal CA can keep TLS verification on by trusting that CA via `NODE_EXTRA_CA_CERTS` (see README).
+## 2026-11-03 — Time-of-day grid tariffs from Datahub
+
+- Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
+- New `npm run import-datahub-tariffs` reads published charges from Energi Data Service (DatahubPricelist) and stores them as contiguous Europe/Copenhagen hour blocks on a contract, with DST and season changes handled and gaps rejected. Dry run by default; `--apply` writes. Transmission + system tariff and elafgift stay separate components, rates are stored excluding VAT (applied once by the contract), and fixed subscriptions stay in the contract's monthly fee.
+- The contract tariff list shows the most recent 500 intervals, so current and future rates stay visible.
+
+## 2026-11-03 — Energy data forms ask for identity confirmation
+
+- Saving an ElOverblik token, selecting a meter, disconnecting, and adding electricity contracts or tariffs now open the password + authenticator dialog when a recent confirmation is required, and retry the save afterwards. Before, they only showed "Please confirm your password and second factor before continuing" with no way to confirm.
+
+## 2026-10-28 — Louder startup warnings for key and bootstrap mistakes
+
+- The backend now logs `secrets_undecryptable` at startup when stored secrets can't be decrypted with the configured `SECRET_ENCRYPTION_KEY`, instead of failing later on upstream calls and 2FA logins.
+- A warning is logged when `INITIAL_ADMIN_PASSWORD` is still set after the first admin exists.
+- The backend container runs with an init process, so child processes are reaped and shutdown signals are forwarded.
+- The README backup section now says the encryption keyring must be kept alongside database backups.
+## 2026-10-28 — Upstream calls can no longer hang or balloon
+
+- Proxmox and FortiGate API calls now have a 60-second total deadline and a 32 MB response limit, on top of the 15-second idle timeout. A slow-drip or oversized response fails the request instead of tying it up indefinitely.
+- Waiting for a Proxmox task (clones, migrations) still rides out short outages, but gives up with the real error after 5 minutes of failed status checks instead of silently retrying for up to 4 hours.
+- VMID allocation and node lookups query all Proxmox hosts in parallel, so one dead host costs one timeout instead of one per host. Unreachable hosts are logged as `pve_host_unreachable` with the host name, so "node not found" has a visible cause.
+## 2026-10-28 — Phone and tablet layout
+
+- Below laptop width the sidebar moves into a slide-in drawer opened from a **menu** button in a new top bar. It traps focus, closes on Escape, a tap outside or navigation, and returns focus to the button. Desktop layout is unchanged.
+- Data tables (users, roles, VLANs, templates, assignments, audit log, snapshots, SSH keys, websites, recent provisions) scroll sideways inside their panel instead of being cut off.
+- The **My VMs** header and summary bar wrap on narrow screens.
+- Console windows are shrunk and moved to fit the screen when opened, tiled or when the window is resized.
+## 2026-10-28 — Audit log filters and CSV export
+
+- The **Audit Log** action filter now lists every action that has actually been recorded, instead of a fixed list of about 25.
+- New filters for **user** and a **date range** (the end date counts in full). They combine with the action and target filters.
+- **Export CSV** downloads the filtered log (newest first, up to 50,000 rows). Spreadsheet formulas in exported text are neutralised, and each export is recorded in the audit log.
+## 2026-10-28 — Failed background deploy steps no longer leave a VM stuck "in progress"
+
+- If background work after a deploy fails unexpectedly (for example recording ownership or tagging), the VM moves to **needs review** with the cause shown, instead of staying in "creating" indefinitely with the error only in the server log. A more specific status already recorded by a deploy step is kept.
+- Deploy failures, VLAN-tag failures and auto-placement skips are now structured log events (`provision_*_background_failed`, `provision_vlan_tag_failed`, `placement_node_skipped`) with the provision ID and VMID.
+## 2026-10-28 — VM page sticky header, section nav and IP
+
+- The **VM page** identity header (name and status) and section nav (Overview, Performance, Snapshots, Backups, IP, SSH) stay pinned while you scroll. Power and connect actions scroll away to keep the sticky area compact on small screens.
+- The VM's IP address is shown next to the VMID, taken from cloud-init, DHCP or the guest agent, with a **copy** button.
+- The app is now called **Homelabrrr** everywhere in the UI (browser tab, sidebar, sign-in screen).
+- Firewall policy service colours use the design-language accent and status colours instead of a rainbow palette.
 ## 2026-10-28 — Readable primary buttons and labelled form fields
 
 - Primary (orange) buttons and active tabs now use dark text instead of white, so their labels meet contrast guidelines. They also show a clear focus ring when reached by keyboard.

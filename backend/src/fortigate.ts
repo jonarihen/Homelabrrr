@@ -5,6 +5,7 @@ import { decodeHtmlEntities } from './utils/sanitize.ts';
 import {
   SERVER_CERT_MAX, ServerCertLimitError, planServerCertList, certSlotKey,
 } from './utils/certSlots.ts';
+import { limitUpstreamRequest, capUpstreamBody } from './utils/upstreamLimits.ts';
 
 const ALLOW_INSECURE_UPSTREAM_TLS = process.env.ALLOW_INSECURE_UPSTREAM_TLS === 'true';
 
@@ -83,7 +84,7 @@ export class FortiGateAPI {
       const lib = this.port === 80 ? http : https;
       const req = lib.request(options, (res) => {
         const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
+        capUpstreamBody(req, res, 'FortiGate', (chunk) => chunks.push(chunk));
         res.on('end', () => {
           const raw = Buffer.concat(chunks).toString();
           let parsed;
@@ -111,6 +112,7 @@ export class FortiGateAPI {
       });
       req.on('error', (err) => reject(new Error(`FortiGate connection error: ${err.message}`)));
       req.setTimeout(15000, () => { req.destroy(); reject(new Error('FortiGate request timeout')); });
+      limitUpstreamRequest(req, 'FortiGate');
       if (body) req.write(body);
       req.end();
     });

@@ -1,3 +1,4 @@
+import { PROVISION_TERMINAL, PROVISION_FAILED } from '../utils/provisionStatus';
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
@@ -195,7 +196,7 @@ function DeploymentProgress({ job, onDeployAnother }) {
         if (!active) return;
         setRow(r.data);
         setFailedPoll(false);
-        const done = ['ready', 'warning', 'error', 'timeout'].includes(r.data.status);
+        const done = PROVISION_TERMINAL.includes(r.data.status);
         if (!done) timer = setTimeout(tick, 2000);
       } catch {
         if (!active) return;
@@ -209,7 +210,7 @@ function DeploymentProgress({ job, onDeployAnother }) {
 
   const status = row?.status;
   const steps = row?.steps || [];
-  const isError = status === 'error' || status === 'timeout';
+  const isError = PROVISION_FAILED.includes(status);
   const isReady = status === 'ready' || status === 'warning';
   const isWarning = status === 'warning';
   const doneCount = steps.filter((s) => ['done', 'skipped'].includes(s.status)).length;
@@ -311,6 +312,7 @@ function StatusPill({ status }) {
     warning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
     error: 'bg-red-500/10 text-red-400 ring-red-500/20',
     timeout: 'bg-red-500/10 text-red-400 ring-red-500/20',
+    needs_review: 'bg-red-500/10 text-red-400 ring-red-500/20',
   }[status] || 'bg-gray-500/10 text-gray-400 ring-gray-500/20';
   const inFlight = ['creating', 'cloning', 'configuring'].includes(status);
   return (
@@ -1344,7 +1346,7 @@ function RecentProvisions() {
   return (
     <div className="space-y-3">
       <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Recent Provisions</h2>
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
