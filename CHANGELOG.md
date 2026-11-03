@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-03 — Energy admin pages tidied up
+
+- The Energy data page (meter, electricity contract and cost, household bills, extra lab loads) and the Energy & Budget admin panel now use the same cards, spacing, buttons, form fields and tables as the other admin pages, with clearer headings, grouped actions and a proper layout on narrow screens.
+- Bill corrections (record payment, revise, void) open in their own row under the bill instead of squeezed into the actions cell.
+- Values no longer read "Unknown" or "Unavailable" while data is still loading: the page now shows placeholders until the answer arrives, and "Unknown" only appears when a value is genuinely missing. Success and error messages are now styled differently.
+
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 
 - Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
