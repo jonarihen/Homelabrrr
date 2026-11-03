@@ -1,8 +1,8 @@
 import { isIP } from 'net';
 import dns from 'dns/promises';
-import { eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { publicIpAssignments, vmAssignments } from '../db/schema/index.ts';
+import { publicIpAssignments, pveHosts, vmAssignments } from '../db/schema/index.ts';
 import { decodeNodeRef, nodeLookupCandidates } from './nodeRef.ts';
 import { userVlanCidrs } from './vlanSubnets.ts';
 import { hostForNode } from '../proxmox.ts';
@@ -179,10 +179,14 @@ export async function getUserAllowedUpstreams(userId, hostResolutionMemo: HostRe
   // match `2~pve` on another cluster, in either direction).
   // Returns null when that cannot be known right now (a Proxmox host needed to
   // resolve a bare node is unreachable): callers must not treat it as a denial.
+  let singleHost: boolean | undefined;
   const sameHost = async (a, row) => {
-    if (row.hostId == null) return true;
+    const rowHostId = row.hostId ?? decodeNodeRef(row.node).hostId;
     const { hostId } = decodeNodeRef(a.node);
-    if (hostId != null) return String(hostId) === String(row.hostId);
+    // A row with no host anywhere stands for a host-qualified assignment only
+    // when there is one Proxmox host, as in services/sshTargetPolicy.ts.
+    if (rowHostId == null) return hostId == null || (singleHost ??= (await db.select({ c: count() }).from(pveHosts))[0].c === 1);
+    if (hostId != null) return String(hostId) === String(rowHostId);
     const key = `${a.node}|${a.vmid}`;
     if (!hostResolutionMemo.has(key)) {
       hostResolutionMemo.set(key, hostForNode(a.node, { vmid: a.vmid, strict: true })
@@ -190,7 +194,7 @@ export async function getUserAllowedUpstreams(userId, hostResolutionMemo: HostRe
         .catch((err) => err?.definite ? false : null));
     }
     const resolved = await hostResolutionMemo.get(key);
-    return resolved === null ? null : resolved !== false && String(resolved) === String(row.hostId);
+    return resolved === null ? null : resolved !== false && String(resolved) === String(rowHostId);
   };
   const vmIps = [];
   const unverifiedIps = [];

@@ -86,3 +86,20 @@ test('a bare-node assignment counts for a host-qualified IP row only on that Pro
   await ipRow('203.0.113.22', host.id, `${host.id}~pve`, '172.16.22.1');
   assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps, ['172.16.22.1']);
 });
+
+test('a legacy row with no recorded host counts for a host-qualified assignment only with one Proxmox host', async () => {
+  const [user] = await testDb.db.insert(users).values({ username: 'legacy-owner', password: 'unused' }).returning({ id: users.id });
+  const [{ id: hostId }] = await testDb.db.select({ id: pveHosts.id }).from(pveHosts);
+  await testDb.db.insert(vmAssignments).values({ user_id: user.id, node: `${hostId}~pve`, vmid: 303 });
+  const [fw] = await testDb.db.insert(firewalls).values({ name: 'fw-legacy', host: 'fw.test', api_key: 'x' }).returning({ id: firewalls.id });
+  const [pool] = await testDb.db.insert(publicIpPools).values({ firewall_id: fw.id, name: 'pool-legacy', external_interface: 'wan1' }).returning({ id: publicIpPools.id });
+  const [ip] = await testDb.db.insert(publicIps).values({ pool_id: pool.id, firewall_id: fw.id, address: '203.0.113.31' }).returning({ id: publicIps.id });
+  await testDb.db.insert(publicIpAssignments).values({
+    public_ip_id: ip.id, firewall_id: fw.id, user_id: user.id, node: 'pve', vmid: 303, private_ip: '172.16.31.1',
+  });
+  assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps, ['172.16.31.1']);
+
+  // With a second cluster the bare row could be that cluster's `pve`: fail closed.
+  await testDb.db.insert(pveHosts).values({ name: 'pve-b', host: '127.0.0.1', port: 1, token_id: 't', token_secret: 'x' });
+  assert.deepEqual((await getUserAllowedUpstreams(user.id)).vmIps, []);
+});
