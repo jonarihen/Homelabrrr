@@ -10,6 +10,7 @@ import { log } from '../utils/logger.ts';
 // throttled: too many bad tokens from one IP within the window get locked out.
 const TOKEN_LOCKOUT_WINDOW_MS = 10 * 60 * 1000;
 const TOKEN_LOCKOUT_MAX = 20;
+const LAST_USED_REFRESH_MS = 60 * 1000;
 
 function clientIp(req): string {
   return req.ip || req.socket?.remoteAddress || 'unknown';
@@ -88,6 +89,7 @@ export async function authenticateApiToken(req, res, next): Promise<void> {
       name: apiTokens.name,
       scopes: apiTokens.scopes,
       expires_at: apiTokens.expires_at,
+      last_used_at: apiTokens.last_used_at,
     })
     .from(apiTokens)
     .where(and(
@@ -114,11 +116,14 @@ export async function authenticateApiToken(req, res, next): Promise<void> {
   }
 
   // Usage stamp is best-effort fire-and-forget (conventions M13): auth must
-  // never slow down or fail because the bookkeeping UPDATE did.
-  db.update(apiTokens)
-    .set({ last_used_at: new Date() })
-    .where(eq(apiTokens.id, token.id))
-    .catch((err) => log('warn', 'api_token_last_used_write_failed', { error: err?.message }));
+  // never slow down or fail because the bookkeeping UPDATE did. Skipped when
+  // already stamped within the last minute so a busy token doesn't write per request.
+  if (!token.last_used_at || Date.now() - token.last_used_at.getTime() > LAST_USED_REFRESH_MS) {
+    db.update(apiTokens)
+      .set({ last_used_at: new Date() })
+      .where(eq(apiTokens.id, token.id))
+      .catch((err) => log('warn', 'api_token_last_used_write_failed', { error: err?.message }));
+  }
 
   // Provide a plain session-shaped object so every downstream requireAuth /
   // requirePermission / userCanAccessVm check works unchanged. The no-op
