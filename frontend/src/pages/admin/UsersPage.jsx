@@ -7,6 +7,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { displayNode, vmIdentityKey } from '../../utils/nodeRef.js';
 import { draftFromState, buildUserPatch, describeUserChanges, invalidQuotaKeys, oversizedAssignmentSections } from '../../utils/userDraft.js';
 import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
+import Field from '../../components/Field.jsx';
 
 export default function UsersPage() {
   const confirm = useConfirm();
@@ -90,7 +91,7 @@ export default function UsersPage() {
           </button>
           <button
             onClick={() => setCreateOpen(true)}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            className="flex items-center gap-2 btn-primary px-4 py-2 rounded-lg text-sm font-medium"
           >
             + New User
           </button>
@@ -104,7 +105,7 @@ export default function UsersPage() {
           {[1,2,3].map(i => <div key={i} className="h-16 bg-gray-900 rounded-xl animate-pulse" />)}
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
@@ -272,7 +273,7 @@ function CreateUserModal({ canCreateAdmin, onClose, onCreated }) {
             required
             value={form.username}
             onChange={e => setForm(f => ({ ...f, username: e.target.value }))}
-            className={inputCls}
+            className="input"
             autoFocus
           />
         </Field>
@@ -283,7 +284,7 @@ function CreateUserModal({ canCreateAdmin, onClose, onCreated }) {
             required
             value={form.password}
             onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-            className={inputCls}
+            className="input"
           />
         </Field>
         {canCreateAdmin && (
@@ -766,7 +767,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                   required
                   value={newUsername}
                   onChange={e => { setNewUsername(e.target.value); setUsernameMsg(''); }}
-                  className={inputCls}
+                  className="input"
                   autoFocus
                 />
               </Field>
@@ -805,7 +806,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
                     required
                     value={newPw}
                     onChange={e => { setNewPw(e.target.value); setPwMsg(''); }}
-                    className={inputCls}
+                    className="input"
                   />
                 </Field>
                 {pwMsg && <p className={`text-xs ${pwMsg.startsWith('Failed') ? 'text-red-400' : 'text-green-400'}`}>{pwMsg}</p>}
@@ -832,7 +833,7 @@ function ManageUserModal({ currentUser, user, allVMs, allVLANs, roles = [], usag
               onClick={() => setReviewing(true)}
               disabled={badQuotas.length > 0 || oversized.length > 0}
               title={badQuotas.length ? 'Quotas must be whole numbers (or empty)' : oversized.length ? 'Each VM/VLAN change list is limited to 500 items' : undefined}
-              className="text-sm px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-medium transition-colors"
+              className="text-sm px-3 py-1.5 rounded-lg btn-primary font-medium"
             >
               Review &amp; Apply
             </button>
@@ -912,7 +913,7 @@ function ReviewUserChangesModal({ user, state, draft, changes, allVMs, onBack, o
               onChange={(e) => setTyped(e.target.value)}
               aria-label="Confirm username"
               autoFocus
-              className={inputCls}
+              className="input"
             />
           </div>
         )}
@@ -924,7 +925,7 @@ function ReviewUserChangesModal({ user, state, draft, changes, allVMs, onBack, o
           <button
             onClick={apply}
             disabled={busy || !confirmed}
-            className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+            className="flex-1 btn-primary rounded-lg py-2.5 text-sm font-medium"
           >
             {busy ? 'Applying…' : `Apply ${changes.length} change${changes.length === 1 ? '' : 's'}`}
           </button>
@@ -981,7 +982,7 @@ function QuotasTab({ user, state, quotas, invalid = [], onChange, usage, role })
               value={value}
               onChange={e => onChange(row.key, e.target.value)}
               aria-invalid={invalid.includes(row.key)}
-              className={`${inputCls} ${invalid.includes(row.key) ? 'border-red-500' : ''}`}
+              className={`input ${invalid.includes(row.key) ? 'border-red-500' : ''}`}
             />
             {invalid.includes(row.key) && <p className="text-xs text-red-400 mt-1">Whole number of {row.unit}, or empty.</p>}
           </div>
@@ -1194,11 +1195,11 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
               readOnly
               value={result.url}
               onFocus={e => e.target.select()}
-              className={`${inputCls} font-mono text-xs`}
+              className={`input font-mono text-xs`}
             />
             <button
               onClick={copy}
-              className="shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+              className="shrink-0 btn-primary rounded-lg px-4 py-2 text-sm font-medium"
             >
               {copied ? 'Copied' : 'Copy'}
             </button>
@@ -1247,7 +1248,7 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
               <select
                 value={form.roleId}
                 onChange={e => setForm(f => ({ ...f, roleId: e.target.value }))}
-                className={inputCls}
+                className="input"
               >
                 <option value="">No role — set individual permissions</option>
                 {roles.map(r => (
@@ -1299,15 +1300,15 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
             <div className="grid grid-cols-3 gap-2">
               <Field label="Max cores">
                 <input type="number" min="0" value={form.maxCores} placeholder="∞"
-                  onChange={e => setForm(f => ({ ...f, maxCores: e.target.value }))} className={inputCls} />
+                  onChange={e => setForm(f => ({ ...f, maxCores: e.target.value }))} className="input" />
               </Field>
               <Field label="Max RAM (GB)">
                 <input type="number" min="0" value={form.maxMemoryGb} placeholder="∞"
-                  onChange={e => setForm(f => ({ ...f, maxMemoryGb: e.target.value }))} className={inputCls} />
+                  onChange={e => setForm(f => ({ ...f, maxMemoryGb: e.target.value }))} className="input" />
               </Field>
               <Field label="Max disk (GB)">
                 <input type="number" min="0" value={form.maxStorageGb} placeholder="∞"
-                  onChange={e => setForm(f => ({ ...f, maxStorageGb: e.target.value }))} className={inputCls} />
+                  onChange={e => setForm(f => ({ ...f, maxStorageGb: e.target.value }))} className="input" />
               </Field>
             </div>
           </div>
@@ -1335,7 +1336,7 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
         <div className="grid grid-cols-2 gap-3">
           <Field label="Expires in (days, empty = never)">
             <input type="number" min="1" value={form.expiresInDays} placeholder="Never"
-              onChange={e => setForm(f => ({ ...f, expiresInDays: e.target.value }))} className={inputCls} />
+              onChange={e => setForm(f => ({ ...f, expiresInDays: e.target.value }))} className="input" />
           </Field>
           <label className="flex items-center gap-3 cursor-pointer bg-gray-800 rounded-lg px-4 py-2.5 self-end">
             <input
@@ -1359,8 +1360,7 @@ function GenerateInviteModal({ canCreateAdmin, roles, allVLANs, onClose, onCreat
 
 // ─── Shared sub-components ────────────────────────────────────────────────────
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
-const btnCls   = 'w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors';
+const btnCls   = 'w-full btn-primary rounded-lg py-2.5 text-sm font-medium';
 
 function tokenDate(v) {
   if (!v) return '—';
@@ -1368,15 +1368,6 @@ function tokenDate(v) {
   const s = String(v);
   const d = new Date(s.includes('T') ? s : s.replace(' ', 'T') + (s.includes('Z') ? '' : 'Z'));
   return isNaN(d.getTime()) ? v : d.toLocaleString();
-}
-
-function Field({ label, children }) {
-  return (
-    <div>
-      <label className="block text-xs text-gray-400 mb-1.5">{label}</label>
-      {children}
-    </div>
-  );
 }
 
 function Section({ title, children }) {
@@ -1444,7 +1435,7 @@ function UsageCell({ usage, user, role }) {
 
 function BlueBtn({ children, onClick }) {
   return (
-    <button onClick={onClick} className="text-xs px-3 py-1 bg-blue-700 hover:bg-blue-600 text-white rounded transition-colors">
+    <button onClick={onClick} className="text-xs px-3 py-1 btn-primary rounded">
       {children}
     </button>
   );

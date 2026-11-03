@@ -155,7 +155,8 @@ test('the filter narrows roles by permission label', async ({ page }) => {
 
 test('in-app navigation away from a dirty role editor asks first', async ({ page }) => {
   await mockRoles(page);
-  await page.route('**/api/admin/audit-log**', (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
+  await page.route(/\/api\/admin\/audit-log(\?.*)?$/, (route) => route.fulfill({ json: { rows: [], total: 0, page: 1, limit: 50 } }));
+  await page.route('**/api/admin/audit-log/actions', (route) => route.fulfill({ json: [] }));
   await page.goto('/admin/audit-log');
   await page.locator('a[href="/admin/roles"]').first().click(); // client-side, so Back is a router POP
   await page.getByRole('row', { name: /Operator/ }).getByRole('button', { name: 'Manage' }).click();

@@ -5,7 +5,6 @@ import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
 import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
 export default function TemplatesPage() {
   const confirm = useConfirm();
@@ -49,7 +48,7 @@ export default function TemplatesPage() {
         </div>
         <button
           onClick={() => { setEditTemplate(null); setShowForm(true); }}
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors"
+          className="flex items-center gap-2 btn-primary px-4 py-2 rounded-xl text-sm font-medium"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
@@ -184,7 +183,7 @@ function NodeStorageFields({ form, setForm, nodes, storages }) {
     <div className="grid grid-cols-2 gap-3">
       <div>
         <label className="block text-xs text-gray-400 mb-1.5">Node</label>
-        <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className={inputCls} required>
+        <select value={form.node} onChange={e => setForm(f => ({ ...f, node: e.target.value }))} className="input" required>
           <option value="">Select node...</option>
           {nodes.map(n => (
             <option key={routeNode(n)} value={routeNode(n)}>
@@ -195,7 +194,7 @@ function NodeStorageFields({ form, setForm, nodes, storages }) {
       </div>
       <div>
         <label className="block text-xs text-gray-400 mb-1.5">Download to Storage</label>
-        <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
+        <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className="input" required>
           <option value="">Select...</option>
           {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
         </select>
@@ -281,7 +280,7 @@ function CloudImagesSection({ onTemplatesChanged }) {
           <p className="text-sm text-gray-500">No cloud images yet. Add Ubuntu, Debian or another distro's cloud image to build templates from.</p>
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
@@ -447,7 +446,7 @@ function CloudImageDefaultStorageModal({ image, onClose, onSaved }) {
               <label className="block text-xs text-gray-400 mb-1.5">
                 {t.hostName ? `${t.hostName} — ` : ''}{displayNode(t.node)}
               </label>
-              <select value={val} onChange={e => setValues(v => ({ ...v, [t.hostId]: e.target.value }))} className={inputCls}>
+              <select value={val} onChange={e => setValues(v => ({ ...v, [t.hostId]: e.target.value }))} className="input">
                 <option value="">Auto (choose when deploying)</option>
                 {!sts.find(s => s.storage === val) && val && <option value={val}>{val}</option>}
                 {sts.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
@@ -457,7 +456,7 @@ function CloudImageDefaultStorageModal({ image, onClose, onSaved }) {
         })}
         <p className="text-[11px] text-gray-600">Pre-selected as the disk target when someone deploys a VM directly from this image.</p>
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
-        <button type="submit" disabled={saving} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+        <button type="submit" disabled={saving} className="w-full btn-primary rounded-xl py-2.5 text-sm font-semibold">
           {saving ? 'Saving...' : 'Save'}
         </button>
       </form>
@@ -520,7 +519,7 @@ function CloudImageFormModal({ onClose, onSaved }) {
       <form onSubmit={submit} className="p-5 space-y-4">
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Preset</label>
-          <select value={form.preset} onChange={e => applyPreset(e.target.value)} className={inputCls}>
+          <select value={form.preset} onChange={e => applyPreset(e.target.value)} className="input">
             <option value="">Custom URL…</option>
             {IMAGE_PRESETS.map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
           </select>
@@ -528,19 +527,19 @@ function CloudImageFormModal({ onClose, onSaved }) {
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Name</label>
-          <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} placeholder="Ubuntu 24.04" />
+          <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className="input" placeholder="Ubuntu 24.04" />
         </div>
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Image URL (qcow2 / raw)</label>
-          <input type="url" required value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} className={inputCls} placeholder="https://cloud-images.ubuntu.com/…" />
+          <input type="url" required value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} className="input" placeholder="https://cloud-images.ubuntu.com/…" />
         </div>
 
         <NodeStorageFields form={form} setForm={setForm} nodes={nodes} storages={importStorages} />
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Default VM storage (optional)</label>
-          <select value={form.defaultStorage} onChange={e => setForm(f => ({ ...f, defaultStorage: e.target.value }))} className={inputCls}>
+          <select value={form.defaultStorage} onChange={e => setForm(f => ({ ...f, defaultStorage: e.target.value }))} className="input">
             <option value="">Auto (choose when deploying)</option>
             {imageStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
           </select>
@@ -556,12 +555,12 @@ function CloudImageFormModal({ onClose, onSaved }) {
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">SHA256 checksum (optional)</label>
-          <input type="text" value={form.checksum} onChange={e => setForm(f => ({ ...f, checksum: e.target.value }))} className={`${inputCls} font-mono`} placeholder="Verify the download (recommended)" />
+          <input type="text" value={form.checksum} onChange={e => setForm(f => ({ ...f, checksum: e.target.value }))} className={`input font-mono`} placeholder="Verify the download (recommended)" />
         </div>
 
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
 
-        <button type="submit" disabled={saving || !form.node || !form.storage} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+        <button type="submit" disabled={saving || !form.node || !form.storage} className="w-full btn-primary rounded-xl py-2.5 text-sm font-semibold">
           {saving ? 'Starting download...' : 'Download Image'}
         </button>
       </form>
@@ -620,20 +619,20 @@ function CreateTemplateModal({ image, onClose, onStarted }) {
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Template Name</label>
-          <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} />
+          <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className="input" />
         </div>
 
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Disk Storage</label>
-            <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className={inputCls} required>
+            <select value={form.storage} onChange={e => setForm(f => ({ ...f, storage: e.target.value }))} className="input" required>
               <option value="">Select...</option>
               {storages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>)}
             </select>
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Network Bridge</label>
-            <select value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className={inputCls}>
+            <select value={form.bridge} onChange={e => setForm(f => ({ ...f, bridge: e.target.value }))} className="input">
               {bridges.map(b => <option key={b.iface} value={b.iface}>{b.iface}</option>)}
               {bridges.length === 0 && <option value="vmbr0">vmbr0</option>}
             </select>
@@ -643,21 +642,21 @@ function CreateTemplateModal({ image, onClose, onStarted }) {
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Base Disk (GB)</label>
-            <input type="number" min="3" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className={inputCls} />
+            <input type="number" min="3" value={form.diskGb} onChange={e => setForm(f => ({ ...f, diskGb: e.target.value }))} className="input" />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Default Cores</label>
-            <input type="number" min="1" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className={inputCls} />
+            <input type="number" min="1" value={form.cores} onChange={e => setForm(f => ({ ...f, cores: e.target.value }))} className="input" />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Default RAM (GB)</label>
-            <input type="number" min="0.5" step="0.5" value={form.memoryGb} onChange={e => setForm(f => ({ ...f, memoryGb: e.target.value }))} className={inputCls} />
+            <input type="number" min="0.5" step="0.5" value={form.memoryGb} onChange={e => setForm(f => ({ ...f, memoryGb: e.target.value }))} className="input" />
           </div>
         </div>
 
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
 
-        <button type="submit" disabled={saving || !form.storage} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+        <button type="submit" disabled={saving || !form.storage} className="w-full btn-primary rounded-xl py-2.5 text-sm font-semibold">
           {saving ? 'Starting...' : 'Create Template'}
         </button>
       </form>
@@ -738,7 +737,7 @@ function IsosSection() {
           <p className="text-sm text-gray-500">No ISOs catalogued yet. Add an installer ISO by URL to boot from-scratch VMs from it.</p>
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
@@ -842,7 +841,7 @@ function IsoFormModal({ onClose, onSaved }) {
       <form onSubmit={submit} className="p-5 space-y-4">
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Preset</label>
-          <select value={form.preset} onChange={e => applyPreset(e.target.value)} className={inputCls}>
+          <select value={form.preset} onChange={e => applyPreset(e.target.value)} className="input">
             <option value="">Custom URL…</option>
             {ISO_PRESETS.map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
           </select>
@@ -850,12 +849,12 @@ function IsoFormModal({ onClose, onSaved }) {
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">Name</label>
-          <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className={inputCls} placeholder="Debian 12 netinst" />
+          <input type="text" required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className="input" placeholder="Debian 12 netinst" />
         </div>
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">ISO URL</label>
-          <input type="url" required value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} className={inputCls} placeholder="https://cdimage.debian.org/…/debian-12-amd64-netinst.iso" />
+          <input type="url" required value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} className="input" placeholder="https://cdimage.debian.org/…/debian-12-amd64-netinst.iso" />
         </div>
 
         <NodeStorageFields form={form} setForm={setForm} nodes={nodes} storages={storages} />
@@ -869,12 +868,12 @@ function IsoFormModal({ onClose, onSaved }) {
 
         <div>
           <label className="block text-xs text-gray-400 mb-1.5">SHA256 checksum (optional)</label>
-          <input type="text" value={form.checksum} onChange={e => setForm(f => ({ ...f, checksum: e.target.value }))} className={`${inputCls} font-mono`} placeholder="Verify the download (recommended)" />
+          <input type="text" value={form.checksum} onChange={e => setForm(f => ({ ...f, checksum: e.target.value }))} className={`input font-mono`} placeholder="Verify the download (recommended)" />
         </div>
 
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
 
-        <button type="submit" disabled={saving || !form.node || !form.storage} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+        <button type="submit" disabled={saving || !form.node || !form.storage} className="w-full btn-primary rounded-xl py-2.5 text-sm font-semibold">
           {saving ? 'Starting download...' : 'Download ISO'}
         </button>
       </form>
@@ -996,7 +995,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
               <select
                 value={form.node}
                 onChange={e => { setForm(f => ({ ...f, node: e.target.value, vmid: '' })); setPveVms([]); }}
-                className={inputCls}
+                className="input"
                 required
               >
                 <option value="">Select node...</option>
@@ -1020,7 +1019,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
                     <select
                       value={form.vmid}
                       onChange={e => selectSourceVm(e.target.value)}
-                      className={inputCls}
+                      className="input"
                       required
                     >
                       <option value="">Select a VM...</option>
@@ -1057,7 +1056,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
             type="text"
             value={form.name}
             onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-            className={inputCls}
+            className="input"
             placeholder="e.g. Ubuntu 22.04 Server"
             required
           />
@@ -1068,7 +1067,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
           <textarea
             value={form.description}
             onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-            className={`${inputCls} h-16 resize-none`}
+            className={`input h-16 resize-none`}
             placeholder="Optional description for users"
           />
         </div>
@@ -1076,15 +1075,15 @@ function TemplateFormModal({ template, onClose, onSaved }) {
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Default Cores</label>
-            <input type="number" min="1" value={form.defaultCores} onChange={e => setForm(f => ({ ...f, defaultCores: e.target.value }))} className={inputCls} />
+            <input type="number" min="1" value={form.defaultCores} onChange={e => setForm(f => ({ ...f, defaultCores: e.target.value }))} className="input" />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Default RAM (GB)</label>
-            <input type="number" min="0.5" step="0.5" value={form.defaultMemoryGb} onChange={e => setForm(f => ({ ...f, defaultMemoryGb: e.target.value }))} className={inputCls} />
+            <input type="number" min="0.5" step="0.5" value={form.defaultMemoryGb} onChange={e => setForm(f => ({ ...f, defaultMemoryGb: e.target.value }))} className="input" />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1.5">Default Disk (GB)</label>
-            <input type="number" min="1" value={form.defaultDiskGb} onChange={e => setForm(f => ({ ...f, defaultDiskGb: e.target.value }))} className={inputCls} />
+            <input type="number" min="1" value={form.defaultDiskGb} onChange={e => setForm(f => ({ ...f, defaultDiskGb: e.target.value }))} className="input" />
           </div>
         </div>
 
@@ -1094,7 +1093,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
             <select
               value={form.defaultStorage}
               onChange={e => setForm(f => ({ ...f, defaultStorage: e.target.value }))}
-              className={inputCls}
+              className="input"
             >
               {!storages.find(s => s.storage === form.defaultStorage) && form.defaultStorage && (
                 <option value={form.defaultStorage}>{form.defaultStorage}</option>
@@ -1108,7 +1107,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
               type="text"
               value={form.defaultStorage}
               onChange={e => setForm(f => ({ ...f, defaultStorage: e.target.value }))}
-              className={inputCls}
+              className="input"
               placeholder="local-lvm"
             />
           )}
@@ -1129,7 +1128,7 @@ function TemplateFormModal({ template, onClose, onSaved }) {
 
         {error && <p className="text-xs text-red-400 bg-red-900/20 rounded-lg p-2.5">{error}</p>}
 
-        <button type="submit" disabled={saving} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+        <button type="submit" disabled={saving} className="w-full btn-primary rounded-xl py-2.5 text-sm font-semibold">
           {saving ? 'Saving...' : isEdit ? 'Update Template' : 'Add Template'}
         </button>
       </form>

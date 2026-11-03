@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '../../api.js';
 import { useConfirm } from '../../contexts/FeedbackContext.jsx';
+import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
 
 const inputClass = 'w-full border border-slate-700 bg-slate-950 px-2 py-2 text-slate-100';
 const initialContract = { label: '', kind: 'spot', area: 'DK1', validFrom: '', validTo: '', fixedDkkPerKwh: '', spotMarginDkkPerKwh: '', vatRate: '', fixedMonthlyOre: '', fixedFeeAllocation: 'none', fixedFeeManualShare: '', provenance: '', requiredComponents: ['network', 'system', 'tax'], active: false };
@@ -28,6 +29,8 @@ export default function ElectricityPricingPanel() {
   const [supersede, setSupersede] = useState({ enabled: false, reason: '' });
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [reauth, setReauth] = useState(null);
+  const [reauthError, setReauthError] = useState('');
   const load = async () => {
     const { data } = await api.get('/admin/electricity-pricing/contracts');
     setContracts(data);
@@ -45,9 +48,24 @@ export default function ElectricityPricingPanel() {
     api.get(`/admin/electricity-pricing/contracts/${selected}/tariffs`).then(({ data }) => setTariffs(data)).catch(() => setTariffs([]));
   }, [selected, contracts]);
   useEffect(() => { setPreview(null); }, [selected, month, scenario]);
-  const action = async (work) => { setBusy(true); setMessage(''); try { await work(); await load(); setMessage('Saved.'); } catch (err) { setMessage(err.response?.data?.error || 'Request failed.'); } finally { setBusy(false); } };
+  // Contract, tariff and statement writes need a recent password + 2FA check;
+  // on REAUTHENTICATION_REQUIRED the work is parked and retried after the dialog.
+  const action = async (work) => {
+    setBusy(true); setMessage('');
+    try { await work(); await load(); setMessage('Saved.'); }
+    catch (err) {
+      if (err.response?.data?.code === 'REAUTHENTICATION_REQUIRED') { setReauth({ work }); setReauthError(''); }
+      else setMessage(err.response?.data?.error || 'Request failed.');
+    } finally { setBusy(false); }
+  };
+  const confirmReauth = async (credentials) => {
+    try { await api.post('/auth/reauthenticate', credentials); }
+    catch (err) { setReauthError(err.response?.data?.error || 'Identity confirmation failed.'); return false; }
+    const pending = reauth; setReauth(null); await action(pending.work); return true;
+  };
   const selectedContract = contracts.find((item) => String(item.id) === selected);
   return <section className="space-y-4 border border-slate-700 bg-slate-900 p-5">
+    <RecentReauthDialog open={!!reauth} busy={busy} error={reauthError} onCancel={() => setReauth(null)} onConfirm={confirmReauth} />
     <div><p className="font-mono text-xs uppercase tracking-widest text-orange-500">Pricing / private</p><h2 className="text-lg font-semibold uppercase">Electricity contract & cost</h2><p className="text-sm text-slate-400">Enter actual supplier terms and tariffs. Wholesale spot is never the full household price. Nothing here changes server modes.</p></div>
     {message && <p role="status" className="border border-orange-700 p-2 text-sm">{message}</p>}
     <div className="grid gap-3 md:grid-cols-2">

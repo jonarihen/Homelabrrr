@@ -100,7 +100,7 @@ export default function RolesPage() {
               </button>
               <button
                 onClick={() => setCreateOpen(true)}
-                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center gap-2 btn-primary px-4 py-2 rounded-lg text-sm font-medium"
               >
                 + New Role
               </button>
@@ -127,7 +127,7 @@ export default function RolesPage() {
           {[1, 2].map(i => <div key={i} className="h-16 bg-gray-900 rounded-xl animate-pulse" />)}
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
@@ -384,7 +384,6 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
     setReviewing(true);
   };
 
-  const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
   if (reviewing) {
     const holders = editing ? reviewHolders.length : 0;
@@ -411,7 +410,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
               type="button"
               onClick={save}
               disabled={saving}
-              className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+              className="flex-1 btn-primary rounded-lg py-2.5 text-sm font-medium"
             >
               {saving ? 'Applying…' : editing ? 'Apply changes' : 'Create role'}
             </button>
@@ -433,7 +432,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
               value={name}
               disabled={editing && role.builtIn}
               onChange={e => setName(e.target.value)}
-              className={`${inputCls} disabled:opacity-50`}
+              className={`input disabled:opacity-50`}
               autoFocus={!editing}
             />
           </div>
@@ -444,7 +443,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
               value={description}
               disabled={editing && role.builtIn}
               onChange={e => setDescription(e.target.value)}
-              className={`${inputCls} disabled:opacity-50`}
+              className={`input disabled:opacity-50`}
             />
           </div>
         </div>
@@ -528,7 +527,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
                   value={quotas[q.key] ?? ''}
                   onChange={e => setQuotas(f => ({ ...f, [q.key]: e.target.value }))}
                   aria-invalid={badQuotas.includes(q.key)}
-                  className={`${inputCls} ${badQuotas.includes(q.key) ? 'border-red-500' : ''}`}
+                  className={`input ${badQuotas.includes(q.key) ? 'border-red-500' : ''}`}
                 />
               </div>
             ))}
@@ -539,7 +538,7 @@ function RoleModal({ role, prefill, onClose, onSaved }) {
         <button
           type="submit"
           disabled={saving || checkingHolders || badQuotas.length > 0 || (editing && changes.length === 0)}
-          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+          className="w-full btn-primary rounded-lg py-2.5 text-sm font-medium"
         >
           {editing
             ? (checkingHolders ? 'Checking holders…' : changes.length === 0 ? 'No changes' : `Review ${changes.length} change${changes.length === 1 ? '' : 's'}`)
@@ -592,7 +591,7 @@ function CloneRoleModal({ source, onClose, onSaved }) {
         <button
           type="submit"
           disabled={saving}
-          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+          className="w-full btn-primary rounded-lg py-2.5 text-sm font-medium"
         >
           {saving ? 'Cloning…' : 'Clone role'}
         </button>
@@ -697,7 +696,7 @@ function HoldersModal({ role, isAdmin, onClose, onChanged }) {
             <button
               onClick={assign}
               disabled={busy || selected.size === 0}
-              className="mt-3 w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2 text-sm font-medium transition-colors"
+              className="mt-3 w-full btn-primary rounded-lg py-2 text-sm font-medium"
             >
               {busy ? 'Assigning…' : `Assign to ${selected.size} selected`}
             </button>
@@ -817,7 +816,7 @@ function CompareRolesModal({ roles, onClose }) {
             {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
           </select>
         </div>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto"><table className="w-full text-sm">
           <thead>
             <tr className="text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
               <th className="text-left py-2">Permission / quota</th>
@@ -840,7 +839,7 @@ function CompareRolesModal({ roles, onClose }) {
               );
             })}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </Modal>
   );
@@ -898,7 +897,7 @@ function ImportRoleModal({ permissionKeys, onClose, onImported }) {
         <button
           onClick={parse}
           disabled={!text.trim()}
-          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+          className="w-full btn-primary rounded-lg py-2.5 text-sm font-medium"
         >
           Continue
         </button>

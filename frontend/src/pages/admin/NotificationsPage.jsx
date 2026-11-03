@@ -4,7 +4,6 @@ import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
 const CATEGORY_LABELS = {
   deployment: 'Deployments',
@@ -80,7 +79,7 @@ export default function NotificationsPage() {
         </div>
         <button
           onClick={() => { setEditWebhook(null); setModalOpen(true); }}
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          className="flex items-center gap-2 btn-primary px-4 py-2 rounded-lg text-sm font-medium"
         >
           + New Webhook
         </button>
@@ -233,7 +232,7 @@ function WebhookFormModal({ webhook, eventTypes, onClose, onSaved }) {
             value={form.name}
             onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
             placeholder="e.g. #lab-alerts"
-            className={inputCls}
+            className="input"
             autoFocus
           />
         </div>
@@ -248,7 +247,7 @@ function WebhookFormModal({ webhook, eventTypes, onClose, onSaved }) {
             value={form.url}
             onChange={e => setForm(f => ({ ...f, url: e.target.value }))}
             placeholder={isEdit ? '••••••••' : 'https://discord.com/api/webhooks/…'}
-            className={`${inputCls} font-mono`}
+            className={`input font-mono`}
             autoComplete="off"
           />
           <p className="mt-1.5 text-xs text-gray-500">Stored encrypted at rest. Create one in Discord under Channel → Integrations → Webhooks.</p>
@@ -293,7 +292,7 @@ function WebhookFormModal({ webhook, eventTypes, onClose, onSaved }) {
         <button
           type="submit"
           disabled={saving}
-          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-medium transition-colors"
+          className="w-full btn-primary rounded-lg py-2.5 text-sm font-medium"
         >
           {saving ? 'Saving...' : isEdit ? 'Save Changes' : 'Create Webhook'}
         </button>

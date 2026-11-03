@@ -4,6 +4,7 @@ import ElectricityPricingPanel from './ElectricityPricingPanel.jsx';
 import ExtraLabLoadsPanel from './ExtraLabLoadsPanel.jsx';
 import ElectricityBillsPanel from './ElectricityBillsPanel.jsx';
 import { useConfirm } from '../../contexts/FeedbackContext.jsx';
+import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
 
 export default function EnergyDataPage() {
   const confirm = useConfirm();
@@ -15,6 +16,8 @@ export default function EnergyDataPage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [period, setPeriod] = useState({ from: '', to: '' });
+  const [reauth, setReauth] = useState(null);
+  const [reauthError, setReauthError] = useState('');
   const refresh = async () => {
     const { data } = await api.get('/admin/energy-data/status');
     setStatus(data);
@@ -22,11 +25,23 @@ export default function EnergyDataPage() {
   };
   useEffect(() => { refresh().catch(() => setMessage('Could not load energy data setup.')); }, []);
   const local = (value) => value ? new Date(value).toLocaleString() : 'Unknown';
+  // Connection, meter and disconnect need a recent password + 2FA check; on
+  // REAUTHENTICATION_REQUIRED the request is parked and retried after the dialog.
   const action = async (path, body = {}) => {
     setBusy(true); setMessage('');
-    try { await api.post(`/admin/energy-data/${path}`, body); await refresh(); setMessage('Saved.'); }
-    catch (err) { setMessage(err.response?.data?.error || 'Request failed.'); }
-    finally { setBusy(false); }
+    try { await api.post(`/admin/energy-data/${path}`, body); await refresh(); setMessage('Saved.'); return true; }
+    catch (err) {
+      if (err.response?.data?.code === 'REAUTHENTICATION_REQUIRED') { setReauth({ path, body }); setReauthError(''); }
+      else setMessage(err.response?.data?.error || 'Request failed.');
+      return false;
+    } finally { setBusy(false); }
+  };
+  const confirmReauth = async (credentials) => {
+    try { await api.post('/auth/reauthenticate', credentials); }
+    catch (err) { setReauthError(err.response?.data?.error || 'Identity confirmation failed.'); return false; }
+    const pending = reauth; setReauth(null);
+    if (await action(pending.path, pending.body) && pending.path === 'connection') setToken('');
+    return true;
   };
   return <main className="max-w-4xl space-y-6 p-6 text-slate-100">
     <header><p className="text-xs uppercase tracking-[.2em] text-orange-500">Power & Energy</p><h1 className="text-3xl font-semibold">Electricity meter data</h1>
@@ -35,7 +50,7 @@ export default function EnergyDataPage() {
     <section className="rounded border border-slate-700 bg-slate-900 p-5 space-y-3">
       <h2 className="text-lg font-medium">Connection</h2>
       <p className="text-sm text-slate-400">Create a Customer API refresh token in ElOverblik and paste it here. The token is stored encrypted. No MitID credentials are needed.</p>
-      <form onSubmit={(event) => { event.preventDefault(); action('connection', { refreshToken: token }).then(() => setToken('')); }} className="flex gap-3">
+      <form onSubmit={(event) => { event.preventDefault(); action('connection', { refreshToken: token }).then((ok) => { if (ok) setToken(''); }); }} className="flex gap-3">
         <input aria-label="ElOverblik refresh token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} className="min-w-0 flex-1 rounded bg-slate-800 p-2" />
         <button disabled={busy || !token} className="rounded bg-orange-700 px-4 py-2 disabled:opacity-50">Test and save</button>
       </form>
@@ -70,6 +85,7 @@ export default function EnergyDataPage() {
       </form>
       <div className="flex flex-wrap gap-3"><button disabled={busy || !status.enabled} onClick={() => action('sync')} className="rounded border border-slate-600 px-4 py-2 disabled:opacity-50">Sync now</button><button disabled={busy} onClick={() => action('disconnect')} className="rounded border border-red-700 px-4 py-2 disabled:opacity-50">Disconnect and keep history</button><button disabled={busy} onClick={async () => { if (await confirm({ message: 'Disconnect and permanently delete all imported meter intervals and charge snapshots? Finalized cost statements are kept.', confirmLabel: 'Purge history', danger: true })) action('disconnect', { purgeHistory: true }); }} className="rounded border border-red-700 px-4 py-2 text-red-300 disabled:opacity-50">Disconnect and purge history</button></div>
     </section>}
+    <RecentReauthDialog open={!!reauth} busy={busy} error={reauthError} onCancel={() => setReauth(null)} onConfirm={confirmReauth} />
     <ElectricityPricingPanel />
     <ElectricityBillsPanel />
     <ExtraLabLoadsPanel />

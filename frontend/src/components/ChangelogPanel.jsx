@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import changelogMarkdown from '../../../CHANGELOG.md?raw';
 import { parseChangelog } from '../utils/changelog.js';
@@ -15,6 +15,7 @@ function formatDateLabel(date) {
 
 export default function ChangelogPanel() {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef(null);
   const entries = useMemo(() => parseChangelog(changelogMarkdown), []);
   const latestEntry = entries[0];
   const latestDateLabel = useMemo(
@@ -68,6 +69,7 @@ export default function ChangelogPanel() {
     <>
       <div className="mb-3">
         <button
+          ref={triggerRef}
           type="button"
           onClick={() => setOpen(true)}
           className="w-full border border-gray-800 bg-gray-900/85 px-3 py-2 text-left text-sm text-gray-300 transition-colors hover:bg-gray-800 hover:text-white"
