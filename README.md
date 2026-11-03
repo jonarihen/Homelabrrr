@@ -1,12 +1,23 @@
+<div align="center">
+
 # Homelabrrr
 
-> Self-service homelab portal for Proxmox and FortiGate
+**A self-service portal with guardrails for Proxmox and FortiGate.**
+Hand your VMs, VLANs and port forwards to other people without handing over the keys.
 
-[![Frontend](https://img.shields.io/badge/frontend-React%2018%20%2B%20Vite-61dafb?style=flat-square&logo=react&logoColor=white)](#stack)
-[![Backend](https://img.shields.io/badge/backend-Node.js%20%2B%20Express-339933?style=flat-square&logo=node.js&logoColor=white)](#stack)
-[![Database](https://img.shields.io/badge/database-PostgreSQL-4169e1?style=flat-square&logo=postgresql&logoColor=white)](#stack)
-[![Deployment](https://img.shields.io/badge/deployment-Docker%20Compose-2496ed?style=flat-square&logo=docker&logoColor=white)](#quick-start)
-[![Security](https://img.shields.io/badge/security-passkeys%20%2B%20role%20controls-bf3989?style=flat-square)](#security-model)
+[![CI](https://img.shields.io/github/actions/workflow/status/jonarihen/Homelabrrr/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/jonarihen/Homelabrrr/actions/workflows/ci.yml)
+[![React](https://img.shields.io/badge/frontend-React%20%2B%20Vite-61dafb?style=flat-square&logo=react&logoColor=white)](#stack)
+[![Node.js](https://img.shields.io/badge/backend-Node.js%20%2B%20Express-339933?style=flat-square&logo=node.js&logoColor=white)](#stack)
+[![PostgreSQL](https://img.shields.io/badge/database-PostgreSQL-4169e1?style=flat-square&logo=postgresql&logoColor=white)](#stack)
+[![Proxmox VE](https://img.shields.io/badge/compute-Proxmox%20VE-e57000?style=flat-square&logo=proxmox&logoColor=white)](#stack)
+[![FortiGate](https://img.shields.io/badge/network-FortiGate-ee3124?style=flat-square&logo=fortinet&logoColor=white)](#stack)
+[![Docker Compose](https://img.shields.io/badge/deploy-Docker%20Compose-2496ed?style=flat-square&logo=docker&logoColor=white)](#quick-start)
+
+[Screenshots](#screenshots) · [Features](#highlights) · [Architecture](#architecture) · [Quick start](#quick-start) · [Security](#security-model) · [Changelog](CHANGELOG.md)
+
+<img src="docs/screenshots/dashboard.png" alt="Homelabrrr dashboard: a user's VMs and containers with live CPU and RAM, lease and power-schedule badges" width="860">
+
+</div>
 
 Homelabrrr is a web portal for running a self-service Proxmox environment with FortiGate-backed networking.
 Users get assigned VM/LXC access, browser VNC, browser SSH, SFTP file access, provisioning, and account management.
@@ -14,6 +25,38 @@ Admins get a single interface for Proxmox hosts, FortiGate firewalls, VLANs, pol
 
 It is built for homelab deployment behind a reverse proxy such as Nginx Proxy Manager.
 The frontend serves internal HTTP, and TLS is expected to terminate at the proxy layer.
+
+## The pitch
+
+Raw Proxmox and FortiGate access is all-or-nothing. Homelabrrr sits between your users and those platforms and only exposes what each person is allowed to touch:
+
+- **Users** see their own VMs, pick from approved images and VLANs, and open a console in the browser.
+- **Admins** keep Proxmox and FortiGate as the source of truth, with quotas, leases, roles and an audit log on top.
+- **Everything is guard-railed**: secrets are encrypted at rest, 2FA and passkeys are supported, and every meaningful action is audit-logged.
+
+## At a glance
+
+| | | |
+| --- | --- | --- |
+| **Compute**<br>Multi-host Proxmox, VM + LXC, snapshots, backups, power schedules, leases | **Access**<br>Browser VNC and SSH, SFTP, multi-session console dock | **Provisioning**<br>Cloud images, templates, from-scratch ISO builds, quotas, capacity checks |
+| **Networking**<br>VLANs, FortiGate sync, port forwards, DHCP and IP reservations, workflows | **Publishing**<br>Caddy reverse-proxy sites with Let's Encrypt certs | **Governance**<br>Roles, invite links, API tokens, Discord notifications, audit log |
+
+## Screenshots
+
+Captured from the real UI against a mocked API with generic demo data (see [Regenerating screenshots](#regenerating-screenshots)).
+
+| My VMs | VM detail |
+| --- | --- |
+| ![My VMs dashboard](docs/screenshots/dashboard.png) | ![VM detail with performance graphs](docs/screenshots/vm-detail.png) |
+| **Deploy from a cloud image** | **VLANs (admin)** |
+| ![Deploy a VM from a cloud image](docs/screenshots/deploy.png) | ![VLAN management](docs/screenshots/vlans.png) |
+
+<details>
+<summary><b>Port forwarding (admin)</b></summary>
+
+![FortiGate port forwarding](docs/screenshots/port-forwarding.png)
+
+</details>
 
 ## Why This Exists
 
@@ -27,6 +70,10 @@ Most homelabs end up split across several tools:
 This project pulls those into one interface so users can work inside guardrails instead of getting raw platform access.
 
 ## Highlights
+
+<details open>
+<summary>Full feature table</summary>
+
 
 | Area | What you get |
 | --- | --- |
@@ -53,6 +100,8 @@ This project pulls those into one interface so users can work inside guardrails 
 | API tokens | Personal `Authorization: Bearer` tokens for scripting (curl, cron, CI) with explicit least-privilege scopes, optional expiry, one-time secret display, live owner permissions, and full audit attribution |
 | Security | Session auth, TOTP plus WebAuthn/passkeys and one-time recovery codes, active-session revocation, origin/CSRF checks, login throttling, versioned encryption keys, upstream TLS enforcement, SSH target/host-key checks, and outcome-aware audit logging |
 
+</details>
+
 ## Power & Energy (private)
 
 An optional, private feature set for an owner who wants to see and manage what the lab's physical servers cost to run. Every part starts disabled and does nothing until an administrator configures it. No simulated data is ever shown as real.
@@ -68,6 +117,9 @@ Everything here was verified with fixtures, fakes and throwaway databases only, 
 **Docs:** [Power & Energy operator runbook](backend/docs/power-energy-runbook.md) (rollout order, defaults, rollback, live checklist) · [ElOverblik](backend/docs/eloverblik.md) · [Energy dashboard, contracts and refunds](backend/docs/energy-dashboard.md) · [PayPal support](backend/docs/paypal-support.md)
 
 ## UI Overview
+
+<details>
+<summary>Every user and admin page</summary>
 
 ### User side
 
@@ -100,6 +152,8 @@ Everything here was verified with fixtures, fakes and throwaway databases only, 
 - `Operations` — interrupted Proxmox task reconciliation, encrypted backup/restore-verification status, PostgreSQL retention/maintenance, and secret-key rotation planning
 - `Changelog` — recent platform changes shown from the sidebar for every signed-in user
 
+</details>
+
 ## Architecture
 
 ```mermaid
@@ -114,7 +168,7 @@ flowchart LR
 
 ## Stack
 
-- Frontend: React 18, Vite 8, Tailwind CSS 3, React Router 7
+- Frontend: React 19, Vite 8, Tailwind CSS 4, React Router 7
 - Backend: Node.js 26 (ESM + TypeScript, run directly via native type stripping — no build step), Express 5, `ws`, `ssh2`, `busboy`
 - Database: PostgreSQL 17, accessed through **Drizzle ORM** over **node-postgres (`pg`)** with a shared connection pool (encrypted secrets at rest)
 - Auth: Drizzle-backed PostgreSQL session store, rate-limited login/2FA, TOTP, WebAuthn/passkeys, recovery codes, and scoped bearer tokens
@@ -134,7 +188,19 @@ The current UI is built around a left navigation shell with focused task pages:
 - admin pages split into Infrastructure, Networking, and Access sections
 - a visual policy mesh for understanding VLAN relationships
 
-If you want this README to include actual screenshots, add image files under something like `docs/` and link them here.
+See the [screenshots](#screenshots) above.
+
+### Regenerating screenshots
+
+The images in `docs/screenshots/` are produced by a Playwright script with a fully mocked API (no backend or real hosts needed):
+
+```bash
+cd frontend
+npm ci && npx playwright install chromium
+npm run screenshots        # writes docs/screenshots/*.png at 1440x900
+```
+
+The script lives in `frontend/screenshots/` and is not part of `npm run e2e`.
 
 ## Port Forwarding Notes
 
