@@ -6,7 +6,6 @@ import {
   dayActive, toggleDay, describeDays, localTimezone,
 } from '../utils/schedule.js';
 
-const inputCls = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors';
 
 // Curated IANA zones for the datalist — any valid zone can still be typed.
 const COMMON_TIMEZONES = [
@@ -150,11 +149,11 @@ export default function VMScheduleModal({ vm, node, vmid, onClose, onSaved }) {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500 mb-1.5">Stop at</label>
-                <input type="time" value={form.stopTime} onChange={(e) => set({ stopTime: e.target.value })} className={inputCls} />
+                <input type="time" value={form.stopTime} onChange={(e) => set({ stopTime: e.target.value })} className="input" />
               </div>
               <div>
                 <label className="block font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500 mb-1.5">Start at</label>
-                <input type="time" value={form.startTime} onChange={(e) => set({ startTime: e.target.value })} className={inputCls} />
+                <input type="time" value={form.startTime} onChange={(e) => set({ startTime: e.target.value })} className="input" />
               </div>
             </div>
 
@@ -210,7 +209,7 @@ export default function VMScheduleModal({ vm, node, vmid, onClose, onSaved }) {
                 value={form.timezone}
                 onChange={(e) => set({ timezone: e.target.value })}
                 placeholder="Europe/Copenhagen"
-                className={inputCls}
+                className="input"
               />
               <datalist id="vm-schedule-timezones">
                 {COMMON_TIMEZONES.map((tz) => <option key={tz} value={tz} />)}
@@ -269,7 +268,7 @@ export default function VMScheduleModal({ vm, node, vmid, onClose, onSaved }) {
                   Cancel
                 </button>
                 <button type="button" onClick={save} disabled={saving}
-                  className="text-xs px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg font-medium transition-colors">
+                  className="text-xs px-5 py-2 btn-primary disabled:opacity-40 rounded-lg font-medium">
                   {saving ? 'Saving…' : 'Save schedule'}
                 </button>
               </div>

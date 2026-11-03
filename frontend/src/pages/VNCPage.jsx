@@ -129,7 +129,7 @@ export default function VNCPage() {
         {showReconnect && (
           <button
             onClick={reconnect}
-            className="text-xs px-3 py-1 rounded bg-orange-600 hover:bg-orange-500 text-white font-medium transition-colors"
+            className="text-xs px-3 py-1 rounded btn-primary font-medium"
             title="Request a new console ticket and reconnect"
           >
             Reconnect

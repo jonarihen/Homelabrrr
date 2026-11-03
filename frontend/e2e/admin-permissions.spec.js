@@ -41,6 +41,14 @@ test('a delegated user can open the matching admin route', async ({ page }) => {
   await page.route('**/api/admin/users', (route) => route.fulfill({ json: [] }));
   await page.goto('/admin/users');
   await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
+  const primary = page.getByRole('button', { name: '+ New User', exact: true });
+  await primary.focus();
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('Tab');
+  await expect(primary).toBeFocused();
+  await expect(primary).toHaveCSS('outline-color', 'rgb(233, 236, 239)');
+  await expect(primary).toHaveCSS('outline-width', '2px');
+  await expect(primary).toHaveCSS('outline-offset', '2px');
 });
 
 test('refresh applies a permission change before protected page data is requested', async ({ page }) => {
