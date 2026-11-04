@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-04 — Deploy polish
+
+- A failed cloud image or template load now shows a **Retry** button.
+- **Start the VM after deployment** is on by default for cloud images.
+- The invalid-invite page tells you to contact the administrator who invited you.
+
 ## 2026-11-04 — Readable metadata text
 
 - Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.

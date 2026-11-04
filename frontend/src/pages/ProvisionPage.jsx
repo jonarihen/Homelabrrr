@@ -521,21 +521,26 @@ function CloudImageForm({ onStarted }) {
   const [vlans, setVlans] = useState(null); // null until loaded
   const noVlan = !user?.isAdmin && vlans?.length === 0;
   const [sshKeys, setSshKeys] = useState([]);
-  const [form, setForm] = useState({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: false });
+  const [form, setForm] = useState({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: true });
   const [ci, setCi] = useState({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   // Chosen deploy host (admins). Defaults to the image's own host; can be any
   // host the image is reachable from (shared storage), from image.deployTargets.
   const [targetNode, setTargetNode] = useState('');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    setLoading(true); setLoadError(null);
     api.get('/provision/images')
       .then(r => setImages(r.data))
       .catch(e => setLoadError(e))
       .finally(() => setLoading(false));
+  }, [attempt]);
+
+  useEffect(() => {
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     // Unusable keys are kept in the list and disabled in the picker, so a user
     // whose key has no public half can see why it isn't offered.
@@ -585,7 +590,7 @@ function CloudImageForm({ onStarted }) {
   const selectImage = (img) => {
     setSelected(img);
     setTargetNode(img.nodeRef);
-    setForm({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: false });
+    setForm({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: true });
     setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   };
 
@@ -627,7 +632,12 @@ function CloudImageForm({ onStarted }) {
     return <div className="space-y-4">{[1, 2].map(i => <div key={i} className="h-24 bg-gray-900 rounded-2xl animate-pulse" />)}</div>;
   }
 
-  if (loadError) return <ErrorCallout error={loadError} fallback="Failed to load cloud images" />;
+  if (loadError) return (
+    <div className="space-y-3">
+      <ErrorCallout error={loadError} fallback="Failed to load cloud images" />
+      <button type="button" onClick={() => setAttempt(a => a + 1)} className="text-xs text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-500">Retry</button>
+    </div>
+  );
 
   if (images.length === 0) {
     return (
@@ -852,14 +862,19 @@ function CloneForm({ onStarted }) {
   const [ci, setCi] = useState({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    setLoading(true); setLoadError(null);
     api.get('/provision/templates')
       .then(r => setTemplates(r.data))
       .catch(e => setLoadError(e))
       .finally(() => setLoading(false));
+  }, [attempt]);
+
+  useEffect(() => {
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     // Unusable keys are kept in the list and disabled in the picker, so a user
     // whose key has no public half can see why it isn't offered.
@@ -929,7 +944,12 @@ function CloneForm({ onStarted }) {
     return <div className="space-y-4">{[1, 2].map(i => <div key={i} className="h-24 bg-gray-900 rounded-2xl animate-pulse" />)}</div>;
   }
 
-  if (loadError) return <ErrorCallout error={loadError} fallback="Failed to load templates" />;
+  if (loadError) return (
+    <div className="space-y-3">
+      <ErrorCallout error={loadError} fallback="Failed to load templates" />
+      <button type="button" onClick={() => setAttempt(a => a + 1)} className="text-xs text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-500">Retry</button>
+    </div>
+  );
 
   if (templates.length === 0) {
     return (
