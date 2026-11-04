@@ -115,31 +115,43 @@ export async function getHost(id) {
   return host;
 }
 
+const unreachable = (h, err) => Object.assign(new Error(`Proxmox host ${h.name ?? h.id} is unreachable: ${err.message}`), { indeterminate: true });
+
 function logUnreachableHost(host, during: string, err) {
   log('warn', 'pve_host_unreachable', { host: host?.name || host?.host, during, error: err });
 }
 
-async function findHostsForNodeName(nodeName, database: DbOrTx = db) {
+async function findHostsForNodeName(nodeName, database: DbOrTx = db, strict = false) {
   const hosts = await getHosts(database);
   const results = await Promise.allSettled(hosts.map((h) => makeRequest(h, 'GET', '/nodes')));
   // Unreachable hosts are skipped (and logged, or "node not found" has no visible cause);
   // matches keep the hosts' name order.
   return hosts.filter((h, i) => {
     const result = results[i];
-    if (result.status === 'rejected') logUnreachableHost(h, 'node_lookup', result.reason);
+    if (result.status === 'rejected') {
+      // With one host there is nothing to tell apart; see hostForNode.
+      if (strict && hosts.length > 1) throw unreachable(h, result.reason);
+      logUnreachableHost(h, 'node_lookup', result.reason);
+    }
     return result.status === 'fulfilled' && result.value.some(n => n.node === nodeName);
   });
 }
 
-async function hostForNode(nodeRef, opts = {}) {
-  const { vmid = null, database = db } = opts;
+// A definite "no such host" answer, as opposed to a lookup that failed: only
+// these let a strict caller conclude the node is not where it was recorded.
+const notFound = (message) => Object.assign(new Error(message), { definite: true });
+
+export async function hostForNode(nodeRef, opts = {}) {
+  // strict: when an unreachable host could change the answer, throw an
+  // `indeterminate` error rather than resolving among the hosts that answered.
+  const { vmid = null, database = db, strict = false } = opts;
   const { hostId, nodeName } = decodeNodeRef(nodeRef);
-  if (!nodeName) throw new Error('Node is required');
-  if (!isValidNodeName(nodeName)) throw new Error('Invalid node name');
+  if (!nodeName) throw notFound('Node is required');
+  if (!isValidNodeName(nodeName)) throw notFound('Invalid node name');
 
   if (hostId) return await getHostById(hostId, database);
 
-  const matches = await findHostsForNodeName(nodeName, database);
+  const matches = await findHostsForNodeName(nodeName, database, strict);
   if (matches.length === 1) return matches[0];
 
   if (matches.length > 1 && vmid !== null && vmid !== undefined) {
@@ -150,21 +162,24 @@ async function hostForNode(nodeRef, opts = {}) {
         if (resources.some(r => r.node === nodeName && Number.parseInt(r.vmid, 10) === Number.parseInt(vmid, 10))) {
           vmMatches.push(h);
         }
-      } catch (err) { logUnreachableHost(h, 'vm_lookup', err); }
+      } catch (err) {
+        if (strict) throw unreachable(h, err);
+        logUnreachableHost(h, 'vm_lookup', err);
+      }
     }
     if (vmMatches.length === 1) return vmMatches[0];
     if (vmMatches.length > 1) {
-      throw new Error(`VM ${vmid} on node ${nodeName} exists on multiple configured hosts. Use a host-specific node reference.`);
+      throw notFound(`VM ${vmid} on node ${nodeName} exists on multiple configured hosts. Use a host-specific node reference.`);
     }
   }
 
   if (matches.length === 0) {
     const hosts = await getHosts(database);
     if (hosts.length === 1) return hosts[0];
-    throw new Error(`Node ${nodeName} was not found on any configured Proxmox host`);
+    throw notFound(`Node ${nodeName} was not found on any configured Proxmox host`);
   }
 
-  throw new Error(`Node ${nodeName} exists on multiple configured Proxmox hosts. Use a host-specific node reference.`);
+  throw notFound(`Node ${nodeName} exists on multiple configured Proxmox hosts. Use a host-specific node reference.`);
 }
 
 async function resolveNode(nodeRef, opts = {}) {

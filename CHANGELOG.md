@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-31 — SSH targets and website upstreams no longer trust guest-reported addresses
+
+- Browser SSH/SFTP now reaches only addresses in your assigned VLANs and addresses an admin assigned to your VM. Addresses a guest reports itself (guest agent, cloud-init) no longer grant access.
+- Website upstreams for non-admins are limited to the same set. Existing sites whose upstream no longer qualifies are unpublished by the periodic maintenance pass (not deleted); re-save them with an address in your VLAN.
+- Legacy admin-assigned address rows that store only a node name now count only for the Proxmox host they were recorded on, so a same-named node on another cluster no longer inherits them.
 ## 2026-11-03 — Warning when the proxy drops X-Forwarded-Proto
 
 - If a request arrives over plain HTTP while secure cookies are on, the backend now logs a one-time warning explaining the cause of the silent login loop. The README's reverse-proxy notes spell out the requirement.
