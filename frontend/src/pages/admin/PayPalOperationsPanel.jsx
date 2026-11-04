@@ -159,7 +159,7 @@ export default function PayPalOperationsPanel({ environment, act, busy }) {
   return <div className="space-y-6">
     {loadError && <div className="space-y-3">
       <ErrorCallout error={loadError} />
-      <button type="button" onClick={load} className={btnSm}>Try again</button>
+      <button type="button" onClick={() => { setLoaded(false); load(); }} className={btnSm}>Try again</button>
     </div>}
     <Section title={`Reconciliation health · ${environment}`}
       description="Coverage is only what this integration created and reconciled. It is not your PayPal account or bank balance."

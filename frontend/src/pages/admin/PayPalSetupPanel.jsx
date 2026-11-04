@@ -11,17 +11,14 @@ export default function PayPalSetupPanel({ environment, act, busy, configVersion
   const [checks, setChecks] = useState(null);
   const [created, setCreated] = useState({});
   const [planAmount, setPlanAmount] = useState('50.00');
-  const [history, setHistory] = useState([]);
-  const [plans, setPlans] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  const loadHistory = useCallback(async () => {
-    try { const { data } = await api.get('/payments/admin/config/history', { params: { environment } }); setHistory(data.items); }
-    catch { setHistory([]); }
-    try { const { data } = await api.get('/payments/admin/monthly-plans', { params: { environment } }); setPlans(data.items); }
-    catch { setPlans([]); }
-    setLoaded(true);
+  // null = still loading; each list settles on its own so one slow endpoint cannot hide the other.
+  const [history, setHistory] = useState(null);
+  const [plans, setPlans] = useState(null);
+  const loadHistory = useCallback(() => {
+    api.get('/payments/admin/config/history', { params: { environment } }).then(({ data }) => setHistory(data.items), () => setHistory([]));
+    api.get('/payments/admin/monthly-plans', { params: { environment } }).then(({ data }) => setPlans(data.items), () => setPlans([]));
   }, [environment]);
-  useEffect(() => { setChecks(null); setCreated({}); setLoaded(false); loadHistory(); }, [loadHistory, configVersion]);
+  useEffect(() => { setChecks(null); setCreated({}); setHistory(null); setPlans(null); loadHistory(); }, [loadHistory, configVersion]);
   const testConnection = () => act('test', async () => {
     const { data } = await api.post('/payments/admin/test-connection', { environment }); setChecks(data);
   });
@@ -73,7 +70,7 @@ export default function PayPalSetupPanel({ environment, act, busy, configVersion
     </li>)}</ul>}
 
     <SubHead>Offered monthly amounts</SubHead>
-    {!loaded ? <RowsSkeleton /> : plans.length === 0 ? <EmptyState>No validated plans beyond the configured default.</EmptyState> :
+    {!plans ? <RowsSkeleton /> : plans.length === 0 ? <EmptyState>No validated plans beyond the configured default.</EmptyState> :
       <DataTable columns={['Amount', 'Plan ID', 'State', 'Actions']}>{plans.map((plan) => <Row key={plan.id}>
         <Cell className="text-gray-100 whitespace-nowrap">{money(plan.amountOre)}</Cell>
         <Cell className="font-mono text-gray-300 break-all">{plan.planId}</Cell>
@@ -82,7 +79,7 @@ export default function PayPalSetupPanel({ environment, act, busy, configVersion
       </Row>)}</DataTable>}
 
     <SubHead>Configuration history</SubHead>
-    {!loaded ? <RowsSkeleton /> : history.length === 0 ? <EmptyState>No recorded changes.</EmptyState> :
+    {!history ? <RowsSkeleton /> : history.length === 0 ? <EmptyState>No recorded changes.</EmptyState> :
       <DataTable columns={['Version', 'Action', 'When', 'Merchant', 'Webhook', 'Plan', 'Checkout', 'Notes']}>{history.map((item) => <Row key={`${item.configVersion}-${item.action}-${item.createdAt}`}>
         <Cell className="font-mono text-gray-100">v{item.configVersion}</Cell>
         <Cell className="text-gray-300">{item.action}</Cell>
