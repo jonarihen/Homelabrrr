@@ -94,10 +94,15 @@ export default function EnergyBudgetPage() {
   // Per-fetch "first load / parameter changed" flag; background refreshes are silent.
   const [pending, setPending] = useState({ summary: true, hosts: true, history: true, preview: true, months: true });
   const latest = useRef({});
+  const inflight = useRef({});
 
+  // silent: truthy keeps current figures on screen; 'poll' also yields to a request
+  // still in flight, so a slow response is never superseded by every timer tick.
   const load = useCallback(async (key, request, setter, message, silent) => {
+    if (silent === 'poll' && inflight.current[key]) return;
     const id = (latest.current[key] || 0) + 1;
     latest.current[key] = id;
+    inflight.current[key] = true;
     if (!silent) setPending((old) => ({ ...old, [key]: true }));
     try {
       const { data } = await request();
@@ -107,6 +112,7 @@ export default function EnergyBudgetPage() {
       if (latest.current[key] !== id) return;
       setter(null); setErrors((old) => ({ ...old, [key]: message }));
     }
+    inflight.current[key] = false;
     setPending((old) => ({ ...old, [key]: false }));
   }, []);
   const loadSummary = useCallback((silent) => load('summary', () => api.get('/energy/summary', { params: { month } }), setSummary, 'Monthly energy and budget data is unavailable.', silent), [load, month]);
@@ -114,12 +120,15 @@ export default function EnergyBudgetPage() {
   const loadHistory = useCallback((silent) => load('history', () => api.get('/energy/history', { params: { range } }), setHistory, 'Power history is unavailable.', silent), [load, range]);
   const loadPreview = useCallback((silent) => load('preview', () => api.get('/energy/preview'), setPreview, 'Mode preview is unavailable.', silent), [load]);
   const loadMonths = useCallback(() => load('months', () => api.get('/energy/months', { params: { count: 12 } }), setMonths, 'Monthly history is unavailable.'), [load]);
+  // Flag the new selection pending in the same render, so old figures never show under it.
+  const selectMonth = (next) => { if (next === month) return; setPending((old) => ({ ...old, summary: true })); setMonth(next); };
+  const selectRange = (next) => { if (next === range) return; setPending((old) => ({ ...old, history: true })); setRange(next); };
   useEffect(() => { void loadSummary(); }, [loadSummary]);
   useEffect(() => { void loadHosts(); }, [loadHosts]);
   useEffect(() => { void loadHistory(); }, [loadHistory]);
   useEffect(() => { void loadMonths(); }, [loadMonths]);
-  useEffect(() => { void loadPreview(); const timer = setInterval(() => { void loadPreview(true); }, 15 * 60_000); return () => clearInterval(timer); }, [loadPreview]);
-  useEffect(() => { const timer = setInterval(() => { void loadSummary(true); void loadHosts(true); void loadHistory(true); }, 60_000); return () => clearInterval(timer); }, [loadSummary, loadHosts, loadHistory]);
+  useEffect(() => { void loadPreview(); const timer = setInterval(() => { void loadPreview('poll'); }, 15 * 60_000); return () => clearInterval(timer); }, [loadPreview]);
+  useEffect(() => { const timer = setInterval(() => { void loadSummary('poll'); void loadHosts('poll'); void loadHistory('poll'); }, 60_000); return () => clearInterval(timer); }, [loadSummary, loadHosts, loadHistory]);
 
   // Data only counts once its fetch has finished; before that (or for another month/range) it is hidden.
   const ready = (key) => !pending[key] && !errors[key];
@@ -149,7 +158,7 @@ export default function EnergyBudgetPage() {
   return <Layout><div className="max-w-6xl space-y-8 p-6 text-gray-100 lg:p-8">
     <header className="flex flex-wrap items-end justify-between gap-4 border-b border-gray-800 pb-6">
       <div><p className="font-mono text-[10px] uppercase tracking-[0.2em] text-orange-500">Private · Power & Energy</p><h1 className="aaris-display mt-2 text-2xl text-gray-100">Energy & Budget</h1><p className="mt-2 max-w-2xl text-sm text-gray-400">Measured server power, calculated electricity cost and confirmed voluntary support. Figures remain unknown until their sources are available.</p></div>
-      <div className="flex items-center gap-2 font-mono text-xs"><button aria-label="Previous month" onClick={() => setMonth(shiftMonth(month, -1))} className={btnGhost}>←</button><span className="min-w-[9rem] text-center uppercase tracking-[0.1em]" aria-live="polite">{monthLabel(month)}</span><button aria-label="Next month" onClick={() => setMonth(shiftMonth(month, 1))} disabled={month >= currentMonth()} className={btnGhost}>→</button></div>
+      <div className="flex items-center gap-2 font-mono text-xs"><button aria-label="Previous month" onClick={() => selectMonth(shiftMonth(month, -1))} className={btnGhost}>←</button><span className="min-w-[9rem] text-center uppercase tracking-[0.1em]" aria-live="polite">{monthLabel(month)}</span><button aria-label="Next month" onClick={() => selectMonth(shiftMonth(month, 1))} disabled={month >= currentMonth()} className={btnGhost}>→</button></div>
     </header>
     <p role="status" className="sr-only">{anyPending ? 'Loading energy data…' : ''}</p>
     {(Object.values(errors).some(Boolean) || (summary?.snapshot && !summary.snapshot.consistent)) && <div className="space-y-2">
@@ -181,7 +190,7 @@ export default function EnergyBudgetPage() {
     </div></Section>
 
     <Section number="03" id="energy-history" title="Power history" busy={pending.history}><div className={panel}>
-      <div className="flex flex-wrap items-center justify-between gap-3"><p className={eyebrow}>Measured input / watts</p><div className="flex gap-2" role="group" aria-label="History range">{['24h', '7d'].map((value) => <button key={value} onClick={() => setRange(value)} aria-pressed={range === value} className={btnToggle(range === value)}>{value}</button>)}</div></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><p className={eyebrow}>Measured input / watts</p><div className="flex gap-2" role="group" aria-label="History range">{['24h', '7d'].map((value) => <button key={value} onClick={() => selectRange(value)} aria-pressed={range === value} className={btnToggle(range === value)}>{value}</button>)}</div></div>
       {!ready('history') ? <div className="mt-4">{blockFallback('history', 'h-32 w-full')}</div> : <>
       {path ? <svg className="mt-4 h-32 w-full" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label={`Server power over the last ${range}${markers.length ? `, with ${markers.length} verified mode changes` : ''}`}>{markers.map((marker) => <line key={`${marker.at}-${marker.mode}`} x1={marker.x} x2={marker.x} y1="0" y2="120" stroke="#6b7280" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />)}<path d={path} fill="none" stroke="#fb923c" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg> : <p className="mt-4 text-sm text-gray-400">No measured trend yet.</p>}
       {points.length > 0 && <details className="mt-3 text-sm"><summary className={`cursor-pointer text-orange-300 ${focus}`}>Power readings table</summary><div className="mt-2 max-h-64 overflow-auto"><table className="w-full text-left"><thead><tr><th className="py-2 font-normal text-gray-400">Time</th><th className="py-2 font-normal text-gray-400">Watts</th><th className="py-2 font-normal text-gray-400">Servers measured</th></tr></thead><tbody>{points.map((point) => <tr key={point.at} className="border-t border-gray-800"><td className="py-2">{localTime(point.at)}</td><td>{quantity(point.watts, 0)}</td><td>{point.measuredHosts}</td></tr>)}</tbody></table></div></details>}
@@ -219,7 +228,7 @@ export default function EnergyBudgetPage() {
         <button type="button" onClick={() => downloadCsv('/energy/summary.csv', { month }, `energy-budget-${month}.csv`).catch(() => setErrors((old) => ({ ...old, export: 'Export failed.' })))} className={btnGhost}>Download this month as CSV</button></div></Section>
 
     <Section number="06" id="energy-months" title="Monthly history" busy={pending.months}>{!ready('months') ? <div className={panel}>{blockFallback('months', 'h-32 w-full')}</div> : months?.months?.length ? <div className={`${panel} overflow-x-auto`}><table className="w-full min-w-[640px] text-left text-sm"><caption className="sr-only">Monthly lab energy, cost and support</caption><thead><tr className="text-xs text-gray-400"><th className="py-2 font-normal">Month</th><th className="font-normal">Lab kWh</th><th className="font-normal">Lab cost</th><th className="font-normal">Gross</th><th className="font-normal">Known net</th><th className="font-normal">Applied</th><th className="font-normal">Owner-funded</th><th className="font-normal">Carried forward</th></tr></thead>
-      <tbody>{months.months.map((item) => <tr key={item.month} className="border-t border-gray-800 tabular-nums"><td className="py-2"><button type="button" onClick={() => setMonth(item.month)} className={`text-orange-300 underline-offset-4 hover:underline ${focus}`}>{monthLabel(item.month)}</button></td><td>{item.kwh == null ? 'Unknown' : quantity(item.kwh, 1)}</td>
+      <tbody>{months.months.map((item) => <tr key={item.month} className="border-t border-gray-800 tabular-nums"><td className="py-2"><button type="button" onClick={() => selectMonth(item.month)} className={`text-orange-300 underline-offset-4 hover:underline ${focus}`}>{monthLabel(item.month)}</button></td><td>{item.kwh == null ? 'Unknown' : quantity(item.kwh, 1)}</td>
         <td>{item.costOre == null ? <span className="text-gray-500">{item.costStatus === 'open' ? 'Open month' : 'Not finalized'}</span> : `${dkk(item.costOre)}${item.costStatus === 'finalized_partial' ? ' (partial)' : ''}`}</td><td>{dkk(item.grossOre)}</td><td>{dkk(item.knownNetOre)}</td><td>{dkk(item.appliedOre)}</td><td>{dkk(item.ownerFundedOre)}</td><td>{dkk(item.carryForwardOre)}</td></tr>)}</tbody></table>
       <p className="mt-3 text-xs text-gray-500">Costs appear once a month is finalized; applied credit and owner share once verified receipts are allocated to that cost.</p></div> : <p className="text-sm text-gray-400">No monthly history yet.</p>}</Section>
 
