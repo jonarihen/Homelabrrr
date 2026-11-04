@@ -16,6 +16,7 @@
  */
 
 import { ipv4InCidr } from '../utils/ipPolicy.ts';
+import { httpError } from '../utils/httpError.ts';
 
 const MAX_CUSTOM_BODY_BYTES = 16 * 1024;
 
@@ -111,7 +112,7 @@ export const ACTIONS = {
             !sameIpv4Network(ip, netmask, String(p.ip), String(p.netmask)) && `address ${existing.ip || 'none'}`,
           ].filter(Boolean);
           if (mismatch.length) {
-            throw new Error(`Interface ${name} already exists but does not match this VLAN (${mismatch.join(', ')}); an admin must remove or reconfigure it on the firewall before syncing`);
+            throw httpError(409, `Interface ${name} already exists but does not match this VLAN (${mismatch.join(', ')}); an admin must remove or reconfigure it on the firewall before syncing`);
           }
           return { skipped: true, output: { interfaceName: name, vlanId: Number(p.vlanId), ip, netmask }, artifacts: [], calls: [{ method: 'GET', path: `cmdb/system/interface/${name}`, scope: client.vdom, summary: `Interface ${name} already exists — skipped` }] };
         }
