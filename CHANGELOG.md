@@ -4,12 +4,67 @@
 
 - Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.
 - Small uppercase labels, table headers and metadata are now at least 11px (the sidebar section labels were 9px). Compact status chips and badges stay at 10px.
+## 2026-10-28 — Styled confirmations, notices and dialogs
+
+- Browser confirm and alert pop-ups are replaced by in-app dialogs and notices. Destructive actions (delete, remove, revoke, discard) use a red confirm button, and focus starts on **Cancel**. **Escape** cancels.
+- Errors appear as notices in the bottom-right corner and stay until you dismiss them. Other notices close on their own.
+- The firewall, Proxmox host, drain-node, policy, Caddy server, site-import, hardware, changelog and identity-check dialogs now close with **Escape**. Keyboard focus stays inside them and returns to the button that opened them.
+- **Stop** on a VM page now asks for confirmation before the hard power-off. Start, Reboot, Shutdown and Stop show their progress (for example "Starting…") until the VM status refreshes.
+- The VM page hides **Delete** from users who can see a VM but do not own it.
+- The hardware dialog takes memory in **GB**, matching the deploy forms.
+- If cloud images, templates, nodes or websites fail to load, the error is shown. Previously the page claimed none were available.
+- An empty dashboard offers **Create your first VM** to users who may provision. Website upstream chips show VM names, and an invalid invite link explains how to get a new one.
+## 2026-10-28 — Keyboard-friendly VM cards, movable console windows, clearer deploy forms
+
+- **VM cards** can now be opened with the keyboard (the VM name is a real link), and the select box shows up when focused and is announced to screen readers.
+- **Console windows** can be dragged with touch or a pen, moved with the arrow keys on the title bar (Shift for bigger steps), and resized from the bottom-right corner.
+- **Deploy**: if your account has no VLAN yet, the deploy forms say so up front ("Ask an admin to assign you a VLAN") and the deploy button stays disabled. With exactly one VLAN it is preselected.
+- The cloud-init **Username** field no longer suggests "operator"; leaving it blank keeps the image's default user.
+- The 2FA step on the login page now tells you what to do if you lost your device.
+## 2026-10-28 — Pin Proxmox host certificates and test connections before saving
+
+- **Admin → PVE Hosts** can now pin a host's TLS certificate: **Fetch certificate** shows the fingerprint the host presents (handshake only, no token sent), you confirm it, and from then on only that certificate is trusted. Self-signed Proxmox hosts work this way without `ALLOW_INSECURE_UPSTREAM_TLS`.
+- The pin covers every Proxmox connection: API calls, backup file downloads, the VNC console and cross-cluster migration. If the host presents a different certificate, the connection stops before the API token is sent, with a clear "certificate changed" error.
+- Setting, replacing or removing a pin requires re-entering the API token secret, and pin changes are recorded in the audit log.
+- A **Test connection** button tries the host, port, token and trust settings in the form without saving them, and reports whether the certificate is untrusted or changed, the token was rejected, the host is unreachable, or it timed out.
+- Hosts with a certificate from an internal CA can keep TLS verification on by trusting that CA via `NODE_EXTRA_CA_CERTS` (see README).
+## 2026-10-28 — Concurrent deploys can't overbook a node
+## 2026-10-31 — SSH targets and website upstreams no longer trust guest-reported addresses
+
+- Browser SSH/SFTP now reaches only addresses in your assigned VLANs and addresses an admin assigned to your VM. Addresses a guest reports itself (guest agent, cloud-init) no longer grant access.
+- Website upstreams for non-admins are limited to the same set. Existing sites whose upstream no longer qualifies are unpublished by the periodic maintenance pass (not deleted); re-save them with an address in your VLAN.
+- Legacy admin-assigned address rows that store only a node name now count only for the Proxmox host they were recorded on, so a same-named node on another cluster no longer inherits them.
+## 2026-11-03 — Warning when the proxy drops X-Forwarded-Proto
+
+- If a request arrives over plain HTTP while secure cookies are on, the backend now logs a one-time warning explaining the cause of the silent login loop. The README's reverse-proxy notes spell out the requirement.
+## 2026-11-03 — 2FA backup codes at enrollment, lockout covers recovery codes
+
+- Enabling 2FA now shows 10 single-use backup codes once. The 2FA login step reminds you that a backup code (or an admin) can get you back in.
+- Wrong backup codes now count against the same 2FA lockout as wrong authenticator codes.
+- An admin 2FA reset also deletes the user's backup codes.
+## 2026-11-04 — PayPal admin page tidy-up
+
+- The PayPal administration page now follows the same layout as the other admin pages: centred page width, consistent card padding, one set of button sizes, labelled form fields in a two-column grid, and an environment switcher with a "Live · real charges" badge in the page header.
+- Review queue, manual transfers, subscriptions, offered amounts and configuration history are proper scrollable tables with status badges instead of tightly packed rows. Setup actions are grouped into four labelled steps.
+- Figures show loading placeholders instead of "Unknown" or empty text while data loads, lists say "Unavailable" (with a retry) if loading fails, and error and success messages stay visible while you work further down the page.
+## 2026-11-04 — Energy & Budget page: loading states and tidier layout
+
+- Figures no longer show "Unknown" while the page is still loading. Each tile, row and chart shows a pulsing placeholder until its data arrives, and "Unknown" appears only when a finished fetch genuinely has no value. Switching month or history range shows placeholders instead of the previous selection's numbers; background refreshes stay silent.
+- If a fetch fails, the affected section shows a dash and a clear "unavailable" message instead of "Unknown" everywhere, and a late response from an older month can no longer overwrite a newer one.
+- The page now matches the rest of the portal: standard panel padding and borders, even spacing between sections, a smaller page heading, consistent button styles for the month picker, range toggle and CSV download, and a two-column-then-four-column tile grid that no longer cramps values on laptop widths.
+## 2026-11-04 — Support page polish
+
+- The Support the lab page now uses the same card, input and button styling as the rest of the portal, with more breathing room between boxes, a consistent two-column layout that stacks on small screens, and bigger, evenly spaced buttons aligned at the bottom of each card.
+- Amounts, subscriptions and history show loading placeholders until your data has arrived, instead of briefly flashing empty or "No ... recorded" text.
+- Clearer states: PayPal buttons say "Opening PayPal…" while busy, returning from PayPal shows a verifying message, and success, pending/cancelled and error messages have distinct colours.
 
 ## 2026-11-03 — Roomier, consistent iLO power panels
 
 - The Hardware / iLO, Power telemetry and Power policy panels on PVE Hosts and in Edit Host now use the same spacing, panels, buttons, inputs and tables as the other admin pages: grouped controls (live control, automation), labelled fields, a proper window editor and history tables.
 - Panels show a loading skeleton instead of briefly reading "not configured" or "unknown", a failed load shows an error with Retry, and empty schedules or history show an empty state.
 - Behaviour and confirmations are unchanged.
+
+## 2026-10-28 — Fixed price plus tariffs contracts
 
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 

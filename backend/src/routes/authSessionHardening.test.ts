@@ -10,7 +10,7 @@ import bcrypt from 'bcryptjs';
 import { eq, sql } from 'drizzle-orm';
 import { generateSync } from 'otplib';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { sessions, twoFactorAttempts, users } from '../db/schema/index.ts';
+import { recoveryCodes, sessions, twoFactorAttempts, users } from '../db/schema/index.ts';
 
 const PASSWORD = 'Correct-horse-battery-staple-1!';
 const SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
@@ -241,8 +241,10 @@ test('admin password and 2FA resets revoke the target\'s sessions', async () => 
 
   await testDb.db.insert(sessions).values({ sid: 'mine-again', sess: { userId }, expire: EXPIRE });
   await testDb.db.update(users).set({ totp_enabled: true, totp_secret: encryptSecret(SECRET) }).where(eq(users.id, userId));
+  await testDb.db.insert(recoveryCodes).values({ user_id: userId, code_hash: 'x'.repeat(64) });
   const totp = await request(adminApp).post(`/users/${userId}/reset-2fa`).send({});
   assert.equal(totp.status, 200);
+  assert.equal((await testDb.db.select().from(recoveryCodes).where(eq(recoveryCodes.user_id, userId))).length, 0, 'reset clears backup codes');
   assert.deepEqual(await remainingSids(), ['theirs']);
 });
 

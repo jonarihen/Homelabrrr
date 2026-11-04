@@ -1,5 +1,5 @@
 import { PROVISION_TERMINAL, PROVISION_FAILED } from '../utils/provisionStatus';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import PrereqCallout from '../components/PrereqCallout.jsx';
@@ -365,6 +365,40 @@ function StepIcon({ status }) {
 
 // ── Cloud-init sub-form (shared visual block) ───────────────────────────────
 
+// Non-admins must deploy onto one of their VLANs (the backend rejects them otherwise),
+// so say so up front instead of after submit, and preselect when there is only one.
+function VlanField({ vlans, isAdmin, value, onChange }) {
+  const selectId = useId();
+  const onlyTag = !isAdmin && vlans?.length === 1 ? String(vlans[0].tag) : '';
+  useEffect(() => {
+    if (onlyTag && !value) onChange(onlyTag);
+  }, [onlyTag, value, onChange]);
+
+  if (!vlans) return null;
+  if (vlans.length === 0) {
+    if (isAdmin) return null;
+    return (
+      <PrereqCallout
+        card={false}
+        title="No VLAN assigned to your account"
+        detail="Every VM you deploy has to be placed on one of your VLANs."
+        fallback="Ask an admin to assign you a VLAN."
+      />
+    );
+  }
+  return (
+    <div>
+      <label htmlFor={selectId} className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
+      <select id={selectId} value={value} onChange={e => onChange(e.target.value)} className={inputCls} required={!isAdmin}>
+        {isAdmin
+          ? <option value="">No VLAN (untagged)</option>
+          : <option value="" disabled>Select a VLAN…</option>}
+        {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
+      </select>
+    </div>
+  );
+}
+
 function CloudInitFields({ ci, setCi, sshKeys }) {
   const toggleKey = (id) => {
     setCi(c => ({ ...c, keyIds: c.keyIds.includes(id) ? c.keyIds.filter(k => k !== id) : [...c.keyIds, id] }));
@@ -383,7 +417,8 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="block text-xs text-gray-400 mb-1.5 font-medium">Username</label>
-          <input type="text" value={ci.user} onChange={e => setCi(c => ({ ...c, user: e.target.value }))} className={inputCls} placeholder="operator" autoComplete="off" />
+          <input type="text" value={ci.user} onChange={e => setCi(c => ({ ...c, user: e.target.value }))} className={inputCls} placeholder="image default" autoComplete="off" />
+          <p className="text-xs text-gray-600 mt-1">Leave blank to keep the image's default user (e.g. ubuntu, debian).</p>
         </div>
         <div>
           <label className="block text-xs text-gray-400 mb-1.5 font-medium">Password</label>
@@ -483,7 +518,8 @@ function CloudImageForm({ onStarted }) {
   const [storages, setStorages] = useState([]);
   const [bridges, setBridges] = useState([]);
   const [users, setUsers] = useState([]);
-  const [vlans, setVlans] = useState([]);
+  const [vlans, setVlans] = useState(null); // null until loaded
+  const noVlan = !user?.isAdmin && vlans?.length === 0;
   const [sshKeys, setSshKeys] = useState([]);
   const [form, setForm] = useState({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: false });
   const [ci, setCi] = useState({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
@@ -491,13 +527,14 @@ function CloudImageForm({ onStarted }) {
   // host the image is reachable from (shared storage), from image.deployTargets.
   const [targetNode, setTargetNode] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     api.get('/provision/images')
       .then(r => setImages(r.data))
-      .catch(() => {})
+      .catch(e => setLoadError(e))
       .finally(() => setLoading(false));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     // Unusable keys are kept in the list and disabled in the picker, so a user
@@ -589,6 +626,8 @@ function CloudImageForm({ onStarted }) {
   if (loading) {
     return <div className="space-y-4">{[1, 2].map(i => <div key={i} className="h-24 bg-gray-900 rounded-2xl animate-pulse" />)}</div>;
   }
+
+  if (loadError) return <ErrorCallout error={loadError} fallback="Failed to load cloud images" />;
 
   if (images.length === 0) {
     return (
@@ -751,17 +790,7 @@ function CloudImageForm({ onStarted }) {
             </p>
           )}
 
-          {vlans.length > 0 && (
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
-              <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
-                {user?.isAdmin
-                  ? <option value="">No VLAN (untagged)</option>
-                  : <option value="" disabled>Select a VLAN…</option>}
-                {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
-              </select>
-            </div>
-          )}
+          <VlanField vlans={vlans} isAdmin={!!user?.isAdmin} value={form.vlanTag} onChange={vlanTag => setForm(f => ({ ...f, vlanTag }))} />
 
           <CloudInitFields ci={ci} setCi={setCi} sshKeys={sshKeys} />
 
@@ -795,7 +824,7 @@ function CloudImageForm({ onStarted }) {
 
           <button
             type="submit"
-            disabled={saving || (user?.isAdmin && !form.storage) || loginMissing}
+            disabled={saving || (user?.isAdmin && !form.storage) || loginMissing || noVlan}
             title={loginMissing ? NO_LOGIN_MESSAGE : undefined}
             className="w-full btn-primary rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
           >
@@ -816,18 +845,20 @@ function CloneForm({ onStarted }) {
   const [selected, setSelected] = useState(null);
   const [storages, setStorages] = useState([]);
   const [users, setUsers] = useState([]);
-  const [vlans, setVlans] = useState([]);
+  const [vlans, setVlans] = useState(null); // null until loaded
+  const noVlan = !user?.isAdmin && vlans?.length === 0;
   const [sshKeys, setSshKeys] = useState([]);
   const [form, setForm] = useState({ name: '', cores: '', memory: '', diskGb: '', storage: '', description: '', assignTo: '', vlanTag: '' });
   const [ci, setCi] = useState({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     api.get('/provision/templates')
       .then(r => setTemplates(r.data))
-      .catch(() => {})
+      .catch(e => setLoadError(e))
       .finally(() => setLoading(false));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     // Unusable keys are kept in the list and disabled in the picker, so a user
@@ -897,6 +928,8 @@ function CloneForm({ onStarted }) {
   if (loading) {
     return <div className="space-y-4">{[1, 2].map(i => <div key={i} className="h-24 bg-gray-900 rounded-2xl animate-pulse" />)}</div>;
   }
+
+  if (loadError) return <ErrorCallout error={loadError} fallback="Failed to load templates" />;
 
   if (templates.length === 0) {
     return (
@@ -1026,17 +1059,7 @@ function CloneForm({ onStarted }) {
             )}
           </div>
 
-          {vlans.length > 0 && (
-            <div>
-              <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
-              <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
-                {user?.isAdmin
-                  ? <option value="">No VLAN (untagged)</option>
-                  : <option value="" disabled>Select a VLAN…</option>}
-                {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
-              </select>
-            </div>
-          )}
+          <VlanField vlans={vlans} isAdmin={!!user?.isAdmin} value={form.vlanTag} onChange={vlanTag => setForm(f => ({ ...f, vlanTag }))} />
 
           {!!selected.cloud_init && <CloudInitFields ci={ci} setCi={setCi} sshKeys={sshKeys} />}
 
@@ -1065,7 +1088,7 @@ function CloneForm({ onStarted }) {
 
           <button
             type="submit"
-            disabled={saving || loginMissing}
+            disabled={saving || loginMissing || noVlan}
             title={loginMissing ? NO_LOGIN_MESSAGE : undefined}
             className="w-full btn-primary rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
           >
@@ -1088,7 +1111,8 @@ function CreateForm({ onStarted }) {
   const [isos, setIsos] = useState([]);
   const [bridges, setBridges] = useState([]);
   const [users, setUsers] = useState([]);
-  const [vlans, setVlans] = useState([]);
+  const [vlans, setVlans] = useState(null); // null until loaded
+  const noVlan = !user?.isAdmin && vlans?.length === 0;
   const [form, setForm] = useState({
     node: '', name: '', cores: 2, memory: 2,
     diskSize: '20', storage: '', iso: '', bridge: 'vmbr0',
@@ -1099,7 +1123,7 @@ function CreateForm({ onStarted }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api.get('/provision/nodes').then(r => setNodes(r.data)).catch(() => {});
+    api.get('/provision/nodes').then(r => setNodes(r.data)).catch(e => setError(normalizeApiError(e, 'Failed to load nodes')));
     api.get('/vms/my-vlans').then(r => setVlans(r.data)).catch(() => {});
     api.get('/portal/status').then(r => setMaint(r.data.maintenance || [])).catch(() => {});
     if (user?.isAdmin) {
@@ -1235,17 +1259,7 @@ function CreateForm({ onStarted }) {
           )}
         </div>
 
-        {vlans.length > 0 && (
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5 font-medium">VLAN</label>
-            <select value={form.vlanTag} onChange={e => setForm(f => ({ ...f, vlanTag: e.target.value }))} className={inputCls}>
-              {user?.isAdmin
-                ? <option value="">No VLAN (untagged)</option>
-                : <option value="" disabled>Select a VLAN…</option>}
-              {vlans.map(v => <option key={v.id} value={v.tag}>{v.name} (Tag {v.tag})</option>)}
-            </select>
-          </div>
-        )}
+        <VlanField vlans={vlans} isAdmin={!!user?.isAdmin} value={form.vlanTag} onChange={vlanTag => setForm(f => ({ ...f, vlanTag }))} />
 
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -1309,7 +1323,7 @@ function CreateForm({ onStarted }) {
 
         {error && <ErrorCallout error={error} />}
 
-        <button type="submit" disabled={saving || !form.node || !form.name} className="w-full btn-primary rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20">
+        <button type="submit" disabled={saving || !form.node || !form.name || noVlan} className="w-full btn-primary rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-blue-600/20">
           {saving ? 'Creating VM...' : 'Create VM'}
         </button>
       </form>

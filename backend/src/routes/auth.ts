@@ -635,11 +635,15 @@ router.post('/2fa/enable', requireAuth, requireInteractiveSession, requireRecent
   // No budget reset here: this code is for a factor the caller just enrolled,
   // which proves nothing about the account's existing credentials.
 
-  const { version, revoked } = await changeCredentials(db, req.session.userId, { totp_enabled: true }, req.sessionID);
+  // One transaction: 2FA is never on without its backup codes.
+  const { version, revoked, codes } = await db.transaction(async (tx) => ({
+    ...(await changeCredentials(tx, req.session.userId, { totp_enabled: true }, req.sessionID)),
+    codes: await replaceRecoveryCodes(req.session.userId, tx),
+  }));
   req.session.credentialsVersion = version;
   req.session.twoFactorEnrollmentOnly = false;
   await logAudit(req, '2fa_enabled', req.session.username, `revoked_sessions=${revoked}`);
-  res.json({ ok: true, revokedSessions: revoked });
+  res.json({ ok: true, revokedSessions: revoked, recoveryCodes: codes });
 });
 
 // Disable 2FA (requires current TOTP code to confirm)
@@ -834,6 +838,19 @@ router.post('/passkeys/authentication/verify', verifyTwoFactorLimiter, async (re
   res.json({ ok: true });
 });
 
+// Replaces the user's recovery codes with 10 fresh ones; only hashes are stored.
+async function replaceRecoveryCodes(userId: number, database: Pick<typeof db, 'transaction'> = db): Promise<string[]> {
+  const codes = Array.from({ length: 10 }, () => {
+    const raw = crypto.randomBytes(8).toString('hex').toUpperCase();
+    return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}-${raw.slice(12)}`;
+  });
+  await database.transaction(async (tx) => {
+    await tx.delete(recoveryCodes).where(eq(recoveryCodes.user_id, userId));
+    await tx.insert(recoveryCodes).values(codes.map((code) => ({ user_id: userId, code_hash: hashRecoveryCode(code) })));
+  });
+  return codes;
+}
+
 router.get('/recovery-codes', requireAuth, requireInteractiveSession, async (req, res) => {
   const [row] = await db
     .select({ remaining: count(), created_at: max(recoveryCodes.created_at) })
@@ -843,14 +860,7 @@ router.get('/recovery-codes', requireAuth, requireInteractiveSession, async (req
 });
 
 router.post('/recovery-codes', requireAuth, requireInteractiveSession, requireRecentReauthentication, async (req, res) => {
-  const codes = Array.from({ length: 10 }, () => {
-    const raw = crypto.randomBytes(8).toString('hex').toUpperCase();
-    return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}-${raw.slice(12)}`;
-  });
-  await db.transaction(async (tx) => {
-    await tx.delete(recoveryCodes).where(eq(recoveryCodes.user_id, req.session.userId));
-    await tx.insert(recoveryCodes).values(codes.map((code) => ({ user_id: req.session.userId, code_hash: hashRecoveryCode(code) })));
-  });
+  const codes = await replaceRecoveryCodes(req.session.userId);
   await logAudit(req, 'recovery_codes_regenerated', req.session.username, '10 codes');
   res.status(201).json({ codes });
 });
@@ -863,9 +873,20 @@ router.delete('/recovery-codes', requireAuth, requireInteractiveSession, require
 
 router.post('/verify-recovery-code', verifyTwoFactorLimiter, async (req, res, next) => {
   const userId = req.session.pendingUserId;
-  if (!userId) return res.status(400).json({ error: 'No pending authentication' });
+  const pendingUsername = req.session.pendingUsername;
+  if (!userId || !pendingUsername) return res.status(400).json({ error: 'No pending authentication' });
+  // Same per-username budget as TOTP: recovery codes can't be guessed around the lockout.
+  if ((await pruneAndCountTwoFactor(pendingUsername)) >= TWO_FACTOR_MAX) {
+    clearPendingAuth(req);
+    return res.status(423).json({ error: 'Two-factor verification locked — too many invalid codes. Sign in again in 10 minutes.' });
+  }
   const hash = hashRecoveryCode(req.body?.code);
-  if (!(await consumeRecoveryCode(db, userId, hash))) return res.status(401).json({ error: 'Invalid or already-used recovery code' });
+  if (!(await consumeRecoveryCode(db, userId, hash))) {
+    const attempts = await recordTwoFactorFailure(pendingUsername);
+    if (attempts >= TWO_FACTOR_MAX) clearPendingAuth(req);
+    return res.status(attempts >= TWO_FACTOR_MAX ? 423 : 401).json({ error: 'Invalid or already-used recovery code' });
+  }
+  await clearTwoFactorAttempts(pendingUsername);
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   try {
     const credentialsVersion = req.session.pendingCredentialsVersion ?? 0;

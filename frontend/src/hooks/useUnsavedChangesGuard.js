@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useBlocker } from 'react-router-dom';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 
 // Guards a dirty draft against being silently discarded: in-app navigation
 // (links, the browser Back button) asks for confirmation through the router,
@@ -9,11 +10,18 @@ export default function useUnsavedChangesGuard(dirty, message = 'Discard unsaved
     dirty && currentLocation.pathname !== nextLocation.pathname
   ));
 
+  const confirm = useConfirm();
+  const asking = useRef(false);
   useEffect(() => {
-    if (blocker.state !== 'blocked') return;
-    if (window.confirm(message)) blocker.proceed();
-    else blocker.reset();
-  }, [blocker, message]);
+    // The blocker object is recreated on re-render; ask once per blocked navigation.
+    if (blocker.state !== 'blocked' || asking.current) return;
+    asking.current = true;
+    confirm({ message, confirmLabel: 'Discard', danger: true }).then((ok) => {
+      asking.current = false;
+      if (ok) blocker.proceed();
+      else blocker.reset();
+    });
+  }, [blocker, message, confirm]);
 
   useEffect(() => {
     if (!dirty) return undefined;

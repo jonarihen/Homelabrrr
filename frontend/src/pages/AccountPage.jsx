@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import api from '../api.js';
 import AccountSecuritySection from '../components/account/AccountSecuritySection.jsx';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
 
@@ -308,6 +309,7 @@ function ConnectionSection() {
 
 function TwoFactorSection({ user, setUser }) {
   const [step, setStep] = useState('idle');
+  const [backupCodes, setBackupCodes] = useState([]);
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [secret, setSecret] = useState('');
   const [code, setCode] = useState('');
@@ -330,10 +332,11 @@ function TwoFactorSection({ user, setUser }) {
   const enable = async (e) => {
     e.preventDefault(); setError(''); setSaving(true);
     try {
-      await api.post('/auth/2fa/enable', { code });
+      const { data } = await api.post('/auth/2fa/enable', { code });
+      setBackupCodes(data.recoveryCodes || []);
       setUser(u => ({ ...u, twoFactorEnabled: true, twoFactorSetupRequired: false }));
       setStep('idle'); setCode('');
-      setSuccess('Two-factor authentication enabled.');
+      setSuccess('Two-factor authentication enabled. Save your backup codes now — they will not be shown again.');
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to enable 2FA');
     } finally { setSaving(false); }
@@ -404,6 +407,14 @@ function TwoFactorSection({ user, setUser }) {
             {saving ? 'Setting up...' : 'Enable 2FA'}
           </button>
         )
+      )}
+
+      {backupCodes.length > 0 && (
+        <div className="border border-yellow-800/40 bg-yellow-900/10 rounded-xl p-3 space-y-2">
+          <p className="text-xs text-yellow-400">Backup codes (each works once if you lose your device):</p>
+          <p className="text-xs font-mono text-gray-200 select-all whitespace-pre-line">{backupCodes.join('\n')}</p>
+          <button onClick={() => setBackupCodes([])} className="text-xs text-gray-400 hover:text-gray-200">I've saved them</button>
+        </div>
       )}
 
       {step === 'setup' && (
@@ -485,6 +496,7 @@ function fmtDate(v) {
 }
 
 function ApiTokensSection() {
+  const confirm = useConfirm();
   const { user } = useAuth();
   const [tokens, setTokens] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -539,7 +551,7 @@ function ApiTokensSection() {
   };
 
   const revoke = async (token) => {
-    if (!window.confirm(`Revoke "${token.name}"? Any script using it will immediately lose access.`)) return;
+    if (!await confirm({ message: `Revoke "${token.name}"? Any script using it will immediately lose access.`, confirmLabel: 'Revoke', danger: true })) return;
     setMsg('');
     try {
       await api.delete(`/auth/tokens/${token.id}`);

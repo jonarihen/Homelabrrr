@@ -5,6 +5,7 @@ import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
 import { shortenVipName, PORT_FORWARD_NAME_MAX } from '../../utils/vipName.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
 
@@ -56,6 +57,7 @@ function buildRuleName(vmName, service, port, protocol) {
 }
 
 export default function PortForwardingPage() {
+  const confirm = useConfirm();
   useDocumentTitle('Port Forwarding');
   const { user } = useAuth();
   const canManageAllPortForwards = !!(user?.isAdmin || user?.permissions?.canManageFirewalls);
@@ -284,7 +286,7 @@ export default function PortForwardingPage() {
   };
 
   const handleDelete = async (vipName) => {
-    if (!confirm(`Delete port forward "${vipName}"?\nThis will remove the VIP and its firewall policy from the root VDOM.`)) return;
+    if (!await confirm({ message: `Delete port forward "${vipName}"?\nThis will remove the VIP and its firewall policy from the root VDOM.`, confirmLabel: 'Delete', danger: true })) return;
     setDeleting(vipName);
     try {
       await api.delete(`/admin/firewalls/${selectedFw}/vips/${encodeURIComponent(vipName)}`);

@@ -1,8 +1,12 @@
 import { useState, useEffect } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import Modal from '../../components/Modal.jsx';
+import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
 
 export default function FirewallsPage() {
+  const confirm = useConfirm();
+  const toast = useToast();
   useDocumentTitle('Firewalls');
   const [firewalls, setFirewalls] = useState([]);
   const [statuses, setStatuses] = useState({});
@@ -17,7 +21,7 @@ export default function FirewallsPage() {
   const [regroup, setRegroup] = useState({}); // fwId → { running, msg, err }
 
   const regroupPolicies = async (fw) => {
-    if (!confirm(`Regroup policy sequence labels on ${fw.name}?\n\nPort forwards get one group per user, lab policies one group per source VLAN, and each group is made contiguous. Portal-managed order inside a group is kept — review custom deny rules afterwards if you hand-ordered any.`)) return;
+    if (!await confirm(`Regroup policy sequence labels on ${fw.name}?\n\nPort forwards get one group per user, lab policies one group per source VLAN, and each group is made contiguous. Portal-managed order inside a group is kept — review custom deny rules afterwards if you hand-ordered any.`)) return;
     setRegroup(prev => ({ ...prev, [fw.id]: { running: true, msg: '' } }));
     try {
       const { data } = await api.post(`/admin/firewalls/${fw.id}/regroup-policies`);
@@ -88,12 +92,12 @@ export default function FirewallsPage() {
   };
 
   const remove = async (id) => {
-    if (!confirm('Delete this firewall? Any synced VLANs will lose their tracking.')) return;
+    if (!await confirm({ message: 'Delete this firewall? Any synced VLANs will lose their tracking.', confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/admin/firewalls/${id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      toast.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -211,14 +215,8 @@ export default function FirewallsPage() {
 
       {/* Add/Edit form modal */}
       {showForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}>
-          <form onSubmit={save} className="w-full max-w-lg bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-              <h2 className="text-white font-semibold">{editId ? 'Edit Firewall' : 'Add Firewall'}</h2>
-              <button type="button" onClick={() => setShowForm(false)} className="text-gray-500 hover:text-white p-1 rounded hover:bg-gray-700 transition-colors">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-              </button>
-            </div>
+        <Modal title={editId ? 'Edit Firewall' : 'Add Firewall'} onClose={() => setShowForm(false)}>
+          <form onSubmit={save}>
             <div className="p-5 space-y-4">
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">Name</label>
@@ -361,7 +359,7 @@ export default function FirewallsPage() {
               </div>
             </div>
           </form>
-        </div>
+        </Modal>
       )}
     </div>
   );

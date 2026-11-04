@@ -6,6 +6,7 @@ import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { routeNode, vmIdentityKey } from '../utils/nodeRef.js';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 
 const STATUS_FILTERS = ['All', 'Running', 'Stopped'];
 const TYPE_FILTERS = ['All', 'VM', 'LXC'];
@@ -18,6 +19,7 @@ const SORT_OPTIONS = [
 ];
 
 export default function Dashboard() {
+  const confirm = useConfirm();
   useDocumentTitle('My VMs');
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -155,7 +157,7 @@ export default function Dashboard() {
     if (selectedVms.length === 0) return;
     const label = action === 'start' ? 'Starting' : action === 'stop' ? 'Stopping' : 'Shutting down';
     const confirmMsg = `${label} ${selectedVms.length} VM${selectedVms.length > 1 ? 's' : ''}. Continue?`;
-    if (!window.confirm(confirmMsg)) return;
+    if (!await confirm(confirmMsg)) return;
 
     setBulkLoading(true);
     setBulkError('');
@@ -181,7 +183,7 @@ export default function Dashboard() {
     } finally {
       setBulkLoading(false);
     }
-  }, [selectedVms, load]);
+  }, [selectedVms, load, confirm]);
 
   function fmtBytes(bytes) {
     if (!bytes) return '0';
@@ -486,13 +488,25 @@ export default function Dashboard() {
         ) : vms.length === 0 ? (
           <div className="text-center py-24">
             <div className="w-16 h-16 rounded-2xl bg-gray-800/50 flex items-center justify-center mx-auto mb-4">
-              <svg className="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+              <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
                 <rect x="2" y="3" width="20" height="14" rx="2" />
                 <path d="M8 21h8M12 17v4" strokeLinecap="round" />
               </svg>
             </div>
             <p className="text-gray-400 font-medium">No VMs assigned</p>
-            <p className="text-sm text-gray-400 mt-1">Contact an admin to get access to virtual machines.</p>
+            {(user?.isAdmin || user?.canProvision || user?.canCreateVms) ? (
+              <>
+                <p className="text-sm text-gray-400 mt-1">You have no virtual machines yet.</p>
+                <button
+                  onClick={() => navigate('/provision')}
+                  className="mt-4 font-mono text-xs font-semibold uppercase tracking-[0.12em] text-gray-950 bg-orange-600 hover:bg-orange-500 px-4 py-2 transition-colors"
+                >
+                  Create your first VM
+                </button>
+              </>
+            ) : (
+              <p className="text-sm text-gray-400 mt-1">Contact an admin to get access to virtual machines.</p>
+            )}
           </div>
         ) : filteredVms.length === 0 ? (
           <div className="text-center py-16">
