@@ -51,8 +51,6 @@ import { decryptSecret, encryptSecret } from './utils/secrets.ts';
 import { sendableCloseCode } from './utils/wsClose.ts';
 import { decodeNodeRef } from './utils/nodeRef.ts';
 import { sweepExpiredMaintenance } from './utils/nodeMaintenance.ts';
-import { runFullTagSync, isTagSyncRunning, getTagSyncSettings } from './utils/vmTags.ts';
-import { logAuditEntry } from './utils/audit.ts';
 import { authenticateApiToken, enforceApiTokenScope } from './middleware/apiToken.ts';
 import { loadSessionUser, requireAdmin, requireAuth } from './middleware/auth.ts';
 import { parseTrustProxy } from './utils/proxyChain.ts';
@@ -550,53 +548,6 @@ async function tickMaintenance() {
 await tickMaintenance();
 const maintenanceTimer = setInterval(tickMaintenance, 60_000);
 
-// ─── Background PVE tag auto-sync scheduler ───────────────────────────────────
-//
-// Periodically walks the fleet and corrects owner/VLAN tag drift (VMs re-tagged
-// in the raw PVE UI, renamed VLANs, migrations/restores, lost assignment writes).
-// The tick is coarse (every few minutes); each tick checks whether a full run is
-// actually due based on the persisted interval and last-run time, so the cadence
-// survives restarts and honours the DB-backed pause switch. A run is skipped when
-// paused or when one is already in flight (in-memory single-run lock lives in
-// utils/vmTags.js — the backend is single-process). Shares the exact fleet loop
-// used by POST /admin/sync-vm-tags via runFullTagSync().
-//
-// Follow-up (#21/#26 tie-in): these issues propose shared background-scheduler
-// plumbing. This feature ships its own self-contained ticker; if that shared
-// scheduler lands, this block can be folded into it.
-const TAG_SYNC_TICK_MS = 5 * 60 * 1000;   // re-evaluate whether a run is due
-const tagSyncSchedulerStart = Date.now();
-
-async function tagSyncTick() {
-  try {
-    if (isTagSyncRunning()) return;
-    const settings = await getTagSyncSettings();
-    if (settings.paused) return;
-
-    // Anchor the cadence to the last completed run (persisted) so restarts don't
-    // reset the clock; fall back to process start when nothing has run yet.
-    const lastRunAt = settings.lastRun?.time ? Date.parse(settings.lastRun.time) : NaN;
-    const anchor = Number.isFinite(lastRunAt) ? lastRunAt : tagSyncSchedulerStart;
-    const dueAt = anchor + settings.intervalHours * 60 * 60 * 1000;
-    if (Date.now() < dueAt) return;
-
-    const summary = await runFullTagSync({ trigger: 'scheduled' });
-    await logAuditEntry({
-      username: 'system',
-      action: 'vm_tags_sync_scheduled',
-      target: 'all',
-      detail: `${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed`,
-    });
-    console.log(`[tag-sync] scheduled run: ${summary.checked} checked, ${summary.updated} updated, ${summary.failed} failed (${summary.durationMs}ms)`);
-  } catch (err) {
-    if (err.code === 'TAG_SYNC_BUSY') return;   // manual run raced us — fine
-    console.warn(`[tag-sync] scheduled run failed: ${err.message}`);
-  }
-}
-
-const tagSyncTimer = setInterval(() => { tagSyncTick(); }, TAG_SYNC_TICK_MS);
-tagSyncTimer.unref?.();   // don't keep the process alive just for the ticker
-
 // ─── VM lease sweeper ────────────────────────────────────────────────────────
 // Periodically finds expired leases and gracefully stops (never deletes) the
 // VMs, flagging them for the admin reclaimable view. Interval is configurable;
@@ -608,7 +559,10 @@ const LEASE_CHECK_INTERVAL_MS = Math.max(
   parseInt(process.env.LEASE_CHECK_INTERVAL_MS || '900000', 10) || 900_000,
 );
 
+let leaseSweeping = false;   // skip a fire while the previous sweep is still running
 async function sweepLeasesSafe() {
+  if (leaseSweeping) return;
+  leaseSweeping = true;
   try {
     const result = await runLeaseSweep();
     if (result.checked > 0) {
@@ -616,6 +570,8 @@ async function sweepLeasesSafe() {
     }
   } catch (err) {
     console.warn(`[leases] sweep failed: ${err.message}`);
+  } finally {
+    leaseSweeping = false;
   }
 }
 
@@ -628,8 +584,13 @@ const leaseTimer = setInterval(sweepLeasesSafe, LEASE_CHECK_INTERVAL_MS);
 // and best-effort — pollNodeHealth() never throws. Disable by setting the
 // interval to 0.
 const NODE_HEALTH_POLL_MS = parseInt(process.env.NODE_HEALTH_POLL_MS || '60000');
+let nodeHealthPolling = false;   // skip a fire while the previous poll is still running
 const nodeHealthTimer = NODE_HEALTH_POLL_MS > 0
-  ? setInterval(() => { pollNodeHealth().catch(() => {}); }, NODE_HEALTH_POLL_MS)
+  ? setInterval(() => {
+    if (nodeHealthPolling) return;
+    nodeHealthPolling = true;
+    pollNodeHealth().catch(() => {}).finally(() => { nodeHealthPolling = false; });
+  }, NODE_HEALTH_POLL_MS)
   : null;
 // Background enforcement of per-VM power schedules (vm_schedules).
 startScheduler();
@@ -679,7 +640,6 @@ async function shutdown(signal) {
 
   clearInterval(maintenanceTimer);
   clearInterval(wsHeartbeatTimer);
-  clearInterval(tagSyncTimer);
   clearTimeout(leaseStartTimer);
   clearInterval(leaseTimer);
   clearTimeout(maintenanceStartTimer);
@@ -718,6 +678,12 @@ async function shutdown(signal) {
     forcedConnections: drained.status === 'timeout',
   });
 }
+
+// Node's default is to crash on an unhandled rejection; log it instead so one stray
+// promise (e.g. a fire-and-forget timer callback) doesn't take the whole portal down.
+process.on('unhandledRejection', (reason) => {
+  log('error', 'unhandled_rejection', { error: reason });
+});
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.once(signal, () => {

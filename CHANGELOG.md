@@ -5,6 +5,22 @@
 - The Energy data page (meter, electricity contract and cost, household bills, extra lab loads) and the Energy & Budget admin panel now use the same cards, spacing, buttons, form fields and tables as the other admin pages, with clearer headings, grouped actions and a proper layout on narrow screens.
 - Bill corrections (record payment, revise, void) open in their own row under the bill instead of squeezed into the actions cell.
 - Values no longer read "Unknown" or "Unavailable" while data is still loading: the page now shows placeholders until the answer arrives, and "Unknown" only appears when a value is genuinely missing. Success and error messages are now styled differently.
+## 2026-11-04 — Support page polish
+
+- The Support the lab page now uses the same card, input and button styling as the rest of the portal, with more breathing room between boxes, a consistent two-column layout that stacks on small screens, and bigger, evenly spaced buttons aligned at the bottom of each card.
+- Amounts, subscriptions and history show loading placeholders until your data has arrived, instead of briefly flashing empty or "No ... recorded" text.
+- Clearer states: PayPal buttons say "Opening PayPal…" while busy, returning from PayPal shows a verifying message, and success, pending/cancelled and error messages have distinct colours.
+
+## 2026-11-03 — Roomier, consistent iLO power panels
+
+- The Hardware / iLO, Power telemetry and Power policy panels on PVE Hosts and in Edit Host now use the same spacing, panels, buttons, inputs and tables as the other admin pages: grouped controls (live control, automation), labelled fields, a proper window editor and history tables.
+- Panels show a loading skeleton instead of briefly reading "not configured" or "unknown", a failed load shows an error with Retry, and empty schedules or history show an empty state.
+- Behaviour and confirmations are unchanged.
+
+## 2026-10-28 — Fixed price plus tariffs contracts
+
+- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
+- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
 
 ## 2026-10-28 — Concurrent deploys can't overbook a node
 

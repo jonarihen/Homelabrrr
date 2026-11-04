@@ -118,16 +118,16 @@ export default function ElectricityPricingPanel() {
       action(() => api.post('/admin/electricity-pricing/contracts', body)); }} className={subForm}>
       <Head title="Add contract revision" />
       <Field label="Label"><input required {...text(contract, setContract, 'label')} className={inputClass} /></Field>
-      <Field label="Agreement"><select {...text(contract, setContract, 'kind')} className={inputClass}><option value="spot">Spot + charges</option><option value="fixed_all_in">Fixed all-in variable rate</option></select></Field>
+      <Field label="Agreement"><select {...text(contract, setContract, 'kind')} className={inputClass}><option value="spot">Spot + charges</option><option value="fixed_all_in">Fixed all-in variable rate</option><option value="fixed_plus_tariffs">Fixed energy + charges</option></select></Field>
       <Field label="Price area"><select {...text(contract, setContract, 'area')} className={inputClass}><option>DK1</option><option>DK2</option></select></Field>
       <Field label="Effective from"><input required type="datetime-local" {...text(contract, setContract, 'validFrom')} className={inputClass} /></Field>
       <Field label="Effective until (optional)"><input type="datetime-local" {...text(contract, setContract, 'validTo')} className={inputClass} /></Field>
-      {contract.kind === 'spot' ? <>
-        <Field label="Retailer margin DKK/kWh"><input required {...text(contract, setContract, 'spotMarginDkkPerKwh')} className={inputClass} placeholder="0.000000 if confirmed zero" /></Field>
+      {contract.kind !== 'spot' && <Field label={contract.kind === 'fixed_all_in' ? 'Fixed all-in DKK/kWh' : 'Fixed energy DKK/kWh excl. VAT'}><input required {...text(contract, setContract, 'fixedDkkPerKwh')} className={inputClass} /></Field>}
+      {contract.kind !== 'fixed_all_in' && <>
+        <Field label={`Retailer margin DKK/kWh${contract.kind === 'fixed_plus_tariffs' ? ' (optional)' : ''}`}><input required={contract.kind === 'spot'} {...text(contract, setContract, 'spotMarginDkkPerKwh')} className={inputClass} placeholder="0.000000 if confirmed zero" /></Field>
         <Field label="VAT fraction"><input required {...text(contract, setContract, 'vatRate')} className={inputClass} placeholder="Enter actual applicable fraction" /></Field>
         <fieldset className="md:col-span-2"><legend className="mb-1.5 block text-xs font-medium text-gray-400">Required variable charges</legend>
-          <div className="flex flex-wrap gap-2.5">{['network', 'system', 'tax', 'retailer'].map((name) => <label key={name} className={`${checkRow} items-center py-2`}><input type="checkbox" className="accent-blue-500" checked={contract.requiredComponents.includes(name)} onChange={(e) => setContract((v) => ({ ...v, requiredComponents: e.target.checked ? [...v.requiredComponents, name] : v.requiredComponents.filter((x) => x !== name) }))} />{name}</label>)}</div></fieldset></>
-        : <Field label="Fixed all-in DKK/kWh"><input required {...text(contract, setContract, 'fixedDkkPerKwh')} className={inputClass} /></Field>}
+          <div className="flex flex-wrap gap-2.5">{['network', 'system', 'tax', 'retailer'].map((name) => <label key={name} className={`${checkRow} items-center py-2`}><input type="checkbox" className="accent-blue-500" checked={contract.requiredComponents.includes(name)} onChange={(e) => setContract((v) => ({ ...v, requiredComponents: e.target.checked ? [...v.requiredComponents, name] : v.requiredComponents.filter((x) => x !== name) }))} />{name}</label>)}</div></fieldset></>}
       <Field label="Separate fixed monthly fee (øre)"><input type="number" min="0" {...text(contract, setContract, 'fixedMonthlyOre')} className={inputClass} /></Field>
       <Field label="Fixed-fee allocation"><select {...text(contract, setContract, 'fixedFeeAllocation')} className={inputClass}><option value="none">None (default)</option><option value="energy_proportion">Household energy proportion</option><option value="manual_share">Manual share</option></select></Field>
       {contract.fixedFeeAllocation === 'manual_share' && <Field label="Manual share (0–1)"><input required {...text(contract, setContract, 'fixedFeeManualShare')} className={inputClass} /></Field>}
