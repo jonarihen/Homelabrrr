@@ -3813,7 +3813,7 @@ router.delete('/firewalls/:id/vips/:name', pPortForwards, async (req, res) => {
   const [managed] = await db.select().from(managedVips)
     .where(and(eq(managedVips.firewall_id, fw.id), eq(managedVips.vip_name, vipName))).limit(1);
   if (!managed) {
-    return res.status(403).json({ error: 'Cannot delete unmanaged VIPs. This was not created through VM Manager.' });
+    return res.status(403).json({ error: 'Cannot delete unmanaged VIPs. This was not created through Homelabrrr.' });
   }
   if (!await canManageAllPortForwards(req)) {
     const allowedInterfaces = new Set((await getScopedFirewallSyncs(req.session.userId, fw.id, false)).map(sync => sync.interface_name));

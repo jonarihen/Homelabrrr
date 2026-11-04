@@ -108,7 +108,7 @@ export default function NotificationsPage() {
                       <span className={`w-1.5 h-1.5 rounded-full ${wh.enabled ? 'bg-green-400' : 'bg-gray-600'}`} />
                       <span className="text-white font-medium">{wh.name}</span>
                       {!wh.enabled && (
-                        <span className="text-[10px] uppercase tracking-wider text-gray-400 bg-gray-800 border border-gray-700 px-2 py-0.5 rounded-full">
+                        <span className="text-[11px] uppercase tracking-wider text-gray-400 bg-gray-800 border border-gray-700 px-2 py-0.5 rounded-full">
                           Disabled
                         </span>
                       )}

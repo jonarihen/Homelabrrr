@@ -8,7 +8,7 @@ const STATE_LED = { online: 'aaris-led--ok', degraded: 'aaris-led--warning', sta
 const MODE_COLOR = { high: '#f87171', dynamic: '#facc15', low: '#60a5fa' };
 const CHART = { width: 300, height: 85 };
 const BTN = 'shrink-0 border border-gray-700 px-3 py-1.5 text-xs font-medium text-gray-300 transition-colors hover:border-gray-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-50';
-const LABEL = 'text-[10px] uppercase tracking-wider text-gray-500';
+const LABEL = 'text-[11px] uppercase tracking-wider text-gray-500';
 const clock = (value) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 export default function HardwareTelemetryView({ connection, onConnectionChange }) {
