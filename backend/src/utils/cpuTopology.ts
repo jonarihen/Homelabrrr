@@ -7,10 +7,10 @@ import { httpError, hasHttpStatus } from './httpError.ts';
  * Returns { sockets, cores, totalVcpus, maxCores } for the Proxmox VM config.
  * Throws if the request exceeds the node's physical cores.
  */
-export async function computeCpuTopology(node, requestedCores) {
+export async function computeCpuTopology(node, requestedCores, getCpuInfo = getNodeCpuInfo) { // getCpuInfo: test seam only
   const vcpus = parseInt(requestedCores) || 2;
   try {
-    const cpuInfo = await getNodeCpuInfo(node);
+    const cpuInfo = await getCpuInfo(node);
     const physSockets = Math.max(1, cpuInfo.sockets || 1);
     const physCoresPerSocket = Math.max(1, cpuInfo.coresPerSocket || 1);
     const maxCores = physSockets * physCoresPerSocket;
