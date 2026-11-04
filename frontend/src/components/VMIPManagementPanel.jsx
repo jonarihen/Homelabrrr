@@ -306,7 +306,7 @@ function InfoCard({ label, value, note, accent = 'gray' }) {
 
   return (
     <div className="rounded-xl border border-gray-800 bg-gray-950/60 px-4 py-3">
-      <p className="text-[11px] uppercase tracking-[0.2em] text-gray-600">{label}</p>
+      <p className="text-[11px] uppercase tracking-[0.2em] text-gray-400">{label}</p>
       <p className={`mt-2 font-mono text-sm ${accents[accent] || accents.gray}`}>{value}</p>
       <p className="mt-1 text-xs text-gray-500">{note}</p>
     </div>

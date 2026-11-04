@@ -99,7 +99,7 @@ export default function SupportPage() {
   const loading = !loaded;
   const amountValid = /^\d{1,5}\.\d{2}$/.test(amount);
   return <Layout><div className="max-w-5xl mx-auto p-6 lg:p-8 space-y-6">
-    <header><p className="font-mono text-[10px] uppercase tracking-[0.2em] text-orange-500">Private · Energy & Budget</p>
+    <header><p className="font-mono text-[11px] uppercase tracking-[0.2em] text-orange-500">Private · Energy & Budget</p>
       <h1 className="aaris-display text-xl text-gray-100 mt-2">Support the lab</h1>
       <p className="text-sm text-gray-500 mt-2 max-w-2xl">Contributions are entirely voluntary. They never change your permissions, quotas, or service priority.</p></header>
     {error && <p role="alert" className="rounded-2xl border border-red-800/50 bg-red-900/20 px-4 py-3 text-sm text-red-300">{error}</p>}
