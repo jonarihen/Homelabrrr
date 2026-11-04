@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-04 — PayPal admin page tidy-up
+
+- The PayPal administration page now follows the same layout as the other admin pages: centred page width, consistent card padding, one set of button sizes, labelled form fields in a two-column grid, and an environment switcher with a "Live · real charges" badge in the page header.
+- Review queue, manual transfers, subscriptions, offered amounts and configuration history are proper scrollable tables with status badges instead of tightly packed rows. Setup actions are grouped into four labelled steps.
+- Figures show loading placeholders instead of "Unknown" or empty text while data loads, lists say "Unavailable" (with a retry) if loading fails, and error and success messages stay visible while you work further down the page.
 ## 2026-11-04 — Energy & Budget page: loading states and tidier layout
 
 - Figures no longer show "Unknown" while the page is still loading. Each tile, row and chart shows a pulsing placeholder until its data arrives, and "Unknown" appears only when a finished fetch genuinely has no value. Switching month or history range shows placeholders instead of the previous selection's numbers; background refreshes stay silent.
