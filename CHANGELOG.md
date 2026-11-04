@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-03 — Roomier, consistent iLO power panels
+
+- The Hardware / iLO, Power telemetry and Power policy panels on PVE Hosts and in Edit Host now use the same spacing, panels, buttons, inputs and tables as the other admin pages: grouped controls (live control, automation), labelled fields, a proper window editor and history tables.
+- Panels show a loading skeleton instead of briefly reading "not configured" or "unknown", a failed load shows an error with Retry, and empty schedules or history show an empty state.
+- Behaviour and confirmations are unchanged.
 ## 2026-10-28 — Fixed price plus tariffs contracts
 
 - Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
