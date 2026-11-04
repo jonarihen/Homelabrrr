@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-03 — Energy admin pages tidied up
+
+- The Energy data page (meter, electricity contract and cost, household bills, extra lab loads) and the Energy & Budget admin panel now use the same cards, spacing, buttons, form fields and tables as the other admin pages, with clearer headings, grouped actions and a proper layout on narrow screens.
+- Bill corrections (record payment, revise, void) open in their own row under the bill instead of squeezed into the actions cell.
+- Values no longer read "Unknown" or "Unavailable" while data is still loading: the page now shows placeholders until the answer arrives, and "Unknown" only appears when a value is genuinely missing. Success and error messages are now styled differently.
 ## 2026-10-28 — Styled confirmations, notices and dialogs
 
 - Browser confirm and alert pop-ups are replaced by in-app dialogs and notices. Destructive actions (delete, remove, revoke, discard) use a red confirm button, and focus starts on **Cancel**. **Escape** cancels.
