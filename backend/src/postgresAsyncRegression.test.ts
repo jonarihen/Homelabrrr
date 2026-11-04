@@ -9,9 +9,9 @@ async function source(relativePath: string) {
 }
 
 test('PostgreSQL-backed scheduler settings and audit writes are awaited', async () => {
-  const index = await source('./index.ts');
-  assert.match(index, /const settings = await getTagSyncSettings\(\);/);
-  assert.match(index, /await logAuditEntry\(\{[\s\S]*?action: 'vm_tags_sync_scheduled'/);
+  const scheduler = await source('./scheduler.ts');
+  assert.match(scheduler, /const settings = await getTagSyncSettings\(\);/);
+  assert.match(scheduler, /await logAuditEntry\(\{[\s\S]*?action: 'vm_tags_sync_scheduled'/);
 });
 
 test('operations routes await PostgreSQL maintenance work and status', async () => {
