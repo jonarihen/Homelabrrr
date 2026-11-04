@@ -25,6 +25,8 @@ services:
     container_name: proxmox-frontend-backend
     # Reaps zombies (ssh2/puttygen children) and forwards SIGTERM to node.
     init: true
+    # Shutdown drain is bounded at 15s plus the DB close; Docker's default 10s would SIGKILL it mid-drain.
+    stop_grace_period: 30s
     restart: unless-stopped
     depends_on:
       postgres:

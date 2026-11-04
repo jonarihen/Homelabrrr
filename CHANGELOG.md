@@ -5,6 +5,10 @@
 - Enabling 2FA now shows 10 single-use backup codes once. The 2FA login step reminds you that a backup code (or an admin) can get you back in.
 - Wrong backup codes now count against the same 2FA lockout as wrong authenticator codes.
 - An admin 2FA reset also deletes the user's backup codes.
+## 2026-10-28 — Fixed price plus tariffs contracts
+
+- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
+- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
 
 ## 2026-10-28 — Concurrent deploys can't overbook a node
 
