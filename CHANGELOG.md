@@ -10,6 +10,11 @@
 - The hardware dialog takes memory in **GB**, matching the deploy forms.
 - If cloud images, templates, nodes or websites fail to load, the error is shown. Previously the page claimed none were available.
 - An empty dashboard offers **Create your first VM** to users who may provision. Website upstream chips show VM names, and an invalid invite link explains how to get a new one.
+## 2026-10-28 — Fixed price plus tariffs contracts
+
+- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
+- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
+
 ## 2026-10-28 — Concurrent deploys can't overbook a node
 
 - A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.

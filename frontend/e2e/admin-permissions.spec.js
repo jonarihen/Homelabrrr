@@ -55,15 +55,21 @@ test('refresh applies a permission change before protected page data is requeste
   await mockUsersPageData(page);
   let canManageUsers = true;
   let usersRequests = 0;
+  let usageRequests = 0;
   // Keep one unrelated admin-area permission so revoking canManageUsers tests
   // the per-route guard instead of the parent guard redirecting to Dashboard.
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: user({ canManageUsers, canManageHosts: true }) }));
   await page.route('**/api/admin/users', (route) => { usersRequests += 1; return route.fulfill({ json: [] }); });
+  await page.route('**/api/admin/user-usage', (route) => { usageRequests += 1; return route.fulfill({ json: {} }); });
   await page.goto('/admin/users');
   await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
-  // React StrictMode may mount the authorized page twice in development. The
-  // security assertion is that losing permission adds no request after reload.
-  await expect.poll(() => usersRequests).toBeGreaterThan(0);
+  // React StrictMode mounts the authorized page twice in development, so it
+  // issues two /admin/users requests that reach this test as separate
+  // route-handler calls. Snapshotting after the first one races the second.
+  // Each load requests /admin/user-usage only after its own /admin/users
+  // call, and the browser reports requests in order, so once a usage request
+  // is seen every authorized users request has already been counted.
+  await expect.poll(() => usageRequests).toBeGreaterThan(0);
   const authorizedRequestCount = usersRequests;
   canManageUsers = false;
   await page.reload();
