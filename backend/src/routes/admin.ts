@@ -23,7 +23,7 @@ import {
 } from '../middleware/auth.ts';
 import { sanitizeError } from '../utils/sanitize.ts';
 import { ipv4InCidr } from '../utils/ipPolicy.ts';
-import { sendError } from '../utils/httpError.ts';
+import { isPortalAuthoredError, sendError } from '../utils/httpError.ts';
 import { logAudit, logAuditTx } from '../utils/audit.ts';
 import { csvLine } from '../utils/csv.ts';
 import { encryptSecret } from '../utils/secrets.ts';
@@ -2714,13 +2714,13 @@ router.post('/vlans/:id/sync', pVlans, async (req, res) => {
         results.push({ firewall: fw.name, status: 'ok', ...result });
       } catch (err) {
         console.error(`[sync] Error provisioning VLAN ${vlan.tag} on ${fw.name}:`, err.message);
-        results.push({ firewall: fw.name, status: 'error', error: err.message });
+        results.push({ firewall: fw.name, status: 'error', error: isPortalAuthoredError(err) ? err.message : sanitizeError(err.message) });
       }
     }
     res.json(results);
   } catch (err) {
     console.error('[sync] Unexpected error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: sanitizeError(err.message) });
   }
 });
 
