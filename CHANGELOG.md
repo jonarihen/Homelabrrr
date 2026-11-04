@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-03 — 2FA backup codes at enrollment, lockout covers recovery codes
+
+- Enabling 2FA now shows 10 single-use backup codes once. The 2FA login step reminds you that a backup code (or an admin) can get you back in.
+- Wrong backup codes now count against the same 2FA lockout as wrong authenticator codes.
+- An admin 2FA reset also deletes the user's backup codes.
 ## 2026-11-04 — PayPal admin page tidy-up
 
 - The PayPal administration page now follows the same layout as the other admin pages: centred page width, consistent card padding, one set of button sizes, labelled form fields in a two-column grid, and an environment switcher with a "Live · real charges" badge in the page header.
