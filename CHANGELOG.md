@@ -10,6 +10,18 @@
 - The hardware dialog takes memory in **GB**, matching the deploy forms.
 - If cloud images, templates, nodes or websites fail to load, the error is shown. Previously the page claimed none were available.
 - An empty dashboard offers **Create your first VM** to users who may provision. Website upstream chips show VM names, and an invalid invite link explains how to get a new one.
+## 2026-11-04 — Support page polish
+
+- The Support the lab page now uses the same card, input and button styling as the rest of the portal, with more breathing room between boxes, a consistent two-column layout that stacks on small screens, and bigger, evenly spaced buttons aligned at the bottom of each card.
+- Amounts, subscriptions and history show loading placeholders until your data has arrived, instead of briefly flashing empty or "No ... recorded" text.
+- Clearer states: PayPal buttons say "Opening PayPal…" while busy, returning from PayPal shows a verifying message, and success, pending/cancelled and error messages have distinct colours.
+
+## 2026-11-03 — Roomier, consistent iLO power panels
+
+- The Hardware / iLO, Power telemetry and Power policy panels on PVE Hosts and in Edit Host now use the same spacing, panels, buttons, inputs and tables as the other admin pages: grouped controls (live control, automation), labelled fields, a proper window editor and history tables.
+- Panels show a loading skeleton instead of briefly reading "not configured" or "unknown", a failed load shows an error with Retry, and empty schedules or history show an empty state.
+- Behaviour and confirmations are unchanged.
+
 ## 2026-10-28 — Fixed price plus tariffs contracts
 
 - Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.

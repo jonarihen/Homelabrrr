@@ -66,7 +66,7 @@ test('an unverified, unpinned iLO shows the TLS-off warning', async ({ page }) =
   await mockApi(page, { connection: { ...base, tls_fingerprint: null } });
   await page.goto('/admin/hosts');
   await expect(page.getByText(/TLS verification is OFF for this iLO/)).toBeVisible();
-  await expect(page.getByText(/TLS NOT verified/)).toBeVisible();
+  await expect(page.getByText("NOT verified", { exact: true })).toBeVisible();
 });
 
 test('a pinned iLO shows no TLS-off warning', async ({ page }) => {
