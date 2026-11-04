@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-04 — Readable metadata text
+
+- Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.
+- Small uppercase labels, table headers and metadata are now at least 11px (the sidebar section labels were 9px). Compact status chips and badges stay at 10px.
 ## 2026-11-03 — Energy admin pages tidied up
 
 - The Energy data page (meter, electricity contract and cost, household bills, extra lab loads) and the Energy & Budget admin panel now use the same cards, spacing, buttons, form fields and tables as the other admin pages, with clearer headings, grouped actions and a proper layout on narrow screens.

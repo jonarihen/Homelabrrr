@@ -208,7 +208,7 @@ export default function VLANsPage() {
                         )}
                       </div>
                     ) : (
-                      <span className="text-xs text-gray-600">N/A</span>
+                      <span className="text-xs text-gray-400">N/A</span>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -229,7 +229,7 @@ export default function VLANsPage() {
                         Push to Firewall
                       </button>
                     ) : (
-                      <span className="text-xs text-gray-600">No firewalls</span>
+                      <span className="text-xs text-gray-400">No firewalls</span>
                     )}
                   </td>
                   <td className="px-4 py-3 text-right">

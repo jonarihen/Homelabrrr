@@ -131,22 +131,22 @@ export default function LeasesPage() {
       {/* Settings */}
       <form onSubmit={saveSettings} className="bg-gray-900 border border-gray-800 rounded-2xl p-5 mb-6 flex flex-wrap items-end gap-4">
         <div>
-          <label className="block font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Default lease (days)</label>
+          <label className="block font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Default lease (days)</label>
           <input
             type="number" min="0" value={settingsForm.defaultDays}
             onChange={(e) => setSettingsForm(f => ({ ...f, defaultDays: e.target.value }))}
             className={`input w-40`}
           />
-          <p className="text-[10px] text-gray-600 mt-1">0 = unlimited (no expiry)</p>
+          <p className="text-[11px] text-gray-400 mt-1">0 = unlimited (no expiry)</p>
         </div>
         <div>
-          <label className="block font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Grace period (days)</label>
+          <label className="block font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Grace period (days)</label>
           <input
             type="number" min="0" value={settingsForm.graceDays}
             onChange={(e) => setSettingsForm(f => ({ ...f, graceDays: e.target.value }))}
             className={`input w-40`}
           />
-          <p className="text-[10px] text-gray-600 mt-1">After expiry, before reclaimable</p>
+          <p className="text-[11px] text-gray-400 mt-1">After expiry, before reclaimable</p>
         </div>
         <button type="submit" disabled={busy} className={btnPrimary}>Save settings</button>
       </form>
@@ -161,7 +161,7 @@ export default function LeasesPage() {
               <div key={`${row.nodeRef}-${row.vmid}`} className="flex items-center justify-between gap-3 bg-gray-900/60 border border-gray-800 rounded-lg px-3 py-2">
                 <div className="min-w-0">
                   <span className="text-sm text-gray-200 font-medium truncate">{row.name}</span>
-                  <span className="ml-2 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500">ID {row.vmid} / {row.node}{row.owner ? ` / ${row.owner}` : ''}</span>
+                  <span className="ml-2 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500">ID {row.vmid} / {row.node}{row.owner ? ` / ${row.owner}` : ''}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <LeaseBadge lease={row} />
@@ -181,13 +181,13 @@ export default function LeasesPage() {
       ) : leases.length === 0 ? (
         <div className="text-center py-16 text-gray-500">
           <p className="text-gray-400 font-medium">No leases yet</p>
-          <p className="text-sm text-gray-600 mt-1">Leases start at provisioning. Use “Backfill missing” to lease existing VMs.</p>
+          <p className="text-sm text-gray-400 mt-1">Leases start at provisioning. Use “Backfill missing” to lease existing VMs.</p>
         </div>
       ) : (
         <div className="overflow-x-auto border border-gray-800 rounded-2xl">
           <table className="w-full text-sm">
             <thead>
-              <tr className="bg-gray-900/80 text-left font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500">
+              <tr className="bg-gray-900/80 text-left font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500">
                 <th className="px-4 py-3">VM</th>
                 <th className="px-4 py-3">Owner</th>
                 <th className="px-4 py-3">Lease</th>
@@ -201,7 +201,7 @@ export default function LeasesPage() {
                 <tr key={`${row.nodeRef}-${row.vmid}`} className="hover:bg-gray-900/40">
                   <td className="px-4 py-3">
                     <div className="text-gray-200 font-medium">{row.name}</div>
-                    <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                    <div className="font-mono text-[11px] uppercase tracking-[0.1em] text-gray-400">
                       ID {row.vmid} / {row.node}
                       {row.autoStopped && <span className="ml-1 text-red-400">· auto-stopped</span>}
                     </div>
@@ -268,21 +268,21 @@ function AdjustLeaseModal({ row, onClose, onSaved, onError }) {
         </label>
 
         <div className={exempt ? 'opacity-40 pointer-events-none' : ''}>
-          <label className="block font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Set new duration (days)</label>
+          <label className="block font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Set new duration (days)</label>
           <input
             type="number" min="0" value={leaseDays} placeholder={`current: ${row.leaseDays || 'unlimited'}`}
             onChange={(e) => setLeaseDays(e.target.value)} className="input"
           />
-          <p className="text-[10px] text-gray-600 mt-1">Resets the clock from now. 0 = unlimited. Leave blank to keep.</p>
+          <p className="text-[11px] text-gray-400 mt-1">Resets the clock from now. 0 = unlimited. Leave blank to keep.</p>
         </div>
 
         <div className={exempt ? 'opacity-40 pointer-events-none' : ''}>
-          <label className="block font-mono text-[10px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Extend by (days)</label>
+          <label className="block font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500 mb-1.5">Extend by (days)</label>
           <input
             type="number" value={extendDays} placeholder="e.g. 30"
             onChange={(e) => setExtendDays(e.target.value)} className="input"
           />
-          <p className="text-[10px] text-gray-600 mt-1">Adds days to the current expiry. Leave blank to skip.</p>
+          <p className="text-[11px] text-gray-400 mt-1">Adds days to the current expiry. Leave blank to skip.</p>
         </div>
 
         <div className="flex justify-end gap-2 pt-2">
