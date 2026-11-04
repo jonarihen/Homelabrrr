@@ -5,6 +5,10 @@
 - Figures no longer show "Unknown" while the page is still loading. Each tile, row and chart shows a pulsing placeholder until its data arrives, and "Unknown" appears only when a finished fetch genuinely has no value. Switching month or history range shows placeholders instead of the previous selection's numbers; background refreshes stay silent.
 - If a fetch fails, the affected section shows a dash and a clear "unavailable" message instead of "Unknown" everywhere, and a late response from an older month can no longer overwrite a newer one.
 - The page now matches the rest of the portal: standard panel padding and borders, even spacing between sections, a smaller page heading, consistent button styles for the month picker, range toggle and CSV download, and a two-column-then-four-column tile grid that no longer cramps values on laptop widths.
+## 2026-10-28 — Fixed price plus tariffs contracts
+
+- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
+- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
 
 ## 2026-10-28 — Concurrent deploys can't overbook a node
 

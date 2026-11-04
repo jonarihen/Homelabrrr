@@ -2,7 +2,7 @@ import { parseDkkPerKwh, type PriceBasis } from './powerPolicy.ts';
 
 export interface ContractPriceInput {
   ref: string;
-  kind: 'spot' | 'fixed_all_in';
+  kind: 'spot' | 'fixed_all_in' | 'fixed_plus_tariffs';
   area: 'DK1' | 'DK2';
   validFrom: Date;
   validTo: Date | null;
@@ -54,31 +54,50 @@ export function resolveApplicablePrice(at: Date, contract: ContractPriceInput, t
   if (!validDate(at) || !validDate(contract.validFrom) || (contract.validTo && !validDate(contract.validTo))) throw new Error('Invalid price evaluation date');
   if (at < contract.validFrom || (contract.validTo && at >= contract.validTo)) return incomplete(contract, basis, 'CONTRACT_OUTSIDE_VALIDITY');
   if (basis !== 'variable_retail_including_vat' && basis !== 'spot_only_excluding_retail_additions') throw new Error('Invalid pricing basis');
+  // Open-ended agreements need a stable, conservative horizon. A moving
+  // `at + 24h` end changes between the controller's first read and its
+  // guarded dispatch read, falsely invalidating every fixed-price decision.
+  const nextUtcDay = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate() + 1));
   if (contract.kind === 'fixed_all_in') {
     if (basis === 'spot_only_excluding_retail_additions') return incomplete(contract, basis, 'SPOT_BASIS_NOT_APPLICABLE');
     if (contract.fixedRate == null) return incomplete(contract, basis, 'FIXED_RATE_MISSING');
     const micros = parseDkkPerKwh(contract.fixedRate);
-    // Open-ended agreements need a stable, conservative horizon. A moving
-    // `at + 24h` end changes between the controller's first read and its
-    // guarded dispatch read, falsely invalidating every fixed-price decision.
-    const nextUtcDay = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate() + 1));
     const end = contract.validTo?.toISOString() || nextUtcDay.toISOString();
     return { status: 'valid', reason: null, dkk_per_kwh: format(micros), currency: 'DKK', start_utc: contract.validFrom.toISOString(), end_utc: end,
       area: contract.area, contract_ref: contract.ref, basis, components: [{ component: 'fixed_all_in', dkk_per_kwh: format(micros), provenance: 'contract', vat_included: true }],
       contract_revision: String(contract.revision), source_revision: `fixed:${contract.revision}`, fetched_at: null, known_horizon: end };
   }
-  if (contract.kind !== 'spot') return incomplete(contract, basis, 'CONTRACT_KIND_UNKNOWN');
-  if (!spot || spot.area !== contract.area || !validDate(spot.startUtc) || !validDate(spot.endUtc) || at < spot.startUtc || at >= spot.endUtc) return incomplete(contract, basis, 'CURRENT_SPOT_UNAVAILABLE');
-  const base = parseDkkPerKwh(spot.rate);
-  const components: ApplicablePrice['components'] = [{ component: 'day_ahead_spot', dkk_per_kwh: format(base), provenance: 'Energi Data Service DayAheadPrices', vat_included: false }];
-  const begin = maxDate(contract.validFrom, spot.startUtc);
-  let end = contract.validTo ? minDate(contract.validTo, spot.endUtc) : spot.endUtc;
-  if (basis === 'spot_only_excluding_retail_additions') return { status: 'valid', reason: null, dkk_per_kwh: format(base), currency: 'DKK', start_utc: begin.toISOString(), end_utc: end.toISOString(),
-    area: contract.area, contract_ref: contract.ref, basis, components, contract_revision: String(contract.revision), source_revision: spot.revision, fetched_at: spot.fetchedAt.toISOString(), known_horizon: spot.endUtc.toISOString() };
-  if (contract.marginRate == null || contract.vatRate == null || !Array.isArray(contract.requiredComponents)) return incomplete(contract, basis, 'RETAIL_TERMS_INCOMPLETE');
-  let taxable = base + parseDkkPerKwh(contract.marginRate);
+  let base: bigint;
+  let components: ApplicablePrice['components'];
+  let begin: Date;
+  let end: Date;
+  if (contract.kind === 'fixed_plus_tariffs') {
+    // fixedRate is the energy price excluding VAT; tariffs and VAT are then
+    // applied exactly as on the spot retail path. No spot data is involved.
+    if (basis === 'spot_only_excluding_retail_additions') return incomplete(contract, basis, 'SPOT_BASIS_NOT_APPLICABLE');
+    if (contract.fixedRate == null) return incomplete(contract, basis, 'FIXED_RATE_MISSING');
+    base = parseDkkPerKwh(contract.fixedRate);
+    components = [{ component: 'fixed_energy', dkk_per_kwh: format(base), provenance: 'contract', vat_included: false }];
+    begin = new Date(contract.validFrom.getTime());
+    end = contract.validTo || nextUtcDay;
+  } else if (contract.kind === 'spot') {
+    if (!spot || spot.area !== contract.area || !validDate(spot.startUtc) || !validDate(spot.endUtc) || at < spot.startUtc || at >= spot.endUtc) return incomplete(contract, basis, 'CURRENT_SPOT_UNAVAILABLE');
+    base = parseDkkPerKwh(spot.rate);
+    components = [{ component: 'day_ahead_spot', dkk_per_kwh: format(base), provenance: 'Energi Data Service DayAheadPrices', vat_included: false }];
+    begin = maxDate(contract.validFrom, spot.startUtc);
+    end = contract.validTo ? minDate(contract.validTo, spot.endUtc) : spot.endUtc;
+    if (basis === 'spot_only_excluding_retail_additions') return { status: 'valid', reason: null, dkk_per_kwh: format(base), currency: 'DKK', start_utc: begin.toISOString(), end_utc: end.toISOString(),
+      area: contract.area, contract_ref: contract.ref, basis, components, contract_revision: String(contract.revision), source_revision: spot.revision, fetched_at: spot.fetchedAt.toISOString(), known_horizon: spot.endUtc.toISOString() };
+    if (contract.marginRate == null) return incomplete(contract, basis, 'RETAIL_TERMS_INCOMPLETE');
+  } else return incomplete(contract, basis, 'CONTRACT_KIND_UNKNOWN');
+  if (contract.vatRate == null || !Array.isArray(contract.requiredComponents)) return incomplete(contract, basis, 'RETAIL_TERMS_INCOMPLETE');
+  let taxable = base;
   let vatIncluded = 0n;
-  components.push({ component: 'retailer_margin', dkk_per_kwh: format(parseDkkPerKwh(contract.marginRate)), provenance: 'contract', vat_included: false });
+  // Margin is required for spot (checked above) and optional for fixed_plus_tariffs.
+  if (contract.marginRate != null) {
+    taxable += parseDkkPerKwh(contract.marginRate);
+    components.push({ component: 'retailer_margin', dkk_per_kwh: format(parseDkkPerKwh(contract.marginRate)), provenance: 'contract', vat_included: false });
+  }
   const selected = new Set<string>();
   for (const component of contract.requiredComponents) {
     if (!/^(network|system|tax|retailer)$/.test(component) || selected.has(component)) return incomplete(contract, basis, 'TARIFF_COMPONENTS_INVALID');
@@ -95,8 +114,10 @@ export function resolveApplicablePrice(at: Date, contract: ContractPriceInput, t
   }
   const total = vatMicros(taxable, contract.vatRate) + vatIncluded;
   components.push({ component: 'vat', dkk_per_kwh: format(vatMicros(taxable, contract.vatRate) - taxable), provenance: `contract VAT fraction ${contract.vatRate}`, vat_included: true });
+  const tariffRevisions = tariffs.filter((item) => selected.has(item.component) && item.validFrom <= at && at < item.validTo).map((item) => item.revision).join('.');
+  const source = contract.kind === 'spot' && spot
+    ? { source_revision: `${spot.revision}:${tariffRevisions}`, fetched_at: spot.fetchedAt.toISOString(), known_horizon: spot.endUtc.toISOString() }
+    : { source_revision: `fixed:${contract.revision}:${tariffRevisions}`, fetched_at: null, known_horizon: end.toISOString() };
   return { status: 'valid', reason: null, dkk_per_kwh: format(total), currency: 'DKK', start_utc: begin.toISOString(), end_utc: end.toISOString(),
-    area: contract.area, contract_ref: contract.ref, basis, components, contract_revision: String(contract.revision),
-    source_revision: `${spot.revision}:${tariffs.filter((item) => selected.has(item.component) && item.validFrom <= at && at < item.validTo).map((item) => item.revision).join('.')}`,
-    fetched_at: spot.fetchedAt.toISOString(), known_horizon: spot.endUtc.toISOString() };
+    area: contract.area, contract_ref: contract.ref, basis, components, contract_revision: String(contract.revision), ...source };
 }

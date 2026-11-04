@@ -64,7 +64,11 @@ test('Edit Host configures an iLO per node and keeps it editable after saving', 
   await expect(pve01.getByLabel('Management host')).toHaveValue('10.0.40.11');
   await pve01.getByLabel('Management host').fill('10.0.40.12');
   await pve01.getByLabel(/^Password/).fill('fixture-password');
+  // fill() already set the value, so wait for the PUT itself rather than for the field.
+  const put = page.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/api/admin/hardware-connections/11'));
   await pve01.getByRole('button', { name: 'Save iLO changes' }).click();
+  await put;
+  await expect(pve01.getByText(/^Saved\./)).toBeVisible();
   await expect(pve01.getByLabel('Management host')).toHaveValue('10.0.40.12');
   expect(writes.map((w) => `${w.method} ${w.path}`)).toEqual(['POST /api/admin/hardware-connections/certificate-probe', 'POST /api/admin/hardware-connections', 'PUT /api/admin/hardware-connections/11']);
   expect(writes[0].body).toEqual({ host: '10.0.40.11', port: 443 });
