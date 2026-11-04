@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-04 — Clearer VM hardware dialog
+
+- The **Hardware** button on a VM page is now always shown. Without the edit-hardware permission it is disabled, with a tooltip saying why.
+- Disks in the hardware dialog show a readable label (for example `SCSI 0 · local-lvm · 32G`) with the raw Proxmox id underneath.
+
 ## 2026-10-28 — Styled confirmations, notices and dialogs
 
 - Browser confirm and alert pop-ups are replaced by in-app dialogs and notices. Destructive actions (delete, remove, revoke, discard) use a red confirm button, and focus starts on **Cancel**. **Escape** cancels.
