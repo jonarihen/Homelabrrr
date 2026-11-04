@@ -10,6 +10,21 @@
 - The hardware dialog takes memory in **GB**, matching the deploy forms.
 - If cloud images, templates, nodes or websites fail to load, the error is shown. Previously the page claimed none were available.
 - An empty dashboard offers **Create your first VM** to users who may provision. Website upstream chips show VM names, and an invalid invite link explains how to get a new one.
+## 2026-10-28 — Keyboard-friendly VM cards, movable console windows, clearer deploy forms
+
+- **VM cards** can now be opened with the keyboard (the VM name is a real link), and the select box shows up when focused and is announced to screen readers.
+- **Console windows** can be dragged with touch or a pen, moved with the arrow keys on the title bar (Shift for bigger steps), and resized from the bottom-right corner.
+- **Deploy**: if your account has no VLAN yet, the deploy forms say so up front ("Ask an admin to assign you a VLAN") and the deploy button stays disabled. With exactly one VLAN it is preselected.
+- The cloud-init **Username** field no longer suggests "operator"; leaving it blank keeps the image's default user.
+- The 2FA step on the login page now tells you what to do if you lost your device.
+## 2026-10-28 — Pin Proxmox host certificates and test connections before saving
+
+- **Admin → PVE Hosts** can now pin a host's TLS certificate: **Fetch certificate** shows the fingerprint the host presents (handshake only, no token sent), you confirm it, and from then on only that certificate is trusted. Self-signed Proxmox hosts work this way without `ALLOW_INSECURE_UPSTREAM_TLS`.
+- The pin covers every Proxmox connection: API calls, backup file downloads, the VNC console and cross-cluster migration. If the host presents a different certificate, the connection stops before the API token is sent, with a clear "certificate changed" error.
+- Setting, replacing or removing a pin requires re-entering the API token secret, and pin changes are recorded in the audit log.
+- A **Test connection** button tries the host, port, token and trust settings in the form without saving them, and reports whether the certificate is untrusted or changed, the token was rejected, the host is unreachable, or it timed out.
+- Hosts with a certificate from an internal CA can keep TLS verification on by trusting that CA via `NODE_EXTRA_CA_CERTS` (see README).
+## 2026-10-28 — Concurrent deploys can't overbook a node
 ## 2026-10-31 — SSH targets and website upstreams no longer trust guest-reported addresses
 
 - Browser SSH/SFTP now reaches only addresses in your assigned VLANs and addresses an admin assigned to your VM. Addresses a guest reports itself (guest agent, cloud-init) no longer grant access.
