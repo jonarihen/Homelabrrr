@@ -1081,16 +1081,17 @@ function ActionBtn({ children, color, onClick, disabled, icon, title }) {
     blue:   'bg-blue-600/15 text-blue-400 hover:bg-blue-600/25 ring-blue-500/20',
     gray:   'bg-gray-600/15 text-gray-300 hover:bg-gray-600/25 ring-gray-500/20',
   };
-  return (
+  const btn = (
     <button
       onClick={onClick}
       disabled={disabled}
-      title={title}
       className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium ring-1 transition-all disabled:opacity-40 ${styles[color] || styles.gray}`}
     >
       {icon}{children}
     </button>
   );
+  // Disabled buttons don't fire hover, so the tooltip lives on a wrapper.
+  return title ? <span title={title} className="inline-flex">{btn}<span className="sr-only">{title}</span></span> : btn;
 }
 
 // ── Backups Section ─────────────────────────────────────────────────────────
