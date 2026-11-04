@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-04 — Clearer VM hardware dialog
+
+- The **Hardware** button on a VM page is now always shown. Without the edit-hardware permission it is disabled, with a tooltip saying why.
+- Disks in the hardware dialog show a readable label (for example `SCSI 0 · local-lvm · 32G`) with the raw Proxmox id underneath.
+
 ## 2026-11-04 — Readable metadata text
 
 - Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.
