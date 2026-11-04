@@ -5,12 +5,19 @@
 - Figures no longer show "Unknown" while the page is still loading. Each tile, row and chart shows a pulsing placeholder until its data arrives, and "Unknown" appears only when a finished fetch genuinely has no value. Switching month or history range shows placeholders instead of the previous selection's numbers; background refreshes stay silent.
 - If a fetch fails, the affected section shows a dash and a clear "unavailable" message instead of "Unknown" everywhere, and a late response from an older month can no longer overwrite a newer one.
 - The page now matches the rest of the portal: standard panel padding and borders, even spacing between sections, a smaller page heading, consistent button styles for the month picker, range toggle and CSV download, and a two-column-then-four-column tile grid that no longer cramps values on laptop widths.
+## 2026-11-04 — Support page polish
+
+- The Support the lab page now uses the same card, input and button styling as the rest of the portal, with more breathing room between boxes, a consistent two-column layout that stacks on small screens, and bigger, evenly spaced buttons aligned at the bottom of each card.
+- Amounts, subscriptions and history show loading placeholders until your data has arrived, instead of briefly flashing empty or "No ... recorded" text.
+- Clearer states: PayPal buttons say "Opening PayPal…" while busy, returning from PayPal shows a verifying message, and success, pending/cancelled and error messages have distinct colours.
 
 ## 2026-11-03 — Roomier, consistent iLO power panels
 
 - The Hardware / iLO, Power telemetry and Power policy panels on PVE Hosts and in Edit Host now use the same spacing, panels, buttons, inputs and tables as the other admin pages: grouped controls (live control, automation), labelled fields, a proper window editor and history tables.
 - Panels show a loading skeleton instead of briefly reading "not configured" or "unknown", a failed load shows an error with Retry, and empty schedules or history show an empty state.
 - Behaviour and confirmations are unchanged.
+
+## 2026-10-28 — Fixed price plus tariffs contracts
 
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 

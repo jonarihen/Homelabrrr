@@ -1,4 +1,5 @@
 import { ACTIONS, deleteArtifact, describeArtifact } from './catalog.ts';
+import { isPortalAuthoredError, tagStatus } from '../utils/httpError.ts';
 import { renderParams, evaluateCondition } from './template.ts';
 
 /**
@@ -76,6 +77,7 @@ export async function runWorkflow({ steps, context, client }) {
 
       await rollback(client, artifacts, log);
       const wrapped = new Error(err.message);
+      if (isPortalAuthoredError(err)) tagStatus(wrapped, err.statusCode ?? err.status); // keep portal-authored 4xx so callers can show it verbatim
       wrapped.workflowRun = { status: 'failed', log, artifacts: [] };
       throw wrapped;
     }
