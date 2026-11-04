@@ -635,7 +635,7 @@ function CloudImageForm({ onStarted }) {
   if (loadError) return (
     <div className="space-y-3">
       <ErrorCallout error={loadError} fallback="Failed to load cloud images" />
-      <button onClick={() => setAttempt(a => a + 1)} className="text-xs text-blue-400 hover:text-blue-300">Retry</button>
+      <button type="button" onClick={() => setAttempt(a => a + 1)} className="text-xs text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-500">Retry</button>
     </div>
   );
 
@@ -947,7 +947,7 @@ function CloneForm({ onStarted }) {
   if (loadError) return (
     <div className="space-y-3">
       <ErrorCallout error={loadError} fallback="Failed to load templates" />
-      <button onClick={() => setAttempt(a => a + 1)} className="text-xs text-blue-400 hover:text-blue-300">Retry</button>
+      <button type="button" onClick={() => setAttempt(a => a + 1)} className="text-xs text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-500">Retry</button>
     </div>
   );
 
