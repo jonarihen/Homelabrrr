@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-11-03 — Warning when the proxy drops X-Forwarded-Proto
+
+- If a request arrives over plain HTTP while secure cookies are on, the backend now logs a one-time warning explaining the cause of the silent login loop. The README's reverse-proxy notes spell out the requirement.
 ## 2026-11-03 — 2FA backup codes at enrollment, lockout covers recovery codes
 
 - Enabling 2FA now shows 10 single-use backup codes once. The 2FA login step reminds you that a backup code (or an admin) can get you back in.
