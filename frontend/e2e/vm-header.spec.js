@@ -43,17 +43,23 @@ test('IP discovery is bounded and does not retry stopped VMs', async ({ page, co
   await page.goto('/vm/2~pve/101');
   await expect.poll(() => requests).toBe(1);
   for (let i = 2; i <= 20; i += 1) {
-    await page.clock.runFor(15100);
-    await expect.poll(() => requests).toBe(i);
+    // The retry timer is only armed once the previous response is handled, so
+    // step the fake clock in slices well under the 15s retry delay until it
+    // fires: that can neither miss the timer nor skip past a request.
+    while (requests < i) await page.clock.runFor(5000);
+    expect(requests).toBe(i);
   }
   await page.clock.runFor(60000);
   expect(requests).toBe(20);
-  await page.unrouteAll({ behavior: 'wait' });
+  // Unload the running page first: its status poll would otherwise see the new
+  // 'stopped' mock (the latest route wins), flip status and legitimately trigger
+  // one extra discovery.
+  await page.goto('about:blank');
   await mockVm(context, route => {
     requests += 1;
     return route.fulfill({ json: { candidates: [] } });
   }, 'stopped');
-  await page.reload();
+  await page.goto('/vm/2~pve/101');
   await expect.poll(() => requests).toBe(21);
   await page.clock.runFor(60000);
   expect(requests).toBe(21);

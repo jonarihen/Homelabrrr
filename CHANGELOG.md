@@ -7,6 +7,11 @@
 - **Deploy**: if your account has no VLAN yet, the deploy forms say so up front ("Ask an admin to assign you a VLAN") and the deploy button stays disabled. With exactly one VLAN it is preselected.
 - The cloud-init **Username** field no longer suggests "operator"; leaving it blank keeps the image's default user.
 - The 2FA step on the login page now tells you what to do if you lost your device.
+## 2026-10-28 — Fixed price plus tariffs contracts
+
+- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
+- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
+
 ## 2026-10-28 — Concurrent deploys can't overbook a node
 
 - A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
