@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import api from '../api.js';
 import Layout from '../components/Layout.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 
 const money = (ore) => typeof ore === 'number' ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(ore / 100) : '—';
 const date = (value) => value ? new Intl.DateTimeFormat('da-DK', { dateStyle: 'medium' }).format(new Date(value)) : '—';
@@ -22,6 +23,7 @@ function Card({ title, hint, children, className = '' }) {
 }
 
 export default function SupportPage() {
+  const confirm = useConfirm();
   useDocumentTitle('Support the lab');
   const [searchParams, setSearchParams] = useSearchParams();
   const [status, setStatus] = useState(null);
@@ -78,7 +80,7 @@ export default function SupportPage() {
   const options = status?.monthlyOptions || [];
   const monthlyChoice = options.includes(monthlyAmount) ? monthlyAmount : options[0] ?? null;
   const change = async (subscription, target) => {
-    if (!window.confirm(`Change to ${money(target)} per month? Your current subscription is cancelled at PayPal first; you then approve the new amount at PayPal. If you do not approve, no monthly contribution continues.`)) return;
+    if (!await confirm(`Change to ${money(target)} per month? Your current subscription is cancelled at PayPal first; you then approve the new amount at PayPal. If you do not approve, no monthly contribution continues.`)) return;
     setBusy(`change:${subscription.id}:${target}`); setError(''); setNotice('');
     try {
       const { data } = await api.post(`/payments/monthly/${encodeURIComponent(subscription.id)}/change`, { environment: 'live', amount: (target / 100).toFixed(2) });
@@ -88,7 +90,7 @@ export default function SupportPage() {
     } catch (err) { setError(err.response?.data?.error || 'Could not change the monthly amount.'); setBusy(''); }
   };
   const cancel = async (subscription) => {
-    if (!window.confirm('Cancel this monthly contribution? PayPal may still process a payment already due.')) return;
+    if (!await confirm({ message: 'Cancel this monthly contribution? PayPal may still process a payment already due.', confirmLabel: 'Cancel contribution', danger: true })) return;
     setBusy(`cancel:${subscription.id}`); setError('');
     try { await api.post(`/payments/monthly/${encodeURIComponent(subscription.id)}/cancel`); await refresh(); setNotice('Cancellation requested and will be verified with PayPal.', 'success'); }
     catch (err) { setError(err.response?.data?.error || 'Could not cancel the subscription.'); }

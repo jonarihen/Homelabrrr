@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '../../api.js';
 import Field from '../../components/Field.jsx';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
 
 const inputClass = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all disabled:opacity-60';
@@ -21,6 +22,7 @@ function Head({ title, children }) {
 const Actions = ({ children }) => <div className="flex flex-wrap items-center gap-3 md:col-span-2">{children}</div>;
 
 export default function ElectricityPricingPanel() {
+  const confirm = useConfirm();
   const [contracts, setContracts] = useState([]);
   const [contractsLoaded, setContractsLoaded] = useState(false);
   const [selected, setSelected] = useState('');
@@ -110,7 +112,7 @@ export default function ElectricityPricingPanel() {
       <Field label="Reason"><input required {...text(ending, setEnding, 'reason')} className={inputClass} /></Field>
       <Actions>
         <button disabled={busy} className={btnPrimary}>End contract</button>
-        <button type="button" disabled={busy} onClick={() => { if (window.confirm('Deactivate this electricity contract? Price-based power rules will fall back to the schedule until another configured contract is selected.')) action(() => api.post(`/admin/electricity-pricing/contracts/${selected}/deactivate`)); }} className={btnDanger}>Deactivate selected contract</button>
+        <button type="button" disabled={busy} onClick={async () => { if (await confirm({ message: 'Deactivate this electricity contract? Price-based power rules will fall back to the schedule until another configured contract is selected.', confirmLabel: 'Deactivate', danger: true })) action(() => api.post(`/admin/electricity-pricing/contracts/${selected}/deactivate`)); }} className={btnDanger}>Deactivate selected contract</button>
       </Actions>
     </form>}
     <form onSubmit={(e) => { e.preventDefault(); const body = { ...contract, fixedMonthlyOre: contract.fixedMonthlyOre === '' ? null : Number(contract.fixedMonthlyOre), validFrom: new Date(contract.validFrom).toISOString(), validTo: contract.validTo ? new Date(contract.validTo).toISOString() : null };

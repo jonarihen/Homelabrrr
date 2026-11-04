@@ -2,12 +2,11 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import { and, count, eq, gt, inArray, lt } from 'drizzle-orm';
 import { db } from '../db/client.ts';
-import { publicIpAssignments, sshConnectionAttempts } from '../db/schema/index.ts';
+import { publicIpAssignments, pveHosts, sshConnectionAttempts } from '../db/schema/index.ts';
 import { validateHost, validatePort } from '../utils/validation.ts';
-import { getLXCConfig, getVMAgentInterfaces, getVMConfig } from '../proxmox.ts';
-import { parseIpConfig0 } from '../utils/detectedIps.ts';
 import { allowedResolvedSshAddresses } from '../utils/sshTargetAuthorization.ts';
 import { userVlanCidrs } from '../utils/vlanSubnets.ts';
+import { decodeNodeRef } from '../utils/nodeRef.ts';
 
 const ATTEMPT_WINDOW_MS = 60_000;
 
@@ -42,51 +41,27 @@ async function explicitlyAssignedAddresses(userId: number, node: string, vmid: n
   // parameter, so keep the same fail-closed outcome without a round trip.
   const parsedVmid = Number.parseInt(String(vmid), 10);
   if (!Number.isInteger(parsedVmid)) return [];
+  const { hostId, nodeName } = decodeNodeRef(node);
   const rows = await db
-    .select({ ip: publicIpAssignments.private_ip })
+    .select({ ip: publicIpAssignments.private_ip, node: publicIpAssignments.node, hostId: publicIpAssignments.proxmox_host_id })
     .from(publicIpAssignments)
     .where(and(
       eq(publicIpAssignments.user_id, userId),
       // Legacy assignment rows may store the bare node name (utils/nodeRef.ts).
-      inArray(publicIpAssignments.node, [String(node), String(node).replace(/^\d+~/, '')]),
+      inArray(publicIpAssignments.node, [String(node), nodeName]),
       eq(publicIpAssignments.vmid, parsedVmid),
     ));
-  return rows.map((row) => row.ip);
-}
-
-function addressesFromAgent(payload) {
-  const interfaces = Array.isArray(payload) ? payload : Array.isArray(payload?.result) ? payload.result : [];
-  return interfaces.flatMap((entry) => Array.isArray(entry?.['ip-addresses']) ? entry['ip-addresses'] : [])
-    .map((entry) => String(entry?.['ip-address'] || '').split('/')[0])
-    .filter((address) => net.isIP(address) && !['127.0.0.1', '::1'].includes(address));
-}
-
-function addressesFromConfig(config) {
-  const addresses: string[] = [];
-  for (const [key, value] of Object.entries(config || {})) {
-    if (!/^ipconfig\d+$/.test(key) && !/^net\d+$/.test(key)) continue;
-    const parsed = parseIpConfig0(String(value || ''));
-    if (parsed?.ip) addresses.push(parsed.ip);
-    for (const match of String(value || '').matchAll(/(?:^|,)ip6?=([^,]+)/g)) {
-      const address = match[1].split('/')[0];
-      if (net.isIP(address)) addresses.push(address);
-    }
+  // A bare legacy row only stands for a host-qualified request when that host
+  // is unambiguous: '2~pve' must not match another cluster's 'pve'.
+  let singleHost: boolean | undefined;
+  const matches: string[] = [];
+  for (const row of rows) {
+    if (hostId == null || row.node === String(node)) { matches.push(row.ip); continue; }
+    if (row.hostId != null) { if (row.hostId === hostId) matches.push(row.ip); continue; }
+    singleHost ??= (await db.select({ c: count() }).from(pveHosts))[0].c === 1;
+    if (singleHost) matches.push(row.ip);
   }
-  return addresses;
-}
-
-async function detectedVmAddresses(node: string, vmid: number | string): Promise<Set<string>> {
-  const addresses = new Set<string>();
-  try {
-    let config;
-    try { config = await getVMConfig(node, vmid); }
-    catch { config = await getLXCConfig(node, vmid); }
-    for (const address of addressesFromConfig(config)) addresses.add(address);
-  } catch { /* a stopped/unreachable VM can still be authorized by its VLAN */ }
-  try {
-    for (const address of addressesFromAgent(await getVMAgentInterfaces(node, vmid))) addresses.add(address);
-  } catch { /* guest agent is optional */ }
-  return addresses;
+  return matches;
 }
 
 export async function authorizeSshTarget({ userId, isAdmin, node, vmid, host, port }) {
@@ -104,13 +79,14 @@ export async function authorizeSshTarget({ userId, isAdmin, node, vmid, host, po
     }
   }
 
-  const [networks, explicit, detected] = await Promise.all([
+  // Guest-agent and cloud-init addresses are chosen inside the guest or at
+  // deploy time, so they never grant access on their own: a non-admin reaches
+  // only their assigned VLAN networks and admin-assigned addresses.
+  const [networks, explicit] = await Promise.all([
     assignedNetworks(userId),
     explicitlyAssignedAddresses(userId, node, vmid),
-    detectedVmAddresses(node, vmid),
   ]);
-  const exact = new Set([...explicit, ...detected]);
-  const allowed = allowedResolvedSshAddresses(addresses, { exactAddresses: [...exact], networks });
+  const allowed = allowedResolvedSshAddresses(addresses, { exactAddresses: explicit, networks });
   if (!allowed.length) {
     throw Object.assign(
       new Error('SSH/SFTP target is outside the VM addresses or networks assigned to you'),

@@ -4,6 +4,7 @@ import Field from '../../components/Field.jsx';
 import ElectricityPricingPanel from './ElectricityPricingPanel.jsx';
 import ExtraLabLoadsPanel from './ExtraLabLoadsPanel.jsx';
 import ElectricityBillsPanel from './ElectricityBillsPanel.jsx';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
 import { localTime } from '../../utils/energyView.js';
 
@@ -26,6 +27,7 @@ function Stat({ label, children }) {
 }
 
 export default function EnergyDataPage() {
+  const confirm = useConfirm();
   const [status, setStatus] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [meters, setMeters] = useState(null);
@@ -112,7 +114,7 @@ export default function EnergyDataPage() {
         <button disabled={busy || !status.enabled} onClick={() => action('sync')} className={btnSecondary}>Sync now</button>
         <span className="hidden h-6 w-px bg-gray-800 sm:block" aria-hidden="true" />
         <button disabled={busy} onClick={() => action('disconnect')} className={btnDanger}>Disconnect and keep history</button>
-        <button disabled={busy} onClick={() => { if (window.confirm('Disconnect and permanently delete all imported meter intervals and charge snapshots? Finalized cost statements are kept.')) action('disconnect', { purgeHistory: true }); }} className={btnDanger}>Disconnect and purge history</button>
+        <button disabled={busy} onClick={async () => { if (await confirm({ message: 'Disconnect and permanently delete all imported meter intervals and charge snapshots? Finalized cost statements are kept.', confirmLabel: 'Purge history', danger: true })) action('disconnect', { purgeHistory: true }); }} className={btnDanger}>Disconnect and purge history</button>
       </div>
     </Card>}
     <RecentReauthDialog open={!!reauth} busy={busy} error={reauthError} onCancel={() => setReauth(null)} onConfirm={confirmReauth} />
