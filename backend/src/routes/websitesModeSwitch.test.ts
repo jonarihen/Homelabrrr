@@ -10,7 +10,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { caddyServers, caddySites } from '../db/schema/index.ts';
+import { caddyServers, caddySites, users } from '../db/schema/index.ts';
 
 let testDb: TestDatabase;
 let app: express.Express;
@@ -79,8 +79,10 @@ async function seedSnippetServer(withSite = false) {
     ssh_auth_type: 'password', ssh_secret: encryptSecret('test-password'),
   }).returning({ id: caddyServers.id });
   if (withSite) {
+    // Upstream trust fails closed for unowned sites; an admin owner is exempt.
+    const [admin] = await testDb.db.insert(users).values({ username: `admin-${id}`, password: 'unused', is_admin: true }).returning({ id: users.id });
     await testDb.db.insert(caddySites).values({
-      server_id: id, domain: `site-${id}.example.test`, upstream_host: '192.0.2.1', upstream_port: 80, status: 'pending',
+      owner_user_id: admin.id, server_id: id, domain: `site-${id}.example.test`, upstream_host: '192.0.2.1', upstream_port: 80, status: 'pending',
     });
   }
   return id;

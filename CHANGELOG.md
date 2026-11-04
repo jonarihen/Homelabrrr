@@ -7,15 +7,51 @@
 - **Deploy**: if your account has no VLAN yet, the deploy forms say so up front ("Ask an admin to assign you a VLAN") and the deploy button stays disabled. With exactly one VLAN it is preselected.
 - The cloud-init **Username** field no longer suggests "operator"; leaving it blank keeps the image's default user.
 - The 2FA step on the login page now tells you what to do if you lost your device.
+## 2026-10-28 — Pin Proxmox host certificates and test connections before saving
+
+- **Admin → PVE Hosts** can now pin a host's TLS certificate: **Fetch certificate** shows the fingerprint the host presents (handshake only, no token sent), you confirm it, and from then on only that certificate is trusted. Self-signed Proxmox hosts work this way without `ALLOW_INSECURE_UPSTREAM_TLS`.
+- The pin covers every Proxmox connection: API calls, backup file downloads, the VNC console and cross-cluster migration. If the host presents a different certificate, the connection stops before the API token is sent, with a clear "certificate changed" error.
+- Setting, replacing or removing a pin requires re-entering the API token secret, and pin changes are recorded in the audit log.
+- A **Test connection** button tries the host, port, token and trust settings in the form without saving them, and reports whether the certificate is untrusted or changed, the token was rejected, the host is unreachable, or it timed out.
+- Hosts with a certificate from an internal CA can keep TLS verification on by trusting that CA via `NODE_EXTRA_CA_CERTS` (see README).
+## 2026-10-28 — Concurrent deploys can't overbook a node
+## 2026-10-31 — SSH targets and website upstreams no longer trust guest-reported addresses
+
+- Browser SSH/SFTP now reaches only addresses in your assigned VLANs and addresses an admin assigned to your VM. Addresses a guest reports itself (guest agent, cloud-init) no longer grant access.
+- Website upstreams for non-admins are limited to the same set. Existing sites whose upstream no longer qualifies are unpublished by the periodic maintenance pass (not deleted); re-save them with an address in your VLAN.
+- Legacy admin-assigned address rows that store only a node name now count only for the Proxmox host they were recorded on, so a same-named node on another cluster no longer inherits them.
+## 2026-11-03 — Warning when the proxy drops X-Forwarded-Proto
+
+- If a request arrives over plain HTTP while secure cookies are on, the backend now logs a one-time warning explaining the cause of the silent login loop. The README's reverse-proxy notes spell out the requirement.
+## 2026-11-03 — 2FA backup codes at enrollment, lockout covers recovery codes
+
+- Enabling 2FA now shows 10 single-use backup codes once. The 2FA login step reminds you that a backup code (or an admin) can get you back in.
+- Wrong backup codes now count against the same 2FA lockout as wrong authenticator codes.
+- An admin 2FA reset also deletes the user's backup codes.
+## 2026-11-04 — PayPal admin page tidy-up
+
+- The PayPal administration page now follows the same layout as the other admin pages: centred page width, consistent card padding, one set of button sizes, labelled form fields in a two-column grid, and an environment switcher with a "Live · real charges" badge in the page header.
+- Review queue, manual transfers, subscriptions, offered amounts and configuration history are proper scrollable tables with status badges instead of tightly packed rows. Setup actions are grouped into four labelled steps.
+- Figures show loading placeholders instead of "Unknown" or empty text while data loads, lists say "Unavailable" (with a retry) if loading fails, and error and success messages stay visible while you work further down the page.
+## 2026-11-04 — Energy & Budget page: loading states and tidier layout
+
+- Figures no longer show "Unknown" while the page is still loading. Each tile, row and chart shows a pulsing placeholder until its data arrives, and "Unknown" appears only when a finished fetch genuinely has no value. Switching month or history range shows placeholders instead of the previous selection's numbers; background refreshes stay silent.
+- If a fetch fails, the affected section shows a dash and a clear "unavailable" message instead of "Unknown" everywhere, and a late response from an older month can no longer overwrite a newer one.
+- The page now matches the rest of the portal: standard panel padding and borders, even spacing between sections, a smaller page heading, consistent button styles for the month picker, range toggle and CSV download, and a two-column-then-four-column tile grid that no longer cramps values on laptop widths.
+## 2026-11-04 — Support page polish
+
+- The Support the lab page now uses the same card, input and button styling as the rest of the portal, with more breathing room between boxes, a consistent two-column layout that stacks on small screens, and bigger, evenly spaced buttons aligned at the bottom of each card.
+- Amounts, subscriptions and history show loading placeholders until your data has arrived, instead of briefly flashing empty or "No ... recorded" text.
+- Clearer states: PayPal buttons say "Opening PayPal…" while busy, returning from PayPal shows a verifying message, and success, pending/cancelled and error messages have distinct colours.
+
+## 2026-11-03 — Roomier, consistent iLO power panels
+
+- The Hardware / iLO, Power telemetry and Power policy panels on PVE Hosts and in Edit Host now use the same spacing, panels, buttons, inputs and tables as the other admin pages: grouped controls (live control, automation), labelled fields, a proper window editor and history tables.
+- Panels show a loading skeleton instead of briefly reading "not configured" or "unknown", a failed load shows an error with Retry, and empty schedules or history show an empty state.
+- Behaviour and confirmations are unchanged.
+
 ## 2026-10-28 — Fixed price plus tariffs contracts
 
-- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
-- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
-
-## 2026-10-28 — Concurrent deploys can't overbook a node
-
-- A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
-- When a deploy is refused for space, the message says how much is held by other deploys still in progress.
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 
 - Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
@@ -26,57 +62,78 @@
 
 - Saving an ElOverblik token, selecting a meter, disconnecting, and adding electricity contracts or tariffs now open the password + authenticator dialog when a recent confirmation is required, and retry the save afterwards. Before, they only showed "Please confirm your password and second factor before continuing" with no way to confirm.
 
+## 2026-10-28 — Fixed price plus tariffs contracts
+
+- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
+- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
+
+## 2026-10-28 — Concurrent deploys can't overbook a node
+
+- A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
+- When a deploy is refused for space, the message says how much is held by other deploys still in progress.
+
 ## 2026-10-28 — Louder startup warnings for key and bootstrap mistakes
 
 - The backend now logs `secrets_undecryptable` at startup when stored secrets can't be decrypted with the configured `SECRET_ENCRYPTION_KEY`, instead of failing later on upstream calls and 2FA logins.
 - A warning is logged when `INITIAL_ADMIN_PASSWORD` is still set after the first admin exists.
 - The backend container runs with an init process, so child processes are reaped and shutdown signals are forwarded.
 - The README backup section now says the encryption keyring must be kept alongside database backups.
+
 ## 2026-10-28 — Upstream calls can no longer hang or balloon
 
 - Proxmox and FortiGate API calls now have a 60-second total deadline and a 32 MB response limit, on top of the 15-second idle timeout. A slow-drip or oversized response fails the request instead of tying it up indefinitely.
 - Waiting for a Proxmox task (clones, migrations) still rides out short outages, but gives up with the real error after 5 minutes of failed status checks instead of silently retrying for up to 4 hours.
 - VMID allocation and node lookups query all Proxmox hosts in parallel, so one dead host costs one timeout instead of one per host. Unreachable hosts are logged as `pve_host_unreachable` with the host name, so "node not found" has a visible cause.
+
 ## 2026-10-28 — Phone and tablet layout
 
 - Below laptop width the sidebar moves into a slide-in drawer opened from a **menu** button in a new top bar. It traps focus, closes on Escape, a tap outside or navigation, and returns focus to the button. Desktop layout is unchanged.
 - Data tables (users, roles, VLANs, templates, assignments, audit log, snapshots, SSH keys, websites, recent provisions) scroll sideways inside their panel instead of being cut off.
 - The **My VMs** header and summary bar wrap on narrow screens.
 - Console windows are shrunk and moved to fit the screen when opened, tiled or when the window is resized.
+
 ## 2026-10-28 — Audit log filters and CSV export
 
 - The **Audit Log** action filter now lists every action that has actually been recorded, instead of a fixed list of about 25.
 - New filters for **user** and a **date range** (the end date counts in full). They combine with the action and target filters.
 - **Export CSV** downloads the filtered log (newest first, up to 50,000 rows). Spreadsheet formulas in exported text are neutralised, and each export is recorded in the audit log.
+
 ## 2026-10-28 — Failed background deploy steps no longer leave a VM stuck "in progress"
 
 - If background work after a deploy fails unexpectedly (for example recording ownership or tagging), the VM moves to **needs review** with the cause shown, instead of staying in "creating" indefinitely with the error only in the server log. A more specific status already recorded by a deploy step is kept.
 - Deploy failures, VLAN-tag failures and auto-placement skips are now structured log events (`provision_*_background_failed`, `provision_vlan_tag_failed`, `placement_node_skipped`) with the provision ID and VMID.
+
 ## 2026-10-28 — VM page sticky header, section nav and IP
 
 - The **VM page** identity header (name and status) and section nav (Overview, Performance, Snapshots, Backups, IP, SSH) stay pinned while you scroll. Power and connect actions scroll away to keep the sticky area compact on small screens.
 - The VM's IP address is shown next to the VMID, taken from cloud-init, DHCP or the guest agent, with a **copy** button.
 - The app is now called **Homelabrrr** everywhere in the UI (browser tab, sidebar, sign-in screen).
 - Firewall policy service colours use the design-language accent and status colours instead of a rainbow palette.
+
 ## 2026-10-28 — Readable primary buttons and labelled form fields
 
 - Primary (orange) buttons and active tabs now use dark text instead of white, so their labels meet contrast guidelines. They also show a clear focus ring when reached by keyboard.
 - Form labels in the SSH key, SSH connect and user management forms are now linked to their inputs: screen readers announce them, and clicking a label focuses its field.
+
 ## 2026-10-28 — Frontend container runs without root
 
 - The frontend container now runs nginx as its unprivileged `nginx` user and listens on port 8080 inside the container. The published host port (8181) is unchanged. If you have a compose override that targets the container's port 80, change it to 8080.
 - The frontend container has its own health check.
+
 ## 2026-10-28 — Switching a Caddy server to API-only mode removes its old routes
 
 - Clearing a Caddy server's SSH host (switching from Caddyfile sync to API-only mode) now empties the Homelabrrr snippet and reloads Caddy first, then re-publishes the sites through the admin API. Before, the old Caddyfile routes stayed live and came back on every reload, out of reach of API-mode unpublish and delete.
 - If the snippet can't be cleared (SSH unreachable, validation fails), the switch is refused and the server stays in Caddyfile mode, with the reason shown.
+
 ## 2026-10-28 — SSH works with fewer steps after deploy
 
 - The SSH connect form now suggests the cloud-init user the VM was deployed with instead of `root`, and fills in the VM's detected IP the first time it's opened.
 - SSH connection failures now say what to check (wrong username or key, VM still booting, SSH not running) instead of showing the raw error.
+
 ## 2026-10-28 — Revoking a session closes its open consoles
 
 - Signing out, revoking a session under Account (one or all others), signing in again, or an admin deleting the user now also closes every SSH and VNC console that session had open. Before, consoles opened earlier kept running after their session was revoked.
+
 ## 2026-10-28 — VLAN access follows the subnets firewalls actually provisioned
 
 - Browser SSH targets, website upstreams and public-IP targets now check your VLANs against the subnet each firewall sync recorded, so deployments that don't use the `10.x` scheme no longer refuse addresses in your own VLAN — and no longer accept the unused `10.x` range.
@@ -378,59 +435,70 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 
 - **Firewall permissions handed out through a role work everywhere again.** A user whose `can_manage_firewalls` came from a role — including the built-in **Administrator** role — was treated as not having it in two places, with no error to explain why. The Firewalls admin page loaded with **host, port, VDOM, WAN interface and TLS verification blank**, and port forwarding quietly dropped to the restricted path: forwards could only be created for VLANs assigned to that user personally, and deleting a forward on any other VLAN was refused. Both now honour the role
 - Permissions granted directly on the user account were never affected — only role-granted ones
+
 ## 2026-08-02 — Restoring a container backup from Proxmox Backup Server works
 
 - **A PBS container snapshot now restores.** Homelabrrr worked out whether a backup held a container or a VM by looking for `vzdump-lxc-` in the file name — a marker that only exists on classic vzdump archives. PBS snapshots don't have it, so every container restore from a PBS datastore was sent to Proxmox's VM endpoint and rejected with a raw upstream error. Both naming schemes are now understood
 - **The guest at the restore target decides the endpoint.** If the backup and the target disagree — a container backup aimed at a VM, or the reverse — the restore is refused up front with a message saying so, instead of failing halfway through Proxmox
 - A backup in a format Homelabrrr doesn't recognise is now reported as such rather than being quietly treated as a VM
+
 ## 2026-08-02 — Delegated permissions always come with a sidebar link
 
 - **Fixes a Port Forwarding page that could not be reached.** Granting someone only *Manage port forwards* — the intended grant for scoped self-service port forwarding — left them with no **Networking** heading in the sidebar and therefore no link to the page they had just been given. The only way in was for someone to send them the URL
 - The sidebar's section headings are now derived from the links inside them: a section appears exactly when the user can follow at least one of its links, so a granted page can no longer be hidden behind a heading that never renders
+
 ## 2026-08-02 — Port forwarding says why a VM can't be published
 
 - **The "Target VM" dropdown no longer hides VMs.** A VM had to clear four separate checks — a recorded IP, a VLAN tag on its network interface, that VLAN synced to the firewall, and (for non-admins) that VLAN assigned to you — and failing any one of them silently removed it from the list. The dropdown could end up empty with nothing but an eleven-pixel grey line to explain it
 - **Every VM you can see is now listed.** The ones that aren't ready appear greyed out with the reason next to the name — `web-01 — no IP recorded`, `db-02 — VLAN not synced to this firewall` — so you can tell at a glance that your VM exists and what it's waiting on
 - **When nothing is publishable, the empty dropdown is replaced by a callout** naming the missing prerequisite and linking to where you fix it: the VM page for a missing IP or VLAN tag, Networking → VLANs for an unsynced VLAN, and "ask an admin" when the VLAN simply isn't yours
 - **Creating a port forward reports the actual blocker.** Two catch-all messages ("You can only create port forwards for your own VMs on VLANs assigned to you" / "This VM is not on a VLAN you can publish through this firewall") covered all four causes; the specific reason and its fix are now returned instead
+
 ## 2026-08-02 — VM names are checked before provisioning starts, and previewed as you type
 
 - **A VM name Proxmox would reject is now caught immediately.** Creating a VM from scratch or cloning a template with a name like `my_test_vm` used to sail through the portal, reserve a VMID, pass the capacity and quota checks, and only then fail with a raw Proxmox error. All three provisioning flows now validate the name first and answer straight away
 - **Every provisioning form shows the name that will actually be created.** Proxmox VM names must be DNS-style — lowercase, hyphenated, 63 characters at most — so `My Test VM` becomes `my-test-vm`. That result is now shown live under the VM Name field in the deploy-from-image, clone-template and create-from-scratch forms instead of appearing as a surprise afterwards
 - A name made entirely of spaces or punctuation is flagged in the form rather than accepted and rejected later
+
 ## 2026-08-02 — Stop hand-typing your VM's IP address
 
 - **The SSH connect form can now find the address for you.** A **Detect IP** button next to *Host / IP* asks the portal what it already knows — the VM's DHCP reservation, its current DHCP lease, the static address cloud-init was given, and what qemu-guest-agent reports from inside the guest. The best candidate fills the field, and every candidate is offered as a chip showing where it came from, so you can pick a different one
 - **Detection degrades instead of failing.** A VM with no guest agent, a VLAN with no managed DHCP scope, or an unreachable firewall simply contributes nothing; whatever the other sources found is still offered. Loopback and link-local addresses are never suggested
 - **The field now says what it actually controls.** A hint under *Host / IP* spells out that this same address is what port forwarding and website publishing use — previously nothing in either feature explained why they were blocked on a form buried in the SSH panel
 - **A VM that only ever had a DHCP lease no longer stays address-less.** Opening the VM's IP management panel records the observed lease as the VM's address when none was set, instead of waiting for someone to create a static reservation. Any change the portal makes to a recorded address is written to the audit log
+
 ## 2026-08-02 — Two people can deploy at the same time without clashing
 
 - **Simultaneous deployments no longer get handed the same VM ID.** The next free ID was picked from a snapshot of what Proxmox reported and nothing held it, so two people clicking Deploy at once — or one person double-clicking — could both be given ID 105. The second deployment then failed with a raw *"VM 105 already exists"* from Proxmox. An ID is now held for the deployment that was given it, so the next request skips it. A deployment that fails hands its ID straight back
 - **If an ID is taken behind the portal's back** (someone creating a VM directly in Proxmox, for instance), the deployment now quietly picks a new one and carries on instead of failing
 - **A failed deployment no longer leaves the VM assigned to you.** Ownership and the lease clock used to be recorded the moment the deployment was submitted, so a clone or cloud-image deploy that failed part-way left your account holding a VM that was never created — sometimes an ID that later belonged to someone else. Both are now recorded once the VM actually exists
+
 ## 2026-08-02 — A deployed VM always has a way to log in
 
 - **Selecting an SSH key that can't be installed no longer fails silently.** A stored key without its public half — an encrypted private key added without its passphrase, for instance — was quietly dropped during provisioning, and the deploy finished green with no authorized key on the VM. The deploy is now refused up front, naming the key and how to fix it
 - **A cloud-init deploy with no password and no SSH key is refused.** Cloud images ship with no default password and a locked default user, so those VMs booted, reported ready, and could not be logged into by anyone — not over SSH, not on the VNC console. Deploying from a cloud image, or cloning a cloud-init template, now needs a password, an SSH key, or both
 - **The deploy form says so before you deploy, not after.** Keys that can't be installed are listed but greyed out with the reason next to them, and the Deploy button stays disabled until there's a way in
 - **The SSH Keys page marks keys with no public key.** The warning used to appear once when the key was added and was never seen again
+
 ## 2026-08-02 — Deploying to an overcommitted node works again
 
 - **A node with no free RAM no longer refuses new VMs.** The pre-flight check compared the request against the node's *momentarily free* memory, which on a healthy host is near zero — ZFS ARC, page cache and ballooning guests use it all. Deployments are now sized against **physical RAM × an overcommit ratio** (default 1.5), which is how a homelab actually runs
 - **The memory check is advisory by default.** A tight node produces a warning on the deployment's progress steps instead of a rejection. Admins can set it to *off*, *warn* or *block* and tune the overcommit ratio under **Admin → PVE Hosts → Capacity policy**
 - **Automatic placement explains itself.** When no host can take a cloud-image deploy, the message now lists every host and why it was skipped — out of memory budget, in maintenance, unreachable, no storage exposed — instead of a flat "contact your admin"
 - Disk space is unchanged and still a hard block: free space on a storage pool is a real limit
+
 ## 2026-08-02 — See the address the portal has for you, and catch a wrong TRUST_PROXY
 
 - **Account → Connection** now shows the address the portal sees you coming from, how many `X-Forwarded-For` hops arrived, and whether that matches the configured `TRUST_PROXY`. If the address shown is not your real public IP, the value is wrong — and the panel says so
 - A wrong `TRUST_PROXY` used to fail completely silently while making every client look like the reverse proxy: the audit log recorded the proxy's address for every action, and the per-account login lockout collapsed into a global one that anyone could trip for everyone. The backend now logs a **one-time warning** when the hop count that actually arrives disagrees with the configured value
 - The README gained a **"Counting your proxies"** table next to the deployment steps, mapping each common topology (direct, one external proxy, Cloudflare in front) to the right number
+
 ## 2026-08-02 — Missing setup is now visible before anyone hits a wall
 
 - **A new "Setup status" card on the Overview page** (admins only) checks the whole prerequisite chain in one place: hosts registered and reachable, API tokens accepted, storage actually exposed to users, a deployable template or cloud image, firewall external IP and synced VLANs, the reverse proxy's WAN IP, and the environment variables that quietly weaken things when unset. Only the rows that need attention are shown; the rest collapse behind a toggle. A single unreachable Proxmox host degrades its own rows instead of blanking the card
 - **Empty states now say what to do next and who can do it.** The Websites page, the New VM page and the browser SSH panel used to end at "no items found"; they now name the missing prerequisite and either link straight to the fix or tell you exactly what to ask an admin for
 - The Websites page also warns up front when the reverse proxy has no WAN IP — previously the first sign was a DNS check that could not say where to point the A record
+
 ## 2026-08-02 — Settings you put in `.env` now actually reach the backend
 
 - **Four documented settings were being thrown away.** `PORTAL_BASE_URL`, `NODE_HEALTH_POLL_MS`, `LEASE_CHECK_INTERVAL_MS` and `VM_SCHEDULE_SHUTDOWN_TIMEOUT_MS` are all read by the backend, but `docker-compose.yml` never passed them into the container — so setting one and restarting did exactly nothing, with no error to explain why. The most visible symptom: Discord embeds shipped without their "open in portal" links, and slow-shutting-down VMs on a schedule got force-stopped after two minutes with no way to extend the window. All four now reach the backend, and the last two are documented in `.env.example`
@@ -438,11 +506,13 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - **The UI no longer comes up before the API is ready.** Docker now waits for the backend's health check instead of just for its container to exist, so the first page load after a restart can't land on a backend still running database migrations
 - **The backend no longer runs as root.** It drops to an unprivileged user before starting the API — the process holding decrypted Proxmox tokens and SSH keys in memory has no need for root. Existing installations upgrade in place; the database volume's ownership is corrected automatically on first start
 - **The README now explains how to back up the database volume**, which holds every registered host, user, key and encrypted secret, along with what to restore it with and why the encryption key has to be backed up separately
+
 ## 2026-08-02 — Cross-host migrations stop failing on attached ISOs and unusable target storage
 
 - **A VM with an ISO in its CD-ROM drive migrates again.** Proxmox refuses to move a guest that has a local ISO attached and aborted the migration before it copied a single byte — while the portal cheerfully promised the ISO would simply be "detached on the target". The drive is now emptied on the source host before the migration starts, and the migration plan says exactly which ISOs will be ejected so it is no chance discovery. An ISO on storage the target host also mounts is left attached
 - **A container is no longer shut down for a migration that cannot succeed.** Moving a container to a storage that cannot accept its disk format (a raw root filesystem onto a ZFS pool, for example) failed deep in the transfer — after Proxmox had already stopped the container — and Proxmox then restarted it on the source, so the downtime bought nothing. The target storage is now checked up front: an incompatible one is named in the migration window with the reason, and the migration cannot be started at all
 - The check only refuses combinations it can prove will fail. If a storage type is unfamiliar it lets the migration proceed rather than standing in the way
+
 ## 2026-08-02 — "Access all VMs" is now two permissions: view, and operate
 
 - **"View all VMs" is finally read-only.** The old `see_all_vms` flag was documented as VM *visibility*, but it also handed out power actions, snapshots, VLAN and hardware edits, backups, DHCP reservations, and VNC/SSH/SFTP console access on every VM in the lab. It now grants exactly what its name says: status, config, RRD graphs, and backup listings
@@ -450,6 +520,7 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - **Nothing changes on upgrade.** Every account and every role that already held "Access all VMs" is granted "Operate all VMs" automatically, so existing setups keep working exactly as before. Revoking it afterwards sticks
 - **Rolling back a snapshot now requires the VM to be assigned to you.** It throws away the VM's current disks — exactly as destructive as a restore, which already required ownership
 - **Backup deletion now matches backup creation.** Whoever can start a dump can also remove it, so a fleet operator can no longer fill a backup storage with archives they aren't allowed to clean up
+
 ## 2026-08-02 — Groundwork for dedicated public IPs: port 443 is no longer first-come, first-served
 
 - **External ports are now claimed per public address, not per firewall.** Until now the first person to publish TCP 443 owned it for the whole firewall and everybody else had to pick an odd port. A port forward is now checked against `firewall + public endpoint + protocol + port range`, so two people can each publish 443, 25565 or 19132 as long as they sit on different public addresses. Overlapping *ranges* are caught too — `4000-5000` and `4500` collide, `4000-4999` and `5000-6000` do not
@@ -466,7 +537,6 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - **A translated failure never quotes the upstream text.** Host and storage names come from the portal's own configuration, so internal addresses can't ride along in the new wording. Anything the portal doesn't recognise is still scrubbed exactly as before, and the raw upstream string always stays in the server log for operators
 - **The file browser reports failures like the rest of the portal.** SFTP listing, upload, download, mkdir and delete used to return the raw SSH error with no filtering at all
 
-## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 ## 2026-08-02 — Validation mistakes stop looking like server crashes
 
 - **"The IP page throws a 500" is fixed.** Picking a network interface that isn't VLAN-tagged, or one whose VLAN the portal doesn't manage, is an ordinary mistake — but saving or removing a DHCP reservation reported it as HTTP 500, so it read as an outage rather than a correction to make
@@ -477,6 +547,8 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - **With a bundle configured, publishing a site touches the FortiGate not at all.** The pipeline stops waiting for a per-site certificate to sync and stops writing to the inspection profile — the new hostname is already inside the bundle's `*.parent-domain` SAN, so the certificate and inspection steps complete immediately. A new site costs **zero** of the ten slots
 - If the bundle name is set but the certificate is not on the firewall yet, publishing falls back to the old per-domain discovery instead of failing, so a half-finished migration still works
 - **Deleting a site never detaches the bundle.** The shared certificate serves every site, so the slot-freeing cleanup added below correctly leaves it alone
+
+## 2026-07-30 — Publish new sites without spending a FortiGate certificate slot
 
 ## 2026-07-30 — Renewed certificates stop filling up the SSL inspection profile
 
@@ -703,6 +775,7 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - Owners get an **Overview notice** on their dashboard when a VM has expired (and been stopped) or is expiring soon, with one-click links to renew
 - New admin **VM Leases** page (Infrastructure section): set the **default lease duration** and **grace period**, see the whole roster with owner + live status, **renew / adjust / extend** any lease, **exempt** infra VMs so they never expire, run the sweep on demand, and **backfill** leases onto VMs that predate the feature
 - All lease actions (auto-stop, renew, adjust, sweep) are audit-logged; the sweep runs `system` audit entries. Discord expiry warnings remain a separate feature (#22)
+
 ## 2026-07-10 — Discord webhook notifications
 
 - New **Notifications** admin page (Access section of the sidebar): add one or more **Discord webhooks**, tick which event types each one receives, and hit **Send test** to confirm the wiring end-to-end
@@ -711,6 +784,7 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - Webhook URLs are **encrypted at rest** and only ever shown masked; every webhook config change is audit-logged
 - Users can **opt out** of notifications about their own resources from the Account page
 - New env knobs: `PORTAL_BASE_URL` (link-back base for embeds, falls back to `ALLOWED_ORIGIN`) and `NODE_HEALTH_POLL_MS` (health-monitor interval; `0` disables it)
+
 ## 2026-07-10 — Personal API tokens for scripting
 
 - You can now create **personal API tokens** from the Account page and use them to script against the portal — `curl`, cron jobs, CI, Terraform-style tooling — without your session cookie or juggling 2FA. Send the token as `Authorization: Bearer <token>`.
@@ -719,6 +793,7 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - Sensitive account operations — managing tokens, changing your password, and anything touching 2FA — are **interactive-session only** and are rejected over token auth. VNC/SSH consoles also stay session-only.
 - Every token-authenticated action is attributed in the **audit log** as `username (token: <name>)`; creation and revocation are logged too. Failed token attempts are rate-limited like logins.
 - Admins can **list and revoke** any user's tokens from the new API Tokens tab in the Users → Manage dialog.
+
 ## 2026-07-10 — Per-VM power schedules
 
 - VMs can now sleep on a schedule: open a VM and hit **Schedule** to set an automatic **stop time, start time, active days, and timezone** (e.g. stop 23:00, start 08:00 on weekdays) so idle dev VMs stop holding cluster memory overnight
@@ -726,6 +801,7 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - **Manual overrides always win** — manually starting a VM inside its off-window keeps it running until the *next* scheduled stop, and a **Skip tonight** button skips just the next shutdown before normal enforcement resumes
 - Schedule state is visible at a glance: a **"sleeps 23:00–08:00"** badge shows on the VM card and the VM page header
 - Owners edit their own VM's schedule (**admins can edit any**); every automatic stop/start (and its outcome) is written to the **audit log**
+
 ## 2026-07-10 — Self-service website publishing (Caddy + FortiGate SSL inspection)
 
 - New **Websites** page: publish a domain through the homelab reverse proxy without an admin hand-editing Caddy. Enter a domain, pick an upstream target, and Homelabrrr validates DNS, pushes the reverse-proxy route to the external **Caddy** admin API, waits for the Let's Encrypt certificate, and attaches the synced cert to the **FortiGate SSL/SSH inspection profile** — shown as a live step-progress flow like the VM deploy stepper
@@ -734,6 +810,7 @@ A private, optional Power & Energy area: measure what the lab's physical servers
 - **Admin Websites page**: register the external Caddy server once (admin API URL, optional auth, TLS verify), configure the homelab WAN IP (manual or auto-read from the linked FortiGate), pick the SSL/SSH inspection profile, see **every** published site with its owner, and reassign site ownership
 - New **Manage Websites** permission (grantable per-user or via a role); Caddy admin-API credentials are **encrypted at rest**; every site create/update/delete/assign is **audit-logged**; DNS-validation checks are rate-limited
 - **Security note**: the Caddy admin API is unauthenticated by default — keep it on a management VLAN Homelabrrr can reach, or front it with mTLS / a token-checking proxy. Never expose `:2019` to untrusted networks (see README)
+
 ## 2026-07-10 — Configurable FortiGate provisioning workflows
 
 The hardcoded FortiGate provisioning sequences are now a **configurable workflow engine**. Each flow — provision a VLAN, create a port forward, create an inter-VLAN policy, and their teardowns — is an ordered list of whitelisted steps you can reorder, enable/disable, parametrize, and extend, per firewall. Homelabrrr no longer assumes one specific vdom-link topology, naming scheme, or subnet formula.
@@ -749,6 +826,7 @@ The hardcoded FortiGate provisioning sequences are now a **configurable workflow
 - On upgrade, built-in **default workflows are seeded that reproduce every previous hardcoded sequence exactly** — a VLAN sync and a port forward behave byte-for-byte as before until you edit the flow.
 - Runs record every created object; **deprovision deletes those recorded artifacts in reverse order** rather than re-deriving from the current definition, so editing a workflow never orphans objects. Rows created before the upgrade keep working through the original teardown path.
 - A failed run **rolls back everything it created**, in reverse. Every workflow edit, reset, dry-run, and run is written to the audit log.
+
 ## 2026-07-10 — Self-service cloud-init credential reset
 
 - Cloud-init VMs now have a **Reset credentials** action on the VM page: set a new password and/or replace the injected SSH public key without asking an admin.
