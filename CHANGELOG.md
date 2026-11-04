@@ -6,6 +6,15 @@
 - **Start the VM after deployment** is on by default for cloud images.
 - The invalid-invite page tells you to contact the administrator who invited you.
 
+## 2026-11-04 — Readable metadata text
+
+- Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.
+- Small uppercase labels, table headers and metadata are now at least 11px (the sidebar section labels were 9px). Compact status chips and badges stay at 10px.
+## 2026-11-03 — Energy admin pages tidied up
+
+- The Energy data page (meter, electricity contract and cost, household bills, extra lab loads) and the Energy & Budget admin panel now use the same cards, spacing, buttons, form fields and tables as the other admin pages, with clearer headings, grouped actions and a proper layout on narrow screens.
+- Bill corrections (record payment, revise, void) open in their own row under the bill instead of squeezed into the actions cell.
+- Values no longer read "Unknown" or "Unavailable" while data is still loading: the page now shows placeholders until the answer arrives, and "Unknown" only appears when a value is genuinely missing. Success and error messages are now styled differently.
 ## 2026-10-28 — Styled confirmations, notices and dialogs
 
 - Browser confirm and alert pop-ups are replaced by in-app dialogs and notices. Destructive actions (delete, remove, revoke, discard) use a red confirm button, and focus starts on **Cancel**. **Escape** cancels.

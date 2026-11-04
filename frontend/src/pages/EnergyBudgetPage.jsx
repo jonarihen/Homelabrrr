@@ -22,7 +22,7 @@ function Skel({ className = 'h-4 w-16' }) {
 }
 function Tile({ label, value, detail, status }) {
   return <div className={`${panel} min-h-28`}>
-    <div className="flex items-start justify-between gap-2"><h3 className={eyebrow}>{label}</h3>{status && <span className="font-mono text-[10px] uppercase text-amber-400">{status}</span>}</div>
+    <div className="flex items-start justify-between gap-2"><h3 className={eyebrow}>{label}</h3>{status && <span className="font-mono text-[11px] uppercase text-amber-400">{status}</span>}</div>
     <p className="mt-3 break-words text-2xl font-semibold tabular-nums text-gray-100">{value}</p>
     {detail && <p className="mt-1 text-sm text-gray-400">{detail}</p>}
   </div>;
@@ -157,7 +157,7 @@ export default function EnergyBudgetPage() {
 
   return <Layout><div className="max-w-6xl space-y-8 p-6 text-gray-100 lg:p-8">
     <header className="flex flex-wrap items-end justify-between gap-4 border-b border-gray-800 pb-6">
-      <div><p className="font-mono text-[10px] uppercase tracking-[0.2em] text-orange-500">Private · Power & Energy</p><h1 className="aaris-display mt-2 text-2xl text-gray-100">Energy & Budget</h1><p className="mt-2 max-w-2xl text-sm text-gray-400">Measured server power, calculated electricity cost and confirmed voluntary support. Figures remain unknown until their sources are available.</p></div>
+      <div><p className="font-mono text-[11px] uppercase tracking-[0.2em] text-orange-500">Private · Power & Energy</p><h1 className="aaris-display mt-2 text-2xl text-gray-100">Energy & Budget</h1><p className="mt-2 max-w-2xl text-sm text-gray-400">Measured server power, calculated electricity cost and confirmed voluntary support. Figures remain unknown until their sources are available.</p></div>
       <div className="flex items-center gap-2 font-mono text-xs"><button aria-label="Previous month" onClick={() => selectMonth(shiftMonth(month, -1))} className={btnGhost}>←</button><span className="min-w-[9rem] text-center uppercase tracking-[0.1em]" aria-live="polite">{monthLabel(month)}</span><button aria-label="Next month" onClick={() => selectMonth(shiftMonth(month, 1))} disabled={month >= currentMonth()} className={btnGhost}>→</button></div>
     </header>
     <p role="status" className="sr-only">{anyPending ? 'Loading energy data…' : ''}</p>

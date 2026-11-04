@@ -32,12 +32,12 @@ export default function ChangelogPanel() {
             <section key={`${entry.date}-${entry.title}`} className="border border-gray-800 bg-gray-900/70 p-4">
               <div className="flex flex-col gap-2 border-b border-gray-800 pb-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
-                  <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-gray-500">
+                  <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-gray-500">
                     {formatDateLabel(entry.date)}
                   </p>
                   <h3 className="mt-1 text-base font-semibold text-white">{entry.title}</h3>
                 </div>
-                <span className="border border-gray-700 bg-gray-950 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-gray-400">
+                <span className="border border-gray-700 bg-gray-950 px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.14em] text-gray-400">
                   Release Note
                 </span>
               </div>
@@ -85,7 +85,7 @@ export default function ChangelogPanel() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
             </svg>
           </div>
-          <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.1em] text-gray-500">
+          <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.1em] text-gray-500">
             {latestDateLabel}
           </div>
         </button>

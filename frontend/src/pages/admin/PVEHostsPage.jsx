@@ -232,12 +232,12 @@ export default function PVEHostsPage() {
       ) : hosts.length === 0 ? (
         <div className="text-center py-20">
           <div className="w-16 h-16 bg-gray-800/50 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <svg className="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+            <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z" />
             </svg>
           </div>
           <p className="text-gray-400 font-medium">No PVE hosts configured</p>
-          <p className="text-sm text-gray-600 mt-1">Add a Proxmox VE server to get started.</p>
+          <p className="text-sm text-gray-400 mt-1">Add a Proxmox VE server to get started.</p>
         </div>
       ) : (
         <div className="space-y-4">
@@ -260,7 +260,7 @@ export default function PVEHostsPage() {
                       <div>
                         <h3 className="text-white font-semibold">{h.name}</h3>
                         <p className="text-xs text-gray-500 font-mono">{h.host}:{h.port}</p>
-                        <p className="text-[10px] text-gray-600 mt-0.5">{h.tls_fingerprint ? 'TLS certificate pinned' : h.verify_tls !== false ? 'TLS verification on' : 'TLS verification off'}</p>
+                        <p className="text-[11px] text-gray-400 mt-0.5">{h.tls_fingerprint ? 'TLS certificate pinned' : h.verify_tls !== false ? 'TLS verification on' : 'TLS verification off'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -298,7 +298,7 @@ export default function PVEHostsPage() {
                         </span>
                         <span>{s.nodes?.length || 0} node{s.nodes?.length !== 1 ? 's' : ''}</span>
                         <span>{s.vmCount || 0} VMs ({s.runningVms || 0} running)</span>
-                        <span className="font-mono text-gray-600">API: {h.token_id}</span>
+                        <span className="font-mono text-gray-400">API: {h.token_id}</span>
                       </div>
 
                       {/* Nodes */}
@@ -320,7 +320,7 @@ export default function PVEHostsPage() {
                                     <div className="flex items-center gap-2 flex-wrap">
                                       <span className="text-sm text-white font-medium">{n.node}</span>
                                       {m ? (
-                                        <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded border border-yellow-500/40 text-yellow-400">
+                                        <span className="text-[11px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded border border-yellow-500/40 text-yellow-400">
                                           Maintenance{m.untilLabel ? ` · until ~${m.untilLabel}` : ''}
                                         </span>
                                       ) : (
@@ -423,11 +423,11 @@ export default function PVEHostsPage() {
                   onChange={e => setForm(f => ({ ...f, tokenId: e.target.value }))}
                   className={inputCls} placeholder="root@pam!my-token"
                 />
-                <p className="text-xs text-gray-600 mt-1">Format: user@realm!token-name</p>
+                <p className="text-xs text-gray-400 mt-1">Format: user@realm!token-name</p>
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">
-                  API Token Secret {editId && <span className="text-gray-600">(leave empty to keep current; required if the address or TLS trust changes)</span>}
+                  API Token Secret {editId && <span className="text-gray-400">(leave empty to keep current; required if the address or TLS trust changes)</span>}
                 </label>
                 <input
                   type="password" required={!editId} value={form.tokenSecret}
@@ -448,11 +448,11 @@ export default function PVEHostsPage() {
                 </div>
               </label>
               <div className="rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3 space-y-2 text-xs">
-                <p className="text-sm text-white">Pinned certificate <span className="text-gray-600">(recommended for self-signed certs)</span></p>
+                <p className="text-sm text-white">Pinned certificate <span className="text-gray-400">(recommended for self-signed certs)</span></p>
                 <p className="text-gray-500">Only the confirmed certificate is trusted; it replaces CA verification. If the host ever presents a different one, every connection stops before the API token is sent, until you confirm the new certificate here.</p>
                 {currentPin && (
                   <div className="flex items-start justify-between gap-3">
-                    <p className={`font-mono break-all ${clearPin ? 'text-gray-600 line-through' : 'text-gray-300'}`}>SHA-256 {currentPin}</p>
+                    <p className={`font-mono break-all ${clearPin ? 'text-gray-400 line-through' : 'text-gray-300'}`}>SHA-256 {currentPin}</p>
                     <label className="flex items-center gap-1.5 text-gray-400 shrink-0">
                       <input type="checkbox" checked={clearPin} onChange={e => setClearPin(e.target.checked)} className="accent-red-500" /> Remove pin
                     </label>
@@ -473,7 +473,7 @@ export default function PVEHostsPage() {
               </div>
               <div className="rounded-xl border border-gray-700/50 bg-gray-800/40 px-3 py-3 space-y-3">
                 <div>
-                  <p className="text-sm text-white">Root SSH <span className="text-gray-600">(optional)</span></p>
+                  <p className="text-sm text-white">Root SSH <span className="text-gray-400">(optional)</span></p>
                   <p className="text-xs text-gray-500 mt-0.5">
                     Used for the one thing the API can't do: removing the leftover source config after a shared-storage
                     migration without touching its disks. Leave the SSH host empty to disable.
@@ -521,7 +521,7 @@ export default function PVEHostsPage() {
                 <div>
                   <label className="block text-xs text-gray-400 mb-1.5 font-medium">
                     {form.sshAuthType === 'password' ? 'Password' : 'Private key'}
-                    {form.hasSsh && <span className="text-gray-600"> (leave empty to keep current; required if the address changes)</span>}
+                    {form.hasSsh && <span className="text-gray-400"> (leave empty to keep current; required if the address changes)</span>}
                   </label>
                   {form.sshAuthType === 'password' ? (
                     <input
@@ -587,7 +587,7 @@ export default function PVEHostsPage() {
                   onChange={e => setMaintForm(f => ({ ...f, until: e.target.value }))}
                   className={inputCls}
                 />
-                <p className="text-xs text-gray-600 mt-1">If set, maintenance lifts itself automatically at this time.</p>
+                <p className="text-xs text-gray-400 mt-1">If set, maintenance lifts itself automatically at this time.</p>
               </div>
               {maintError && <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-xl p-3">{maintError}</p>}
               <div className="flex gap-3 pt-1">
@@ -683,7 +683,7 @@ function CapacityPolicySection() {
     <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
       <div className="flex items-center justify-between gap-4 mb-1">
         <h2 className="text-white font-semibold">Capacity policy</h2>
-        <span className="text-[10px] font-mono uppercase tracking-[0.1em] text-gray-600">Provisioning pre-flight</span>
+        <span className="text-[11px] font-mono uppercase tracking-[0.1em] text-gray-400">Provisioning pre-flight</span>
       </div>
       <p className="text-xs text-gray-500 mb-4 max-w-3xl">
         New deployments are sized against each node's physical RAM × the overcommit ratio — not the RAM
@@ -707,7 +707,7 @@ function CapacityPolicySection() {
               <option value="warn">Warn — deploy anyway</option>
               <option value="block">Block — refuse</option>
             </select>
-            <p className="text-[11px] text-gray-600 mt-1">{modeHint}</p>
+            <p className="text-[11px] text-gray-400 mt-1">{modeHint}</p>
           </div>
           <div>
             <label htmlFor="capacity-overcommit" className="block text-xs text-gray-400 mb-1.5 font-medium">Overcommit ratio</label>
@@ -717,7 +717,7 @@ function CapacityPolicySection() {
               onChange={e => setForm(f => ({ ...f, overcommitRatio: e.target.value }))}
               className={`${inputCls} w-32`}
             />
-            <p className="text-[11px] text-gray-600 mt-1">1.0 = no overcommit · 1.5 = 50% over physical RAM</p>
+            <p className="text-[11px] text-gray-400 mt-1">1.0 = no overcommit · 1.5 = 50% over physical RAM</p>
           </div>
           <button
             type="submit" disabled={saving}
@@ -784,14 +784,14 @@ function StoragePoolsSection({ hostId, online, loading }) {
     <div className="mt-4 pt-4 border-t border-gray-800">
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-[11px] font-mono uppercase tracking-[0.1em] text-gray-500">Storage pools</h4>
-        <span className="text-[10px] text-gray-600">exposed to users</span>
+        <span className="text-[11px] text-gray-400">exposed to users</span>
       </div>
       {loadingPools ? (
         <div className="h-10 bg-gray-800/40 rounded-xl animate-pulse" />
       ) : error ? (
         <p className="text-xs text-red-400/70 bg-red-900/10 rounded-lg px-3 py-2">{error}</p>
       ) : !pools || pools.length === 0 ? (
-        <p className="text-xs text-gray-600">No storage pools found on this host.</p>
+        <p className="text-xs text-gray-400">No storage pools found on this host.</p>
       ) : (
         <div className="space-y-1.5">
           {saveError && (
@@ -801,10 +801,10 @@ function StoragePoolsSection({ hostId, online, loading }) {
             <div key={p.storage} className="bg-gray-800/50 border border-gray-700/30 rounded-xl px-3 py-2 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <span className="text-sm text-white font-mono">{p.storage}</span>
-                <span className="text-[10px] text-gray-500 ml-2 uppercase tracking-wide">{p.type}{p.content ? ` · ${p.content}` : ''}</span>
+                <span className="text-[11px] text-gray-500 ml-2 uppercase tracking-wide">{p.type}{p.content ? ` · ${p.content}` : ''}</span>
               </div>
               <label className="flex items-center gap-2 shrink-0 cursor-pointer select-none">
-                <span className={`text-[10px] font-mono uppercase tracking-wide ${p.exposed ? 'text-green-400' : 'text-gray-500'}`}>
+                <span className={`text-[11px] font-mono uppercase tracking-wide ${p.exposed ? 'text-green-400' : 'text-gray-500'}`}>
                   {p.exposed ? 'Exposed' : 'Hidden'}
                 </span>
                 <input
