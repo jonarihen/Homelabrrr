@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import api from '../../api.js';
+import Field from '../../components/Field.jsx';
 import HardwareTelemetryView from './HardwareTelemetryView.jsx';
 import HardwarePowerPolicy from './HardwarePowerPolicy.jsx';
 import { connectionNotices, connectionStatusText, connectionStatusTone, testFailureText, tlsTrustText, writePrivilegeText } from '../../utils/hardwareView.js';
@@ -9,8 +10,17 @@ const blank = { host: '', port: 443, username: '', password: '', tlsMode: 'pinne
 const tlsModeOf = (connection) => (connection.tls_fingerprint ? 'pinned' : connection.verify_tls ? 'ca' : 'insecure');
 // Every node's Hardware section reloads when a connection moves between nodes.
 const CHANGED_EVENT = 'hardware-connections-changed';
-const NOTICE_CLASS = { warn: 'border-yellow-500/40 text-yellow-300', error: 'border-red-500/40 text-red-300', info: 'border-gray-700 text-gray-400' };
+const NOTICE_CLASS = { warn: 'border-yellow-500/40 bg-yellow-500/5 text-yellow-300', error: 'border-red-500/40 bg-red-900/20 text-red-300', info: 'border-gray-700 bg-gray-800/40 text-gray-400' };
 const STATUS_CLASS = { ok: 'text-green-400', info: 'text-gray-400', error: 'text-red-400' };
+const STATUS_LED = { ok: 'aaris-led--ok', info: 'aaris-led--off', error: 'aaris-led--error' };
+const HEADING = 'font-mono text-xs uppercase tracking-widest text-orange-400';
+const BTN = 'shrink-0 border border-gray-700 px-3 py-1.5 text-xs font-medium text-gray-300 transition-colors hover:border-gray-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-50';
+const BTN_ACCENT = 'shrink-0 border border-orange-500/40 px-3 py-1.5 text-xs font-medium text-orange-400 transition-colors hover:bg-orange-500/10 disabled:cursor-not-allowed disabled:opacity-50';
+const BTN_DANGER = 'shrink-0 border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50';
+
+function Detail({ label, children }) {
+  return <div className="min-w-0"><dt className="text-[10px] uppercase tracking-wider text-gray-500">{label}</dt><dd className="mt-0.5 break-words text-sm text-gray-200">{children}</dd></div>;
+}
 
 // `mode="summary"` is the node row on PVE Hosts: status, read-only test,
 // telemetry and power policy. `mode="config"` lives in the Edit Host dialog and
@@ -25,6 +35,8 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
   const [rebindTo, setRebindTo] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
   const [saved, setSaved] = useState(false);
+  // Nothing about the connection is shown (e.g. "not configured") until the first load settles.
+  const [loadState, setLoadState] = useState('loading');
   // Certificate the iLO presented on "Fetch certificate", and whether the admin confirmed it.
   const [probe, setProbe] = useState(null);
   const [pinConfirmed, setPinConfirmed] = useState(false);
@@ -38,10 +50,10 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
     api.get('/admin/hardware-connections').then(({ data }) => {
       if (!live) return;
       const found = data.find((x) => x.node_ref === nodeRef) || null;
-      setConnection(found);
+      setConnection(found); setLoadState('ready');
       if (found) setForm({ host: found.target_host, port: found.target_port, username: found.username, password: '', tlsMode: tlsModeOf(found), caCertificate: '', clearCaCertificate: false });
       setProbe(null); setPinConfirmed(false);
-    }).catch(() => { if (live) setError('Could not load hardware connection'); });
+    }).catch(() => { if (live) { setError('Could not load hardware connection'); setLoadState((state) => (state === 'ready' ? state : 'failed')); } });
     return () => { live = false; };
   }, [nodeRef, reloadKey]);
   async function save(e) {
@@ -96,60 +108,102 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
     catch (err) { setError(err.response?.data?.error || 'Could not disconnect'); }
     finally { setBusy(false); }
   }
-  return <div className="mt-3 border-t border-gray-700/50 pt-3 text-xs font-mono">
-    <div className="flex flex-wrap items-center gap-3">
-      {!configMode && <span className="uppercase tracking-widest text-orange-400">Hardware / iLO</span>}
-      {connection
-        ? <span><span className={STATUS_CLASS[connectionStatusTone(connection.last_status)]}>{connectionStatusText(connection.last_status)}</span><span className="text-gray-400"> · {connection.generation || 'generation unknown'} · {connection.model || 'model unknown'} · firmware {connection.firmware || 'unknown'}</span></span>
-        : <span className="text-gray-400">not configured{configMode ? '' : ' — add it under Edit Host'}</span>}
-      {connection && <button type="button" disabled={busy} onClick={test} className="text-orange-400 hover:text-orange-300 disabled:opacity-50">Test read-only connection</button>}
-      {configMode && connection && <button type="button" disabled={busy} onClick={disconnect} className="text-red-400 hover:text-red-300 disabled:opacity-50">Decommission</button>}
+  const ready = loadState === 'ready';
+  const tone = connection ? connectionStatusTone(connection.last_status) : 'info';
+  return <div className="mt-4 space-y-4 border-t border-gray-800 pt-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
+        {!configMode && <h3 className={HEADING}>Hardware / iLO</h3>}
+        {loadState === 'loading' && <span className="text-xs text-gray-500">Loading…</span>}
+        {ready && (connection
+          ? <span className="inline-flex items-center gap-2 text-sm"><span className={`aaris-led ${STATUS_LED[tone]}`} aria-hidden="true" /><span className={STATUS_CLASS[tone]}>{connectionStatusText(connection.last_status)}</span></span>
+          : <span className="text-sm text-gray-400">not configured{configMode ? '' : ' — add it under Edit Host'}</span>)}
+      </div>
+      {ready && connection && <div className="flex flex-wrap items-center gap-2">
+        <button type="button" disabled={busy} onClick={test} className={BTN_ACCENT}>Test read-only connection</button>
+        {configMode && <button type="button" disabled={busy} onClick={disconnect} className={BTN_DANGER}>Decommission</button>}
+      </div>}
     </div>
-    {connection && <p className="mt-2 text-gray-500">Collection {connection.collection_enabled ? 'enabled' : 'disabled'} · Control {connection.control_enabled ? 'enabled' : 'disabled'} · Runtime capability {connection.capabilities?.runtimeMode || 'unverified'} · Write privilege {writePrivilegeText(connection.capabilities)} · TLS {tlsTrustText(connection)}{connection.last_test_at ? ` · Last test ${new Date(connection.last_test_at).toLocaleString()}` : ''}</p>}
-    {connectionNotices(connection).map((notice) => <p key={notice.text} className={`mt-2 border-l-2 pl-2 ${NOTICE_CLASS[notice.tone]}`}>{notice.text}</p>)}
-    {discovery && <div className="mt-2 text-gray-300">Mode {discovery.mode.value} · Actual input {discovery.sample.watts == null ? 'unavailable' : `${discovery.sample.watts} W`} · Monitoring {discovery.capabilities.monitoring} · Runtime mode {discovery.capabilities.runtimeMode} · Temperatures {discovery.capabilities.temperatures} · Fans {discovery.capabilities.fans} · Power supplies {discovery.capabilities.powerSupplies}</div>}
-    {error && <p role="alert" className="mt-2 text-red-400">{error}</p>}
-    {!configMode && connection && <HardwareTelemetryView connection={connection} onConnectionChange={setConnection} />}
-    {!configMode && connection && <HardwarePowerPolicy connection={connection} onConnectionChange={setConnection} />}
-    {configMode && <form onSubmit={save} className="mt-3 grid gap-2 sm:grid-cols-2">
-      <label className="text-gray-400">Management host<input required value={form.host} onChange={(e) => setTarget({ host: e.target.value })} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
-      <label className="text-gray-400">HTTPS port<input required type="number" min="1" max="65535" value={form.port} onChange={(e) => setTarget({ port: Number(e.target.value) })} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
-      <label className="text-gray-400">Username<input required value={form.username} onChange={(e) => setForm((v) => ({ ...v, username: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
-      <label className="text-gray-400">Password {connection && '(blank keeps existing only while address, account and TLS trust are unchanged)'}<input type="password" required={!connection} autoComplete="new-password" value={form.password} onChange={(e) => setForm((v) => ({ ...v, password: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
-      <fieldset className="sm:col-span-2 border border-gray-700/60 px-2 py-2">
-        <legend className="px-1 text-gray-400">Certificate trust</legend>
+    {loadState === 'loading' && <div role="status" aria-label="Loading hardware connection" className="h-16 animate-pulse border border-gray-800 bg-gray-800/40" />}
+    {error && <div role="alert" className="flex flex-wrap items-center justify-between gap-2 bg-red-900/20 p-2 text-xs text-red-400">
+      <span>{error}</span>
+      {loadState === 'failed' && <button type="button" onClick={() => { setError(''); setLoadState('loading'); setReloadKey((k) => k + 1); }} className={BTN}>Retry</button>}
+    </div>}
+    {ready && connection && <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
+      <Detail label="Model">{connection.model || 'unknown'}</Detail>
+      <Detail label="Generation">{connection.generation || 'unknown'}</Detail>
+      <Detail label="Firmware">{connection.firmware || 'unknown'}</Detail>
+      <Detail label="Collection">{connection.collection_enabled ? 'enabled' : 'disabled'}</Detail>
+      <Detail label="Control">{connection.control_enabled ? 'enabled' : 'disabled'}</Detail>
+      <Detail label="Runtime capability">{connection.capabilities?.runtimeMode || 'unverified'}</Detail>
+      <Detail label="Write privilege">{writePrivilegeText(connection.capabilities)}</Detail>
+      <Detail label="TLS">{tlsTrustText(connection)}</Detail>
+      {connection.last_test_at && <Detail label="Last test">{new Date(connection.last_test_at).toLocaleString()}</Detail>}
+    </dl>}
+    {ready && connectionNotices(connection).map((notice) => <p key={notice.text} className={`border-l-2 px-3 py-2 text-xs ${NOTICE_CLASS[notice.tone]}`}>{notice.text}</p>)}
+    {discovery && <div className="border border-gray-800 bg-gray-800/40 p-3">
+      <h4 className="mb-2 text-[10px] uppercase tracking-wider text-gray-500">Read-only test result</h4>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
+        <Detail label="Mode">{discovery.mode.value}</Detail>
+        <Detail label="Actual input">{discovery.sample.watts == null ? 'unavailable' : `${discovery.sample.watts} W`}</Detail>
+        <Detail label="Monitoring">{discovery.capabilities.monitoring}</Detail>
+        <Detail label="Runtime mode">{discovery.capabilities.runtimeMode}</Detail>
+        <Detail label="Temperatures">{discovery.capabilities.temperatures}</Detail>
+        <Detail label="Fans">{discovery.capabilities.fans}</Detail>
+        <Detail label="Power supplies">{discovery.capabilities.powerSupplies}</Detail>
+      </dl>
+    </div>}
+    {!configMode && ready && connection && <HardwareTelemetryView connection={connection} onConnectionChange={setConnection} />}
+    {!configMode && ready && connection && <HardwarePowerPolicy connection={connection} onConnectionChange={setConnection} />}
+    {configMode && ready && <form onSubmit={save} className="grid gap-4 sm:grid-cols-2">
+      <Field label="Management host"><input required value={form.host} onChange={(e) => setTarget({ host: e.target.value })} className="input" /></Field>
+      <Field label="HTTPS port"><input required type="number" min="1" max="65535" value={form.port} onChange={(e) => setTarget({ port: Number(e.target.value) })} className="input" /></Field>
+      <Field label="Username"><input required value={form.username} onChange={(e) => setForm((v) => ({ ...v, username: e.target.value }))} className="input" /></Field>
+      <Field label="Password">
+        <input type="password" required={!connection} autoComplete="new-password" aria-describedby={connection ? `ilo-pw-hint-${nodeRef}` : undefined} value={form.password} onChange={(e) => setForm((v) => ({ ...v, password: e.target.value }))} className="input" />
+        {connection && <p id={`ilo-pw-hint-${nodeRef}`} className="mt-1.5 text-xs text-gray-500">Leave blank to keep the existing password, only while address, account and TLS trust are unchanged.</p>}
+      </Field>
+      <fieldset className="space-y-2 border border-gray-800 bg-gray-900/50 p-4 sm:col-span-2">
+        <legend className="px-1 text-xs text-gray-400">Certificate trust</legend>
         {[['pinned', 'Pin this iLO’s certificate (recommended: iLOs use self-signed certificates)'], ['ca', 'Verify against a trusted or private CA'], ['insecure', 'No verification (break-glass; the server must allow it)']].map(([value, label]) => (
-          <label key={value} className="flex items-center gap-2 text-gray-300"><input type="radio" name={`tls-${nodeRef}`} value={value} checked={form.tlsMode === value} onChange={() => setForm((v) => ({ ...v, tlsMode: value }))} /> {label}</label>
+          <label key={value} className="flex items-start gap-2 py-0.5 text-sm text-gray-200"><input type="radio" name={`tls-${nodeRef}`} value={value} checked={form.tlsMode === value} onChange={() => setForm((v) => ({ ...v, tlsMode: value }))} className="mt-1 accent-orange-500" /> {label}</label>
         ))}
-        {form.tlsMode === 'pinned' && <div className="mt-2 space-y-2">
-          <p className="text-gray-500">Only the confirmed certificate is trusted. If the iLO ever presents a different one, every connection stops before the password is sent, until you confirm the new certificate here.</p>
-          {connection?.tls_fingerprint && <p className="text-gray-300 break-all">Pinned SHA-256: {connection.tls_fingerprint}</p>}
-          <button type="button" disabled={busy || !form.host} onClick={fetchCertificate} className="border border-gray-600 px-3 py-1 text-gray-200 hover:border-orange-400 disabled:opacity-50">{connection?.tls_fingerprint ? 'Fetch current certificate' : 'Fetch certificate'}</button>
-          {probe && <div className="border-l-2 border-orange-500/40 pl-2 text-gray-300">
+        {form.tlsMode === 'pinned' && <div className="space-y-3 pt-2">
+          <p className="text-xs text-gray-500">Only the confirmed certificate is trusted. If the iLO ever presents a different one, every connection stops before the password is sent, until you confirm the new certificate here.</p>
+          {connection?.tls_fingerprint && <p className="break-all font-mono text-xs text-gray-300">Pinned SHA-256: {connection.tls_fingerprint}</p>}
+          <button type="button" disabled={busy || !form.host} onClick={fetchCertificate} className={BTN}>{connection?.tls_fingerprint ? 'Fetch current certificate' : 'Fetch certificate'}</button>
+          {probe && <div className="space-y-2 border-l-2 border-orange-500/40 bg-gray-800/40 px-3 py-2 text-xs text-gray-300">
             <p>Subject {probe.subject || 'unknown'} · Issuer {probe.issuer || 'unknown'}{probe.selfSigned ? ' (self-signed)' : ''}{probe.validTo ? ` · Valid until ${probe.validTo}` : ''}</p>
-            <p className="break-all">SHA-256 {probe.fingerprint256}</p>
+            <p className="break-all font-mono">SHA-256 {probe.fingerprint256}</p>
             {connection?.tls_fingerprint === probe.fingerprint256
               ? <p className="text-green-400">Matches the pinned certificate.</p>
-              : <label className="flex items-start gap-2 text-yellow-300"><input type="checkbox" checked={pinConfirmed} onChange={(e) => setPinConfirmed(e.target.checked)} /> This is my iLO’s certificate. I compared the fingerprint with the iLO web interface (Security → SSL Certificate).</label>}
+              : <label className="flex items-start gap-2 text-yellow-300"><input type="checkbox" checked={pinConfirmed} onChange={(e) => setPinConfirmed(e.target.checked)} className="mt-0.5 accent-orange-500" /> This is my iLO’s certificate. I compared the fingerprint with the iLO web interface (Security → SSL Certificate).</label>}
           </div>}
         </div>}
-        {form.tlsMode === 'ca' && <div className="mt-2 space-y-2">
-          <label className="block text-gray-400">Private CA certificate (PEM; blank keeps existing or uses public CAs)<textarea value={form.caCertificate} onChange={(e) => setForm((v) => ({ ...v, caCertificate: e.target.value }))} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white" /></label>
-          {connection?.has_ca_certificate && <label className="text-gray-400"><input type="checkbox" checked={form.clearCaCertificate} onChange={(e) => setForm((v) => ({ ...v, clearCaCertificate: e.target.checked, caCertificate: e.target.checked ? '' : v.caCertificate }))} /> Remove the stored private CA certificate</label>}
+        {form.tlsMode === 'ca' && <div className="space-y-3 pt-2">
+          <Field label="Private CA certificate (PEM; blank keeps existing or uses public CAs)"><textarea rows={5} value={form.caCertificate} onChange={(e) => setForm((v) => ({ ...v, caCertificate: e.target.value }))} className="input font-mono text-xs" /></Field>
+          {connection?.has_ca_certificate && <label className="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" checked={form.clearCaCertificate} onChange={(e) => setForm((v) => ({ ...v, clearCaCertificate: e.target.checked, caCertificate: e.target.checked ? '' : v.caCertificate }))} className="accent-orange-500" /> Remove the stored private CA certificate</label>}
         </div>}
-        {form.tlsMode === 'insecure' && <p role="alert" className="mt-2 border-l-2 border-yellow-500/40 pl-2 text-yellow-300">Break-glass only: without verification anyone on the management path can impersonate this iLO and receive its password. The server must also allow it explicitly. Pinning the certificate is safer and needs no server setting.</p>}
+        {form.tlsMode === 'insecure' && <p role="alert" className="mt-2 border-l-2 border-yellow-500/40 bg-yellow-500/5 px-3 py-2 text-xs text-yellow-300">Break-glass only: without verification anyone on the management path can impersonate this iLO and receive its password. The server must also allow it explicitly. Pinning the certificate is safer and needs no server setting.</p>}
       </fieldset>
-      <button disabled={busy} className="border border-orange-500 px-3 py-2 text-orange-400 uppercase sm:col-span-2 disabled:opacity-50">{connection ? 'Save iLO changes' : 'Add iLO connection'}</button>
-      {saved && <p role="status" className="sm:col-span-2 text-green-400">Saved. Run the read-only test to bring collection and control back.</p>}
+      <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
+        <button disabled={busy} className="btn-primary px-4 py-2 text-sm font-medium">{connection ? 'Save iLO changes' : 'Add iLO connection'}</button>
+        {saved && <p role="status" className="text-xs text-green-400">Saved. Run the read-only test to bring collection and control back.</p>}
+      </div>
     </form>}
-    {configMode && connection && rebindTargets.filter((ref) => ref !== nodeRef).length > 0 && <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-gray-700/50 pt-3">
-      <label className="text-gray-400">Rebind to node (renamed or moved; keeps hardware ID and history)
-        <select value={rebindTo} onChange={(e) => setRebindTo(e.target.value)} className="block w-full bg-gray-900 border border-gray-700 px-2 py-1 text-white">
-          <option value="">Select node…</option>
-          {rebindTargets.filter((ref) => ref !== nodeRef).map((ref) => <option key={ref} value={ref}>{ref}</option>)}
-        </select>
-      </label>
-      <button type="button" disabled={busy || !rebindTo} onClick={rebind} className="border border-gray-600 px-3 py-1 text-gray-200 hover:border-orange-400 disabled:opacity-50">Rebind</button>
+    {configMode && ready && connection && rebindTargets.filter((ref) => ref !== nodeRef).length > 0 && <div className="space-y-2 border-t border-gray-800 pt-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="min-w-[14rem] flex-1">
+          <Field label="Rebind to node">
+            <select value={rebindTo} onChange={(e) => setRebindTo(e.target.value)} className="input">
+              <option value="">Select node…</option>
+              {rebindTargets.filter((ref) => ref !== nodeRef).map((ref) => <option key={ref} value={ref}>{ref}</option>)}
+            </select>
+          </Field>
+        </div>
+        <button type="button" disabled={busy || !rebindTo} onClick={rebind} className={`${BTN} py-2 text-sm`}>Rebind</button>
+      </div>
+      <p className="text-xs text-gray-500">Use when the node was renamed or moved. Keeps the hardware ID and history.</p>
     </div>}
   </div>;
 }
