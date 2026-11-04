@@ -30,15 +30,16 @@ export default function SupportPage() {
   const [busy, setBusy] = useState('');
   const [notice, setNoticeState] = useState({ text: '', tone: 'info' });
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const setNotice = (text, tone = 'info') => setNoticeState({ text, tone });
   const [error, setError] = useState('');
   const [monthlyAmount, setMonthlyAmount] = useState(null);
   const [transfer, setTransfer] = useState({ amount: '', reference: '', receivedOn: '' });
   const refresh = useCallback(async () => {
     const [{ data: nextStatus }, { data: nextHistory }] = await Promise.all([api.get('/payments/status'), api.get('/payments/mine')]);
-    setStatus(nextStatus); setHistory(nextHistory);
+    setStatus(nextStatus); setHistory(nextHistory); setLoadFailed(false);
   }, []);
-  useEffect(() => { refresh().catch(() => setError('Could not load private contribution information.')).finally(() => setLoaded(true)); }, [refresh]);
+  useEffect(() => { refresh().catch(() => { setLoadFailed(true); setError('Could not load private contribution information.'); }).finally(() => setLoaded(true)); }, [refresh]);
   useEffect(() => {
     const returned = searchParams.get('paypal');
     if (!returned) return;
@@ -119,7 +120,7 @@ export default function SupportPage() {
       </Card>
       <Card title="Optional monthly contribution" className="flex flex-col">
         <div className="mt-4 min-h-[2.5rem]" aria-busy={loading}>
-          {loading ? <Skeleton className="h-10 w-48" /> : options.length > 1
+          {loading ? <Skeleton className="h-10 w-48" /> : loadFailed ? <p className="text-sm text-gray-500">Monthly amounts could not be loaded.</p> : options.length > 1
             ? <div className="flex flex-wrap gap-3" role="radiogroup" aria-label="Monthly amount">{options.map((ore) => <button key={ore} type="button" role="radio" aria-checked={monthlyChoice === ore}
               onClick={() => setMonthlyAmount(ore)} className={`px-4 py-2 text-sm rounded-xl border transition-colors ${monthlyChoice === ore ? 'border-orange-500 bg-orange-700/20 text-orange-100' : 'border-gray-700 text-gray-300 hover:bg-gray-800'}`}>{money(ore)}</button>)}</div>
             : monthlyChoice != null ? <p className="text-2xl text-white">{money(monthlyChoice)} <span className="text-sm text-gray-400">per month</span></p>
@@ -137,6 +138,7 @@ export default function SupportPage() {
     </div>
     <Card title="Your subscriptions">
       {loading ? <div className="mt-4" aria-busy="true"><Skeleton className="h-12 w-full" /></div>
+        : loadFailed ? <p className="text-sm text-gray-500 mt-4">Subscriptions could not be loaded.</p>
         : history.subscriptions.length === 0 ? <p className="text-sm text-gray-500 mt-4">No subscriptions recorded.</p> :
         <div className="mt-4 divide-y divide-gray-800">{history.subscriptions.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-4 py-4 first:pt-0 last:pb-0 text-sm">
           <div><p className="text-white">{money(item.amountOre)} monthly · {item.status}</p><p className="text-xs text-gray-500 mt-1">{item.environment === 'sandbox' ? 'Sandbox test · ' : ''}Next billing {date(item.nextBillingAt)}</p></div>
@@ -163,6 +165,7 @@ export default function SupportPage() {
     </Card>
     <Card title="Your contribution history" hint="Only verified postings count toward the lab budget. Refunds and actual PayPal fees reduce net support.">
       {loading ? <div className="mt-5 space-y-3" aria-busy="true"><Skeleton className="h-5 w-full" /><Skeleton className="h-5 w-full" /></div>
+        : loadFailed ? <p className="text-sm text-gray-500 mt-5">Contribution history could not be loaded.</p>
         : history.postings.length === 0 ? <p className="text-sm text-gray-500 mt-5">No verified contributions recorded.</p> :
         <div className="mt-5 divide-y divide-gray-800">{history.postings.map((item, index) => <div key={`${item.effectiveAt}-${index}`} className="flex justify-between gap-4 py-3 first:pt-0 last:pb-0 text-sm">
           <span className="text-gray-300">{item.postingKind.replaceAll('_', ' ')} <span className="text-gray-500">· {date(item.effectiveAt)}{item.environment === 'sandbox' ? ' · sandbox' : ''}</span></span>
