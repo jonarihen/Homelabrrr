@@ -1,22 +1,39 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
+import ErrorCallout from '../../components/ErrorCallout.jsx';
+import Field from '../../components/Field.jsx';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
-import PayPalOperationsPanel from './PayPalOperationsPanel.jsx';
+import PayPalOperationsPanel, { Badge, EmptyState, Section, Skeleton, Stat, btnPrimary, btnSecondary, inputCls, money } from './PayPalOperationsPanel.jsx';
 import PayPalSetupPanel from './PayPalSetupPanel.jsx';
 
 const monthNow = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit' }).format(new Date());
-const money = (ore) => typeof ore === 'number' ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(ore / 100) : 'Unknown';
-const card = 'border border-gray-800 bg-gray-900/90 p-5';
+const EMPTY_FORM = { clientId: '', clientSecret: '', merchantId: '', webhookId: '', monthlyPlanId: '', monthlyAmount: '' };
+const FIELDS = [['clientId', 'Client ID'], ['clientSecret', 'Client secret'], ['merchantId', 'Merchant ID'], ['webhookId', 'Webhook ID'], ['monthlyPlanId', 'Monthly plan ID (optional)'], ['monthlyAmount', 'Monthly amount in DKK (optional)']];
+const LEDGER = [
+  ['Gross', (s) => money(s.grossOre)], ['Fees', (s) => money(s.feeDebitsOre + s.feeCreditsOre)],
+  ['Refunds / reversals', (s) => money(s.refundDebitsOre)], ['Known net', (s) => money(s.knownNetOre)],
+  ['Unresolved transactions', (s) => s.unresolvedTransactions], ['Review events', (s) => s.reviewEvents],
+  ['Pending · not counted', (s) => `${s.pendingCount ?? 0} · ${money(s.pendingOre)}`],
+  ['Disputed · not deducted', (s) => `${s.disputeCount ?? 0} · ${money(s.disputedOre)}`],
+];
+const ALLOCATION = [
+  ['Revision', (a) => a.revision], ['Status', (a) => a.status], ['Cost', (a) => money(a.cost_ore)],
+  ['Net received', (a) => money(a.received_net_ore)], ['Applied', (a) => money(a.applied_ore)],
+  ['Owner remainder', (a) => money(a.owner_remainder_ore)], ['Owner adjustment', (a) => money(a.owner_adjustment_ore)],
+  ['Closing balance', (a) => money(a.closing_balance_ore)],
+];
 
 export default function PayPalPage() {
   useDocumentTitle('PayPal administration');
   const [configs, setConfigs] = useState([]);
   const [environment, setEnvironment] = useState('sandbox');
-  const [form, setForm] = useState({ clientId: '', clientSecret: '', merchantId: '', webhookId: '', monthlyPlanId: '', monthlyAmount: '' });
+  const [form, setForm] = useState(EMPTY_FORM);
   const [summary, setSummary] = useState(null);
   const [month, setMonth] = useState(monthNow);
   const [allocation, setAllocation] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [allocLoading, setAllocLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -31,8 +48,11 @@ export default function PayPalPage() {
     const { data } = await api.get('/payments/admin/allocation', { params: { month } });
     setAllocation(data.allocation);
   }, [month]);
-  useEffect(() => { load().catch(() => setError('Could not load PayPal administration.')); }, [load]);
-  useEffect(() => { loadAllocation().catch(() => setAllocation(null)); }, [loadAllocation]);
+  useEffect(() => { load().catch(() => setError('Could not load PayPal administration.')).finally(() => setLoading(false)); }, [load]);
+  useEffect(() => {
+    setAllocLoading(true);
+    loadAllocation().catch(() => setAllocation(null)).finally(() => setAllocLoading(false));
+  }, [loadAllocation]);
   const current = configs.find((item) => item.environment === environment);
   const act = async (key, request) => {
     setBusy(key); setError(''); setNotice('');
@@ -53,7 +73,7 @@ export default function PayPalPage() {
     event.preventDefault();
     const payload = { environment, ...form, webhookId: form.webhookId || null, monthlyPlanId: form.monthlyPlanId || null,
       monthlyAmount: form.monthlyAmount || null, expectedVersion: current?.configVersion ?? null };
-    act('save', () => api.post('/payments/admin/config', payload)).then((saved) => { if (saved) setForm({ clientId: '', clientSecret: '', merchantId: '', webhookId: '', monthlyPlanId: '', monthlyAmount: '' }); });
+    act('save', () => api.post('/payments/admin/config', payload)).then((saved) => { if (saved) setForm(EMPTY_FORM); });
   };
   const toggle = () => {
     const enabling = !current?.enabled;
@@ -61,37 +81,74 @@ export default function PayPalPage() {
     act('toggle', () => api.post('/payments/admin/enabled', { environment, enabled: enabling, confirmLive: environment === 'live' && enabling,
       expectedVersion: current?.configVersion }));
   };
-  return <div className="p-6 lg:p-8 max-w-6xl space-y-6">
+  return <div className="p-6 lg:p-8 max-w-5xl mx-auto space-y-6">
     <RecentReauthDialog open={!!reauth} busy={reauthBusy} error={reauthError} onCancel={() => setReauth(null)} onConfirm={confirmReauth} />
-    <header><p className="font-mono text-[10px] uppercase tracking-[0.2em] text-orange-500">Restricted · Payments</p>
-      <h1 className="aaris-display text-2xl text-gray-100 mt-2">PayPal administration</h1>
-      <p className="text-sm text-gray-400 mt-2">Checkout starts disabled. Configure sandbox separately from live. Secrets are write-only and encrypted at rest.</p></header>
-    {error && <p role="alert" className="border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
-    {notice && <p role="status" className="border border-green-800 bg-green-950/30 p-3 text-sm text-green-300">{notice}</p>}
-    <div className="grid lg:grid-cols-2 gap-4">
-      <section className={card}><h2 className="aaris-display text-lg text-gray-100">Checkout configuration</h2>
-        <label className="block text-xs text-gray-400 mt-4">Environment<select value={environment} onChange={(event) => setEnvironment(event.target.value)} className="block w-full mt-2 bg-gray-950 border border-gray-700 px-3 py-2 text-white"><option value="sandbox">Sandbox</option><option value="live">Live</option></select></label>
-        <p className="text-sm mt-3 text-gray-300">{current?.configured ? 'Configured' : 'Not configured'} · {current?.enabled ? 'Checkout enabled' : 'Checkout disabled'} · Version {current?.configVersion || '—'}</p>
-        <p className="text-xs text-gray-500 mt-1">Merchant {current?.merchantId || '—'} · Webhook {current?.webhookId || '—'}</p>
-        <form onSubmit={save} className="mt-5 space-y-3">
-          {[['clientId', 'Client ID'], ['clientSecret', 'Client secret'], ['merchantId', 'Merchant ID'], ['webhookId', 'Webhook ID'], ['monthlyPlanId', 'Monthly plan ID (optional)'], ['monthlyAmount', 'Monthly amount in DKK (optional)']].map(([field, label]) => <label key={field} className="block text-xs text-gray-400">{label}<input value={form[field]} onChange={(event) => setForm((old) => ({ ...old, [field]: event.target.value }))} type={field === 'clientSecret' ? 'password' : 'text'} autoComplete="off" className="block w-full mt-1 bg-gray-950 border border-gray-700 px-3 py-2 text-white" /></label>)}
-          <p className="text-xs text-gray-500">Saving creates a new configuration version and disables checkout until explicitly enabled again. Leave the secret blank to keep the stored one (only while the client ID is unchanged). A save based on an outdated version is refused.</p>
-          <div className="flex flex-wrap gap-2"><button disabled={!!busy} className="border border-orange-600 px-4 py-2 text-xs text-orange-200 disabled:opacity-40">Save configuration</button>
-            <button type="button" disabled={!!busy || !current?.configured} onClick={toggle} className="border border-gray-700 px-4 py-2 text-xs text-gray-200 disabled:opacity-40">{current?.enabled ? 'Disable checkout' : 'Enable checkout'}</button></div>
-        </form>
-      </section>
-      <div className="space-y-4"><section className={card}><h2 className="aaris-display text-lg text-gray-100">Verified live ledger</h2>
-        {summary ? <dl className="grid grid-cols-2 gap-3 mt-4 text-sm">{[['Gross', money(summary.grossOre)], ['Fees', money(summary.feeDebitsOre + summary.feeCreditsOre)], ['Refunds / reversals', money(summary.refundDebitsOre)], ['Known net', money(summary.knownNetOre)], ['Unresolved transactions', summary.unresolvedTransactions], ['Review events', summary.reviewEvents], ['Pending · not counted', `${summary.pendingCount ?? 0} · ${money(summary.pendingOre)}`], ['Disputed · not deducted', `${summary.disputeCount ?? 0} · ${money(summary.disputedOre)}`]].map(([name, value]) => <div key={name}><dt className="text-xs text-gray-500">{name}</dt><dd className="text-white">{value}</dd></div>)}</dl> : <p className="text-gray-500 mt-4">Loading…</p>}
-        <p className="text-xs text-gray-500 mt-3">Unknown fees and review items are excluded from confirmed net totals.</p>
-        <button type="button" disabled={!!busy || !current?.configured} onClick={() => act('reconcile', () => api.post('/payments/admin/reconcile', { environment }))} className="mt-3 border border-gray-700 px-4 py-2 text-xs text-gray-200 disabled:opacity-40">Reconcile {environment}</button>
-      </section>
-      <section className={card}><h2 className="aaris-display text-lg text-gray-100">Monthly allocation</h2>
-        <p className="text-xs text-gray-500 mt-2">Append-only revisions apply verified live net support to finalized lab electricity costs. A negative balance is owner funded; no member owes money.</p>
-        <label className="block text-xs text-gray-400 mt-4">Month<input type="month" value={month} onChange={(event) => setMonth(event.target.value)} className="block mt-1 bg-gray-950 border border-gray-700 px-3 py-2 text-white" /></label>
-        {allocation ? <dl className="grid grid-cols-2 gap-3 text-sm mt-4">{[['Revision', allocation.revision], ['Status', allocation.status], ['Cost', money(allocation.cost_ore)], ['Net received', money(allocation.received_net_ore)], ['Applied', money(allocation.applied_ore)], ['Owner remainder', money(allocation.owner_remainder_ore)], ['Owner adjustment', money(allocation.owner_adjustment_ore)], ['Closing balance', money(allocation.closing_balance_ore)]].map(([name, value]) => <div key={name}><dt className="text-gray-500 text-xs">{name}</dt><dd className="text-gray-100">{value}</dd></div>)}</dl> : <p className="text-sm text-gray-500 mt-4">No allocation snapshot yet.</p>}
-        <button type="button" disabled={!!busy || !month} onClick={() => act('allocate', () => api.post('/payments/admin/allocate', { month }))} className="mt-4 border border-gray-700 px-4 py-2 text-xs text-gray-200 disabled:opacity-40">Recalculate through month</button>
-      </section></div>
+    <header className="flex flex-wrap items-end justify-between gap-4">
+      <div className="min-w-0">
+        <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-orange-500">Restricted · Payments</p>
+        <h1 className="aaris-display text-xl text-gray-100 mt-2">PayPal administration</h1>
+        <p className="text-sm text-gray-500 mt-1">Checkout starts disabled. Configure sandbox separately from live. Secrets are write-only and encrypted at rest.</p>
+      </div>
+      <div className="flex items-end gap-3">
+        {environment === 'live' && <span className="pb-2.5"><Badge tone="bad">Live · real charges</Badge></span>}
+        <div className="w-40"><Field label="Environment">
+          <select value={environment} onChange={(event) => setEnvironment(event.target.value)} className={inputCls}><option value="sandbox">Sandbox</option><option value="live">Live</option></select>
+        </Field></div>
+      </div>
+    </header>
+
+    {(error || notice) && <div className="sticky top-2 z-10 space-y-2">
+      {error && <div className="bg-gray-950"><ErrorCallout error={error} /></div>}
+      {notice && <div className="bg-gray-950"><p role="status" className="text-xs text-green-400 bg-green-900/20 border border-green-800/30 rounded-xl p-3">{notice}</p></div>}
+    </div>}
+
+    <Section title="Checkout configuration"
+      description="Saving creates a new configuration version and disables checkout until explicitly enabled again."
+      actions={<div className="flex flex-wrap items-center gap-2" aria-busy={loading}>
+        {loading ? <><Skeleton className="h-6 w-48" /><span className="sr-only">Loading</span></> : <>
+          <Badge tone={current?.configured ? 'ok' : 'neutral'}>{current?.configured ? 'Configured' : 'Not configured'}</Badge>
+          <Badge tone={current?.enabled ? 'ok' : 'neutral'}>{current?.enabled ? 'Checkout enabled' : 'Checkout disabled'}</Badge>
+          <span className="font-mono text-xs text-gray-500">Version {current?.configVersion || '—'}</span></>}
+      </div>}>
+      <dl className="grid sm:grid-cols-2 gap-3">
+        <Stat label="Merchant" value={current?.merchantId || '—'} loading={loading} />
+        <Stat label="Webhook" value={current?.webhookId || '—'} loading={loading} />
+      </dl>
+      <form onSubmit={save} className="mt-5 pt-5 border-t border-gray-800">
+        <div className="grid md:grid-cols-2 gap-4">
+          {FIELDS.map(([field, label]) => <Field key={field} label={label}>
+            <input value={form[field]} onChange={(event) => setForm((old) => ({ ...old, [field]: event.target.value }))} type={field === 'clientSecret' ? 'password' : 'text'} autoComplete="off" className={inputCls} />
+          </Field>)}
+        </div>
+        <p className="text-xs text-gray-500 mt-4">Leave the secret blank to keep the stored one (only while the client ID is unchanged). A save based on an outdated version is refused.</p>
+        <div className="flex flex-wrap gap-3 mt-5">
+          <button disabled={!!busy || loading} className={btnPrimary}>{busy === 'save' ? 'Saving…' : 'Save configuration'}</button>
+          <button type="button" disabled={!!busy || loading || !current?.configured} onClick={toggle} className={btnSecondary}>{current?.enabled ? 'Disable checkout' : 'Enable checkout'}</button>
+        </div>
+      </form>
+    </Section>
+
+    <div className="grid lg:grid-cols-2 gap-6">
+      <Section title="Verified live ledger"
+        footer={<button type="button" disabled={!!busy || loading || !current?.configured} onClick={() => act('reconcile', () => api.post('/payments/admin/reconcile', { environment }))} className={btnSecondary}>{busy === 'reconcile' ? 'Reconciling…' : `Reconcile ${environment}`}</button>}>
+        <dl className="grid grid-cols-2 gap-3" aria-busy={loading}>
+          {LEDGER.map(([name, read]) => <Stat key={name} label={name} loading={loading} mono={false} value={summary ? read(summary) : '—'} />)}
+        </dl>
+        <p className="text-xs text-gray-500 mt-4">Unknown fees and review items are excluded from confirmed net totals.</p>
+      </Section>
+      <Section title="Monthly allocation"
+        description="Append-only revisions apply verified live net support to finalized lab electricity costs. A negative balance is owner funded; no member owes money."
+        footer={<button type="button" disabled={!!busy || !month} onClick={() => act('allocate', () => api.post('/payments/admin/allocate', { month }))} className={btnSecondary}>{busy === 'allocate' ? 'Recalculating…' : 'Recalculate through month'}</button>}>
+        <div className="w-48 mb-4"><Field label="Month">
+          <input type="month" value={month} onChange={(event) => setMonth(event.target.value)} className={inputCls} />
+        </Field></div>
+        {!allocLoading && !allocation ? <EmptyState>No allocation snapshot yet.</EmptyState> :
+          <dl className="grid grid-cols-2 gap-3" aria-busy={allocLoading}>
+            {ALLOCATION.map(([name, read]) => <Stat key={name} label={name} loading={allocLoading} mono={false} value={allocation ? read(allocation) : '—'} />)}
+          </dl>}
+      </Section>
     </div>
+
     <PayPalSetupPanel environment={environment} act={act} busy={busy} configVersion={current?.configVersion} onUseId={(field, value) => setForm((old) => ({ ...old, [field]: value }))} />
     <PayPalOperationsPanel environment={environment} act={act} busy={busy} />
   </div>;
