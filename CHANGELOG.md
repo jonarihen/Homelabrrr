@@ -5,6 +5,10 @@
 - Browser SSH/SFTP now reaches only addresses in your assigned VLANs and addresses an admin assigned to your VM. Addresses a guest reports itself (guest agent, cloud-init) no longer grant access.
 - Website upstreams for non-admins are limited to the same set. Existing sites whose upstream no longer qualifies are unpublished by the periodic maintenance pass (not deleted); re-save them with an address in your VLAN.
 - Legacy admin-assigned address rows that store only a node name now count only for the Proxmox host they were recorded on, so a same-named node on another cluster no longer inherits them.
+## 2026-10-28 — Fixed price plus tariffs contracts
+
+- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
+- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
 
 ## 2026-10-28 — Concurrent deploys can't overbook a node
 
