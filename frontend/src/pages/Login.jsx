@@ -148,6 +148,7 @@ export default function Login() {
               {loading ? 'Verifying…' : 'Verify →'}
             </button>
             {methods.includes('passkey') && <button type="button" disabled={loading} onClick={verifyPasskey} className="w-full border border-gray-700 text-gray-200 font-mono text-xs uppercase tracking-[0.1em] py-3 hover:border-orange-600">Use a passkey</button>}
+            <p className="text-[11px] text-gray-500 font-mono text-center leading-relaxed">Lost your device? Use a backup code or contact an admin.</p>
             {methods.includes('recovery') && <button type="button" onClick={() => { setStep('recovery'); setCode(''); setError(''); }} className="w-full font-mono text-[10px] uppercase tracking-[0.14em] text-gray-500 hover:text-gray-300">Use a recovery code</button>}
             <button
               type="button"

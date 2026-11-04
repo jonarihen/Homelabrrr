@@ -332,7 +332,7 @@ If the database is brand new and empty, also set:
 - `INITIAL_ADMIN_PASSWORD`
 
 Those bootstrap values are only used to create the first admin account on first run.
-After the first successful sign-in, remove `INITIAL_ADMIN_PASSWORD` from `.env` and recreate the backend container so the bootstrap password is no longer present in its environment.
+After the first successful sign-in, remove `INITIAL_ADMIN_PASSWORD` from `.env` and recreate the backend container so the bootstrap password is no longer present in its environment. There is no forced first-login password change, so change the admin password from `Account` after signing in.
 
 ### 2. Build and start
 
@@ -710,7 +710,7 @@ That matches a homelab setup where the app itself stays internal and the public 
 Proxy requirements:
 
 - forward normal HTTP requests and websocket upgrades for `/api/*`
-- preserve `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto`
+- preserve `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto` — without `X-Forwarded-Proto: https` the backend sees plain HTTP, never sets the `Secure` session cookie, and login silently loops (the backend logs a one-time warning when this happens)
 - set `ALLOWED_ORIGIN` to the exact external URL, for example `https://portal.example.com`
 - keep `COOKIE_SECURE` at its secure default (`true`) — the `Secure` cookie flag must stay on behind the TLS-terminating proxy
 - if PayPal support is enabled, expose only `POST /api/payments/paypal/webhook/<environment>` to PayPal over HTTPS and keep everything else private (see the [Power & Energy runbook](backend/docs/power-energy-runbook.md#9-paypal-private-support))
