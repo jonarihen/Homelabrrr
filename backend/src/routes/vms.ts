@@ -462,10 +462,12 @@ router.get('/:node/:vmid/status', async (req, res) => {
     const nodeIdentity = serializeNodeIdentity(node);
     const lease = await summarizeLease(node, vmid);
     const hostName = await hostNameForNode(node);
+    // Lets the UI hide Delete from users who can see but not own the VM.
+    const canDelete = await allowOp(req, node, vmid, 'vm.delete');
     try {
-      res.json({ ...(await getVMStatus(node, vmid)), ...nodeIdentity, hostName, vmid: parseInt(vmid, 10), type: 'qemu', lease });
+      res.json({ ...(await getVMStatus(node, vmid)), ...nodeIdentity, hostName, vmid: parseInt(vmid, 10), type: 'qemu', lease, canDelete });
     } catch {
-      res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, hostName, vmid: parseInt(vmid, 10), type: 'lxc', lease });
+      res.json({ ...(await getLXCStatus(node, vmid)), ...nodeIdentity, hostName, vmid: parseInt(vmid, 10), type: 'lxc', lease, canDelete });
     }
   } catch (err) {
     sendError(res, err);

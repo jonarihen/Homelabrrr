@@ -5,6 +5,7 @@ import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 
 const OVERALL_STATES = {
   operational: { led: 'aaris-led--ok aaris-led--pulse', text: 'text-green-400', label: 'All systems operational' },
@@ -29,6 +30,7 @@ const READINESS_STATES = {
 };
 
 export default function WelcomePage() {
+  const confirm = useConfirm();
   useDocumentTitle('Welcome');
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -166,7 +168,7 @@ export default function WelcomePage() {
   };
 
   const deleteNotice = async (notice) => {
-    if (!window.confirm(`Delete notice "${notice.title}"?`)) return;
+    if (!await confirm({ message: `Delete notice "${notice.title}"?`, confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/portal/notices/${notice.id}`);
       loadNotices();
@@ -194,7 +196,7 @@ export default function WelcomePage() {
   };
 
   const deleteLink = async (link) => {
-    if (!window.confirm(`Remove link "${link.label}"?`)) return;
+    if (!await confirm({ message: `Remove link "${link.label}"?`, confirmLabel: 'Remove', danger: true })) return;
     try {
       await api.delete(`/portal/links/${link.id}`);
       loadLinks();

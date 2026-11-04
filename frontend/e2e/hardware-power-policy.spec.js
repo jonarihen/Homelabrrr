@@ -23,7 +23,6 @@ const preview = { at: '2026-10-12T13:59:00Z', draft: true, observedMode: 'low', 
 
 async function mockHosts(page, state = record()) {
   const writes = [];
-  page.on('dialog', (dialog) => dialog.accept());
   await page.route('**/api/**', (route) => {
     const request = route.request();
     if (request.method() !== 'GET') writes.push({ method: request.method(), path: new URL(request.url()).pathname, body: request.postDataJSON?.() ?? null });
@@ -86,6 +85,7 @@ test('enabling live control requires explicit acknowledgement', async ({ page })
   const writes = await mockHosts(page);
   await page.goto('/admin/hosts');
   await page.getByRole('button', { name: 'Enable live control' }).click();
+  await page.getByRole('dialog', { name: 'Confirm' }).getByRole('button', { name: 'Confirm' }).click();
   await expect.poll(() => writes.find((item) => item.path.endsWith('/enable'))).toBeTruthy();
   expect(writes.find((item) => item.path.endsWith('/enable')).body).toEqual({ acknowledgeLiveControl: true });
 });

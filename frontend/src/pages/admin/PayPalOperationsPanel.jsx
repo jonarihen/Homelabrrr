@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 import ErrorCallout from '../../components/ErrorCallout.jsx';
 
 // Shared look for the three PayPal admin files (same classes as the Users /
@@ -115,6 +116,7 @@ const METRICS = [
 ];
 
 export default function PayPalOperationsPanel({ environment, act, busy }) {
+  const confirm = useConfirm();
   const [health, setHealth] = useState(null);
   const [review, setReview] = useState({ items: [], nextOffset: null });
   const [subscriptions, setSubscriptions] = useState({ items: [], nextOffset: null });
@@ -142,16 +144,16 @@ export default function PayPalOperationsPanel({ environment, act, busy }) {
     if (!note || note.trim().length < 3) return;
     run(`dismiss-${item.id}`, () => api.post(`/payments/admin/review/${encodeURIComponent(item.id)}/dismiss`, { environment, note }));
   };
-  const cancel = (item) => {
-    if (!window.confirm('Request cancellation at PayPal? A payment already in flight may still complete.')) return;
+  const cancel = async (item) => {
+    if (!await confirm({ message: 'Request cancellation at PayPal? A payment already in flight may still complete.', confirmLabel: 'Request cancellation', danger: true })) return;
     run(`cancel-${item.id}`, () => api.post(`/payments/admin/subscriptions/${encodeURIComponent(item.id)}/cancel`, { environment }));
   };
-  const decideManual = (item, action) => {
+  const decideManual = async (item, action) => {
     const field = action === 'confirm' ? 'evidence' : 'reason';
     const label = action === 'confirm' ? 'Evidence (statement line, bank reference) for this transfer:' : `Reason to ${action} this entry:`;
     const value = window.prompt(label);
     if (!value || value.trim().length < 3) return;
-    const acknowledgeSimilar = action === 'confirm' && window.confirm('Only press OK if you already checked this is not the same money as an imported PayPal payment. Cancel keeps the duplicate check.');
+    const acknowledgeSimilar = action === 'confirm' && await confirm({ message: 'Only confirm if you already checked this is not the same money as an imported PayPal payment. Cancel keeps the duplicate check.', confirmLabel: 'Confirm', danger: true });
     run(`manual-${action}-${item.id}`, () => api.post(`/payments/admin/manual/${item.id}/${action}`, { [field]: value, acknowledgeSimilar }));
   };
   const loading = !loaded;

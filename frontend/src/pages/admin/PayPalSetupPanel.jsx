@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../api.js';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 import { Actions, Badge, Cell, DataTable, EmptyState, Row, RowsSkeleton, Section, SubHead, btnSecondary, btnSm, btnSmDanger, inputCls, money, when } from './PayPalOperationsPanel.jsx';
 
 const step = 'bg-gray-950/50 border border-gray-800 rounded-xl p-4 flex flex-col gap-3';
@@ -8,6 +9,7 @@ const step = 'bg-gray-950/50 border border-gray-800 rounded-xl p-4 flex flex-col
 // of the product, monthly plan and webhook registration. Created IDs are only
 // copied into the form; saving them is a separate, versioned step.
 export default function PayPalSetupPanel({ environment, act, busy, configVersion, onUseId }) {
+  const confirm = useConfirm();
   const [checks, setChecks] = useState(null);
   const [created, setCreated] = useState({});
   const [planAmount, setPlanAmount] = useState('50.00');
@@ -29,8 +31,8 @@ export default function PayPalSetupPanel({ environment, act, busy, configVersion
   const offerPlan = (planId, amount) => act('offer-plan', async () => {
     const { data } = await api.post('/payments/admin/monthly-plans', { environment, planId, amount }); setPlans(data.items);
   });
-  const retirePlan = (plan) => {
-    if (!window.confirm('Stop offering this amount to new subscribers? Existing subscriptions keep billing until cancelled.')) return;
+  const retirePlan = async (plan) => {
+    if (!await confirm({ message: 'Stop offering this amount to new subscribers? Existing subscriptions keep billing until cancelled.', confirmLabel: 'Stop offering', danger: true })) return;
     act('retire-plan', async () => { const { data } = await api.post(`/payments/admin/monthly-plans/${plan.id}/deactivate`, { environment }); setPlans(data.items); });
   };
   const planValid = /^\d{1,6}(\.\d{2})?$/.test(planAmount);

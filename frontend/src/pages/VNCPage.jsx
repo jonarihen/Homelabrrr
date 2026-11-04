@@ -5,6 +5,7 @@ import useVmName from '../hooks/useVmName.js';
 import api from '../api.js';
 import { displayNode } from '../utils/nodeRef.js';
 import { readClipboardText, typeIntoVnc } from '../utils/vncPaste.js';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 import {
   CONNECTING, CONNECTED, DISCONNECTED, CONNECTION_LOST,
   canReconnect, isConnected,
@@ -24,6 +25,7 @@ function forceFullRefresh(rfb) {
 }
 
 export default function VNCPage() {
+  const confirm = useConfirm();
   const { node, vmid } = useParams();
   const vmName = useVmName(node, vmid);
   useDocumentTitle(`VNC - ${vmName}`);
@@ -44,7 +46,7 @@ export default function VNCPage() {
     if (!rfb || pasting) return;
     const text = await readClipboardText();
     if (!text) return;
-    if (text.length > 2000 && !confirm(`Type all ${text.length} clipboard characters into the VM?`)) return;
+    if (text.length > 2000 && !await confirm(`Type all ${text.length} clipboard characters into the VM?`)) return;
     setPasting(true);
     try {
       await typeIntoVnc(rfb, text, { shouldStop: () => pasteStopRef.current || rfbRef.current !== rfb });

@@ -6,6 +6,7 @@ import Field from '../../components/Field.jsx';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
 import PayPalOperationsPanel, { Badge, EmptyState, Section, Skeleton, Stat, btnPrimary, btnSecondary, inputCls, money } from './PayPalOperationsPanel.jsx';
 import PayPalSetupPanel from './PayPalSetupPanel.jsx';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const monthNow = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit' }).format(new Date());
 const EMPTY_FORM = { clientId: '', clientSecret: '', merchantId: '', webhookId: '', monthlyPlanId: '', monthlyAmount: '' };
@@ -25,6 +26,7 @@ const ALLOCATION = [
 ];
 
 export default function PayPalPage() {
+  const confirm = useConfirm();
   useDocumentTitle('PayPal administration');
   const [configs, setConfigs] = useState([]);
   const [environment, setEnvironment] = useState('sandbox');
@@ -75,9 +77,9 @@ export default function PayPalPage() {
       monthlyAmount: form.monthlyAmount || null, expectedVersion: current?.configVersion ?? null };
     act('save', () => api.post('/payments/admin/config', payload)).then((saved) => { if (saved) setForm(EMPTY_FORM); });
   };
-  const toggle = () => {
+  const toggle = async () => {
     const enabling = !current?.enabled;
-    if (enabling && !window.confirm(`Enable ${environment.toUpperCase()} PayPal checkout? This permits real charges if LIVE is selected.`)) return;
+    if (enabling && !await confirm(`Enable ${environment.toUpperCase()} PayPal checkout? This permits real charges if LIVE is selected.`)) return;
     act('toggle', () => api.post('/payments/admin/enabled', { environment, enabled: enabling, confirmLive: environment === 'live' && enabling,
       expectedVersion: current?.configVersion }));
   };

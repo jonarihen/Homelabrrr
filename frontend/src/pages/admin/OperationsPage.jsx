@@ -4,6 +4,7 @@ import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
 import { backupVerificationLabel } from '../../utils/backupVerification.js';
 import { operationNeedsReview, readyResolution } from '../../utils/operationRecovery.js';
+import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const card = 'bg-gray-900 border border-gray-800 rounded-2xl p-5';
 
@@ -16,6 +17,7 @@ function formatBytes(value) {
 }
 
 export default function OperationsPage() {
+  const confirm = useConfirm();
   useDocumentTitle('Operations');
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -54,10 +56,10 @@ export default function OperationsPage() {
     finally { setReauthBusy(false); }
   };
 
-  const resolveReady = (operation) => {
+  const resolveReady = async (operation) => {
     let evidence;
     if (operation.type === 'provision' && !operation.upid) {
-      if (!window.confirm('Verify the VM has finished creating in Proxmox. Recovery checks its unique creation marker, recorded node and VMID, and existing ownership.')) return;
+      if (!await confirm('Verify the VM has finished creating in Proxmox. Recovery checks its unique creation marker, recorded node and VMID, and existing ownership.')) return;
       evidence = window.prompt('Record how you verified this VM and that its creation finished (10–1000 characters):');
     }
     const body = readyResolution(operation, evidence);
@@ -65,8 +67,8 @@ export default function OperationsPage() {
     act(`ready-${operation.id}`, () => api.post(`/admin/operations/${operation.type}/${operation.id}/resolve`, body));
   };
 
-  const cleanup = (operation) => {
-    if (!window.confirm('Remove only this portal tracking record? This does not stop a Proxmox task or delete any VM, disk, or configuration.')) return;
+  const cleanup = async (operation) => {
+    if (!await confirm({ message: 'Remove only this portal tracking record? This does not stop a Proxmox task or delete any VM, disk, or configuration.', confirmLabel: 'Remove', danger: true })) return;
     act(`cleanup-${operation.type}-${operation.id}`, () => api.delete(`/admin/operations/${operation.type}/${operation.id}`));
   };
 

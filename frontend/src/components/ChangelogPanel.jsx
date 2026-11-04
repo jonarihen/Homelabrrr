@@ -1,8 +1,8 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import changelogMarkdown from '../../../CHANGELOG.md?raw';
 import { parseChangelog } from '../utils/changelog.js';
-import { activateModal, isTopModal } from '../utils/modalFocus.js';
+import Modal from './Modal.jsx';
 
 function formatDateLabel(date) {
   return new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', {
@@ -15,9 +15,6 @@ function formatDateLabel(date) {
 
 export default function ChangelogPanel() {
   const [open, setOpen] = useState(false);
-  const titleId = useId();
-  const dialogRef = useRef(null);
-  const contentRef = useRef(null);
   const triggerRef = useRef(null);
   const entries = useMemo(() => parseChangelog(changelogMarkdown), []);
   const latestEntry = entries[0];
@@ -26,51 +23,11 @@ export default function ChangelogPanel() {
     [latestEntry]
   );
 
-  // The overlay joins the shared modal stack (focus trap, Escape, scroll
-  // lock, focus return) so it behaves correctly even when opened on top of
-  // the mobile navigation drawer.
-  useEffect(() => {
-    if (!open) return undefined;
-    return activateModal({
-      dialog: dialogRef.current,
-      content: contentRef.current,
-      trigger: triggerRef.current,
-      onClose: () => setOpen(false),
-    });
-  }, [open]);
-
   if (!latestEntry) return null;
 
   const modal = open ? (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
-      onClick={(e) => {
-        if (e.target === e.currentTarget && isTopModal(dialogRef.current)) setOpen(false);
-      }}
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
-        className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden border border-gray-800 bg-gray-950"
-      >
-        <div className="flex items-center justify-between border-b border-gray-800 px-5 py-4">
-          <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-gray-500">Changelog</p>
-            <h2 id={titleId} className="aaris-display mt-1 text-sm text-gray-100">Recent platform changes</h2>
-          </div>
-          <button
-            type="button"
-            onClick={() => setOpen(false)}
-            className="border border-gray-700 bg-gray-900 px-3 py-2 font-mono text-xs uppercase tracking-[0.12em] text-gray-300 transition-colors hover:bg-gray-800 hover:text-white"
-          >
-            Close
-          </button>
-        </div>
-
-        <div ref={contentRef} className="space-y-5 overflow-y-auto px-5 py-5">
+    <Modal title="Recent platform changes" onClose={() => setOpen(false)} size="xl">
+        <div className="space-y-5 px-5 py-5">
           {entries.map((entry) => (
             <section key={`${entry.date}-${entry.title}`} className="border border-gray-800 bg-gray-900/70 p-4">
               <div className="flex flex-col gap-2 border-b border-gray-800 pb-3 sm:flex-row sm:items-start sm:justify-between">
@@ -105,8 +62,7 @@ export default function ChangelogPanel() {
             </section>
           ))}
         </div>
-      </div>
-    </div>
+    </Modal>
   ) : null;
 
   return (

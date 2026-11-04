@@ -3,9 +3,12 @@ import api from '../../api.js';
 import Modal from '../../components/Modal.jsx';
 import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import { displayNode, routeNode } from '../../utils/nodeRef.js';
+import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
 
 
 export default function TemplatesPage() {
+  const confirm = useConfirm();
+  const toast = useToast();
   useDocumentTitle('Templates');
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -27,12 +30,12 @@ export default function TemplatesPage() {
   useEffect(() => { load(); }, [load]);
 
   const deleteTemplate = async (id, name) => {
-    if (!confirm(`Delete template "${name}"? This does not delete the actual VM.`)) return;
+    if (!await confirm({ message: `Delete template "${name}"? This does not delete the actual VM.`, confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/provision/admin/templates/${id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      toast.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
@@ -201,6 +204,8 @@ function NodeStorageFields({ form, setForm, nodes, storages }) {
 }
 
 function CloudImagesSection({ onTemplatesChanged }) {
+  const confirm = useConfirm();
+  const toast = useToast();
   const [images, setImages] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
   const [templateImage, setTemplateImage] = useState(null);
@@ -231,24 +236,24 @@ function CloudImagesSection({ onTemplatesChanged }) {
   }, [imageWorkInFlight, load]);
 
   const remove = async (img) => {
-    if (!confirm(`Delete cloud image "${img.name}"? The downloaded file is removed from ${img.storage}.`)) return;
+    if (!await confirm({ message: `Delete cloud image "${img.name}"? The downloaded file is removed from ${img.storage}.`, confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/cloud-images/${img.id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      toast.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
   // Patch the stored image so VMs deployed from it get a clean Proxmox console
   // (disables the systemd v257+ OSC 3008 shell drop-in via virt-customize).
   const patchConsole = async (img) => {
-    if (!confirm(`Patch "${img.name}" so its console output is clean?\n\nRuns virt-customize on ${displayNode(img.node)} (needs host SSH configured and libguestfs-tools installed). Edits the stored image — future deploys inherit the fix; existing VMs are unaffected.`)) return;
+    if (!await confirm(`Patch "${img.name}" so its console output is clean?\n\nRuns virt-customize on ${displayNode(img.node)} (needs host SSH configured and libguestfs-tools installed). Edits the stored image — future deploys inherit the fix; existing VMs are unaffected.`)) return;
     try {
       await api.post(`/cloud-images/${img.id}/patch-console`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to start patching');
+      toast.error(e.response?.data?.error || 'Failed to start patching');
     }
   };
 
@@ -675,6 +680,8 @@ const isoStatusCls = {
 };
 
 function IsosSection() {
+  const confirm = useConfirm();
+  const toast = useToast();
   const [isos, setIsos] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
 
@@ -698,12 +705,12 @@ function IsosSection() {
     // Native confirm/alert mirrors the sibling CloudImagesSection on this
     // page; the in-app notify/confirm dialogs live in a separate a11y branch and
     // will convert this page's dialogs in one pass once merged.
-    if (!confirm(`Delete ISO "${iso.name}"? The downloaded file is removed from ${iso.storage}.`)) return;
+    if (!await confirm({ message: `Delete ISO "${iso.name}"? The downloaded file is removed from ${iso.storage}.`, confirmLabel: 'Delete', danger: true })) return;
     try {
       await api.delete(`/isos/${iso.id}`);
       load();
     } catch (e) {
-      alert(e.response?.data?.error || 'Failed to delete');
+      toast.error(e.response?.data?.error || 'Failed to delete');
     }
   };
 
