@@ -78,17 +78,17 @@ export default function SupportPage() {
   const monthlyChoice = options.includes(monthlyAmount) ? monthlyAmount : options[0] ?? null;
   const change = async (subscription, target) => {
     if (!window.confirm(`Change to ${money(target)} per month? Your current subscription is cancelled at PayPal first; you then approve the new amount at PayPal. If you do not approve, no monthly contribution continues.`)) return;
-    setBusy(subscription.id); setError(''); setNotice('');
+    setBusy(`change:${subscription.id}:${target}`); setError(''); setNotice('');
     try {
       const { data } = await api.post(`/payments/monthly/${encodeURIComponent(subscription.id)}/change`, { environment: 'live', amount: (target / 100).toFixed(2) });
-      if (data.status === 'cancellation_unknown') { setNotice('Cancellation of the current subscription is not yet confirmed by PayPal, so no new subscription was started. Try again later.', 'warning'); await refresh(); return; }
+      if (data.status === 'cancellation_unknown') { setNotice('Cancellation of the current subscription is not yet confirmed by PayPal, so no new subscription was started. Try again later.', 'warning'); await refresh(); setBusy(''); return; }
       sessionStorage.setItem('paypalPendingIntent', data.intentId);
       window.location.assign(data.approvalUrl);
     } catch (err) { setError(err.response?.data?.error || 'Could not change the monthly amount.'); setBusy(''); }
   };
   const cancel = async (subscription) => {
     if (!window.confirm('Cancel this monthly contribution? PayPal may still process a payment already due.')) return;
-    setBusy(subscription.id); setError('');
+    setBusy(`cancel:${subscription.id}`); setError('');
     try { await api.post(`/payments/monthly/${encodeURIComponent(subscription.id)}/cancel`); await refresh(); setNotice('Cancellation requested and will be verified with PayPal.', 'success'); }
     catch (err) { setError(err.response?.data?.error || 'Could not cancel the subscription.'); }
     finally { setBusy(''); }
@@ -142,8 +142,8 @@ export default function SupportPage() {
           <div><p className="text-white">{money(item.amountOre)} monthly · {item.status}</p><p className="text-xs text-gray-500 mt-1">{item.environment === 'sandbox' ? 'Sandbox test · ' : ''}Next billing {date(item.nextBillingAt)}</p></div>
           {!['CANCELLED', 'EXPIRED'].includes(item.status) && <div className="flex flex-wrap gap-3">
             {item.environment === 'live' && options.filter((ore) => ore !== item.amountOre).map((ore) => <button key={ore} type="button" disabled={!!busy} onClick={() => change(item, ore)}
-              className={secondaryBtn}>Change to {money(ore)}</button>)}
-            <button type="button" disabled={!!busy} onClick={() => cancel(item)} className={secondaryBtn}>{busy === item.id ? 'Working…' : 'Cancel subscription'}</button></div>}
+              className={secondaryBtn}>{busy === `change:${item.id}:${ore}` ? 'Changing…' : `Change to ${money(ore)}`}</button>)}
+            <button type="button" disabled={!!busy} onClick={() => cancel(item)} className={secondaryBtn}>{busy === `cancel:${item.id}` ? 'Cancelling…' : 'Cancel subscription'}</button></div>}
         </div>)}</div>}
     </Card>
     <Card title="Paid by bank transfer?" hint="Report it here so the owner can match it against the bank statement. A report is not counted until confirmed.">
