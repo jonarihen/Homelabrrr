@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-04 — Deploy polish
+
+- A failed cloud image or template load now shows a **Retry** button.
+- **Start the VM after deployment** is on by default for cloud images.
+- The invalid-invite page tells you to contact the administrator who invited you.
+
 ## 2026-10-28 — Styled confirmations, notices and dialogs
 
 - Browser confirm and alert pop-ups are replaced by in-app dialogs and notices. Destructive actions (delete, remove, revoke, discard) use a red confirm button, and focus starts on **Cancel**. **Escape** cancels.
