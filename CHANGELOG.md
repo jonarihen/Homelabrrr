@@ -1,15 +1,17 @@
 # Changelog
 
-## 2026-11-03 — PayPal admin page tidy-up
+## 2026-11-04 — PayPal admin page tidy-up
 
 - The PayPal administration page now follows the same layout as the other admin pages: centred page width, consistent card padding, one set of button sizes, labelled form fields in a two-column grid, and an environment switcher with a "Live · real charges" badge in the page header.
 - Review queue, manual transfers, subscriptions, offered amounts and configuration history are proper scrollable tables with status badges instead of tightly packed rows. Setup actions are grouped into four labelled steps.
 - Figures show loading placeholders instead of "Unknown" or empty text while data loads, lists say "Unavailable" (with a retry) if loading fails, and error and success messages stay visible while you work further down the page.
 
-## 2026-10-28 — Concurrent deploys can't overbook a node
+## 2026-11-03 — Roomier, consistent iLO power panels
 
-- A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
-- When a deploy is refused for space, the message says how much is held by other deploys still in progress.
+- The Hardware / iLO, Power telemetry and Power policy panels on PVE Hosts and in Edit Host now use the same spacing, panels, buttons, inputs and tables as the other admin pages: grouped controls (live control, automation), labelled fields, a proper window editor and history tables.
+- Panels show a loading skeleton instead of briefly reading "not configured" or "unknown", a failed load shows an error with Retry, and empty schedules or history show an empty state.
+- Behaviour and confirmations are unchanged.
+
 ## 2026-11-03 — Time-of-day grid tariffs from Datahub
 
 - Network tariffs like Cerius "Nettarif C time" are now stored at their real local-hour rates (night 00–06, day 06–17 and 21–24, peak 17–21) instead of one daily figure, so both the lab cost and price-based power control see the correct price for the exact hour.
@@ -19,6 +21,16 @@
 ## 2026-11-03 — Energy data forms ask for identity confirmation
 
 - Saving an ElOverblik token, selecting a meter, disconnecting, and adding electricity contracts or tariffs now open the password + authenticator dialog when a recent confirmation is required, and retry the save afterwards. Before, they only showed "Please confirm your password and second factor before continuing" with no way to confirm.
+
+## 2026-10-28 — Fixed price plus tariffs contracts
+
+- Electricity contracts have a new agreement kind, **Fixed energy + charges**: a fixed energy price (excluding VAT) plus separately applied network, system, tax and retailer tariffs.
+- Tariffs and VAT are applied exactly as for spot contracts: VAT is added once, tariffs already marked VAT-included are not taxed again, and a missing or overlapping tariff leaves the price incomplete instead of guessing. The retailer margin is optional.
+
+## 2026-10-28 — Concurrent deploys can't overbook a node
+
+- A deploy now holds its memory and disk on the target node until it finishes. Two deploys submitted at the same moment can no longer both pass a storage check that only one of them fits.
+- When a deploy is refused for space, the message says how much is held by other deploys still in progress.
 
 ## 2026-10-28 — Louder startup warnings for key and bootstrap mistakes
 
