@@ -221,12 +221,12 @@ export default function AdminWebsitesPage() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <h3 className="text-white font-semibold">{s.name}</h3>
-                    {st.loading ? <span className="text-[10px] text-gray-500 bg-gray-800 px-2 py-0.5 rounded-full">Checking…</span>
-                      : st.online ? <span className="text-[10px] text-green-400 bg-green-500/10 ring-1 ring-green-500/20 px-2 py-0.5 rounded-full">Online</span>
-                      : <span className="text-[10px] text-red-400 bg-red-500/10 ring-1 ring-red-500/20 px-2 py-0.5 rounded-full">Offline</span>}
+                    {st.loading ? <span className="text-[11px] text-gray-500 bg-gray-800 px-2 py-0.5 rounded-full">Checking…</span>
+                      : st.online ? <span className="text-[11px] text-green-400 bg-green-500/10 ring-1 ring-green-500/20 px-2 py-0.5 rounded-full">Online</span>
+                      : <span className="text-[11px] text-red-400 bg-red-500/10 ring-1 ring-red-500/20 px-2 py-0.5 rounded-full">Offline</span>}
                     {s.mode === 'caddyfile'
-                      ? <span className="text-[10px] text-emerald-300 bg-emerald-500/10 ring-1 ring-emerald-500/20 px-2 py-0.5 rounded-full" title={`Sites are written to ${s.snippetPath} over SSH and survive every reload`}>Caddyfile sync</span>
-                      : <span className="text-[10px] text-gray-400 bg-gray-800 ring-1 ring-gray-700 px-2 py-0.5 rounded-full" title="Routes are pushed through the admin API only — a Caddyfile reload drops them; Homelabrrr re-pushes missing routes every 5 minutes">API only</span>}
+                      ? <span className="text-[11px] text-emerald-300 bg-emerald-500/10 ring-1 ring-emerald-500/20 px-2 py-0.5 rounded-full" title={`Sites are written to ${s.snippetPath} over SSH and survive every reload`}>Caddyfile sync</span>
+                      : <span className="text-[11px] text-gray-400 bg-gray-800 ring-1 ring-gray-700 px-2 py-0.5 rounded-full" title="Routes are pushed through the admin API only — a Caddyfile reload drops them; Homelabrrr re-pushes missing routes every 5 minutes">API only</span>}
                   </div>
                   <p className="text-xs text-gray-500 font-mono mt-0.5">{s.apiUrl}</p>
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-500 mt-2">
@@ -287,8 +287,8 @@ export default function AdminWebsitesPage() {
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       <a href={site.url} target="_blank" rel="noreferrer" className="text-white hover:text-orange-400 transition-colors">{site.domain}</a>
-                      {site.managed === false && <span className="text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-1.5 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
-                      {site.wildcard && <span className="text-[10px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
+                      {site.managed === false && <span className="text-[11px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-1.5 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
+                      {site.wildcard && <span className="text-[11px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
                     </div>
                   </td>
                   <td className="px-4 py-3 text-gray-400 font-mono text-xs">
@@ -335,8 +335,8 @@ export default function AdminWebsitesPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm text-white font-mono truncate">{s.domain}</span>
-                      {s.wildcard && <span className="text-[10px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title="Covered by this wildcard certificate">{s.wildcard}</span>}
-                      {s.guarded && <span className="text-[10px] uppercase tracking-wider text-amber-300 bg-amber-500/10 ring-1 ring-amber-500/20 px-1.5 py-0.5 rounded-full" title="Access-restricted in Caddy (IP allowlist / basic auth)">restricted</span>}
+                      {s.wildcard && <span className="text-[11px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-1.5 py-0.5 rounded-full" title="Covered by this wildcard certificate">{s.wildcard}</span>}
+                      {s.guarded && <span className="text-[11px] uppercase tracking-wider text-amber-300 bg-amber-500/10 ring-1 ring-amber-500/20 px-1.5 py-0.5 rounded-full" title="Access-restricted in Caddy (IP allowlist / basic auth)">restricted</span>}
                     </div>
                     <p className="text-[11px] text-gray-500 font-mono mt-0.5">
                       {s.kind === 'reverse_proxy' ? `→ ${s.upstreamTls ? 'https://' : ''}${s.upstreamHost}:${s.upstreamPort}` : s.kind}
@@ -526,5 +526,5 @@ function SiteStatus({ status }) {
     error: 'text-red-400 bg-red-500/10 ring-red-500/20',
   }[status] || 'text-blue-400 bg-blue-500/10 ring-blue-500/20';
   const inFlight = IN_FLIGHT.includes(status);
-  return <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full ring-1 ${cls} ${inFlight ? 'animate-pulse' : ''}`}>{status}</span>;
+  return <span className={`text-[11px] uppercase tracking-wider px-2 py-0.5 rounded-full ring-1 ${cls} ${inFlight ? 'animate-pulse' : ''}`}>{status}</span>;
 }

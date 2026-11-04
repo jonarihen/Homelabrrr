@@ -401,10 +401,10 @@ function SiteCard({ hidden, site: initial, servers, upstream, isAdmin, onChanged
             <div className="flex items-center gap-2">
               <a href={site.url} target="_blank" rel="noreferrer" className="text-white font-semibold hover:text-orange-400 transition-colors truncate">{site.domain}</a>
               <StatusPill status={site.status} />
-              {site.managed === false && <span className="text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-2 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
-              {site.wildcard && <span className="text-[10px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-2 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
+              {site.managed === false && <span className="text-[11px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-2 py-0.5 rounded-full" title="Imported from Caddy — managed in the Caddyfile, not by Homelabrrr">imported</span>}
+              {site.wildcard && <span className="text-[11px] font-mono text-purple-300 bg-purple-500/10 ring-1 ring-purple-500/20 px-2 py-0.5 rounded-full" title={`Covered by the ${site.wildcard} wildcard certificate`}>{site.wildcard}</span>}
               {serverHasInspection && !isInspectionOn(site) && (
-                <span className="text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-2 py-0.5 rounded-full" title="Published without FortiGate SSL inspection — this site holds none of the profile's certificate slots">no inspection</span>
+                <span className="text-[11px] uppercase tracking-wider text-gray-400 bg-gray-700/50 ring-1 ring-gray-600/50 px-2 py-0.5 rounded-full" title="Published without FortiGate SSL inspection — this site holds none of the profile's certificate slots">no inspection</span>
               )}
             </div>
             <p className="text-xs text-gray-500 font-mono mt-0.5">
@@ -567,7 +567,7 @@ function StatusPill({ status }) {
   }[status] || 'bg-blue-500/10 text-blue-400 ring-blue-500/20';
   const inFlight = IN_FLIGHT.includes(status);
   return (
-    <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full ring-1 ${cls}`}>
+    <span className={`text-[11px] uppercase tracking-wider px-2 py-0.5 rounded-full ring-1 ${cls}`}>
       {inFlight ? <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />{status}</span> : status}
     </span>
   );

@@ -449,7 +449,7 @@ export default function WorkflowsPage() {
                       <div className="flex flex-wrap gap-1.5">
                         {variables.map((v) => (
                           <button key={v} onClick={() => insertVariable(v)}
-                            className="border border-gray-700 px-1.5 py-0.5 font-mono text-[10px] text-gray-400 hover:border-orange-600 hover:text-orange-300">
+                            className="border border-gray-700 px-1.5 py-0.5 font-mono text-[11px] text-gray-400 hover:border-orange-600 hover:text-orange-300">
                             {v}
                           </button>
                         ))}

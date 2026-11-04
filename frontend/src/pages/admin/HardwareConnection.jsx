@@ -20,7 +20,7 @@ const BTN_ACCENT = 'shrink-0 border border-orange-500/40 px-3 py-1.5 text-xs fon
 const BTN_DANGER = 'shrink-0 border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50';
 
 function Detail({ label, children }) {
-  return <div className="min-w-0"><dt className="text-[10px] uppercase tracking-wider text-gray-500">{label}</dt><dd className="mt-0.5 break-words text-sm text-gray-200">{children}</dd></div>;
+  return <div className="min-w-0"><dt className="text-[11px] uppercase tracking-wider text-gray-500">{label}</dt><dd className="mt-0.5 break-words text-sm text-gray-200">{children}</dd></div>;
 }
 
 // `mode="summary"` is the node row on PVE Hosts: status, read-only test,
@@ -144,7 +144,7 @@ export default function HardwareConnection({ nodeRef, rebindTargets = [], mode =
     </dl>}
     {ready && connectionNotices(connection).map((notice) => <p key={notice.text} className={`border-l-2 px-3 py-2 text-xs ${NOTICE_CLASS[notice.tone]}`}>{notice.text}</p>)}
     {discovery && <div className="border border-gray-800 bg-gray-800/40 p-3">
-      <h4 className="mb-2 text-[10px] uppercase tracking-wider text-gray-500">Read-only test result</h4>
+      <h4 className="mb-2 text-[11px] uppercase tracking-wider text-gray-500">Read-only test result</h4>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
         <Detail label="Mode">{discovery.mode.value}</Detail>
         <Detail label="Actual input">{discovery.sample.watts == null ? 'unavailable' : `${discovery.sample.watts} W`}</Detail>

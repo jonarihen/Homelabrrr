@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-04 — Branding and label size cleanup
+
+- The sidebar header now reads "Homelabrrr" instead of "VM Manager", and the unmanaged-VIP delete error uses the same name.
+- Remaining 10px labels on the Websites, Policies, Welcome, Hardware, VM card and other pages are now 11px; two empty-state messages use the standard muted grey.
+
 ## 2026-11-04 — Readable metadata text
 
 - Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.

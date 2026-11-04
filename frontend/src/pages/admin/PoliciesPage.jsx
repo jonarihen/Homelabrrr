@@ -406,7 +406,7 @@ function GraphLegend({ usedServices, hasDeny }) {
           <span
             key={service.name}
             title={used ? undefined : 'No policy currently uses this service'}
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] transition-opacity ${used ? '' : 'opacity-40'}`}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] transition-opacity ${used ? '' : 'opacity-40'}`}
             style={badgeStyle(service.name)}
           >
             <span
@@ -419,7 +419,7 @@ function GraphLegend({ usedServices, hasDeny }) {
       })}
       {hasDeny && (
         <span
-          className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em]"
+          className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em]"
           style={badgeStyle('DENY', 'deny')}
         >
           <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: DENY_COLOR }} />
@@ -981,10 +981,10 @@ export default function PoliciesPage() {
                     height: `${Math.min(Math.max(canvasSize.width * 0.78, 360), 680)}px`,
                   }}
                 />
-                <div className="absolute left-1/2 top-[22%] -translate-x-1/2 rounded-full border border-cyan-400/15 bg-cyan-500/5 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-cyan-200/80">
+                <div className="absolute left-1/2 top-[22%] -translate-x-1/2 rounded-full border border-cyan-400/15 bg-cyan-500/5 px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-cyan-200/80">
                   Existing Paths
                 </div>
-                <div className="absolute left-1/2 top-[11%] -translate-x-1/2 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-400">
+                <div className="absolute left-1/2 top-[11%] -translate-x-1/2 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-slate-400">
                   Available Targets
                 </div>
               </div>
@@ -1255,7 +1255,7 @@ export default function PoliciesPage() {
                           {line.services.map(service => (
                             <span
                               key={`${line.id}-${service}`}
-                              className="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em]"
+                              className="rounded-full border px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.14em]"
                               style={badgeStyle(service, line.action)}
                             >
                               {service}
@@ -1316,7 +1316,7 @@ export default function PoliciesPage() {
                           {line.services.map(service => (
                             <span
                               key={`popover-${line.id}-${service}`}
-                              className="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em]"
+                              className="rounded-full border px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.14em]"
                               style={badgeStyle(service, line.action)}
                             >
                               {service}
@@ -1409,7 +1409,7 @@ export default function PoliciesPage() {
                             <h3 className="mt-1 line-clamp-2 break-words text-[12px] font-semibold leading-[1.12] text-white [overflow-wrap:anywhere] sm:text-[14px]">
                               {vlan.name}
                             </h3>
-                            <div className="mt-3 flex flex-wrap items-center justify-center gap-1 text-[8px] uppercase tracking-[0.1em] text-slate-400 sm:text-[9px]">
+                            <div className="mt-3 flex flex-wrap items-center justify-center gap-1 text-[8px] uppercase tracking-[0.1em] text-slate-400 sm:text-[11px]">
                               <span className="rounded-full border border-slate-700/80 bg-slate-950/70 px-2 py-0.5">
                                 {routeCount} route{routeCount !== 1 ? 's' : ''}
                               </span>
@@ -1522,7 +1522,7 @@ export default function PoliciesPage() {
                           {policy.service.map(service => (
                             <span
                               key={`${policy.policyid}-${service}`}
-                              className="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em]"
+                              className="rounded-full border px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.14em]"
                               style={badgeStyle(service, policy.action)}
                             >
                               {service}
@@ -1530,7 +1530,7 @@ export default function PoliciesPage() {
                           ))}
                         </div>
 
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ${
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ${
                           policy.action === 'accept'
                             ? 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/20'
                             : 'bg-red-500/10 text-red-300 ring-red-500/20'
@@ -1577,7 +1577,7 @@ export default function PoliciesPage() {
                   <div key={object.name} className="flex items-center gap-3 px-5 py-2.5 transition-colors hover:bg-gray-800/20">
                     <span className="flex-1 truncate text-xs font-medium text-white">{object.name}</span>
                     <span className="shrink-0 text-xs font-mono text-gray-400">{object.subnet || object.fqdn || ''}</span>
-                    <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{object.type}</span>
+                    <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-500">{object.type}</span>
                     <button
                       onClick={async () => {
                         if (!await confirm({ message: `Delete address object "${object.name}"?`, confirmLabel: 'Delete', danger: true })) return;
@@ -1668,9 +1668,9 @@ export default function PoliciesPage() {
                 {serviceObjects.map(object => (
                   <div key={object.name} className="flex items-center gap-3 px-5 py-2.5 transition-colors hover:bg-gray-800/20">
                     <span className="flex-1 truncate text-xs font-medium text-white">{object.name}</span>
-                    {object.tcpPortrange && <span className="rounded px-1.5 py-0.5 text-[10px] font-mono text-blue-400" style={{ backgroundColor: `${SERVICE_COLORS.HTTP}14` }}>TCP {object.tcpPortrange}</span>}
-                    {object.udpPortrange && <span className="rounded px-1.5 py-0.5 text-[10px] font-mono text-amber-400" style={{ backgroundColor: `${SERVICE_COLORS.SSH}14` }}>UDP {object.udpPortrange}</span>}
-                    <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{object.protocol}</span>
+                    {object.tcpPortrange && <span className="rounded px-1.5 py-0.5 text-[11px] font-mono text-blue-400" style={{ backgroundColor: `${SERVICE_COLORS.HTTP}14` }}>TCP {object.tcpPortrange}</span>}
+                    {object.udpPortrange && <span className="rounded px-1.5 py-0.5 text-[11px] font-mono text-amber-400" style={{ backgroundColor: `${SERVICE_COLORS.SSH}14` }}>UDP {object.udpPortrange}</span>}
+                    <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-500">{object.protocol}</span>
                     <button
                       onClick={async () => {
                         if (!await confirm({ message: `Delete service object "${object.name}"?`, confirmLabel: 'Delete', danger: true })) return;
@@ -1797,10 +1797,10 @@ export default function PoliciesPage() {
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Policy Preview</p>
                 <p className="mt-2 text-sm text-slate-200">{policyPreviewText}</p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-cyan-200">
+                  <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-[11px] uppercase tracking-[0.14em] text-cyan-200">
                     {policyCountPreview} firewall rule{policyCountPreview !== 1 ? 's' : ''}
                   </span>
-                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-slate-300">
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] uppercase tracking-[0.14em] text-slate-300">
                     Direction: {bidirectional ? 'two-way' : 'one-way'}
                   </span>
                 </div>
