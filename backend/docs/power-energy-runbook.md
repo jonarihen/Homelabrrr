@@ -91,6 +91,7 @@ Under Admin → Energy Data → **Electricity contract & cost**:
 
 - Pick DK1 or DK2 explicitly. Choose either *spot plus charges* or a *fixed all-in* variable rate, and set the valid dates, retailer margin, required tariff components, VAT fraction and whether each tariff already includes VAT. Fixed monthly charges are entered separately, in øre.
 - Nothing is preloaded: no supplier, tax or network tariff. An empty required term makes the price *incomplete*, while an explicit `0.000000` is a known zero. A fixed all-in rate is never combined with spot.
+- `npm run import-datahub-tariffs -- --contract <id> --auto` fills network, system and tax tariffs using the charges linked to the selected meter. It is a dry run until `--apply`, and needs `--until` when a charge has no end date. It refuses a range that already holds tariffs for that component. Retailer margin and fixed monthly charges stay manual.
 - With an active spot contract, `DayAheadPrices` for that area is cached in 15-minute intervals. The scheduler checks hourly, with a six-hour gate. It honours `429`, keeps cached prices through outages and backfills up to three missing days per run. Prices are never invented for unpublished hours.
 - Two price bases exist. **Variable retail including VAT, excluding fixed fees** is the default for power policy. **Spot only, excluding retail additions** is labelled as such wherever it is used.
 

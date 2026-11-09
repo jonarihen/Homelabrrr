@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dkk, fundingProgress, shiftMonth, currentMonth, wattPath, historyPath } from './energyView.js';
+import { dkk, fundingProgress, shiftMonth, currentMonth, wattPath, historyPath, savedMeterId } from './energyView.js';
 
 test('money and progress preserve unknowns and avoid misleading percentages', () => {
   assert.equal(dkk(null), 'Unknown');
@@ -64,4 +64,13 @@ test('mode markers stay inside the chart range', () => {
   const markers = markerPositions([{ at: '2026-10-08T11:00:00Z' }, { at: '2026-10-07T00:00:00Z' }, { at: 'bad' }], '2026-10-08T10:00:00Z', '2026-10-08T12:00:00Z');
   assert.equal(markers.length, 1);
   assert.equal(markers[0].x, 300);
+});
+
+test('savedMeterId resolves the masked saved meter to a selectable option', () => {
+  const meters = [{ id: '571313100000001234', hasRelation: true }, { id: '571313100000005678', hasRelation: true }];
+  assert.equal(savedMeterId(meters, '••••5678'), '571313100000005678');
+  assert.equal(savedMeterId(meters, null), '', 'nothing saved yet');
+  assert.equal(savedMeterId(null, '••••5678'), '', 'meters not loaded');
+  assert.equal(savedMeterId([{ id: '571313100000005678', hasRelation: false }], '••••5678'), '', 'an unlinked meter is not offered');
+  assert.equal(savedMeterId([...meters, { id: '571313199999995678', hasRelation: true }], '••••5678'), '', 'an ambiguous mask is not guessed');
 });

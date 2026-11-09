@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import api from '../../api.js';
 import Field from '../../components/Field.jsx';
 import ElectricityPricingPanel from './ElectricityPricingPanel.jsx';
@@ -6,7 +6,7 @@ import ExtraLabLoadsPanel from './ExtraLabLoadsPanel.jsx';
 import ElectricityBillsPanel from './ElectricityBillsPanel.jsx';
 import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
-import { localTime } from '../../utils/energyView.js';
+import { localTime, savedMeterId } from '../../utils/energyView.js';
 
 const card = 'bg-gray-900 border border-gray-800 rounded-2xl p-5';
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all disabled:opacity-60';
@@ -34,6 +34,7 @@ export default function EnergyDataPage() {
   const [token, setToken] = useState('');
   const [meterId, setMeterId] = useState('');
   const [scope, setScope] = useState('household');
+  const scopeSeeded = useRef(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const [period, setPeriod] = useState({ from: '', to: '' });
@@ -43,9 +44,15 @@ export default function EnergyDataPage() {
   const refresh = async () => {
     const { data } = await api.get('/admin/energy-data/status');
     setStatus(data);
+    // Show the saved choice on load, but never replace an unsaved edit when a
+    // later action refreshes the status.
+    if (!scopeSeeded.current) { scopeSeeded.current = true; if (data.scope) setScope(data.scope); }
     if (data.configured) {
-      try { setMeters((await api.get('/admin/energy-data/meters')).data.meters); }
-      catch (err) { setMeters((old) => old ?? []); throw err; }
+      try {
+        const list = (await api.get('/admin/energy-data/meters')).data.meters;
+        setMeters(list);
+        setMeterId((current) => current || savedMeterId(list, data.selectedMeter));
+      } catch (err) { setMeters((old) => old ?? []); throw err; }
     }
   };
   useEffect(() => { refresh().catch(() => { setLoadFailed(true); say('Could not load energy data setup.', true); }); }, []);

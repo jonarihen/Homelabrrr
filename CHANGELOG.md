@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-09 — Saved meter stays selected, tariff import finds its own codes
+
+- The Energy data page now shows the saved meter and scope after a reload, instead of empty dropdowns that looked like the choice was lost. The selection itself was always saved.
+- `npm run import-datahub-tariffs -- --contract <id> --auto` finds the meter's grid company and tariff codes from its ElOverblik charges, so they no longer need looking up by hand. Rates still come from Datahub, it stays a dry run until `--apply`, and retailer margin stays manual.
+
 ## 2026-11-04 — Readable metadata text
 
 - Help text, field hints, empty-state messages, table metadata and the sidebar section labels were drawn in a dark grey that was hard to read on the panels. They now use the standard muted grey.

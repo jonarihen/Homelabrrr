@@ -110,3 +110,12 @@ export function markerPositions(markers, from, through) {
     .map((marker) => ({ ...marker, x: (Date.parse(marker.at) - start) / (end - start) * 600 }))
     .filter((marker) => marker.x >= 0 && marker.x <= 600);
 }
+
+// The API only exposes the saved meter masked ("••••1234"). Returns the linked
+// meter that mask identifies, or '' when none or more than one matches.
+export function savedMeterId(meters, maskedSelected) {
+  if (!maskedSelected) return '';
+  const tail = maskedSelected.slice(-4);
+  const matches = (meters || []).filter((meter) => meter.hasRelation && meter.id.slice(-4) === tail);
+  return matches.length === 1 ? matches[0].id : '';
+}
