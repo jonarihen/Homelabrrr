@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-09 — Ko-fi support
+
+- Members can support the lab through the owner's Ko-fi page without the owner needing a business account. Ko-fi posts each payment to the portal, which records donations and membership payments as support receipts in the existing ledger. Support never changes access, quotas or priority.
+- Payments in DKK are recorded straight away and count toward the budget once the owner has entered the actual processor fee. Payments in another currency (the owner's page charges EUR) wait in the review queue until the owner records the DKK amount actually received and the fee. Nothing is converted or estimated, and a missing fee is never treated as zero.
+- Payers are matched to members by a Ko-fi email the owner has verified; the portal stores only a keyed hash and a masked hint. A first payment from an unknown email waits for the owner to link it, which also remembers the email.
+- New Ko-fi section on the admin page now called **Support payments** (formerly PayPal): webhook URL to paste into Ko-fi, page URL, write-only verification token, enable/disable, delivery status, review queue (link, record in DKK, retry, dismiss), receipts (fee, void, reverse) and linked emails. `/support` links to the Ko-fi page when enabled and lists the member's own Ko-fi payments.
+- The only new public endpoint is `POST /api/payments/kofi/webhook`. It checks the verification token in constant time before storing anything, limits body size and rate, ignores replays, and never stores the token or shipping details. See `backend/docs/kofi-support.md` for setup, exposure and the live checklist. Ko-fi's webhook format could not be verified against Ko-fi's own documentation during development; confirm it with a small real payment.
+
 ## 2026-11-09 — Month estimate, interactive power history, real server names
 
 - **Estimated month total.** The Energy page now gives a best guess for the whole month's lab electricity cost, with a likely range, from the first day of readings. It shows what is measured, what is filled in for time without readings, and what is projected for the rest of the month. The calculated cost itself is unchanged.
