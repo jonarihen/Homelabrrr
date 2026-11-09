@@ -11,7 +11,8 @@ function summary(overrides = {}) {
     month: '2026-10', closed: false, snapshot: { consistent: true, attempts: 1 },
     telemetry: { status: 'measured', watts: 250, observedAt: '2026-10-08T12:00:00Z', kwh: 12.5, energyStatus: 'measured', coveragePercent: 100, monitoredHosts: 1, configuredHosts: 1 },
     price: { status: 'valid', orePerKwh: 245, basis: 'variable_retail_including_vat', validUntil: '2026-10-08T13:00:00Z' },
-    cost: { status: 'calculated', actualOre: '25678', forecastOre: '40000', source: 'live_calculation', observedThrough: '2026-10-08T12:00:00Z',
+    cost: { status: 'calculated', actualOre: '25678', forecastOre: null, source: 'live_calculation', observedThrough: '2026-10-08T12:00:00Z',
+      estimate: { status: 'estimated', totalOre: '40000', lowOre: '36000', highOre: '44000', measuredOre: '25678', unmeasuredOre: '1322', remainingOre: '13000', fixedFeeOre: '0', basisDays: 7.5, estimatedPriceShare: 0.9 },
       components: [{ key: 'server_variable', label: 'Measured server energy (purchase and variable charges)', ore: '25678', status: 'calculated' },
         { key: 'extra_variable', label: 'Estimated extra loads', ore: '0', status: 'estimated' },
         { key: 'fixed_fees', label: 'Allocated fixed fees', ore: '0', status: 'pending_month_end' }] },
@@ -91,7 +92,7 @@ test('missing price and stale hardware display unknowns, coverage gaps and no in
   await expect(page.getByText('Stale', { exact: true })).toBeVisible();
   await expect(page.getByText('No measured trend yet.')).toBeVisible();
   await expect(page.getByText('No integrated energy trend yet.')).toBeVisible();
-  await expect(page.getByText('Month-end forecast unavailable')).toBeVisible();
+  await expect(page.getByText('Month estimate unavailable')).toBeVisible();
 });
 
 test('mode reasons are explained in words and unpublished price periods are unknown', async ({ page }) => {

@@ -5,9 +5,10 @@ import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import EnergyBudgetAdminPanel from './admin/EnergyBudgetAdminPanel.jsx';
+import TimeSeriesChart from '../components/energy/TimeSeriesChart.jsx';
 import {
-  basisLabel, componentStatusLabel, costStatusLabel, currentMonth, decisionText, dkk, fundingStatusLabel, historyPath,
-  localTime, markerPositions, modeLabel, monthLabel, progressView, quantity, reasonText, shiftMonth,
+  basisLabel, componentStatusLabel, costStatusLabel, currentMonth, decisionText, dkk, fundingStatusLabel,
+  localTime, markerPositions, modeLabel, monthEstimateView, monthLabel, progressView, quantity, reasonText, shiftMonth,
 } from '../utils/energyView.js';
 
 const panel = 'border border-gray-800 bg-gray-900/90 p-5';
@@ -28,9 +29,9 @@ function Tile({ label, value, detail, status }) {
   </div>;
 }
 function Row({ label, value, note }) {
-  return <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 border-t border-gray-800 py-2.5 text-sm">
-    <span className="text-gray-400">{label}{note && <span className="block text-xs text-gray-500">{note}</span>}</span>
-    <span className="font-mono tabular-nums text-gray-100">{value}</span>
+  return <div className="flex justify-between gap-x-4 border-t border-gray-800 py-2.5 text-sm">
+    <span className="min-w-0 text-gray-400">{label}{note && <span className="block text-xs text-gray-500">{note}</span>}</span>
+    <span className="shrink-0 text-right font-mono tabular-nums text-gray-100">{value}</span>
   </div>;
 }
 function Section({ number, title, children, id, busy }) {
@@ -59,7 +60,7 @@ async function downloadCsv(path, params, filename) {
 function HostCard({ host, preview, v }) {
   const next = preview?.nextKnownChangeAt;
   return <div className={panel}>
-    <div className="flex justify-between gap-2"><h3 className="font-mono text-xs uppercase tracking-[0.12em] text-orange-300">{host.alias}</h3><span className="font-mono text-xs text-gray-400">{host.stale ? 'Stale' : host.monitoring}</span></div>
+    <div className="flex justify-between gap-2"><h3 className="font-mono text-xs uppercase tracking-[0.12em] text-orange-300">{host.name || host.alias}</h3><span className="font-mono text-xs text-gray-400">{host.stale ? 'Stale' : host.monitoring}</span></div>
     <p className="mt-3 text-lg">{host.observedMode ? `Observed ${modeLabel(host.observedMode)}` : 'Mode unknown'}</p>
     <p className="mt-1 text-sm text-gray-400">{host.watts == null ? 'Power unknown' : `${quantity(host.watts, 0)} W`} · {host.ageSeconds == null ? 'No observation' : `${host.ageSeconds}s old`}</p>
     {host.reason ? <dl className="mt-3 space-y-1 text-xs text-gray-400">
@@ -73,7 +74,7 @@ function HostCard({ host, preview, v }) {
 
 function PreviewTable({ preview }) {
   if (!preview?.segments?.length) return null;
-  return <details className="text-sm"><summary className={`cursor-pointer text-orange-300 ${focus}`}>{preview.alias}: next 24 hours</summary>
+  return <details className="text-sm"><summary className={`cursor-pointer text-orange-300 ${focus}`}>{preview.name || preview.alias}: next 24 hours</summary>
     <div className="mt-2 max-h-72 overflow-auto"><table className="w-full text-left text-xs"><thead><tr className="text-gray-400"><th className="py-2 font-normal">From</th><th className="font-normal">Until</th><th className="font-normal">Weekly baseline</th><th className="font-normal">Selected</th><th className="font-normal">Reason</th><th className="font-normal">kr./kWh</th></tr></thead>
       <tbody>{preview.segments.map((segment) => <tr key={segment.startAt} className="border-t border-gray-800"><td className="py-2">{time(segment.startAt)}</td><td>{time(segment.endAt)}</td><td>{modeLabel(segment.baseMode)}</td>
         <td>{segment.unknown ? <span className="text-amber-300">Unknown (price not published)</span> : modeLabel(segment.selectedMode)}</td><td>{segment.unknown ? 'depends on unpublished price' : reasonText(segment.reason)}</td>
@@ -144,10 +145,9 @@ export default function EnergyBudgetPage() {
   const funding = S?.funding;
   const price = S?.price;
   const household = S?.household;
+  const estimate = monthEstimateView(cost?.estimate);
   const points = history?.points || [];
-  const path = historyPath(points, 'watts', history?.from, history?.through, history?.energy?.binSeconds);
   const energyPoints = history?.energy?.points || [];
-  const energyPath = historyPath(energyPoints, 'kwh', history?.from, history?.through, history?.energy?.binSeconds);
   const markers = markerPositions(history?.modeChanges, history?.from, history?.through);
   const progress = progressView(funding?.progress);
   const previewByAlias = new Map((preview?.hosts || []).map((item) => [item.alias, item]));
@@ -170,7 +170,7 @@ export default function EnergyBudgetPage() {
       <Tile label="Live server input" value={v('summary', telemetry?.watts == null ? 'Unknown' : `${quantity(telemetry.watts, 0)} W`, tileSkel)} status={telemetry?.status} detail={v('summary', telemetry?.observedAt ? `Oldest included reading: ${localTime(telemetry.observedAt)}` : 'No fresh fleet reading', detailSkel)} />
       <Tile label="Lab energy this month" value={v('summary', telemetry?.kwh == null ? 'Unknown' : `${quantity(telemetry.kwh, 2)} kWh`, tileSkel)} status={telemetry?.energyStatus} detail={v('summary', telemetry?.coveragePercent == null ? 'Coverage unknown' : `${quantity(telemetry.coveragePercent, 0)}% of server time monitored${telemetry.retiredHostsInPeriod ? ` · includes ${telemetry.retiredHostsInPeriod} retired server(s)` : ''}`, detailSkel)} />
       <Tile label="Electricity unit price" value={v('summary', price?.orePerKwh == null ? 'Unknown' : `${quantity(price.orePerKwh / 100, 3)} kr./kWh`, tileSkel)} status={price?.status} detail={v('summary', price?.basis ? `${basisLabel(price.basis)} · ${price.validUntil ? `valid until ${localTime(price.validUntil)}` : 'validity unavailable'}` : 'Price basis not configured', detailSkel)} />
-      <Tile label="Lab electricity cost" value={v('summary', dkk(cost?.actualOre), tileSkel)} status={cost?.status && costStatusLabel(cost.status)} detail={v('summary', cost?.statementRevision ? `Finalized statement, revision ${cost.statementRevision}` : cost?.forecastOre == null ? 'Month-end forecast unavailable' : `Forecast (estimate): ${dkk(cost.forecastOre)}`, detailSkel)} />
+      <Tile label="Lab electricity cost" value={v('summary', dkk(cost?.actualOre), tileSkel)} status={cost?.status && costStatusLabel(cost.status)} detail={v('summary', cost?.statementRevision ? `Finalized statement, revision ${cost.statementRevision}` : estimate.total == null ? 'Month estimate unavailable' : `Estimated month total: ${estimate.total}`, detailSkel)} />
     </div><p className="text-xs text-gray-500">Watts are instantaneous input power. kWh is energy integrated over monitored time. A unit price (kr./kWh) is not the servers’ running cost per hour. Missing coverage or price components make the cost partial, never zero.</p></Section>
 
     <Section number="02" id="energy-cost" title="Cost breakdown" busy={pending.summary}><div className="grid gap-4 lg:grid-cols-2">
@@ -178,7 +178,7 @@ export default function EnergyBudgetPage() {
         <p className={`${eyebrow} pb-2`}>Calculated lab cost · {v('summary', costStatusLabel(cost?.status), 'h-3 w-20')}</p>
         {cost?.components?.length ? cost.components.map((component) => <Row key={component.key} label={component.label} note={componentStatusLabel(component.status)} value={dkk(component.ore)} />) : <p className="border-t border-gray-800 pt-3 text-sm text-gray-400">{ready('summary') ? 'No cost components are available for this month.' : v('summary', null, 'h-4 w-48')}</p>}
         <Row label="Calculated lab cost" note={v('summary', cost?.source === 'finalized_statement' ? `Immutable finalized statement, revision ${cost.statementRevision}` : cost?.observedThrough ? `Live calculation through ${localTime(cost.observedThrough)}` : 'Not calculated', detailSkel)} value={v('summary', dkk(cost?.actualOre), 'h-4 w-20')} />
-        <Row label="Month-end forecast" note="Estimate from recent measured days and published prices; not a bill." value={v('summary', cost?.forecastOre == null ? cost?.forecastStatus ? cost.forecastStatus.replaceAll('_', ' ') : 'Not applicable' : dkk(cost.forecastOre), 'h-4 w-20')} />
+        <Row label="Estimated month total" note={v('summary', estimate.note, detailSkel)} value={v('summary', estimate.value, 'h-4 w-20')} />
       </div>
       <div className={panel}>
         <p className={`${eyebrow} pb-2`}>Whole-household electricity</p>
@@ -192,11 +192,15 @@ export default function EnergyBudgetPage() {
     <Section number="03" id="energy-history" title="Power history" busy={pending.history}><div className={panel}>
       <div className="flex flex-wrap items-center justify-between gap-3"><p className={eyebrow}>Measured input / watts</p><div className="flex gap-2" role="group" aria-label="History range">{['24h', '7d'].map((value) => <button key={value} onClick={() => selectRange(value)} aria-pressed={range === value} className={btnToggle(range === value)}>{value}</button>)}</div></div>
       {!ready('history') ? <div className="mt-4">{blockFallback('history', 'h-32 w-full')}</div> : <>
-      {path ? <svg className="mt-4 h-32 w-full" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label={`Server power over the last ${range}${markers.length ? `, with ${markers.length} verified mode changes` : ''}`}>{markers.map((marker) => <line key={`${marker.at}-${marker.mode}`} x1={marker.x} x2={marker.x} y1="0" y2="120" stroke="#6b7280" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />)}<path d={path} fill="none" stroke="#fb923c" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg> : <p className="mt-4 text-sm text-gray-400">No measured trend yet.</p>}
+      <TimeSeriesChart points={points} field="watts" from={history?.from} through={history?.through} binSeconds={history?.energy?.binSeconds} color="#fb923c" empty="No measured trend yet."
+        label={`Server power over the last ${range}${markers.length ? `, with ${markers.length} verified mode changes` : ''}`} formatValue={(watts) => `${quantity(watts, 0)} W`}
+        detail={(point) => `${point.measuredHosts} server${point.measuredHosts === 1 ? '' : 's'} measured, average for the interval`} markers={markers} markerText={(marker) => `${modeLabel(marker.mode)} (${reasonText(marker.reason)})`} />
       {points.length > 0 && <details className="mt-3 text-sm"><summary className={`cursor-pointer text-orange-300 ${focus}`}>Power readings table</summary><div className="mt-2 max-h-64 overflow-auto"><table className="w-full text-left"><thead><tr><th className="py-2 font-normal text-gray-400">Time</th><th className="py-2 font-normal text-gray-400">Watts</th><th className="py-2 font-normal text-gray-400">Servers measured</th></tr></thead><tbody>{points.map((point) => <tr key={point.at} className="border-t border-gray-800"><td className="py-2">{localTime(point.at)}</td><td>{quantity(point.watts, 0)}</td><td>{point.measuredHosts}</td></tr>)}</tbody></table></div></details>}
       {markers.length > 0 && <details className="mt-3 text-sm"><summary className={`cursor-pointer text-orange-300 ${focus}`}>Verified mode changes ({markers.length})</summary><ul className="mt-2 space-y-1 text-xs text-gray-400">{markers.map((marker) => <li key={`${marker.at}-${marker.mode}`}>{localTime(marker.at)}: {modeLabel(marker.mode)} ({reasonText(marker.reason)})</li>)}</ul><p className="mt-2 text-xs text-gray-500">Dashed lines mark verified changes. Power before and after a change is an observation, not proof of savings.</p></details>}
       <p className={`mt-6 border-t border-gray-800 pt-5 ${eyebrow}`}>Integrated server energy / kWh per {range === '24h' ? 'hour' : 'two hours'}</p>
-      {energyPath ? <svg className="mt-3 h-32 w-full" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label={`Integrated server energy over the last ${range}`}><path d={energyPath} fill="none" stroke="#60a5fa" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg> : <p className="mt-3 text-sm text-gray-400">No integrated energy trend yet.</p>}
+      <TimeSeriesChart kind="bar" points={energyPoints} field="kwh" from={history?.from} through={history?.through} binSeconds={history?.energy?.binSeconds} color="#60a5fa" empty="No integrated energy trend yet."
+        label={`Integrated server energy over the last ${range}`} formatValue={(kwh) => `${new Intl.NumberFormat('da-DK', { minimumFractionDigits: 3, maximumFractionDigits: 3 }).format(kwh)} kWh`} faded={(point) => point.expectedSeconds > 0 && point.coveredSeconds / point.expectedSeconds < 0.8}
+        detail={(point) => point.expectedSeconds > 0 ? `${quantity(point.coveredSeconds / point.expectedSeconds * 100, 0)}% of the interval measured` : 'Coverage unknown'} />
       {energyPoints.length > 0 && <details className="mt-3 text-sm"><summary className={`cursor-pointer text-orange-300 ${focus}`}>Energy intervals table</summary><div className="mt-2 max-h-64 overflow-auto"><table className="w-full text-left"><thead><tr><th className="py-2 font-normal text-gray-400">Time</th><th className="py-2 font-normal text-gray-400">Server kWh</th><th className="py-2 font-normal text-gray-400">Coverage</th></tr></thead><tbody>{energyPoints.map((point) => <tr key={point.at} className="border-t border-gray-800"><td className="py-2">{localTime(point.at)}</td><td>{quantity(point.kwh, 3)}</td><td>{point.expectedSeconds > 0 ? `${quantity(point.coveredSeconds / point.expectedSeconds * 100, 0)}%` : 'Unknown'}</td></tr>)}</tbody></table></div></details>}
       </>}
     </div></Section>

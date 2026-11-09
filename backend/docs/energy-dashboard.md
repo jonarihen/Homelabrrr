@@ -7,14 +7,14 @@ Member reads:
 - `/summary?month=YYYY-MM` — one Europe/Copenhagen calendar month, bounded to the current month and the 119 before it. Sections:
   - `telemetry`: fresh fleet watts with the oldest included observation, integrated lab kWh and monitored coverage. Past months include machines decommissioned since (their energy stays in the record); a machine registered after the month does not lower its coverage.
   - `price`: current kr./kWh (`orePerKwh`), `basis`, `validFrom`/`validUntil`, `knownHorizon`. Missing price is `incomplete`, never zero.
-  - `cost`: `finalized`/`finalized_partial` (from the immutable statement, with `statementId`/`statementRevision`), `calculated` or `partial` (live calculation), with per-component status (measured server energy, estimated extra loads, allocated fixed fees — fees are added only once a month closes) and a separately labeled `forecastOre`.
+  - `cost`: `finalized`/`finalized_partial` (from the immutable statement, with `statementId`/`statementRevision`), `calculated` or `partial` (live calculation), with per-component status (measured server energy, estimated extra loads, allocated fixed fees — fees are added only once a month closes), a separately labeled `forecastOre`, and `estimate` (open months only; see *Month estimate* below).
   - `funding`: gross, actual fee debits/credits, refunds/reversals and known net received in the month; `openingCreditOre` (credit carried in) kept apart from new receipts; applied credit, owner-funded remainder, owner adjustment after refunds and carry-forward (only for a current, known allocation); unresolved amounts are `null`, not zero; `held` lists open pending/disputed PayPal states (never subtracted). `progress` gives the funding percentage against the finalized lab cost the allocation used (`basis: finalized_lab_cost`), or for an open month an estimate against the cost calculated so far (`basis: current_estimate`, using the same `allocateMonth` rule); zero, negative or unknown cost yields `percent: null`.
   - `household`: `{ shared: false }` unless the owner explicitly shares the monthly household total (see below).
   - `snapshot`: each section is read independently (one failing source degrades only its own section to `status: error`). The summary is built between two identical reads of revision tokens (ledger head, allocation, statement, energy intervals, contracts, tariffs, spot prices, bills, sharing setting) and rebuilt up to three times if any moved; `snapshot.consistent` says whether that succeeded. In addition a known allocation is shown only if it was computed against the very statement revision being displayed; otherwise funding reports `recalculation_pending` and withholds applied/remainder figures. (The individual services use their own connections, so this is optimistic revision checking, not one database transaction.)
 - `/summary.csv?month=` — the same member DTO flattened to `field,value` rows (formula-safe via `utils/csv.ts`).
 - `/history?range=24h|7d` — at most 100 server-side watt and kWh aggregates each (including machines decommissioned since), plus up to 100 verified mode-change markers (mode and reason only).
 - `/months?count=1..24` — monthly history from finalized statements, latest allocations and integrated kWh only; open/unfinalized months are labeled, nothing is recalculated.
-- `/hosts` — stable `Server NN` aliases (ranked over all connections ever created, so retiring one machine does not rename another), watts, observed mode, age/staleness, and the resolver's baseline, selected mode and reason (same input as the worker).
+- `/hosts` — stable `Server NN` aliases (ranked over all connections ever created, so retiring one machine does not rename another; administrators additionally get `name`, the Proxmox node name, on `/hosts` and `/preview`), watts, observed mode, age/staleness, and the resolver's baseline, selected mode and reason (same input as the worker).
 - `/preview` — the next 24 hours of combined schedule/price decisions per host from the shared resolver and price boundaries; periods beyond the published price horizon have `selectedMode: null` with the baseline still shown, plus `nextKnownChangeAt` and `priceKnownUntil`.
 
 Administrator routes (`requireAdmin`):
@@ -24,6 +24,17 @@ Administrator routes (`requireAdmin`):
 - `GET /admin/export.csv?from=YYYY-MM&to=YYYY-MM` — recent reauthentication required, audited. Every cost-statement and allocation revision in the range with selected calculation fields only (never the raw statement JSON, which embeds household comparison/bill details). Allocations are live-only, so sandbox money never appears. The PayPal ledger has its own export at `/api/payments/admin/export.csv`.
 
 The member UI lives at `/energy`; administrators additionally see the setup/coverage panel, the sharing toggle and the exports there.
+
+## Month estimate
+
+`cost.estimate` is a best guess for the whole open month (`monthCostEstimate.ts`, method `hourly_profile_v1`). It never replaces `actualOre`, is absent for closed months, and is never stored in a statement.
+
+- **Load.** Per monitored server, 15-minute readings from the last 28 days are averaged per local hour and weekday/weekend, with a 7-day half-life. A cell with few readings is pulled toward that hour's mean across all days, and the hour toward the overall mean. A server needs 24 hours of readings; otherwise `status` is `insufficient_data`.
+- **Unmeasured time.** Every second of the month without a reading gets the profile's energy: before monitoring began, outages, and the rest of the month. A server is never assumed to have run before its PVE host or iLO connection existed.
+- **Price.** Published prices are used as they are. For a spot contract, quarter-hours without a published price get a spot estimated with the same hourly profile from recent day-ahead prices, resolved through the real contract (margin, tariffs, VAT). A quarter-hour that still has no price makes `status` `price_unavailable`; nothing is priced at zero.
+- **Range.** `lowOre`/`highOre` is an 80% interval from the day-to-day spread of each server's load and of spot, with days treated as half correlated. It never goes below what is already measured.
+- **Fields.** `totalOre` = `measuredOre` + `unmeasuredOre` (past, estimated) + `remainingOre` (future, estimated) + `fixedFeeOre` when the allocation is known. `basisDays` is the shortest server history used, and `estimatedPriceShare` the share of estimated energy priced with an estimated spot.
+- The strict `forecast` (explicit scenario price, 14 days of evidence) is unchanged and remains the administrator's what-if tool.
 
 ## Contracts, finalized months and funding carry-forward
 
