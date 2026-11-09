@@ -1,10 +1,12 @@
 import { and, eq, gte, lte, lt, gt, desc, sql, inArray } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { db, type DbOrTx } from '../db/client.ts';
-import { electricityContracts, electricityTariffs, electricitySpotPrices, electricityBills, electricityCostStatements, electricityExtraLoads, eloverblikConnections, eloverblikIntervals, hardwareConnections, hardwareEnergyIntervals, hardwareEnergyDays } from '../db/schema/index.ts';
+import { electricityContracts, electricityTariffs, electricitySpotPrices, electricityBills, electricityCostStatements, electricityExtraLoads, eloverblikConnections, eloverblikIntervals, hardwareConnections, hardwareEnergyIntervals, hardwareEnergyDays, pveHosts } from '../db/schema/index.ts';
 import { calculateLabCostForContracts, loadPricingInputs, resolvePriceSegments } from './electricityPricing.ts';
 import { allocateFixedFee, compareHouseholdEnergy, forecastMonthlyCost, includeMonthlyFixedFee, startOfLocalDateUtc, type DailyEvidence } from './energyAccounting.ts';
 import { extraLoadInterval, forecastExtraLoadCost } from './extraLabLoads.ts';
+import { ESTIMATE_CONFIDENCE, ESTIMATE_METHOD, estimateMissingSpot, estimateRange, estimateServerMonth } from './monthCostEstimate.ts';
+import { log } from '../utils/logger.ts';
 
 const SCALE = 1_000_000_000n;
 function nano(value: string): bigint {
@@ -65,6 +67,55 @@ async function sourceFingerprint(database: DbOrTx, contracts: ContractRow[], sta
   // Single-contract months keep the historical fingerprint shape.
   const contract = contractRows.length === 1 ? contractRows[0] : contractRows;
   return createHash('sha256').update(JSON.stringify({ contract, tariffs, spots, energy, extraLoads, monitored, meter, meterIntervals, bills })).digest('hex');
+}
+
+type ExtraLoadRow = typeof electricityExtraLoads.$inferSelect;
+const ESTIMATE_HISTORY_MS = 28 * 86400_000;
+const NO_ESTIMATE = { totalOre: null, lowOre: null, highOre: null, unmeasuredOre: null, remainingOre: null, estimatedKwh: null, basisDays: null, estimatedPriceShare: null };
+
+// Best-guess total for an open month (method in monthCostEstimate.ts): the
+// measured cost so far, plus profile-based energy for unmeasured time and the
+// rest of the month, priced with published prices where they exist and an
+// estimated spot under the real tariffs where they do not. Read-only.
+async function estimateOpenMonth(chain: ContractRow[], start: Date, end: Date, asOf: Date, measuredOre: bigint, extraLoads: ExtraLoadRow[], fee: { allocatedOre: bigint; status: 'known' | 'incomplete' }) {
+  const historyStart = new Date(Math.min(start.getTime(), asOf.getTime() - ESTIMATE_HISTORY_MS));
+  const hosts = await db.select({ id: hardwareConnections.id, created_at: hardwareConnections.created_at, host_created_at: pveHosts.created_at })
+    .from(hardwareConnections).leftJoin(pveHosts, eq(pveHosts.id, hardwareConnections.pve_host_id))
+    .where(and(eq(hardwareConnections.lifecycle_state, 'active'), eq(hardwareConnections.collection_enabled, true)));
+  const buckets = (await db.select().from(hardwareEnergyIntervals).where(and(gt(hardwareEnergyIntervals.end_utc, historyStart), lt(hardwareEnergyIntervals.start_utc, asOf))))
+    .map((row) => ({ hardwareId: row.hardware_id, startUtc: row.start_utc, endUtc: row.end_utc, kwh: row.kwh, coveredSeconds: row.covered_seconds, expectedSeconds: row.expected_seconds }));
+  const inputs = await loadPricingInputs(db, chain, start, end);
+  const published = new Set(resolvePriceSegments(inputs, start, end).filter((segment) => segment.status === 'valid').map((segment) => segment.startUtc.getTime()));
+  const guessed: typeof inputs.spots = [];
+  let spotSpreadDkkPerKwh = 0; let spotHistoryDays = 0;
+  for (const area of new Set(chain.filter((row) => row.kind === 'spot').map((row) => row.area))) {
+    const history = await db.select().from(electricitySpotPrices).where(and(eq(electricitySpotPrices.area, area), gt(electricitySpotPrices.end_utc, historyStart)))
+      .orderBy(electricitySpotPrices.start_utc).limit(20_000);
+    const guess = estimateMissingSpot(history.map((row) => ({ startUtc: row.start_utc, endUtc: row.end_utc, dkkPerKwh: row.dkk_per_kwh })), asOf, start, end);
+    if (!guess) continue;
+    spotSpreadDkkPerKwh = Math.max(spotSpreadDkkPerKwh, guess.spreadDkkPerKwh); spotHistoryDays = Math.max(spotHistoryDays, guess.historyDays);
+    for (const row of guess.rows) guessed.push({ id: 0, area, start_utc: row.startUtc, end_utc: row.endUtc, dkk_per_kwh: row.dkkPerKwh, source_revision: `estimate:${ESTIMATE_METHOD}`, fetched_at: asOf });
+  }
+  const spots = [...inputs.spots, ...guessed].sort((a, b) => a.area.localeCompare(b.area) || a.start_utc.getTime() - b.start_utc.getTime());
+  const prices = resolvePriceSegments({ ...inputs, spots }, start, end).filter((segment) => segment.status === 'valid' && segment.dkkPerKwh)
+    .map((segment) => ({ startUtc: segment.startUtc, endUtc: segment.endUtc, dkkPerKwh: segment.dkkPerKwh!, status: 'valid' as const, estimated: !published.has(segment.startUtc.getTime()) }));
+  const servers = estimateServerMonth({ now: asOf, monthStart: start, monthEnd: end, buckets, prices, spotSpreadDkkPerKwh, spotHistoryDays,
+    hosts: hosts.map((host) => ({ hardwareId: host.id, from: new Date(Math.max(start.getTime(), Math.min(host.created_at.getTime(), host.host_created_at?.getTime() ?? Infinity))) })),
+    spotToRetail: 1 + Math.max(0, ...chain.map((row) => Number(row.vat_rate ?? 0))) });
+  // Extra loads are fixed watts: only the hours without a published price need the estimate.
+  const extraPast = forecastExtraLoadCost(extraLoads, start, asOf, prices.filter((price) => price.estimated), null);
+  const extraFuture = forecastExtraLoadCost(extraLoads, asOf, end, prices, null);
+  const status = servers.status === 'estimated' && !extraFuture.complete ? 'price_unavailable' as const : servers.status;
+  const base = { status, method: ESTIMATE_METHOD, confidence: ESTIMATE_CONFIDENCE, measuredOre: measuredOre.toString(), fixedFeeOre: fee.status === 'known' ? fee.allocatedOre.toString() : null };
+  if (status !== 'estimated') return { ...base, ...NO_ESTIMATE };
+  const unmeasuredOre = BigInt(Math.round(servers.unmeasuredOre)) + extraPast.costOre;
+  const remainingOre = BigInt(Math.round(servers.remainingOre)) + extraFuture.costOre;
+  const knownOre = measuredOre + (fee.status === 'known' ? fee.allocatedOre : 0n);
+  const totalOre = knownOre + unmeasuredOre + remainingOre;
+  const range = estimateRange(totalOre, knownOre, servers.sigmaOre);
+  return { ...base, totalOre: totalOre.toString(), lowOre: range.lowOre.toString(), highOre: range.highOre.toString(), unmeasuredOre: unmeasuredOre.toString(), remainingOre: remainingOre.toString(),
+    estimatedKwh: Math.round(servers.estimatedKwh * 1000) / 1000, basisDays: Math.round(servers.basisDays * 10) / 10,
+    estimatedPriceShare: servers.estimatedKwh > 0 ? Math.round(servers.estimatedSpotKwh / servers.estimatedKwh * 1000) / 1000 : 0 };
 }
 
 export async function previewMonthlyElectricity(month: string, contractRef: string, asOf = new Date(), scenarioDkkPerKwh: string | null = null) {
@@ -142,6 +193,11 @@ export async function previewMonthlyElectricity(month: string, contractRef: stri
     forecastTotalOre: null, futureCostOre: null } : null;
   const forecast = withExtra ? includeMonthlyFixedFee(withExtra, fee.allocatedOre, fee.status) : null;
   const closed = asOf >= end;
+  // The guess must never take the exact calculation down with it.
+  const estimate = closed ? null : await estimateOpenMonth(chain, start, end, asOf, variableCostOre, extraLoads, fee).catch((err) => {
+    log('warn', 'month_estimate_failed', { month, error: err });
+    return { status: 'unavailable' as const, method: ESTIMATE_METHOD, confidence: ESTIMATE_CONFIDENCE, measuredOre: variableCostOre.toString(), fixedFeeOre: null, ...NO_ESTIMATE };
+  });
   const fingerprint = await sourceFingerprint(db, chain, start, elapsedEnd);
   return { month, contractRef, statementContractRef: String(chain[0].id), contractRefs: chain.map((row) => String(row.id)), periodStart: start.toISOString(), periodEnd: end.toISOString(), observedThrough: elapsedEnd.toISOString(), closed,
     methodVersion: chain.length > 1 ? 'electricity_month_v3_contract_succession' : 'electricity_month_v2_extra_loads', contractRevision: contract.revision,
@@ -163,6 +219,8 @@ export async function previewMonthlyElectricity(month: string, contractRef: stri
     forecast: forecast && { ...forecast, actualCostOre: forecast.actualCostOre.toString(), forecastTotalOre: forecast.forecastTotalOre?.toString() || null,
       futureCostOre: forecast.futureCostOre?.toString() || null, estimatedExtraFutureOre: extraFuture?.complete ? extraFuture.costOre.toString() : null,
       estimatedExtraLoadCount: extraFuture?.loadCount || 0 },
+    // Open months only, so a finalized statement never stores a guess.
+    ...(estimate ? { estimate } : {}),
   };
 }
 

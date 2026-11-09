@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-09 — Month estimate, interactive power history, real server names
+
+- **Estimated month total.** The Energy page now gives a best guess for the whole month's lab electricity cost, with a likely range, from the first day of readings. It shows what is measured, what is filled in for time without readings, and what is projected for the rest of the month. The calculated cost itself is unchanged.
+- The guess learns each server's typical draw per hour of day, weekdays and weekends apart, with recent days counting more. Hours without a published spot price use the real tariffs plus a spot price estimated the same way from recent days. It replaces the "Month-end forecast" row, which only worked once all remaining prices were published.
+- **Power history** charts are interactive: move the pointer, tap, or use the arrow keys to read the exact value, interval, coverage and any mode change. They now have value and time axes, energy per interval is drawn as bars, and intervals with partial coverage are dimmed.
+- Administrators see the real node name on server cards and previews. Members still see only "Server 01", "Server 02".
+
 ## 2026-11-09 — Saved meter stays selected, tariff import finds its own codes
 
 - The Energy data page now shows the saved meter and scope after a reload, instead of empty dropdowns that looked like the choice was lost. The selection itself was always saved.

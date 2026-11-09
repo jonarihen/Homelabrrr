@@ -119,3 +119,19 @@ export function savedMeterId(meters, maskedSelected) {
   const matches = (meters || []).filter((meter) => meter.hasRelation && meter.id.slice(-4) === tail);
   return matches.length === 1 ? matches[0].id : '';
 }
+
+// Member view of `cost.estimate`: the best-guess month total, its likely
+// range and what it is built from. `total` is null when no guess exists.
+export function monthEstimateView(estimate) {
+  if (!estimate) return { total: null, value: 'Not applicable', note: 'Shown while the month is still open.' };
+  if (estimate.status === 'insufficient_data') return { total: null, value: 'Not yet', note: 'Needs 24 hours of readings from every monitored server.' };
+  if (estimate.status !== 'estimated' || estimate.totalOre == null) return { total: null, value: 'Unavailable', note: estimate.status === 'price_unavailable' ? 'A price is missing for part of the month.' : 'The estimate could not be calculated.' };
+  const parts = [`measured ${dkk(estimate.measuredOre)}`, `unmeasured time ${dkk(estimate.unmeasuredOre)}`, `rest of month ${dkk(estimate.remainingOre)}`];
+  if (estimate.fixedFeeOre != null && estimate.fixedFeeOre !== '0') parts.push(`fixed fees ${dkk(estimate.fixedFeeOre)}`);
+  const guessed = Math.round((estimate.estimatedPriceShare || 0) * 100);
+  // Currency strings already end in "kr.", so a sentence never adds a second full stop.
+  const sentence = (text) => (text.endsWith('.') ? text : `${text}.`);
+  return { total: dkk(estimate.totalOre), value: `≈ ${dkk(estimate.totalOre)}`,
+    note: [sentence(`Likely ${dkk(estimate.lowOre)} to ${dkk(estimate.highOre)}`), sentence(`Made up of ${parts.join(', ')}`),
+      sentence(`Based on ${quantity(estimate.basisDays, 1)} days of readings${guessed ? `; ${guessed}% of the estimated energy uses an estimated spot price` : ''}`), 'A guess, not a bill.'].join(' ') };
+}

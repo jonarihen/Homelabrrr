@@ -42,11 +42,15 @@ router.get('/months', async (req, res) => {
   try { count = parseMonthCount(req.query.count); } catch { return res.status(400).json({ error: 'Invalid count' }); }
   try { res.json(await energyMonths(count)); } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
 });
-router.get('/hosts', async (_req, res) => {
-  try { res.json(await energyHosts()); } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
+// Members see generated aliases only; an administrator's response also
+// carries the real node name of each host.
+router.get('/hosts', async (req, res) => {
+  try { res.json(await energyHosts(new Date(), { names: Boolean(req.session?.isAdmin) })); }
+  catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
 });
-router.get('/preview', async (_req, res) => {
-  try { res.json(await energyPreview()); } catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
+router.get('/preview', async (req, res) => {
+  try { res.json(await energyPreview(new Date(), { names: Boolean(req.session?.isAdmin) })); }
+  catch (err) { res.status(500).json({ error: sanitizeError(err) }); }
 });
 
 // Administrator view. Reads stored state only; the one setting it changes is

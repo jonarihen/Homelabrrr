@@ -23,7 +23,7 @@ before(async () => {
   app = express();
   app.use((req, _res, next) => {
     const kind = req.header('x-test-session');
-    if (kind) req.session = { userId: memberId, isAdmin: false } as never;
+    if (kind) req.session = { userId: memberId, isAdmin: kind === 'admin' } as never;
     if (kind === 'token') req.apiToken = { id: 1 } as never;
     next();
   });
@@ -44,5 +44,22 @@ test('member responses are no-store aggregates without management identifiers', 
     assert.equal(response.status, 200, JSON.stringify(response.body));
     assert.match(response.headers['cache-control'], /private, no-store/);
     assert.doesNotMatch(JSON.stringify(response.body), /pve-private|ilo-private|private-node|private-operator|private-token|private-ilo-secret|payer_email|contributor_id|selected_meter_id/i);
+  }
+});
+
+test('only an administrator sees the real node name next to the alias', async () => {
+  for (const path of ['/hosts', '/preview']) {
+    const admin = await request(app).get(path).set('x-test-session', 'admin');
+    assert.equal(admin.status, 200, JSON.stringify(admin.body));
+    assert.equal(admin.body.hosts[0].alias, 'Server 01');
+    assert.equal(admin.body.hosts[0].name, 'private-node');
+    // The name is the only addition: no management address, account or secret.
+    assert.doesNotMatch(JSON.stringify(admin.body), /pve-private|ilo-private|private-operator|private-token|private-ilo-secret/i);
+
+    const member = await request(app).get(path).set('x-test-session', 'member');
+    assert.equal(member.status, 200, JSON.stringify(member.body));
+    assert.equal(member.body.hosts[0].alias, 'Server 01');
+    assert.equal(Object.hasOwn(member.body.hosts[0], 'name'), false);
+    assert.doesNotMatch(JSON.stringify(member.body), /private-node/);
   }
 });
