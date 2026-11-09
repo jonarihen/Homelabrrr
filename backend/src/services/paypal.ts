@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, desc, lt, gt, or, isNull, lte, notInArray, inArray, sql, count } from 'drizzle-orm';
+import { and, eq, ne, desc, lt, gt, or, isNull, lte, notInArray, inArray, sql, count } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { paypalConfigs, paypalConfigHistory, paypalMonthlyPlans, paypalIntents, paypalSubscriptions, paypalWebhookInbox, paypalTransactions, paypalReconciliation, paypalPostings } from '../db/schema/index.ts';
 import { encryptSecret, decryptSecret } from '../utils/secrets.ts';
@@ -11,6 +11,7 @@ import { normalizeCompletedCapture, normalizeSubscriptionTransaction, normalizeC
 import { postReceipt, postCaptureRefund, postProviderAdjustment, recordForeignReceipt } from './paypalLedger.ts';
 import { PAYMENT_STATE_EVENTS, closePendingState, openPaymentStateTotals, recordPaymentStateEvent } from './paypalPaymentStates.ts';
 import { isAdjustedSaleStatus, linkedCaptureId, settleCaptureAdjustments, settleSaleAdjustments } from './paypalCoverage.ts';
+import { KOFI_INBOX_SOURCE } from './kofi.ts';
 
 function environment(value: unknown): PayPalEnvironment {
   if (value !== 'sandbox' && value !== 'live') throw new PayPalError('INVALID_ENVIRONMENT', 400);
@@ -308,9 +309,13 @@ export async function memberPaypalStatus() {
 }
 
 export async function processPaypalInbox(limit = 20) {
+  // Ko-fi events share this inbox but belong to the Ko-fi worker. This worker
+  // would mark them processed without recording the payment, so it never
+  // selects or requeues them.
+  const paypalEvents = ne(paypalWebhookInbox.source, KOFI_INBOX_SOURCE);
   await db.update(paypalWebhookInbox).set({ status: 'pending', processing_at: null })
-    .where(and(eq(paypalWebhookInbox.status, 'processing'), lt(paypalWebhookInbox.processing_at, new Date(Date.now() - 10 * 60_000))));
-  const pending = await db.select().from(paypalWebhookInbox).where(and(eq(paypalWebhookInbox.status, 'pending'),
+    .where(and(paypalEvents, eq(paypalWebhookInbox.status, 'processing'), lt(paypalWebhookInbox.processing_at, new Date(Date.now() - 10 * 60_000))));
+  const pending = await db.select().from(paypalWebhookInbox).where(and(paypalEvents, eq(paypalWebhookInbox.status, 'pending'),
     or(isNull(paypalWebhookInbox.next_attempt_at), lte(paypalWebhookInbox.next_attempt_at, new Date()))))
     .orderBy(paypalWebhookInbox.received_at).limit(Math.max(1, Math.min(limit, 50)));
   for (const entry of pending) {

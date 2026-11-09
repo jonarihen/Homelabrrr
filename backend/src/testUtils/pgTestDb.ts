@@ -20,6 +20,26 @@ export interface TestDatabase {
   drop(): Promise<void>;
 }
 
+// PostgreSQL's lock table is shared by every database on the server, and one
+// full migration transaction holds roughly 1,200 locks. On a many-core host the
+// runner starts twenty-odd files at once, so a few of them can hit "out of
+// shared memory" (SQLSTATE 53200) while their siblings migrate. The failed
+// transaction rolled back cleanly, so the file tries again after a short
+// pause instead of failing on a scheduling accident. Anything else still
+// fails loudly.
+async function migrateWithRetry(pool: pg.Pool): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await runMigrations(pool);
+      return;
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code !== '53200' || attempt >= 8) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt + Math.floor(Math.random() * 500)));
+    }
+  }
+}
+
 export async function createTestDatabase(): Promise<TestDatabase> {
   const name = `homelabrrr_test_${crypto.randomBytes(6).toString('hex')}`;
   const admin = new pg.Client({ connectionString: ADMIN_URL });
@@ -38,7 +58,7 @@ export async function createTestDatabase(): Promise<TestDatabase> {
   const dbUrl = url.toString();
 
   const pool = new pg.Pool({ connectionString: dbUrl, max: 5 });
-  await runMigrations(pool);
+  await migrateWithRetry(pool);
   const db = drizzle(pool, { schema });
 
   return {

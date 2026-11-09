@@ -32,7 +32,7 @@ export const NAV_SECTIONS = [
       },
       {
         to: '/admin/paypal',
-        label: 'PayPal',
+        label: 'Support payments',
         perms: [ADMIN_ONLY],
         icon: 'M4.5 6h15v12h-15zM7.5 9h4.5m-4.5 3h9m-9 3h6',
       },

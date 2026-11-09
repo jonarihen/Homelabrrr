@@ -172,7 +172,7 @@ export default function PayPalOperationsPanel({ environment, act, busy }) {
       {health?.errorCode && <p className="mt-4 font-mono text-xs text-orange-300">Last error: {health.errorCode}</p>}
     </Section>
 
-    <Section title="Review queue"
+    <Section title="PayPal review queue"
       description="Quarantined events block finalized net support. Retry sends an event back through verified processing; dismiss records it as not lab income and posts nothing.">
       {loading ? <RowsSkeleton /> : loadError ? unavailable : review.items.length === 0 ? <EmptyState>No events need review.</EmptyState> :
         <DataTable columns={['Event', 'Reason', 'Received', 'Attempts', 'Source', 'Actions']}>

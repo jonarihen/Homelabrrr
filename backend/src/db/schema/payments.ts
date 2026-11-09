@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { pgTable, integer, text, boolean, timestamp, jsonb, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, integer, text, boolean, timestamp, jsonb, index, uniqueIndex, check } from 'drizzle-orm/pg-core';
 import { users } from './auth.ts';
 import { electricityCostStatements } from './energy.ts';
 
@@ -152,6 +152,13 @@ export const paypalTransactions = pgTable('paypal_transactions', {
   retry_count: integer('retry_count').notNull().default(0),
   next_retry_at: timestamp('next_retry_at', { withTimezone: true, mode: 'date' }),
   last_error_code: text('last_error_code'),
+  // Ko-fi receipts only. admin_note is the administrator's fee note or
+  // reversal reason. original_amount/original_currency keep what Ko-fi sent
+  // for a payment in another currency (decimal string + ISO code); the DKK
+  // amounts on such a row are the ones the administrator recorded.
+  admin_note: text('admin_note'),
+  original_amount: text('original_amount'),
+  original_currency: text('original_currency'),
 }, (t) => [
   uniqueIndex('paypal_transaction_identity').on(t.environment, t.merchant_id, t.provider_transaction_id),
   index('paypal_transaction_unresolved').on(t.status, t.observed_at),
@@ -281,3 +288,34 @@ export const paypalMonthlyPlans = pgTable('paypal_monthly_plans', {
   uniqueIndex('paypal_monthly_plan_id').on(t.environment, t.plan_id),
   uniqueIndex('paypal_monthly_plan_amount').on(t.environment, t.merchant_id, t.amount_ore).where(sql`${t.active}`),
 ]);
+
+// Ko-fi support (live only, merchant scope `kofi`). One configuration row. The
+// verification token and the email hash key are encrypted and never returned.
+// Ko-fi events reuse paypal_webhook_inbox (id `live:kofi:<message_id>`),
+// paypal_transactions and paypal_postings.
+export const kofiConfig = pgTable('kofi_config', {
+  id: integer('id').primaryKey().default(1),
+  enabled: boolean('enabled').notNull().default(false),
+  verification_token: text('verification_token'),
+  page_url: text('page_url'),
+  email_hash_key: text('email_hash_key'),
+  token_updated_at: timestamp('token_updated_at', { withTimezone: true, mode: 'date' }),
+  // Last refused delivery, written at most once a minute per reason.
+  last_rejected_at: timestamp('last_rejected_at', { withTimezone: true, mode: 'date' }),
+  last_rejected_code: text('last_rejected_code'),
+  updated_by: integer('updated_by').references(() => users.id, { onDelete: 'set null' }),
+  updated_at: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [check('kofi_config_singleton', sql`${t.id} = 1`)]);
+
+// Ko-fi payer emails an administrator has bound to a member. Only a keyed
+// hash and a masked hint are kept, never the address itself. The unique hash
+// means one email maps to at most one member.
+export const kofiMemberEmails = pgTable('kofi_member_emails', {
+  id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+  user_id: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  email_hash: text('email_hash').notNull(),
+  email_hint: text('email_hint').notNull(),
+  source: text('source').notNull(),
+  verified_by: integer('verified_by').references(() => users.id, { onDelete: 'set null' }),
+  verified_at: timestamp('verified_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+}, (t) => [uniqueIndex('kofi_member_email_hash').on(t.email_hash), index('kofi_member_email_user').on(t.user_id)]);

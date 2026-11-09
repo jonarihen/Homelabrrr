@@ -4,6 +4,7 @@ import { manualContributions, paypalPostings, paypalTransactions } from '../db/s
 import { isUniqueViolation } from '../db/errors.ts';
 import { PayPalError } from './paypalClient.ts';
 import { startOfLocalDateUtc } from './energyAccounting.ts';
+import { KOFI_MERCHANT } from './kofi.ts';
 
 // Manual bank-transfer fallback. Reports are evidence only. Confirmation is an
 // administrator decision with an evidence reference and posts exactly one
@@ -40,7 +41,9 @@ function text(value: unknown, min: number, max: number, code: string) {
 }
 
 // A reference that is an imported PayPal transaction ID is not a bank
-// transfer: posting it manually would count the same money twice.
+// transfer: posting it manually would count the same money twice. Ko-fi
+// transaction IDs are stored normalized the same way as `key`, so a Ko-fi
+// payment is refused in any casing or hyphenation.
 async function assertNotProviderPayment(tx: any, reference: string, key: string) {
   const [match] = await tx.select({ id: paypalTransactions.id }).from(paypalTransactions)
     .where(inArray(paypalTransactions.provider_transaction_id, [...new Set([reference.trim(), key])])).limit(1);
@@ -79,6 +82,14 @@ async function postConfirmation(tx: any, row: typeof manualContributions.$inferS
       gte(paypalPostings.effective_at, new Date(row.received_at.getTime() - 4 * 86_400_000)),
       lte(paypalPostings.effective_at, new Date(row.received_at.getTime() + 4 * 86_400_000)))).limit(1);
     if (similar) throw new PayPalError('SIMILAR_PROVIDER_PAYMENT', 409);
+    // A Ko-fi receipt has no posting until its fee is entered, so it is
+    // matched on the recorded receipt itself.
+    const [kofi] = await tx.select({ id: paypalTransactions.id }).from(paypalTransactions).where(and(eq(paypalTransactions.environment, 'live'),
+      eq(paypalTransactions.merchant_id, KOFI_MERCHANT), eq(paypalTransactions.user_id, row.user_id), eq(paypalTransactions.gross_ore, row.amount_ore),
+      inArray(paypalTransactions.status, ['net_unresolved', 'posted']),
+      gte(paypalTransactions.effective_at, new Date(row.received_at.getTime() - 4 * 86_400_000)),
+      lte(paypalTransactions.effective_at, new Date(row.received_at.getTime() + 4 * 86_400_000)))).limit(1);
+    if (kofi) throw new PayPalError('SIMILAR_PROVIDER_PAYMENT', 409);
   }
   await tx.insert(paypalPostings).values({ environment: 'live', merchant_id: MANUAL_MERCHANT, provider_transaction_id: `manual:${row.reference_key}`,
     posting_kind: 'gross', source_id: `manual:${row.id}`, user_id: row.user_id, amount_ore: row.amount_ore, currency: 'DKK',

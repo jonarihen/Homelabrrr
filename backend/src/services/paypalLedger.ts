@@ -1,17 +1,21 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { db } from '../db/client.ts';
+import { db, type DbOrTx } from '../db/client.ts';
 import { paypalPostings, paypalTransactions } from '../db/schema/index.ts';
 import { PayPalError } from './paypalClient.ts';
 
-type Scope = { environment: string; merchantId: string; intentId: string; userId: number | null };
+// Ko-fi receipts have no checkout intent, so their scope carries intentId null.
+type Scope = { environment: string; merchantId: string; intentId: string | null; userId: number | null };
+export type ReceiptKind = 'capture' | 'sale' | 'kofi_donation' | 'kofi_subscription';
 type Foreign = Record<string, { currency_code: string; value: string }> | null | undefined;
 type Receipt = { transactionId: string; grossOre: number; feeOre: number | null; netOre: number | null; effectiveAt: Date; foreign?: Foreign };
 type Refund = { transactionId: string; grossOre: number; feeCreditOre: number | null; netDebitOre: number | null; effectiveAt: Date };
 
-export async function postReceipt(scope: Scope, kind: 'capture' | 'sale', receipt: Receipt, verification: string) {
+// `database` may be a caller's transaction: the work then runs in a savepoint
+// and commits or rolls back with the caller's other statements.
+export async function postReceipt(scope: Scope, kind: ReceiptKind, receipt: Receipt, verification: string, database: DbOrTx = db) {
   if (receipt.grossOre <= 0 || !Number.isSafeInteger(receipt.grossOre)) throw new PayPalError('INVALID_RECEIPT');
   const complete = receipt.feeOre !== null && receipt.netOre !== null;
-  const outcome = await db.transaction(async (tx) => {
+  const outcome = await database.transaction(async (tx) => {
     const record = { environment: scope.environment, merchant_id: scope.merchantId, provider_transaction_id: receipt.transactionId,
       provider_kind: kind, intent_id: scope.intentId, user_id: scope.userId, status: 'net_unresolved',
       currency: 'DKK', gross_ore: receipt.grossOre, fee_ore: receipt.feeOre, net_ore: receipt.netOre, effective_at: receipt.effectiveAt,
@@ -50,9 +54,9 @@ export async function postCaptureRefund(scope: Scope, originalCaptureId: string,
   return postProviderAdjustment(scope, originalCaptureId, 'capture', 'refund', refund, verification);
 }
 
-export async function postProviderAdjustment(scope: Scope, originalId: string, originalKind: 'capture' | 'sale',
-  adjustmentKind: 'refund' | 'reversal', adjustment: Refund, verification: string) {
-  const outcome = await db.transaction(async (tx) => {
+export async function postProviderAdjustment(scope: Scope, originalId: string, originalKind: ReceiptKind,
+  adjustmentKind: 'refund' | 'reversal', adjustment: Refund, verification: string, database: DbOrTx = db) {
+  const outcome = await database.transaction(async (tx) => {
     const [original] = await tx.select().from(paypalTransactions).where(and(
       eq(paypalTransactions.environment, scope.environment), eq(paypalTransactions.merchant_id, scope.merchantId),
       eq(paypalTransactions.provider_transaction_id, originalId), eq(paypalTransactions.provider_kind, originalKind))).for('update');

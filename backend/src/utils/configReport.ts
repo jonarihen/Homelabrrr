@@ -141,6 +141,16 @@ export const OPTIONAL_ENV_VARS = [
     effect: 'overall request limit on the PayPal webhook ingress across all clients, protecting the PayPal API quota from distributed floods',
   },
   {
+    name: 'KOFI_WEBHOOK_RATE_LIMIT_PER_MINUTE',
+    defaultValue: '60',
+    effect: 'per-client request limit on the Ko-fi webhook ingress; Ko-fi redelivers throttled events',
+  },
+  {
+    name: 'KOFI_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE',
+    defaultValue: '300',
+    effect: 'overall request limit on the Ko-fi webhook ingress across all clients',
+  },
+  {
     name: 'HARDWARE_POLL_INTERVAL_MS',
     defaultValue: '60000',
     effect: 'iLO telemetry collection interval for explicitly enabled physical nodes (minimum 30000)',

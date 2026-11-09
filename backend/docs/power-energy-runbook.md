@@ -5,13 +5,14 @@ This runbook covers the private Power & Energy features (epic #232, issues #233�
 - [eloverblik.md](eloverblik.md): ElOverblik Customer API details, failure states and charge observations
 - [energy-dashboard.md](energy-dashboard.md): the member read API, contract succession, finalized months, refund policy and bills
 - [paypal-support.md](paypal-support.md): PayPal setup, reconciliation, refunds and the review queue
+- [kofi-support.md](kofi-support.md): Ko-fi webhook setup, exposure, processing rules, recording DKK amounts and fees, and the live checklist
 
 > **Verification boundary.** Every behaviour described here was verified only with fixtures, fakes and throwaway PostgreSQL databases. Nothing was tested against a live HPE iLO, a real ElOverblik account or meter, or a PayPal sandbox or live account. The one exception is a bounded, read-only query to the public Energi Data Service on 2026-10-08, which confirmed field names and units. Before you trust any of this in production, work through the [live verification checklist](#13-live-verification-checklist).
 
 ## 1. Prerequisites and what stays disabled by default
 
 - Run a single backend replica. The telemetry collector, power controller, ElOverblik sync and PayPal workers all assume one process.
-- Keep `SECRET_ENCRYPTION_KEY` safe and backed up separately. The iLO passwords, the ElOverblik refresh token and the PayPal client secrets are encrypted at rest, and key rotation covers all three (`hardware_connections.secret`, `eloverblik_connections.refresh_token`, `paypal_configs.client_secret`).
+- Keep `SECRET_ENCRYPTION_KEY` safe and backed up separately. The iLO passwords, the ElOverblik refresh token, the PayPal client secrets, and the Ko-fi verification token and email hash key are encrypted at rest, and key rotation covers all of them (`hardware_connections.secret`, `eloverblik_connections.refresh_token`, `paypal_configs.client_secret`, `kofi_config.verification_token`, `kofi_config.email_hash_key`).
 - Every admin route below requires an administrator session. Hardware connection routes accept `can_manage_hosts`. Power control, energy data, electricity pricing and PayPal administration are admin-only. Routes that write to hardware or move money also require recent reauthentication.
 
 A fresh install or an upgrade changes nothing until you configure it:
@@ -25,7 +26,7 @@ A fresh install or an upgrade changes nothing until you configure it:
 | Spot price download (Energi Data Service) | off | Creating an active *spot* contract. The download uses a public dataset and needs no credentials |
 | Extra lab loads | none | Adding one explicitly |
 | Fixed-fee allocation | none | Choosing a manual share or a household proportion |
-| PayPal checkout (sandbox and live separately) | off | Admin → PayPal. Live also needs reauthentication and `confirmLive` |
+| PayPal checkout (sandbox and live separately) | off | Admin → Support payments. Live also needs reauthentication and `confirmLive` |
 
 No simulated data is shown as real. Values without a source show as *unknown* or *unavailable*.
 
@@ -176,13 +177,15 @@ PayPal support is optional and voluntary. It never changes access, quotas or pri
 
 1. **Account.** You need a verified PayPal **Business** account that accepts DKK, plus one REST app per environment with Checkout, Subscriptions and the Transaction Search reporting scope. A personal account may not be eligible.
 2. **Sandbox before live.** Sandbox and live keep completely separate credentials, merchant IDs, webhooks, plans and ledgers, and sandbox postings never count toward live totals. Enable sandbox first. Enabling live requires reauthentication and explicit live confirmation.
-3. **Setup.** In Admin → PayPal, save the client ID, the secret (write-only) and the receiving merchant ID. Stale form saves are refused (`CONFIG_VERSION_CONFLICT`). Then run **Register webhook**, **Create product** and **Create monthly plan**. These are idempotent per environment and app, and the request IDs are persisted before each call. After that, run **Test connection**, which is read-only.
+3. **Setup.** In Admin → Support payments, save the client ID, the secret (write-only) and the receiving merchant ID. Stale form saves are refused (`CONFIG_VERSION_CONFLICT`). Then run **Register webhook**, **Create product** and **Create monthly plan**. These are idempotent per environment and app, and the request IDs are persisted before each call. After that, run **Test connection**, which is read-only.
 4. **Webhook reachability.** Through the reverse proxy, expose **only** `POST /api/payments/paypal/webhook/<environment>` to the internet, over HTTPS, and forward `X-Forwarded-Proto`. Keep the rest of the portal, iLO and Proxmox private. Events are acknowledged only after signature verification and durable storage. Rate limits are `PAYPAL_WEBHOOK_RATE_LIMIT_PER_MINUTE` (default 120, per client) and `PAYPAL_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE` (default 600). PayPal's simulator events fail verification by design, so never weaken verification to make them pass.
-5. **Reconciliation.** It runs every `PAYPAL_RECONCILE_INTERVAL_MINUTES` (default 360, range 15–1440), plus a pass shortly after startup. It recovers missed events, reads back uncertain captures, reconciles each subscription in isolation, and retries missing fee and refund details. Admin → PayPal shows reconciliation health, subscriptions, the review queue and a formula-safe CSV export (which requires reauthentication).
+5. **Reconciliation.** It runs every `PAYPAL_RECONCILE_INTERVAL_MINUTES` (default 360, range 15–1440), plus a pass shortly after startup. It recovers missed events, reads back uncertain captures, reconciles each subscription in isolation, and retries missing fee and refund details. Admin → Support payments shows reconciliation health, subscriptions, the review queue and a formula-safe CSV export (which requires reauthentication).
 6. **Fee unknowns.** A missing fee or net amount is recorded as `net_unresolved`, never as zero, and it blocks the finalized net until it is resolved. Pending payments, denials and disputes are shown but never subtracted. Non-DKK amounts are stored verbatim and never summed into DKK.
 7. **Cancellation.** Members can cancel their own subscriptions, and admins can cancel any subscription with reauthentication. Cancellation is confirmed only by provider readback. Deleting a member requests cancellation of their subscriptions and is blocked until PayPal confirms it. Plans use `payment_failure_threshold: 1` and `auto_bill_outstanding: false`, so a failed payment suspends the subscription instead of building up debt.
-8. **Disabling new checkout** (Admin → PayPal, disable the environment) stops new approvals. It **does not cancel existing subscriptions**, so cancel those separately if needed. Retiring a plan likewise only stops new approvals.
+8. **Disabling new checkout** (Admin → Support payments, disable the environment) stops new approvals. It **does not cancel existing subscriptions**, so cancel those separately if needed. Retiring a plan likewise only stops new approvals.
 9. **Manual bank transfer.** A member reports the transfer, which never posts by itself. An admin then confirms it with evidence, which posts one live DKK receipt. Duplicates of imported PayPal transactions are refused, and a correction appends a reversal.
+
+**Ko-fi.** Ko-fi is a second optional way to receive support, set up in its own panel on the same admin page. It uses the same live ledger, review queue and allocation, and it also never changes access, quotas or priority. Its only public path is `POST /api/payments/kofi/webhook`. Every Ko-fi payment needs an administrator step before it counts: the DKK amount and fee for a foreign-currency payment, or the fee alone for a DKK payment. Until then the budget reads "Unknown". Ko-fi sends no refund or membership-end events, and its webhook format is unverified until a real payment arrives. For setup, exposure, the processing rules and the live checklist, see [kofi-support.md](kofi-support.md).
 
 ## 10. Member Energy & Budget dashboard and privacy
 
@@ -196,7 +199,7 @@ PayPal support is optional and voluntary. It never changes access, quotas or pri
 
 ## 11. Backup, restore and retention
 
-**Backup and restore.** The scheduled encrypted `pg_dump` backups (see README → *Configure encrypted, verified, off-host backups* and *Disaster-recovery restore*) include every power, energy and PayPal table. Restoring needs the same `SECRET_ENCRYPTION_KEY` (or the previous keyring) to decrypt the iLO, ElOverblik and PayPal secrets. After a restore:
+**Backup and restore.** The scheduled encrypted `pg_dump` backups (see README → *Configure encrypted, verified, off-host backups* and *Disaster-recovery restore*) include every power, energy and PayPal table. Restoring needs the same `SECRET_ENCRYPTION_KEY` (or the previous keyring) to decrypt the iLO, ElOverblik, PayPal and Ko-fi secrets. After a restore:
 
 - Abandoned power-control claims are cleared and recorded as unknown. The controller re-reads every node before it acts.
 - The PayPal inbox's replay protection blocks re-posting of already-processed events. Run a reconciliation and check the review queue.
@@ -225,7 +228,7 @@ PayPal support is optional and voluntary. It never changes access, quotas or pri
 | Price rules | Disable the price policy. The schedule continues | Saved thresholds |
 | ElOverblik | **Disconnect** (optionally `purgeHistory`) | Intervals and charges, unless purged |
 | Spot prices | End or withdraw the spot contract | Cached prices, until retention removes them |
-| PayPal checkout | Disable the environment in Admin → PayPal. Cancel subscriptions separately | Ledger, allocations, inbox evidence |
+| PayPal checkout | Disable the environment in Admin → Support payments. Cancel subscriptions separately | Ledger, allocations, inbox evidence |
 | Whole release | Roll back the images and restore the pre-upgrade backup. The Power & Energy migrations (`0004`–`0017`) are not reversible in place | n/a |
 
 ## 13. Live verification checklist

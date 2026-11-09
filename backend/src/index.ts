@@ -41,9 +41,11 @@ import type { ApplicablePowerPrice } from './services/powerPolicy.ts';
 import energyRoutes from './routes/energy.ts';
 import { startElOverblikScheduler, stopElOverblikScheduler } from './services/eloverblik.ts';
 import paymentsWebhookRoutes from './routes/paymentsWebhook.ts';
+import kofiWebhookRoutes from './routes/kofiWebhook.ts';
 import paymentsRoutes from './routes/payments.ts';
 import { startPaypalInboxWorker, stopPaypalInboxWorker, startPaypalReconciliation, stopPaypalReconciliation } from './services/paypal.ts';
 import { startPaypalAllocationWorker, stopPaypalAllocationWorker } from './services/paypalAllocation.ts';
+import { startKofiInboxWorker, stopKofiInboxWorker } from './services/kofi.ts';
 import { seedAllFirewalls } from './workflows/store.ts';
 import { proxySshShell } from './utils/sshConnect.ts';
 import { decryptSecret, encryptSecret } from './utils/secrets.ts';
@@ -100,8 +102,10 @@ app.get('/api/health/ready', async (_req, res) => {
   const status = await readiness();
   res.status(status.ok ? 200 : 503).json(status);
 });
-// The sole unauthenticated provider ingress receives original bytes before JSON/CSRF/session middleware.
+// The two unauthenticated provider ingresses run before JSON/CSRF/session middleware:
+// PayPal needs the original bytes, Ko-fi posts a form. Nothing else under /api/payments is public.
 app.use('/api/payments/paypal/webhook', paymentsWebhookRoutes);
+app.use('/api/payments/kofi/webhook', kofiWebhookRoutes);
 app.use(express.json({ limit: '1mb' }));
 if (ALLOWED_ORIGIN) {
   app.use(cors({
@@ -603,6 +607,7 @@ startPowerControlWorker(async (at, policy) => {
 startPaypalInboxWorker();
 startPaypalReconciliation();
 startPaypalAllocationWorker();
+startKofiInboxWorker();
 
 const runDatabaseMaintenanceSafe = () => {
   Promise.resolve().then(() => runDatabaseMaintenance())
@@ -652,6 +657,7 @@ async function shutdown(signal) {
   stopPaypalInboxWorker();
   stopPaypalReconciliation();
   stopPaypalAllocationWorker();
+  stopKofiInboxWorker();
   stopWebsiteMaintenance();
 
   for (const ws of [...vncWss.clients, ...sshWss.clients]) {

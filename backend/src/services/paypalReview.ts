@@ -1,7 +1,8 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { paypalWebhookInbox } from '../db/schema/index.ts';
 import { PayPalError } from './paypalClient.ts';
+import { KOFI_INBOX_SOURCE } from './kofi.ts';
 
 // Operator resolution for quarantined (needs_review) webhook events. A review
 // event blocks finalized net support until it is either retried through the
@@ -20,12 +21,14 @@ export async function listPaypalReviewEvents(environment: unknown, offset = 0, s
   if (environment !== 'sandbox' && environment !== 'live') throw new PayPalError('INVALID_ENVIRONMENT', 400);
   if (!Number.isInteger(offset) || offset < 0 || offset > 10_000) throw new PayPalError('INVALID_OFFSET', 400);
   const statuses = status === 'resolved' ? ['dismissed'] : status === 'all' ? ['needs_review', 'dismissed'] : ['needs_review'];
-  // Never return the raw payload: it can contain payer data.
+  // Never return the raw payload: it can contain payer data. Ko-fi events
+  // are listed by the Ko-fi review queue, not here.
   const rows = await db.select({ id: paypalWebhookInbox.id, eventType: paypalWebhookInbox.event_type, status: paypalWebhookInbox.status,
     errorCode: paypalWebhookInbox.error_code, resourceId: paypalWebhookInbox.resource_id, source: paypalWebhookInbox.source,
     receivedAt: paypalWebhookInbox.received_at, eventAt: paypalWebhookInbox.event_at, attemptCount: paypalWebhookInbox.attempt_count,
     resolution: paypalWebhookInbox.resolution, resolvedAt: paypalWebhookInbox.resolved_at })
-    .from(paypalWebhookInbox).where(and(eq(paypalWebhookInbox.environment, environment), inArray(paypalWebhookInbox.status, statuses)))
+    .from(paypalWebhookInbox).where(and(eq(paypalWebhookInbox.environment, environment), inArray(paypalWebhookInbox.status, statuses),
+      ne(paypalWebhookInbox.source, KOFI_INBOX_SOURCE)))
     .orderBy(desc(paypalWebhookInbox.received_at), desc(paypalWebhookInbox.id)).limit(51).offset(offset);
   return { environment, items: rows.slice(0, 50), nextOffset: rows.length > 50 ? offset + 50 : null };
 }

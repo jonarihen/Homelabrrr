@@ -6,6 +6,7 @@ import Field from '../../components/Field.jsx';
 import RecentReauthDialog from '../../components/account/RecentReauthDialog.jsx';
 import PayPalOperationsPanel, { Badge, EmptyState, Section, Skeleton, Stat, btnPrimary, btnSecondary, inputCls, money } from './PayPalOperationsPanel.jsx';
 import PayPalSetupPanel from './PayPalSetupPanel.jsx';
+import KofiPanel from './KofiPanel.jsx';
 import { useConfirm } from '../../contexts/FeedbackContext.jsx';
 
 const monthNow = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit' }).format(new Date());
@@ -27,7 +28,7 @@ const ALLOCATION = [
 
 export default function PayPalPage() {
   const confirm = useConfirm();
-  useDocumentTitle('PayPal administration');
+  useDocumentTitle('Support payments');
   const [configs, setConfigs] = useState([]);
   const [environment, setEnvironment] = useState('sandbox');
   const [form, setForm] = useState(EMPTY_FORM);
@@ -88,12 +89,13 @@ export default function PayPalPage() {
     <header className="flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
         <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-orange-500">Restricted · Payments</p>
-        <h1 className="aaris-display text-xl text-gray-100 mt-2">PayPal administration</h1>
-        <p className="text-sm text-gray-500 mt-1">Checkout starts disabled. Configure sandbox separately from live. Secrets are write-only and encrypted at rest.</p>
+        <h1 className="aaris-display text-xl text-gray-100 mt-2">Support payments</h1>
+        <p className="text-sm text-gray-500 mt-1 max-w-2xl">PayPal checkout starts disabled; configure sandbox separately from live. Ko-fi is live only. Secrets are write-only and encrypted at rest.</p>
+        <p className="font-mono text-xs mt-2"><a href="#kofi" className="text-gray-400 hover:text-white underline underline-offset-4 decoration-gray-700">Ko-fi setup, review and receipts ↓</a></p>
       </div>
       <div className="flex items-end gap-3">
         {environment === 'live' && <span className="pb-2.5"><Badge tone="bad">Live · real charges</Badge></span>}
-        <div className="w-40"><Field label="Environment">
+        <div className="w-40"><Field label="PayPal environment">
           <select value={environment} onChange={(event) => setEnvironment(event.target.value)} className={inputCls}><option value="sandbox">Sandbox</option><option value="live">Live</option></select>
         </Field></div>
       </div>
@@ -104,7 +106,7 @@ export default function PayPalPage() {
       {notice && <div className="bg-gray-950"><p role="status" className="text-xs text-green-400 bg-green-900/20 border border-green-800/30 rounded-xl p-3">{notice}</p></div>}
     </div>}
 
-    <Section title="Checkout configuration"
+    <Section title="PayPal checkout configuration"
       description="Saving creates a new configuration version and disables checkout until explicitly enabled again."
       actions={<div className="flex flex-wrap items-center gap-2" aria-busy={loading}>
         {loading ? <><Skeleton className="h-6 w-48" /><span className="sr-only">Loading</span></> : <>
@@ -136,7 +138,7 @@ export default function PayPalPage() {
         <dl className="grid grid-cols-2 gap-3" aria-busy={loading}>
           {LEDGER.map(([name, read]) => <Stat key={name} label={name} loading={loading} mono={false} value={summary ? read(summary) : '—'} />)}
         </dl>
-        <p className="text-xs text-gray-500 mt-4">Unknown fees and review items are excluded from confirmed net totals.</p>
+        <p className="text-xs text-gray-500 mt-4">Unknown fees and review items are excluded from confirmed net totals. Review events and unresolved transactions include Ko-fi; resolve those in the Ko-fi section below.</p>
       </Section>
       <Section title="Monthly allocation"
         description="Append-only revisions apply verified live net support to finalized lab electricity costs. A negative balance is owner funded; no member owes money."
@@ -153,5 +155,6 @@ export default function PayPalPage() {
 
     <PayPalSetupPanel environment={environment} act={act} busy={busy} configVersion={current?.configVersion} onUseId={(field, value) => setForm((old) => ({ ...old, [field]: value }))} />
     <PayPalOperationsPanel environment={environment} act={act} busy={busy} />
+    <KofiPanel act={act} busy={busy} />
   </div>;
 }

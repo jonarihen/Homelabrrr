@@ -8,7 +8,7 @@ import { importDatabase } from '../scripts/importSqlite.ts';
 import {
   users, roles, rolePermissions, sshKeys, pveHosts, firewalls,
   notificationWebhooks, caddyServers, provisionedVms, vmMigrations, isos,
-  hardwareConnections, eloverblikConnections, paypalConfigs,
+  hardwareConnections, eloverblikConnections, paypalConfigs, kofiConfig,
 } from './schema/index.ts';
 import {
   assertSecretEncryptionKey, decryptSecret, encryptSecret, isEncryptedSecret, secretNeedsMigration,
@@ -38,6 +38,8 @@ const ENCRYPTED_COLUMNS = [
   { label: 'hardware_connections.secret', table: hardwareConnections, id: hardwareConnections.id, column: hardwareConnections.secret, key: 'secret' as const },
   { label: 'eloverblik_connections.refresh_token', table: eloverblikConnections, id: eloverblikConnections.id, column: eloverblikConnections.refresh_token, key: 'refresh_token' as const },
   { label: 'paypal_configs.client_secret', table: paypalConfigs, id: paypalConfigs.environment, column: paypalConfigs.client_secret, key: 'client_secret' as const },
+  { label: 'kofi_config.verification_token', table: kofiConfig, id: kofiConfig.id, column: kofiConfig.verification_token, key: 'verification_token' as const },
+  { label: 'kofi_config.email_hash_key', table: kofiConfig, id: kofiConfig.id, column: kofiConfig.email_hash_key, key: 'email_hash_key' as const },
 ];
 
 type EncryptedColumn = (typeof ENCRYPTED_COLUMNS)[number];

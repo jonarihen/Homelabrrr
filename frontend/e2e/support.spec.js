@@ -58,3 +58,47 @@ test('a bank-transfer report is shown as awaiting confirmation, not as a contrib
   await expect(page.getByText('awaiting confirmation')).toBeVisible();
   await expect(page.getByText('No verified contributions recorded.')).toBeVisible();
 });
+
+test('the Ko-fi link is shown only when Ko-fi is enabled', async ({ page }) => {
+  const kofiLink = page.getByRole('link', { name: /Ko-fi page/ });
+  const unavailable = page.getByText('Online contributions are currently unavailable.');
+
+  // An older status answer without the Ko-fi block: PayPal only, as before.
+  await mockSupport(page);
+  await page.goto('/support');
+  await expect(page.getByRole('heading', { name: 'One-off contribution' })).toBeVisible();
+  await expect(kofiLink).toHaveCount(0);
+  await expect(unavailable).toHaveCount(0);
+
+  // Ko-fi disabled and PayPal not set up: nothing is offered.
+  await mockSupport(page, { status: { configured: false, checkoutEnabled: false, monthlyAvailable: false, monthlyOptions: [], kofi: { enabled: false, pageUrl: null } } });
+  await page.reload();
+  await expect(unavailable).toBeVisible();
+  await expect(kofiLink).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'One-off contribution' })).toHaveCount(0);
+
+  // Ko-fi enabled: an external link, the matching rules, and the member's own Ko-fi payments.
+  await mockSupport(page, {
+    status: { configured: false, checkoutEnabled: false, monthlyAvailable: false, monthlyOptions: [], kofi: { enabled: true, pageUrl: 'https://ko-fi.com/aarislab' } },
+    history: { kofiReceipts: [
+      { kind: 'donation', amountOre: 5000, receivedAt: '2026-11-03T10:00:00Z', status: 'awaiting_fee' },
+      { kind: 'subscription', amountOre: 3725, receivedAt: '2026-10-03T10:00:00Z', status: 'counted' },
+    ] },
+  });
+  await page.reload();
+  await expect(kofiLink).toBeVisible();
+  await expect(kofiLink).toHaveAttribute('href', 'https://ko-fi.com/aarislab');
+  await expect(kofiLink).toHaveAttribute('target', '_blank');
+  await expect(kofiLink).toHaveAttribute('rel', 'noopener noreferrer');
+  await expect(unavailable).toHaveCount(0);
+  const card = page.locator('section', { has: page.getByRole('heading', { name: 'Support via Ko-fi' }) });
+  for (const copy of [/voluntary/, /same email address on Ko-fi every time/, /first payment is matched by the owner/,
+    /once the owner has confirmed the actual fee/, /another currency are counted at the DKK amount the owner actually received/,
+    /Do not also report a Ko-fi payment as a bank transfer/]) await expect(card.getByText(copy)).toBeVisible();
+  const historyCard = page.locator('section', { has: page.getByRole('heading', { name: 'Your contribution history' }) });
+  await expect(historyCard.getByText(/actual payment fees/)).toBeVisible();
+  await expect(historyCard.getByRole('listitem').filter({ hasText: '50,00' })).toContainText('awaiting fee confirmation');
+  await expect(historyCard.getByRole('listitem').filter({ hasText: '37,25' })).toContainText('counted');
+  // A Ko-fi payment awaiting its fee is not yet a verified contribution.
+  await expect(historyCard.getByText('No verified contributions recorded.')).toBeVisible();
+});

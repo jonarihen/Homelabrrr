@@ -10,6 +10,9 @@ import { confirmManualContribution, listManualContributions, ownManualContributi
 import { startBackgroundWork } from '../services/backgroundWork.ts';
 import { latestPaypalAllocation, recalculatePaypalAllocations } from '../services/paypalAllocation.ts';
 import { PayPalError } from '../services/paypalClient.ts';
+import { memberKofiStatus } from '../services/kofi.ts';
+import { ownKofiReceipts } from '../services/kofiAdmin.ts';
+import kofiAdminRoutes from './kofi.ts';
 import { logAudit } from '../utils/audit.ts';
 
 const router = Router();
@@ -26,10 +29,15 @@ const captureLimiter = memberLimiter(30);
 const cancelLimiter = memberLimiter(10);
 const setupLimiter = memberLimiter(20);
 function fail(res: any, err: unknown) { res.status(err instanceof PayPalError ? err.status : 500).json({ error: err instanceof PayPalError ? err.code : 'INTERNAL' }); }
-router.get('/status', async (_req, res) => { try { res.json(await memberPaypalStatus()); } catch (err) { fail(res, err); } });
+// `kofi` tells the member page whether to show the Ko-fi link; nothing else about Ko-fi is exposed here.
+router.get('/status', async (_req, res) => {
+  try { const [paypal, kofi] = await Promise.all([memberPaypalStatus(), memberKofiStatus()]); res.json({ ...paypal, kofi }); }
+  catch (err) { fail(res, err); }
+});
 router.get('/mine', async (req, res) => {
-  try { const [history, manualReports] = await Promise.all([ownPaymentHistory(req.session.userId!), ownManualContributions(req.session.userId!)]);
-    res.json({ ...history, manualReports }); }
+  try { const [history, manualReports, kofiReceipts] = await Promise.all([ownPaymentHistory(req.session.userId!),
+    ownManualContributions(req.session.userId!), ownKofiReceipts(req.session.userId!)]);
+    res.json({ ...history, manualReports, kofiReceipts }); }
   catch (err) { fail(res, err); }
 });
 // A member's own bank-transfer report: evidence only, never posted until an
@@ -57,6 +65,8 @@ router.post('/monthly/:id/change', checkoutLimiter, async (req, res) => {
 router.post('/monthly/:id/cancel', cancelLimiter, async (req, res) => {
   try { res.json(await cancelMonthly(req.session.userId!, String(req.params.id))); } catch (err) { fail(res, err); }
 });
+// Ko-fi administration (setup, review queue, receipts, linked emails).
+router.use('/admin/kofi', requireAdmin, kofiAdminRoutes);
 router.get('/admin/summary', requireAdmin, async (_req, res) => { try { res.json(await verifiedContributionSnapshot('live')); } catch (err) { fail(res, err); } });
 router.get('/admin/allocation', requireAdmin, async (req, res) => {
   const month = String(req.query.month || '');
