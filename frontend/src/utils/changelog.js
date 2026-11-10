@@ -70,3 +70,23 @@ export function parseChangelog(markdown) {
   closeEntry(state);
   return state.entries;
 }
+
+// Inline markdown used in the changelog: `code`, **bold** and *emphasis*.
+// Returns a token tree ({ type, text } or { type, children }) so the panel can
+// render real elements; nothing is ever injected as HTML. Code is matched
+// first, so asterisks inside backticks stay literal.
+const INLINE_RE = /`([^`]+)`|\*\*(?=\S)(.+?)(?<=\S)\*\*|\*(?=[^\s*])([^*]+?)(?<=\S)\*/g;
+
+export function inlineTokens(text) {
+  const tokens = [];
+  let last = 0;
+  for (const match of String(text).matchAll(INLINE_RE)) {
+    if (match.index > last) tokens.push({ type: 'text', text: text.slice(last, match.index) });
+    if (match[1] !== undefined) tokens.push({ type: 'code', text: match[1] });
+    else if (match[2] !== undefined) tokens.push({ type: 'bold', children: inlineTokens(match[2]) });
+    else tokens.push({ type: 'em', children: inlineTokens(match[3]) });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) tokens.push({ type: 'text', text: text.slice(last) });
+  return tokens;
+}

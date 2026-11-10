@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-10 — Changelog formatting
+
+- The changelog panel now shows **bold**, *emphasis* and `code` as formatting instead of printing the raw `**` and backtick characters.
+
 ## 2026-11-10 — Support payments: method switches and cost coverage
 
 - **Payment methods.** The Support payments admin page has one switch each for PayPal, Ko-fi and bank transfer. Members only see the methods that are on. Bank transfer reports can now be switched off; you can still record a transfer yourself.
