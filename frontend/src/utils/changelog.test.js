@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs';
 import { inlineTokens, parseChangelog } from './changelog.js';
 
 const text = (value) => ({ type: 'text', text: value });
-const flat = (tokens) => tokens.map((token) => token.children ? flat(token.children) : token.text).join('');
+// Text outside code spans; inside backticks asterisks are meant literally.
+const prose = (tokens) => tokens.map((token) => token.children ? prose(token.children) : token.type === 'code' ? '' : token.text).join('');
 
 test('bold, emphasis and code become tokens around plain text', () => {
   assert.deepEqual(inlineTokens('**Payment methods.** One switch for `PayPal`, *really*.'), [
@@ -24,12 +25,12 @@ test('plain text and stray asterisks pass through unchanged', () => {
   assert.deepEqual(inlineTokens(''), []);
 });
 
-test('no bold markers are left in any entry of the real changelog', () => {
+test('no bold markers are left in the prose of any real changelog entry', () => {
   const entries = parseChangelog(readFileSync(new URL('../../../CHANGELOG.md', import.meta.url), 'utf8'));
   assert.ok(entries.length > 0);
   for (const entry of entries) {
     for (const item of [entry.summary, ...entry.sections.flatMap((section) => section.items)]) {
-      assert.ok(!flat(inlineTokens(item)).includes('**'), `${entry.date}: ${item.slice(0, 80)}`);
+      assert.ok(!prose(inlineTokens(item)).includes('**'), `${entry.date}: ${item.slice(0, 80)}`);
     }
   }
 });
