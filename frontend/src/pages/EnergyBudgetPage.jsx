@@ -5,6 +5,7 @@ import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import useSupportStatus from '../hooks/useSupportStatus.js';
+import SupportCoverage from '../components/SupportCoverage.jsx';
 import EnergyBudgetAdminPanel from './admin/EnergyBudgetAdminPanel.jsx';
 import TimeSeriesChart from '../components/energy/TimeSeriesChart.jsx';
 import {
@@ -229,6 +230,7 @@ export default function EnergyBudgetPage() {
         {!ready('summary') ? <div className="mt-4">{v('summary', null, 'h-3 w-full')}</div> : progress ? <div className="mt-4"><p className="text-xs text-gray-300">Confirmed net credit applied / {progress.basis}: {quantity(progress.percent, 1)}%{progress.estimate ? ' (estimate, the month is still open)' : ''}</p><div className="mt-2 h-2 bg-gray-800" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percent} aria-label={`Funding progress against ${progress.basis}`}><div className="h-full bg-orange-500" style={{ width: `${progress.percent}%` }} /></div>{progress.estimate && <p className="mt-1 text-xs text-gray-500">Estimated owner share so far: {dkk(funding.progress.ownerRemainderOre)}</p>}</div>
           : <p className="mt-4 text-xs text-gray-500">Funding progress is shown once the cost is calculated and verified receipts are allocated.</p>}
       </div></div>
+      <div className={panel}><p className={`${eyebrow} pb-4`}>Cost coverage · last 24 months</p><SupportCoverage /></div>
       <p className="text-xs text-gray-500">Support is entirely optional. It never changes access, quotas or service priority, and it does not change the electricity cost itself. These figures describe this lab’s recorded receipts, not a PayPal or bank balance.</p>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-3 font-mono text-xs">{supportVisible && <Link className={linkCls} to="/support">Optional contribution controls and your private history →</Link>}
         <button type="button" onClick={() => downloadCsv('/energy/summary.csv', { month }, `energy-budget-${month}.csv`).catch(() => setErrors((old) => ({ ...old, export: 'Export failed.' })))} className={btnGhost}>Download this month as CSV</button></div></Section>

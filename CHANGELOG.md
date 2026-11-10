@@ -4,7 +4,7 @@
 
 - **Payment methods.** The Support payments admin page has one switch each for PayPal, Ko-fi and bank transfer. Members only see the methods that are on. Bank transfer reports can now be switched off; you can still record a transfer yourself.
 - With every method off, "Support the Lab" disappears from members' menu and from the Energy page. A member with a running PayPal subscription still sees it, so they can cancel.
-- **Cost coverage.** The page now opens with what the lab's electricity has cost, how much of it member support has covered, and what you paid yourself, with a month-by-month table. Totals only; no member is named.
+- **Cost coverage for everyone.** The Support page and the Energy & Budget page now show members the projected cost for this month, what the lab's electricity has cost in total, how much of it member support has covered, and what the owner paid. The admin page shows the same with a month-by-month table. Totals only; no member is named.
 - PayPal credentials are folded away behind "Change credentials" once PayPal is set up.
 
 ## 2026-11-10 — Identity prompt on user, role and power changes

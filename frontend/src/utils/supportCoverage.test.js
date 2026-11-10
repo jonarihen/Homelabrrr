@@ -57,3 +57,15 @@ test('a refund month lowers total support', () => {
   const view = coverageOverview([month({ knownNetOre: -2000 }), month({ month: '2026-09', knownNetOre: 5000 })]);
   assert.equal(view.supportOre, 3000);
 });
+
+test('the open month carries the projected total only for a real estimate', () => {
+  const open = month({ month: '2026-11', open: true, costOre: null });
+  const estimate = { status: 'estimated', totalOre: '105680', lowOre: '93252', highOre: '118108' };
+  const view = coverageOverview([open], { month: '2026-11', cost: { actualOre: '23912', estimate } });
+  assert.deepEqual(view.projection, { month: '2026-11', totalOre: 105680, lowOre: 93252, highOre: 118108, soFarOre: 23912 });
+  // The projection is shown beside the totals; it is never added to them.
+  assert.equal(view.costOre, 23912);
+  assert.equal(coverageOverview([open], { month: '2026-11', cost: { actualOre: '23912', estimate: { status: 'insufficient_data' } } }).projection, null);
+  assert.equal(coverageOverview([open], { month: '2026-11', cost: { actualOre: '23912', estimate: null } }).projection, null);
+  assert.equal(coverageOverview([month()], { month: '2026-10', cost: { estimate } }).projection, null);
+});

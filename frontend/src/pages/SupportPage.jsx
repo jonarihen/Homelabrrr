@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import api from '../api.js';
 import Layout from '../components/Layout.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useConfirm } from '../contexts/FeedbackContext.jsx';
 import { supportMethods } from '../utils/supportStatus.js';
+import SupportCoverage from '../components/SupportCoverage.jsx';
 
 const money = (ore) => typeof ore === 'number' ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(ore / 100) : '—';
 const date = (value) => value ? new Intl.DateTimeFormat('da-DK', { dateStyle: 'medium' }).format(new Date(value)) : '—';
@@ -121,6 +122,10 @@ export default function SupportPage() {
     {busy === 'capture' && <p role="status" className={`rounded-2xl border px-4 py-3 text-sm ${toneCls.info}`}>Verifying your PayPal payment…</p>}
     {notice.text && busy !== 'capture' && <p role="status" className={`rounded-2xl border px-4 py-3 text-sm ${toneCls[notice.tone]}`}>{notice.text}</p>}
     {loaded && status && !methods.paypal && !kofiUrl && !methods.bankTransfer && <p className="rounded-2xl border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">Online contributions are currently unavailable. Your existing contribution history remains private below.</p>}
+    <Card title="What the lab costs" hint="Lab electricity over the last 24 months and how much of it member support has covered. Totals only; nobody is named.">
+      <div className="mt-5"><SupportCoverage /></div>
+      <p className="mt-5 font-mono text-xs"><Link to="/energy" className="text-gray-400 hover:text-white underline underline-offset-4 decoration-gray-700">Monthly history on Energy & Budget →</Link></p>
+    </Card>
     {kofiUrl && <Card title="Support via Ko-fi">
       <p className="text-sm text-gray-400 mt-3 max-w-2xl">Ko-fi is a voluntary way to contribute. You pay on Ko-fi's own site; nothing is charged from this portal.</p>
       <ul className="mt-4 space-y-2 text-sm text-gray-400 max-w-2xl list-disc pl-5 marker:text-gray-600">

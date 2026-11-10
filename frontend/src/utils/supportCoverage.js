@@ -15,6 +15,15 @@ function monthCost(month, current) {
   return current?.month === month.month ? ore(current.cost?.actualOre) : null;
 }
 
+// The open month's projected total, only when the backend produced a real estimate.
+function monthProjection(rows, current) {
+  const estimate = current?.cost?.estimate;
+  const row = rows.find((item) => item.month === current?.month && item.state !== 'finalized' && item.state !== 'not_finalized');
+  const totalOre = estimate?.status === 'estimated' ? ore(estimate.totalOre) : null;
+  if (!row || totalOre === null) return null;
+  return { month: row.month, totalOre, lowOre: ore(estimate.lowOre), highOre: ore(estimate.highOre), soFarOre: row.costOre };
+}
+
 export function coverageOverview(months, current = null) {
   const rows = [];
   for (const month of months ?? []) {
@@ -31,6 +40,7 @@ export function coverageOverview(months, current = null) {
   const coveredOre = Math.max(0, Math.min(supportOre, costOre));
   return {
     rows, costOre, supportOre, coveredOre,
+    projection: monthProjection(rows, current),
     ownerOre: Math.max(0, costOre - supportOre),
     creditOre: Math.max(0, supportOre - costOre),
     percent: costOre > 0 ? coveredOre / costOre * 100 : null,
