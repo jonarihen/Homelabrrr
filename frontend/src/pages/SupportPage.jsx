@@ -108,9 +108,10 @@ export default function SupportPage() {
   const loading = !loaded;
   const kofiUrl = kofiPage(status?.kofi);
   const kofiReceipts = history.kofiReceipts || [];
-  // Until the status answer is known the page keeps its usual shape (PayPal cards
-  // and the transfer form), so nothing jumps; then only enabled methods remain.
-  const methods = status ? supportMethods(status) : { paypal: true, kofi: false, bankTransfer: true };
+  // No method is offered until the status answer is known: showing PayPal or
+  // the transfer form first and removing it a moment later looks like a glitch.
+  // A placeholder holds the space while loading.
+  const methods = supportMethods(status);
   const showPayPal = methods.paypal;
   const manualReports = history.manualReports || [];
   const amountValid = /^\d{1,5}\.\d{2}$/.test(amount);
@@ -126,6 +127,7 @@ export default function SupportPage() {
       <div className="mt-5"><SupportCoverage /></div>
       <p className="mt-5 font-mono text-xs"><Link to="/energy" className="text-gray-400 hover:text-white underline underline-offset-4 decoration-gray-700">Monthly history on Energy & Budget →</Link></p>
     </Card>
+    {loading && <div className={card} aria-busy="true"><span className="sr-only">Loading contribution options</span><Skeleton className="h-5 w-48" /><Skeleton className="h-24 w-full mt-4" /></div>}
     {kofiUrl && <Card title="Support via Ko-fi">
       <p className="text-sm text-gray-400 mt-3 max-w-2xl">Ko-fi is a voluntary way to contribute. You pay on Ko-fi's own site; nothing is charged from this portal.</p>
       <ul className="mt-4 space-y-2 text-sm text-gray-400 max-w-2xl list-disc pl-5 marker:text-gray-600">
