@@ -4,6 +4,7 @@ import api from '../api.js';
 import Layout from '../components/Layout.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useConfirm } from '../contexts/FeedbackContext.jsx';
+import { supportMethods } from '../utils/supportStatus.js';
 
 const money = (ore) => typeof ore === 'number' ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(ore / 100) : '—';
 const date = (value) => value ? new Intl.DateTimeFormat('da-DK', { dateStyle: 'medium' }).format(new Date(value)) : '—';
@@ -77,7 +78,11 @@ export default function SupportPage() {
     setBusy('manual'); setError(''); setNotice('');
     try { await api.post('/payments/manual-reports', transfer); setTransfer({ amount: '', reference: '', receivedOn: '' });
       setNotice('Transfer reported. It counts only after the owner confirms it against the bank statement.', 'success'); await refresh(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not report the transfer.'); }
+    catch (err) {
+      const code = err.response?.data?.error;
+      if (code === 'BANK_TRANSFER_DISABLED') { setError('Bank transfer reports are currently switched off, so this transfer was not reported.'); refresh().catch(() => {}); }
+      else setError(code || 'Could not report the transfer.');
+    }
     finally { setBusy(''); }
   };
   const options = status?.monthlyOptions || [];
@@ -102,8 +107,11 @@ export default function SupportPage() {
   const loading = !loaded;
   const kofiUrl = kofiPage(status?.kofi);
   const kofiReceipts = history.kofiReceipts || [];
-  // PayPal cards are hidden once it is known that PayPal is not set up at all.
-  const showPayPal = !status || !!status.configured;
+  // Until the status answer is known the page keeps its usual shape (PayPal cards
+  // and the transfer form), so nothing jumps; then only enabled methods remain.
+  const methods = status ? supportMethods(status) : { paypal: true, kofi: false, bankTransfer: true };
+  const showPayPal = methods.paypal;
+  const manualReports = history.manualReports || [];
   const amountValid = /^\d{1,5}\.\d{2}$/.test(amount);
   return <Layout><div className="max-w-5xl mx-auto p-6 lg:p-8 space-y-6">
     <header><p className="font-mono text-[11px] uppercase tracking-[0.2em] text-orange-500">Private · Energy & Budget</p>
@@ -112,7 +120,7 @@ export default function SupportPage() {
     {error && <p role="alert" className="rounded-2xl border border-red-800/50 bg-red-900/20 px-4 py-3 text-sm text-red-300">{error}</p>}
     {busy === 'capture' && <p role="status" className={`rounded-2xl border px-4 py-3 text-sm ${toneCls.info}`}>Verifying your PayPal payment…</p>}
     {notice.text && busy !== 'capture' && <p role="status" className={`rounded-2xl border px-4 py-3 text-sm ${toneCls[notice.tone]}`}>{notice.text}</p>}
-    {loaded && status && !status.checkoutEnabled && !kofiUrl && <p className="rounded-2xl border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">Online contributions are currently unavailable. Your existing contribution history remains private below.</p>}
+    {loaded && status && !methods.paypal && !kofiUrl && !methods.bankTransfer && <p className="rounded-2xl border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">Online contributions are currently unavailable. Your existing contribution history remains private below.</p>}
     {kofiUrl && <Card title="Support via Ko-fi">
       <p className="text-sm text-gray-400 mt-3 max-w-2xl">Ko-fi is a voluntary way to contribute. You pay on Ko-fi's own site; nothing is charged from this portal.</p>
       <ul className="mt-4 space-y-2 text-sm text-gray-400 max-w-2xl list-disc pl-5 marker:text-gray-600">
@@ -167,8 +175,9 @@ export default function SupportPage() {
             <button type="button" disabled={!!busy} onClick={() => cancel(item)} className={secondaryBtn}>{busy === `cancel:${item.id}` ? 'Cancelling…' : 'Cancel subscription'}</button></div>}
         </div>)}</div>}
     </Card>
-    <Card title="Paid by bank transfer?" hint="Report it here so the owner can match it against the bank statement. A report is not counted until confirmed.">
-      <form onSubmit={reportTransfer} className="mt-5 grid sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs text-gray-400">
+    {(methods.bankTransfer || manualReports.length > 0) && <Card title={methods.bankTransfer ? 'Paid by bank transfer?' : 'Bank transfer reports'}
+      hint={methods.bankTransfer ? 'Report it here so the owner can match it against the bank statement. A report is not counted until confirmed.' : 'New transfer reports are not being accepted right now. Your earlier reports stay listed here.'}>
+      {methods.bankTransfer && <form onSubmit={reportTransfer} className="mt-5 grid sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs text-gray-400">
         <div><label htmlFor="transfer-amount" className="block mb-2">Amount · DKK</label>
           <input id="transfer-amount" value={transfer.amount} inputMode="decimal" onChange={(event) => setTransfer((old) => ({ ...old, amount: event.target.value }))} className={inputCls} /></div>
         <div><label htmlFor="transfer-reference" className="block mb-2">Bank reference</label>
@@ -177,11 +186,11 @@ export default function SupportPage() {
           <input id="transfer-date" type="date" value={transfer.receivedOn} onChange={(event) => setTransfer((old) => ({ ...old, receivedOn: event.target.value }))} className={inputCls} /></div>
         <div className="sm:col-span-2 lg:col-span-3"><button disabled={!!busy || !transfer.amount || !transfer.reference || !transfer.receivedOn} className={primaryBtn}>
           {busy === 'manual' ? 'Reporting…' : 'Report transfer'}</button></div>
-      </form>
-      {(history.manualReports || []).length > 0 && <ul className="mt-6 divide-y divide-gray-800 text-sm">{history.manualReports.map((item) => <li key={item.id} className="py-3 flex flex-wrap justify-between gap-x-4 gap-y-1">
+      </form>}
+      {manualReports.length > 0 && <ul className={`${methods.bankTransfer ? 'mt-6' : 'mt-4'} divide-y divide-gray-800 text-sm`}>{manualReports.map((item) => <li key={item.id} className="py-3 flex flex-wrap justify-between gap-x-4 gap-y-1">
         <span className="text-gray-300">{money(item.amountOre)} · ref <span className="font-mono">{item.reference}</span> · {date(item.receivedAt)}</span>
         <span className="font-mono text-xs text-gray-400">{item.status === 'reported' ? 'awaiting confirmation' : item.status}</span></li>)}</ul>}
-    </Card>
+    </Card>}
     <Card title="Your contribution history" hint="Only verified postings count toward the lab budget. Refunds and actual payment fees reduce net support.">
       {loading ? <div className="mt-5 space-y-3" aria-busy="true"><Skeleton className="h-5 w-full" /><Skeleton className="h-5 w-full" /></div>
         : loadFailed ? <p className="text-sm text-gray-500 mt-5">Contribution history could not be loaded.</p>

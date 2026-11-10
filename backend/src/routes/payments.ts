@@ -12,6 +12,7 @@ import { latestPaypalAllocation, recalculatePaypalAllocations } from '../service
 import { PayPalError } from '../services/paypalClient.ts';
 import { memberKofiStatus } from '../services/kofi.ts';
 import { ownKofiReceipts } from '../services/kofiAdmin.ts';
+import { bankTransferEnabled, hasOpenLiveSubscription, setBankTransferEnabled } from '../services/supportMethods.ts';
 import kofiAdminRoutes from './kofi.ts';
 import { logAudit } from '../utils/audit.ts';
 
@@ -30,8 +31,13 @@ const cancelLimiter = memberLimiter(10);
 const setupLimiter = memberLimiter(20);
 function fail(res: any, err: unknown) { res.status(err instanceof PayPalError ? err.status : 500).json({ error: err instanceof PayPalError ? err.code : 'INTERNAL' }); }
 // `kofi` tells the member page whether to show the Ko-fi link; nothing else about Ko-fi is exposed here.
-router.get('/status', async (_req, res) => {
-  try { const [paypal, kofi] = await Promise.all([memberPaypalStatus(), memberKofiStatus()]); res.json({ ...paypal, kofi }); }
+// `bankTransfer` is the owner's switch for member transfer reports. `showSupport` says whether the member has any
+// reason to see the support page: a method that is switched on, or a live subscription they may still need to cancel.
+router.get('/status', async (req, res) => {
+  try { const [paypal, kofi, bankTransfer, openSubscription] = await Promise.all([memberPaypalStatus(), memberKofiStatus(),
+    bankTransferEnabled(), hasOpenLiveSubscription(req.session.userId!)]);
+    res.json({ ...paypal, kofi, bankTransfer: { enabled: bankTransfer },
+      showSupport: paypal.checkoutEnabled || kofi.enabled === true || bankTransfer || openSubscription }); }
   catch (err) { fail(res, err); }
 });
 router.get('/mine', async (req, res) => {
@@ -41,8 +47,12 @@ router.get('/mine', async (req, res) => {
   catch (err) { fail(res, err); }
 });
 // A member's own bank-transfer report: evidence only, never posted until an
-// administrator confirms it.
-router.post('/manual-reports', cancelLimiter, async (req, res) => {
+// administrator confirms it. Refused outright while the owner has the method
+// switched off; the admin routes under /admin/manual are not affected.
+const requireBankTransferEnabled = async (_req: any, res: any, next: any) => {
+  try { if (!(await bankTransferEnabled())) throw new PayPalError('BANK_TRANSFER_DISABLED', 403); next(); } catch (err) { fail(res, err); }
+};
+router.post('/manual-reports', requireBankTransferEnabled, cancelLimiter, async (req, res) => {
   try { res.status(201).json(await reportManualContribution(req.session.userId!, req.body)); } catch (err) { fail(res, err); }
 });
 router.post('/one-off', checkoutLimiter, async (req, res) => {
@@ -102,6 +112,12 @@ router.get('/admin/export.csv', requireAdmin, requireRecentReauthentication, asy
     res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="paypal-ledger-${environment}.csv"`,
       'X-Content-Type-Options': 'nosniff' }).send(body);
   } catch (err) { fail(res, err); }
+});
+router.post('/admin/bank-transfer/enabled', requireAdmin, requireRecentReauthentication, async (req, res) => {
+  try { if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'INVALID_REQUEST' });
+    const bankTransfer = await setBankTransferEnabled(req.body.enabled);
+    await logAudit(req, 'payments.bank_transfer.toggle', bankTransfer.enabled ? 'on' : 'off'); res.json({ bankTransfer }); }
+  catch (err) { fail(res, err); }
 });
 const manualId = (value: unknown) => { const id = Number(value); if (!Number.isSafeInteger(id) || id <= 0) throw new PayPalError('INVALID_ID', 400); return id; };
 router.get('/admin/manual', requireAdmin, async (req, res) => {

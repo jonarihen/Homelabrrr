@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-10 — Support payments: method switches and cost coverage
+
+- **Payment methods.** The Support payments admin page has one switch each for PayPal, Ko-fi and bank transfer. Members only see the methods that are on. Bank transfer reports can now be switched off; you can still record a transfer yourself.
+- With every method off, "Support the Lab" disappears from members' menu and from the Energy page. A member with a running PayPal subscription still sees it, so they can cancel.
+- **Cost coverage.** The page now opens with what the lab's electricity has cost, how much of it member support has covered, and what you paid yourself, with a month-by-month table. Totals only; no member is named.
+- PayPal credentials are folded away behind "Change credentials" once PayPal is set up.
+
 ## 2026-11-10 — Identity prompt on user, role and power changes
 
 - Creating or changing users, roles, invites and admin-revoked tokens, and changing live power policy, now opens the **Confirm your identity** dialog when a recent password and 2FA check is needed, then finishes the action. These pages previously showed only the error "Please confirm your password and second factor before continuing", with no way to confirm.

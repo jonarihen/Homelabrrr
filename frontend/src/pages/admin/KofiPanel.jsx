@@ -431,7 +431,9 @@ function LinkedEmails({ members, failed, users, run, busy }) {
 // Ko-fi is live only, so nothing here follows the page's sandbox/live selector.
 // Every action goes through the page's `act`, which opens the identity check on
 // REAUTHENTICATION_REQUIRED and replays the request afterwards.
-export default function KofiPanel({ act, busy }) {
+// `configKey` changes when the page switches Ko-fi on or off from its own
+// controls; `onStatus` hands the page the setup status this panel loads.
+export default function KofiPanel({ act, busy, configKey = 0, onStatus }) {
   const [status, setStatus] = useState(null);
   const [review, setReview] = useState(null);
   const [receipts, setReceipts] = useState(null);
@@ -456,7 +458,9 @@ export default function KofiPanel({ act, busy }) {
   const loadMembers = useCallback(() => fetchPart('members', () => api.get(`${BASE}/members`), (data) => setMembers(page(data).items)), [fetchPart]);
   const loadUsers = useCallback(() => fetchPart('users', () => api.get('/admin/users'),
     (data) => setUsers(Array.isArray(data) ? [...data].sort((a, b) => String(a.username).localeCompare(String(b.username))) : [])), [fetchPart]);
-  useEffect(() => { loadConfig(); loadMembers(); loadUsers(); }, [loadConfig, loadMembers, loadUsers]);
+  useEffect(() => { loadConfig(); }, [loadConfig, configKey]);
+  useEffect(() => { if (status) onStatus?.(status); }, [status, onStatus]);
+  useEffect(() => { loadMembers(); loadUsers(); }, [loadMembers, loadUsers]);
   useEffect(() => { setReview(null); loadReview(); }, [loadReview]);
   useEffect(() => { setReceipts(null); loadReceipts(); }, [loadReceipts]);
   const reload = () => Promise.all([loadConfig(), loadReview(), loadReceipts(), loadMembers()]);

@@ -32,6 +32,7 @@ async function mockEnergy(page, { values = summary(), hosts = { status: 'availab
   const writes = [];
   page.on('request', (request) => { if (request.url().includes('/api/') && request.method() !== 'GET') writes.push(`${request.method()} ${new URL(request.url()).pathname}`); });
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: user }));
+  await page.route('**/api/payments/status', (route) => route.fulfill({ json: { checkoutEnabled: true, bankTransfer: { enabled: true }, showSupport: true } }));
   await page.route('**/api/energy/summary?**', (route) => route.fulfill({ json: values }));
   await page.route('**/api/energy/hosts', (route) => route.fulfill({ json: hosts }));
   await page.route('**/api/energy/history**', (route) => route.fulfill({ json: history }));
