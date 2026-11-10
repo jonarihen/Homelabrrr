@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-10 — VLAN tag preview for delegated VLAN managers
+
+- When a non-admin VLAN manager creates a VLAN, the form now shows the tag and subnet that will really be assigned. It used to guess from only the VLANs that user could see, so the preview could show a tag that was already taken by someone else.
+
 ## 2026-11-10 — Save your own Ko-fi email
 
 - Members can save the email they pay with on Ko-fi, on the Support page. Payments from that email are then matched to their account automatically, so the owner no longer has to link the first one by hand.

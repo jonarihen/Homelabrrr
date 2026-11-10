@@ -1656,6 +1656,13 @@ router.get('/vlans', requirePermission('can_manage_vlans', 'can_manage_policies'
   })));
 });
 
+// The tag the server would hand a non-admin right now. A non-admin only sees
+// the VLANs assigned to them, so the browser cannot work this out itself; the
+// create form asks here so its preview shows the tag that will really be used.
+router.get('/vlans/next-tag', pVlans, async (_req, res) => {
+  res.json({ tag: await findNextAvailableVlanTag() });
+});
+
 router.post('/vlans', pVlans, async (req, res) => {
   const { name, tag, description, mode = 'managed', subnetCidr = '' } = req.body;
   if (!name) {
