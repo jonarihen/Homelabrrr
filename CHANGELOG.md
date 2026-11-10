@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-10 — Identity prompt on user, role and power changes
+
+- Creating or changing users, roles, invites and admin-revoked tokens, and changing live power policy, now opens the **Confirm your identity** dialog when a recent password and 2FA check is needed, then finishes the action. These pages previously showed only the error "Please confirm your password and second factor before continuing", with no way to confirm.
+
 ## 2026-11-09 — Ko-fi support
 
 - Members can support the lab through the owner's Ko-fi page without the owner needing a business account. Ko-fi posts each payment to the portal, which records donations and membership payments as support receipts in the existing ledger. Support never changes access, quotas or priority.
