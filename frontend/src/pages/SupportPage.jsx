@@ -27,6 +27,44 @@ function Card({ title, hint, children, className = '' }) {
     {hint && <p className="text-xs text-gray-500 mt-2">{hint}</p>}{children}</section>;
 }
 
+const KOFI_EMAIL_ERRORS = {
+  INVALID_EMAIL: 'That does not look like an email address.',
+  EMAIL_ALREADY_LINKED: 'That email is already linked to an account. If it is yours, ask the owner to sort it out.',
+  TOO_MANY_EMAILS: 'You have saved the maximum number of emails. Remove one first.',
+  KOFI_DISABLED: 'Ko-fi is switched off right now.',
+  RATE_LIMITED: 'Too many attempts. Try again in a few minutes.',
+};
+// The member's own Ko-fi email(s). Only a masked hint ever comes back from the
+// server; the address itself is not stored. Rows the owner linked are listed
+// but can only be removed by the owner.
+function KofiEmails({ emails, onChange }) {
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const run = async (key, request, done) => {
+    setBusy(key); setError('');
+    try { const { data } = await request(); onChange(data.items || []); done?.(); }
+    catch (err) { setError(KOFI_EMAIL_ERRORS[err.response?.data?.error] || 'Could not save the change. Try again.'); }
+    finally { setBusy(''); }
+  };
+  const add = (event) => { event.preventDefault(); run('add', () => api.post('/payments/kofi-emails', { email: email.trim() }), () => setEmail('')); };
+  return <div className="mt-6 pt-6 border-t border-gray-800 max-w-2xl">
+    <h3 className="aaris-meta">Your Ko-fi email</h3>
+    <p className="text-xs text-gray-500 mt-2">Save the email you pay with on Ko-fi and payments from it are matched to your account by themselves. Only a masked hint is kept visible; the owner can see that you added it.</p>
+    {emails.length > 0 && <ul className="mt-4 divide-y divide-gray-800 text-sm">{emails.map((item) => <li key={item.id} className="py-2.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+      <span className="font-mono text-gray-300 break-all">{item.emailHint}</span>
+      {item.removable ? <button type="button" disabled={!!busy} onClick={() => run(`remove:${item.id}`, () => api.delete(`/payments/kofi-emails/${item.id}`))} className={secondaryBtn}>{busy === `remove:${item.id}` ? 'Removing…' : 'Remove'}</button>
+        : <span className="font-mono text-xs text-gray-500">linked by the owner</span>}
+    </li>)}</ul>}
+    <form onSubmit={add} className="mt-4 flex flex-wrap items-end gap-3">
+      <div className="flex-1 min-w-[14rem]"><label htmlFor="kofi-email" className="block text-xs text-gray-400 mb-2">Email used on Ko-fi</label>
+        <input id="kofi-email" type="email" required maxLength={254} autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} className={inputCls} /></div>
+      <button disabled={!!busy || !email.trim()} className={secondaryBtn}>{busy === 'add' ? 'Saving…' : 'Save email'}</button>
+    </form>
+    {error && <p role="alert" className="text-xs text-red-400 mt-3">{error}</p>}
+  </div>;
+}
+
 export default function SupportPage() {
   const confirm = useConfirm();
   useDocumentTitle('Support the lab');
@@ -132,11 +170,12 @@ export default function SupportPage() {
       <p className="text-sm text-gray-400 mt-3 max-w-2xl">Ko-fi is a voluntary way to contribute. You pay on Ko-fi's own site; nothing is charged from this portal.</p>
       <ul className="mt-4 space-y-2 text-sm text-gray-400 max-w-2xl list-disc pl-5 marker:text-gray-600">
         <li>Use the same email address on Ko-fi every time. It is how a payment is matched to your account.</li>
-        <li>Your first payment is matched by the owner, so it can take a while before it shows in your history below.</li>
+        <li>Save that email below and your payments are matched automatically. Without it, the first payment is matched by the owner, so it can take a while before it shows in your history below.</li>
         <li>A payment counts toward the lab budget once the owner has confirmed the actual fee. Payments in another currency are counted at the DKK amount the owner actually received.</li>
         <li>Do not also report a Ko-fi payment as a bank transfer.</li>
       </ul>
       <div className="mt-6"><a href={kofiUrl} target="_blank" rel="noopener noreferrer" className={`${primaryBtn} inline-block`}>Open the Ko-fi page ↗</a></div>
+      <KofiEmails emails={history.kofiEmails || []} onChange={(items) => setHistory((old) => ({ ...old, kofiEmails: items }))} />
     </Card>}
     {showPayPal && <div className="grid lg:grid-cols-2 gap-6 items-stretch">
       <Card title="One-off contribution" className="flex flex-col">

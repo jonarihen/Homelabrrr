@@ -51,7 +51,7 @@ const reasonCode = (code) => code.split('_').map((part, index) => <Fragment key=
 const REVIEW_FILTERS = [['needs_review', 'Needs review'], ['resolved', 'Resolved'], ['all', 'All']];
 const RECEIPT_FILTERS = [['net_unresolved', 'Awaiting fee'], ['posted', 'Posted'], ['reversed', 'Reversed'], ['voided', 'Voided'], ['all', 'All']];
 const RECEIPT_STATUS = { net_unresolved: ['warn', 'awaiting fee'], posted: ['ok', 'posted'], reversed: ['neutral', 'reversed'], voided: ['neutral', 'voided'] };
-const SOURCES = { admin_link: 'Linked from review', admin_entry: 'Entered in advance' };
+const SOURCES = { admin_link: 'Linked from review', admin_entry: 'Entered in advance', member_entry: 'Entered by the member (not verified)' };
 const TILES = [
   ['Last event', (s) => s.lastEventAt ? [when(s.lastEventAt), s.lastEventType, s.lastEventOutcome].filter(Boolean).join(' · ') : '—'],
   ['Last test event', (s) => when(s.lastTestEventAt)],

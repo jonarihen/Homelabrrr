@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-10 — Save your own Ko-fi email
+
+- Members can save the email they pay with on Ko-fi, on the Support page. Payments from that email are then matched to their account automatically, so the owner no longer has to link the first one by hand.
+- The address is self-declared, not verified. The owner sees it under linked emails as "Entered by the member" and can unlink it; an address that is already linked to someone cannot be claimed. Linking by hand from the review queue works as before.
+
 ## 2026-11-10 — Changelog formatting
 
 - The changelog panel now shows **bold**, *emphasis* and `code` as formatting instead of printing the raw `**` and backtick characters.
