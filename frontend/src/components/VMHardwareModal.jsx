@@ -242,7 +242,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                     <p className="text-xs text-gray-400 mb-1.5">Remove a disk</p>
                     <ul className="space-y-1.5">
                       {disks.map((d) => {
-                        const blocker = diskRemoveBlocker(d, isRunning);
+                        const blocker = diskRemoveBlocker(d, { vmid: vm.vmid, isRunning, canRemove: !!vm.canDelete });
                         return (
                           <li key={d.name} className="flex items-center justify-between gap-3 bg-gray-900/50 rounded-lg px-3 py-2">
                             <span className="text-xs text-gray-300 truncate" title={`${d.name} ${d.storage}`}>{diskLabel(d)}</span>

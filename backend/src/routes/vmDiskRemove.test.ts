@@ -6,7 +6,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, pveHosts, vmAssignments, auditLog } from '../db/schema/index.ts';
+import { users, pveHosts, vmAssignments, vmMigrations, auditLog } from '../db/schema/index.ts';
 
 // DELETE /vms/:node/:vmid/disks/:disk — owner-only, never the boot disk, stopped VMs only,
 // and the deleted volume stops counting against the owner's storage quota.
@@ -22,13 +22,17 @@ let snapshots: { name: string }[] = [{ name: 'current' }];
 let quota: typeof import('../utils/quota.ts');
 const unlinks: { path: string; method: string; body: string }[] = [];
 
-const CONFIG = {
+const CONFIG: Record<string, string> = {
   boot: 'order=scsi0;ide2;net0',
   scsi0: 'local-lvm:vm-500-disk-0,size=20G',
   scsi1: 'local-lvm:vm-500-disk-1,size=10G',
+  // PVE would only detach these, never delete the data behind them.
+  scsi2: 'local-lvm:vm-999-disk-0,size=5G',
+  scsi3: '/dev/disk/by-id/ata-passthrough,size=100G',
   ide2: 'local-lvm:vm-500-cloudinit,media=cdrom',
   net0: 'virtio=BC:24:11:00:00:01,bridge=vmbr0',
 };
+let config = CONFIG;
 
 before(async () => {
   testDb = await createTestDatabase();
@@ -63,6 +67,7 @@ beforeEach(t => {
   sessionUserId = ownerId;
   vmStatus = 'stopped';
   snapshots = [{ name: 'current' }];
+  config = CONFIG;
   unlinks.length = 0;
   t.mock.method(https, 'request', (url: URL, options: { method?: string }, callback: (res: EventEmitter) => void) => {
     const outgoing = new EventEmitter();
@@ -81,7 +86,7 @@ beforeEach(t => {
           let data: unknown = null;
           if (path === '/api2/json/nodes') data = [{ node: 'pve' }];
           else if (path === '/api2/json/cluster/resources') data = [{ vmid: 500, node: 'pve', type: 'qemu' }];
-          else if (path.endsWith('/qemu/500/config')) data = CONFIG;
+          else if (path.endsWith('/qemu/500/config')) data = config;
           else if (path.endsWith('/qemu/500/status/current')) data = { status: vmStatus };
           else if (path.endsWith('/qemu/500/snapshot')) data = snapshots;
           else if (path.endsWith('/qemu/500/unlink')) unlinks.push({ path, method: options?.method || '', body });
@@ -116,10 +121,38 @@ test('malformed or non-removable disk keys are refused before any change', async
   assert.equal(unlinks.length, 0);
 });
 
+test('host paths and volumes of another VM are refused', async () => {
+  for (const disk of ['scsi2', 'scsi3']) {
+    const res = await remove(disk);
+    assert.equal(res.status, 400, disk);
+    assert.match(res.body.error, /not a storage volume owned by this VM/);
+  }
+  assert.equal(unlinks.length, 0);
+});
+
 test('the boot disk is refused', async () => {
   const res = await remove('scsi0');
   assert.equal(res.status, 409);
   assert.match(res.body.error, /boot disk/);
+  // Without boot order or bootdisk, PVE boots the first disk across buses, sata before scsi.
+  config = { sata0: 'local-lvm:vm-500-disk-0,size=20G', scsi0: 'local-lvm:vm-500-disk-1,size=10G' };
+  assert.equal((await remove('sata0')).status, 409);
+  assert.equal(unlinks.length, 0);
+});
+
+test('a pending migration or conflicting owner aliases are refused', async () => {
+  const [migration] = await testDb.db.insert(vmMigrations).values({
+    vmid: 500, source_node: node, target_node: node, status: 'running',
+  }).returning({ id: vmMigrations.id });
+  const migrating = await remove('scsi1');
+  assert.equal(migrating.status, 409);
+  assert.match(migrating.body.error, /migration/);
+  await testDb.db.delete(vmMigrations).where(eq(vmMigrations.id, migration.id));
+
+  const [alias] = await testDb.db.insert(vmAssignments).values({ user_id: operatorId, node: 'pve', vmid: 500 })
+    .returning({ id: vmAssignments.id });
+  assert.equal((await remove('scsi1')).status, 409);
+  await testDb.db.delete(vmAssignments).where(eq(vmAssignments.id, alias.id));
   assert.equal(unlinks.length, 0);
 });
 

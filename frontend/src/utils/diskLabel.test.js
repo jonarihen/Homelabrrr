@@ -16,18 +16,23 @@ test('edge values', () => {
   assert.equal(diskLabel({ name: 'scsi2', storage: '/dev/disk/by-id/x', size: '1T' }), 'SCSI 2 · /dev/disk/by-id/x · 1T');
 });
 
-test('boot disks come from the boot order, then bootdisk, then scsi0/virtio0', () => {
+test('boot disks come from the boot order, then bootdisk, then the first disk across buses', () => {
   const disk = 'local-lvm:vm-1-disk-0,size=8G';
   assert.deepEqual([...bootDiskKeys({ boot: 'order=virtio1;ide2;net0', virtio1: disk })], ['virtio1', 'ide2', 'net0']);
   assert.ok(bootDiskKeys({ boot: 'cdn', bootdisk: 'sata0', sata0: disk }).has('sata0'));
-  const fallback = bootDiskKeys({ boot: 'order=ide2;net0', scsi0: disk });
-  assert.ok(fallback.has('scsi0') && fallback.has('virtio0'));
+  const fallback = bootDiskKeys({ boot: 'order=ide2;net0', ide2: 'local:iso/x.iso,media=cdrom', scsi1: disk, sata3: disk });
+  assert.ok(fallback.has('sata3') && !fallback.has('scsi1'));
 });
 
 test('remove blockers', () => {
-  assert.equal(diskRemoveBlocker({ name: 'scsi1', storage: 'local-lvm:vm-1-disk-1' }, false), '');
-  assert.equal(diskRemoveBlocker({ name: 'scsi0', storage: 'local-lvm:vm-1-disk-0', boot: true }, false), 'Boot disk: cannot be removed');
-  assert.equal(diskRemoveBlocker({ name: 'ide2', storage: 'local-lvm:vm-1-cloudinit' }, false), 'Not a data disk');
-  assert.equal(diskRemoveBlocker({ name: 'efidisk0', storage: 'local-lvm:vm-1-disk-2' }, false), 'Not a data disk');
-  assert.equal(diskRemoveBlocker({ name: 'scsi1', storage: 'local-lvm:vm-1-disk-1' }, true), 'Stop the VM to remove disks');
+  const ok = { vmid: 1, isRunning: false, canRemove: true };
+  assert.equal(diskRemoveBlocker({ name: 'scsi1', storage: 'local-lvm:vm-1-disk-1' }, ok), '');
+  assert.equal(diskRemoveBlocker({ name: 'scsi1', storage: 'local:1/vm-1-disk-1.qcow2' }, ok), '');
+  assert.equal(diskRemoveBlocker({ name: 'scsi1', storage: 'local-lvm:vm-1-disk-1' }, { ...ok, canRemove: false }), 'Only the VM owner can remove disks');
+  assert.equal(diskRemoveBlocker({ name: 'scsi0', storage: 'local-lvm:vm-1-disk-0', boot: true }, ok), 'Boot disk: cannot be removed');
+  assert.equal(diskRemoveBlocker({ name: 'ide2', storage: 'local-lvm:vm-1-cloudinit' }, ok), 'Not a data disk');
+  assert.equal(diskRemoveBlocker({ name: 'efidisk0', storage: 'local-lvm:vm-1-disk-2' }, ok), 'Not a data disk');
+  assert.match(diskRemoveBlocker({ name: 'scsi2', storage: '/dev/disk/by-id/ata-x' }, ok), /Not a volume owned/);
+  assert.match(diskRemoveBlocker({ name: 'scsi2', storage: 'local-lvm:vm-11-disk-0' }, ok), /Not a volume owned/);
+  assert.equal(diskRemoveBlocker({ name: 'scsi1', storage: 'local-lvm:vm-1-disk-1' }, { ...ok, isRunning: true }), 'Stop the VM to remove disks');
 });
