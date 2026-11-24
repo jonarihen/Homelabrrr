@@ -95,7 +95,11 @@ jobs:
         working-directory: frontend
       - run: npx playwright install --with-deps chromium
         working-directory: frontend
-      - run: npm run e2e
+      - name: npm run e2e on a free port
+        run: |
+          E2E_PORT=$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")
+          export E2E_PORT
+          npm run e2e
         working-directory: frontend
 
   containers:
