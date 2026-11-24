@@ -92,7 +92,7 @@ async function setStep(provisionId: number, key: string, status: string, note?: 
 // utils/cloudInitCredentials.js.
 
 async function parseCloudInitOptions(
-  { ciUser, ciPassword, sshKeyIds, ipMode, ipAddress, ipGateway }: any,
+  { ciUser, ciPassword, sshKeyIds, ipMode, ipAddress, ipGateway, allowNoLogin }: any,
   userId: number,
   cloudInitCapable = false,
 ): Promise<{ opts: any } | { error: { status: number; message: string } }> {
@@ -124,9 +124,10 @@ async function parseCloudInitOptions(
     if (keys.length > 0) opts.sshKeys = keys.join('\n');
   }
   // A cloud image has no default password and a locked default user, so a deploy
-  // with neither credential boots into a VM nobody can log into.
+  // with neither credential boots into a VM nobody can log into — unless the
+  // user explicitly ticked "I know this VM will have no login".
   try {
-    assertLoginPossible({ ciPassword: opts.ciPassword, sshKeys: opts.sshKeys, cloudInitCapable });
+    assertLoginPossible({ ciPassword: opts.ciPassword, sshKeys: opts.sshKeys, cloudInitCapable, allowNoLogin: allowNoLogin === true });
   } catch (err: any) {
     return { error: { status: err.status || 400, message: err.message } };
   }

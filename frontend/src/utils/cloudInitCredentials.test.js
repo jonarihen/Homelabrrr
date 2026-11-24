@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  isUsableKey, unusableKeyReason, cloudInitLoginMissing, NO_LOGIN_MESSAGE, NO_PUBLIC_KEY_LABEL,
+  isUsableKey, unusableKeyReason, cloudInitLoginMissing, imageDefaultUser, NO_LOGIN_MESSAGE, NO_PUBLIC_KEY_LABEL,
 } from './cloudInitCredentials.js';
 
 const LAPTOP = { id: 1, name: 'laptop', public_key: 'ssh-ed25519 AAAAC3Nza laptop', encrypted: false };
@@ -56,4 +56,15 @@ test('the blocking message matches the backend wording', () => {
     NO_LOGIN_MESSAGE,
     'This VM would have no way to log in. Set a cloud-init password, choose an SSH key, or both.',
   );
+});
+
+test('known cloud images name their default user; unknown ones say nothing', () => {
+  assert.equal(imageDefaultUser({ name: 'Ubuntu 24.04', url: 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img' }), 'ubuntu');
+  assert.equal(imageDefaultUser({ name: 'bookworm', url: 'https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2' }), 'debian');
+  assert.equal(imageDefaultUser({ name: 'AlmaLinux 9' }), 'almalinux');
+  assert.equal(imageDefaultUser({ name: 'Arch-Linux-x86_64-cloudimg' }), 'arch');
+  // "aarch64" must not read as Arch Linux.
+  assert.equal(imageDefaultUser({ name: 'my-image', url: 'https://example.com/foo-aarch64.qcow2' }), '');
+  assert.equal(imageDefaultUser({ name: 'custom golden image' }), '');
+  assert.equal(imageDefaultUser(undefined), '');
 });
