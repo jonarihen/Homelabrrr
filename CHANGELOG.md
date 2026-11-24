@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-24 — No more deploys you can't log into
+
+- Deploying from a cloud image, or from a cloud-init template, now needs a password or an SSH key. The deploy form says so before you submit, and the API refuses the same request.
+- If you really want a VM with no login, tick **I know this VM will have no login** under the warning.
+- The username field shows the image's default user, for example `ubuntu` or `debian`. If the image's default user is unknown, the form asks you to set one.
+
+![Deploy form warning that the VM would have no login, with the image's default user shown](docs/screenshots/changelog/2026-11-24-deploy-login-guard.jpg)
+
 ## 2026-11-24 — Screenshots in the changelog
 
 - Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll

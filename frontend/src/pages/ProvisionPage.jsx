@@ -9,7 +9,7 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
 import { toPveVmName } from '../utils/vmName.js';
-import { isUsableKey, unusableKeyReason, cloudInitLoginMissing, NO_LOGIN_MESSAGE, NO_PUBLIC_KEY_LABEL } from '../utils/cloudInitCredentials.js';
+import { isUsableKey, unusableKeyReason, cloudInitLoginMissing, imageDefaultUser, NO_LOGIN_MESSAGE, NO_PUBLIC_KEY_LABEL } from '../utils/cloudInitCredentials.js';
 import { normalizeApiError } from '../utils/apiError.js';
 
 const inputCls = 'w-full bg-gray-800 border border-gray-700/50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all';
@@ -399,7 +399,7 @@ function VlanField({ vlans, isAdmin, value, onChange }) {
   );
 }
 
-function CloudInitFields({ ci, setCi, sshKeys }) {
+function CloudInitFields({ ci, setCi, sshKeys, defaultUser }) {
   const toggleKey = (id) => {
     setCi(c => ({ ...c, keyIds: c.keyIds.includes(id) ? c.keyIds.filter(k => k !== id) : [...c.keyIds, id] }));
   };
@@ -417,8 +417,13 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="block text-xs text-gray-400 mb-1.5 font-medium">Username</label>
-          <input type="text" value={ci.user} onChange={e => setCi(c => ({ ...c, user: e.target.value }))} className={inputCls} placeholder="image default" autoComplete="off" />
-          <p className="text-xs text-gray-600 mt-1">Leave blank to keep the image's default user (e.g. ubuntu, debian).</p>
+          {/* Unknown default user: ask for one rather than leave the login name a guess. */}
+          <input type="text" value={ci.user} onChange={e => setCi(c => ({ ...c, user: e.target.value }))} className={inputCls} placeholder={defaultUser || 'required'} required={!defaultUser} autoComplete="off" />
+          <p className="text-xs text-gray-600 mt-1">
+            {defaultUser
+              ? <>Leave blank to log in as <span className="font-mono text-gray-400">{defaultUser}</span>, this image's default user.</>
+              : "This image's default user is unknown, so set a username."}
+          </p>
         </div>
         <div>
           <label className="block text-xs text-gray-400 mb-1.5 font-medium">Password</label>
@@ -472,7 +477,13 @@ function CloudInitFields({ ci, setCi, sshKeys }) {
           <svg className="w-4 h-4 flex-shrink-0 text-amber-400 mt-px" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
           </svg>
-          <p>{NO_LOGIN_MESSAGE} A cloud-init guest has no default password and a locked default user.</p>
+          <div className="space-y-2">
+            <p>{NO_LOGIN_MESSAGE} A cloud-init guest has no default password and a locked default user.</p>
+            <label className="flex items-center gap-2 text-gray-300 cursor-pointer">
+              <input type="checkbox" checked={!!ci.allowNoLogin} onChange={e => setCi(c => ({ ...c, allowNoLogin: e.target.checked }))} className="accent-orange-600" />
+              I know this VM will have no login
+            </label>
+          </div>
         </div>
       )}
 
@@ -586,11 +597,12 @@ function CloudImageForm({ onStarted }) {
     setSelected(img);
     setTargetNode(img.nodeRef);
     setForm({ name: '', cores: 2, memory: 2, diskGb: 20, storage: '', bridge: 'vmbr0', description: '', assignTo: '', vlanTag: '', start: false });
-    setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
+    setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '', allowNoLogin: false });
   };
 
-  // Every cloud image is cloud-init only, so a credential is mandatory.
-  const loginMissing = cloudInitLoginMissing({ password: ci.password, keyIds: ci.keyIds, keys: sshKeys });
+  // Every cloud image is cloud-init only, so a credential is mandatory unless
+  // the user explicitly opts out.
+  const loginMissing = cloudInitLoginMissing({ password: ci.password, keyIds: ci.keyIds, keys: sshKeys }) && !ci.allowNoLogin;
 
   const submit = async (e) => {
     e.preventDefault();
@@ -613,6 +625,7 @@ function CloudImageForm({ onStarted }) {
         ciUser: ci.user || undefined,
         ciPassword: ci.password || undefined,
         sshKeyIds: ci.keyIds.length > 0 ? ci.keyIds : undefined,
+        allowNoLogin: ci.allowNoLogin || undefined,
         ipMode: ci.ipMode,
         ipAddress: ci.ipMode === 'static' ? ci.ipAddress : undefined,
         ipGateway: ci.ipMode === 'static' ? (ci.ipGateway || undefined) : undefined,
@@ -792,7 +805,7 @@ function CloudImageForm({ onStarted }) {
 
           <VlanField vlans={vlans} isAdmin={!!user?.isAdmin} value={form.vlanTag} onChange={vlanTag => setForm(f => ({ ...f, vlanTag }))} />
 
-          <CloudInitFields ci={ci} setCi={setCi} sshKeys={sshKeys} />
+          <CloudInitFields ci={ci} setCi={setCi} sshKeys={sshKeys} defaultUser={imageDefaultUser(selected)} />
 
           {user?.isAdmin && (
             <div>
@@ -887,13 +900,13 @@ function CloneForm({ onStarted }) {
       storage: t.default_storage,
       description: '',
     });
-    setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '' });
+    setCi({ user: '', password: '', keyIds: [], ipMode: 'dhcp', ipAddress: '', ipGateway: '', allowNoLogin: false });
   };
 
   // A cloud-init template gets its credentials from cloud-init and nothing else,
   // so one of password / SSH key is mandatory. Other templates bring their own.
   const loginMissing = !!selected?.cloud_init
-    && cloudInitLoginMissing({ password: ci.password, keyIds: ci.keyIds, keys: sshKeys });
+    && cloudInitLoginMissing({ password: ci.password, keyIds: ci.keyIds, keys: sshKeys }) && !ci.allowNoLogin;
 
   const submit = async (e) => {
     e.preventDefault();
@@ -914,6 +927,7 @@ function CloneForm({ onStarted }) {
           ciUser: ci.user || undefined,
           ciPassword: ci.password || undefined,
           sshKeyIds: ci.keyIds.length > 0 ? ci.keyIds : undefined,
+          allowNoLogin: ci.allowNoLogin || undefined,
           ipMode: ci.ipMode,
           ipAddress: ci.ipMode === 'static' ? ci.ipAddress : undefined,
           ipGateway: ci.ipMode === 'static' ? (ci.ipGateway || undefined) : undefined,
@@ -1061,7 +1075,7 @@ function CloneForm({ onStarted }) {
 
           <VlanField vlans={vlans} isAdmin={!!user?.isAdmin} value={form.vlanTag} onChange={vlanTag => setForm(f => ({ ...f, vlanTag }))} />
 
-          {!!selected.cloud_init && <CloudInitFields ci={ci} setCi={setCi} sshKeys={sshKeys} />}
+          {!!selected.cloud_init && <CloudInitFields ci={ci} setCi={setCi} sshKeys={sshKeys} defaultUser={imageDefaultUser(selected)} />}
 
           {user?.isAdmin && (
             <div>
