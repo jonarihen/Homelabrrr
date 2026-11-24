@@ -45,13 +45,15 @@ function fmtUptime(s) {
 
 // ── Chart ────────────────────────────────────────────────────────────────────
 
-function MiniChart({ data, color, label, formatValue, height = 64 }) {
+function MiniChart({ data, token, label, formatValue, height = 64 }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !data || data.length === 0) return;
     const ctx = canvas.getContext('2d');
+    // Canvas can't resolve var(); read the token's hex so the alpha suffixes below work.
+    const color = getComputedStyle(canvas).getPropertyValue(token).trim();
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     canvas.width = w * dpr; canvas.height = h * dpr;
@@ -84,7 +86,7 @@ function MiniChart({ data, color, label, formatValue, height = 64 }) {
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     ctx.stroke();
-  }, [data, color]);
+  }, [data, token]);
 
   const lastVal = data?.filter(v => v != null).slice(-1)[0];
 
@@ -92,7 +94,7 @@ function MiniChart({ data, color, label, formatValue, height = 64 }) {
     <div className="bg-gray-800/50 border border-gray-700/30 rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs text-gray-400 font-medium">{label}</span>
-        <span className="text-xs font-mono font-semibold" style={{ color }}>
+        <span className="text-xs font-mono font-semibold" style={{ color: `var(${token})` }}>
           {formatValue ? formatValue(lastVal) : lastVal?.toFixed(1) ?? '—'}
         </span>
       </div>
@@ -635,12 +637,12 @@ export default function VMPage() {
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <MiniChart data={cpuData}       color="#ff5a1f" label="CPU"         formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'} />
-                <MiniChart data={memData}        color="#ff8a55" label="Memory"      formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'} />
-                <MiniChart data={netInData}      color="#3fd97f" label="Network In"  formatValue={fmtRate} />
-                <MiniChart data={netOutData}     color="#ffb224" label="Network Out" formatValue={fmtRate} />
-                <MiniChart data={diskReadData}   color="#8b939e" label="Disk Read"   formatValue={fmtRate} />
-                <MiniChart data={diskWriteData}  color="#e9ecef" label="Disk Write"  formatValue={fmtRate} />
+                <MiniChart data={cpuData}       token="--accent"       label="CPU"         formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'} />
+                <MiniChart data={memData}        token="--accent-hover" label="Memory"      formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'} />
+                <MiniChart data={netInData}      token="--ok"           label="Network In"  formatValue={fmtRate} />
+                <MiniChart data={netOutData}     token="--warning"      label="Network Out" formatValue={fmtRate} />
+                <MiniChart data={diskReadData}   token="--muted"        label="Disk Read"   formatValue={fmtRate} />
+                <MiniChart data={diskWriteData}  token="--ink"          label="Disk Write"  formatValue={fmtRate} />
               </div>
             )}
           </div>

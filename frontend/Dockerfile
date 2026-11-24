@@ -5,6 +5,7 @@ COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
 COPY CHANGELOG.md /app/CHANGELOG.md
+COPY aaris-tokens.css /app/aaris-tokens.css
 COPY docs/screenshots/changelog/ /app/docs/screenshots/changelog/
 RUN npm run build
 
