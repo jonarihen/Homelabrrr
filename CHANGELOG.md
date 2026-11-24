@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-24 — Policies and charts use the shared colour tokens
+
+- **The Policies mesh drops its leftover stock blue, cyan and green glows.** Panels, the canvas grid and the VLAN cards now use the AARIS surfaces, orange accent and status colours, with no drop shadows.
+- **Service badges and routes keep their colours, now read from the shared tokens.** Web traffic is orange, SSH/RDP amber, all traffic green and deny red, as before.
+- **The VM performance charts take their colours from the same tokens.** The Memory chart is a slightly deeper orange than before.
+- **The frontend and `aaris.css` now share one token file, `aaris-tokens.css`.** A colour changed there applies everywhere.
+
+![Policies mesh with routes and badges drawn from the AARIS tokens](docs/screenshots/changelog/2026-11-24-policies-design-tokens.png)
 ## 2026-11-04 — Clearer VM hardware dialog
 
 - The **Hardware** button on a VM page is now always shown. Without the edit-hardware permission it is disabled, with a tooltip saying why.

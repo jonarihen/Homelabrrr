@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* One token source: the repo-root AARIS tokens (also used by aaris.css). */
+@import "../../aaris-tokens.css";
 
 /* Tailwind 4 prefers a CSS-first `@theme`, but the AARIS palette remap in
    tailwind.config.js is what lets ~1300 stock utility classes across the app
@@ -23,26 +25,6 @@
    Palette tokens are also remapped onto Tailwind color names in
    tailwind.config.js so existing utility classes adopt this look.
    ========================================================================== */
-
-:root {
-  --bg:        #0e1014;
-  --bg-raise:  #12151a;
-  --bg-input:  #0b0d11;
-  --ink:       #e9ecef;
-  --muted:     #8b939e;
-  --dim:       #4d545e;
-  --line:      #232830;
-  --line-soft: #1a1e25;
-  --accent:    #ff5a1f;
-  --accent-hover: #ff7a44;
-  --ok:        #3fd97f;
-  --warning:   #ffb224;
-  --danger:    #e5484d;
-
-  --font-sans: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --grid: 48px;
-}
 
 * { box-sizing: border-box; }
 
