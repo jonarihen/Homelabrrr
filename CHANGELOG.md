@@ -6,6 +6,7 @@
 - The card shows the address the VM page last found. That covers DHCP reservations and leases, static cloud-init addresses and the guest agent. A VM you have never opened shows no IP until you open its page once; after that the dashboard remembers it.
 
 ![Dashboard VM cards with each VM's IP address under its ID](docs/screenshots/changelog/2026-11-24-dashboard-vm-ip.png)
+
 ## 2026-11-24 — SSH host key filled in for new VMs
 
 - Opening SSH on a VM with no saved connection now also reads the VM's host key fingerprint after it finds the IP, so a freshly deployed VM is ready to connect with no extra clicks. Check the fingerprint before you click Connect, the same as after a manual scan.
