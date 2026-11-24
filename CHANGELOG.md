@@ -4,12 +4,20 @@
 
 - The **Hardware** button on a VM page is now always shown. Without the edit-hardware permission it is disabled, with a tooltip saying why.
 - Disks in the hardware dialog show a readable label (for example `SCSI 0 · local-lvm · 32G`) with the raw Proxmox id underneath.
+## 2026-11-24 — VM IP on the dashboard cards
+
+- Each VM card on the dashboard now shows the VM's IP address under its ID, so you no longer have to open the VM to find it.
+- The card shows the address the VM page last found. That covers DHCP reservations and leases, static cloud-init addresses and the guest agent. A VM you have never opened shows no IP until you open its page once; after that the dashboard remembers it.
+
+![Dashboard VM cards with each VM's IP address under its ID](docs/screenshots/changelog/2026-11-24-dashboard-vm-ip.png)
+
 ## 2026-11-24 — Port forwarding no longer needs an SSH config
 
 - **A VM no longer needs browser SSH set up before it can be published.** When no SSH Host/IP is recorded, the Target VM list now uses the address the firewall's own DHCP server holds for the VM: its reservation, or else its current lease on the VM's VLAN. The form shows where the internal IP came from
 - **Port forwards follow the same address rules as browser SSH.** A user with *Manage port forwards* can only publish an address inside a VLAN assigned to them or one an admin assigned to that VM. Addresses reported from inside the guest never count. A VM with any other address is listed as *IP outside your networks* and cannot be selected. Admins and users with firewall-wide rights are unchanged
 
 ![Port forwarding form with a VM whose internal IP comes from a DHCP reservation](docs/screenshots/changelog/2026-11-24-port-forward-dhcp-targets.png)
+
 ## 2026-11-24 — SSH host key filled in for new VMs
 
 - Opening SSH on a VM with no saved connection now also reads the VM's host key fingerprint after it finds the IP, so a freshly deployed VM is ready to connect with no extra clicks. Check the fingerprint before you click Connect, the same as after a manual scan.
