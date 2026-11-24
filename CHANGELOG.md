@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-24 — Deploy polish
+
+- A failed cloud image or template load now shows a **Retry** button.
+- **Start the VM after deployment** is on by default for cloud images.
+- The invalid-invite page tells you to contact the administrator who invited you.
+
+![Deploy page after the cloud image list failed to load, with a Retry button under the error](docs/screenshots/changelog/2026-11-24-deploy-retry.png)
+
 ## 2026-11-24 — Saved Ko-fi emails need the owner's confirmation
 
 - An email a member saves on the Support page no longer matches payments by itself. The first payment from it waits in the review queue, marked "claimed by", until the owner links it; linking it with "remember this email" confirms the address, and later payments from it match automatically.

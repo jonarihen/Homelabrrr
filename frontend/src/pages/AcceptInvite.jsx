@@ -78,7 +78,7 @@ export default function AcceptInvite() {
               <span className="aaris-led aaris-led--error mt-1" /> {loadError}
             </p>
             <p className="text-xs text-gray-400">
-              Invite links work once and expire. If you don't have an account yet, ask the administrator who invited you for a new link.
+              Invite links work once and expire. If you don't have an account yet, contact the administrator who invited you for a new link.
               If you already have an account, sign in instead.
             </p>
             <button
