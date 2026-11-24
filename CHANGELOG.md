@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-24 — SSH host key filled in for new VMs
+
+- Opening SSH on a VM with no saved connection now also reads the VM's host key fingerprint after it finds the IP, so a freshly deployed VM is ready to connect with no extra clicks. Check the fingerprint before you click Connect, the same as after a manual scan.
+- The automatic scan never replaces a fingerprint you typed, skips if you changed the host, and stays quiet if the VM isn't answering yet. "Scan fingerprint" still works as before.
+
+![SSH connect form for a new VM with the IP, cloud-init user and host key fingerprint already filled in](docs/screenshots/changelog/2026-11-24-ssh-prefilled-after-deploy.png)
+
 ## 2026-11-24 — Screenshots in the changelog
 
 - Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll
