@@ -4,7 +4,7 @@ import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmMigrations, vmAssignments, vmSshConfigs, vmSshUserConfigs, vmTemplates, provisionedVms,
-  vmLeases, vmSchedules, publicIpAssignments,
+  vmLeases, vmSchedules, publicIpAssignments, vmDetectedIps,
 } from '../db/schema/index.ts';
 import {
   getAllVMs, getHost, getHosts, remoteMigrateVm, getTaskStatus, getTaskLog,
@@ -87,6 +87,8 @@ async function repointVmRowsInTransaction(sourceNode, vmid, targetNode, tx: DbOr
   }
   await tx.update(provisionedVms).set({ node: targetNode })
     .where(and(eq(provisionedVms.vmid, Number(vmid)), inArray(provisionedVms.node, candidates)));
+  // The detected-IP cache is re-filled on the next VM page visit at the new location.
+  await tx.delete(vmDetectedIps).where(and(eq(vmDetectedIps.vmid, Number(vmid)), inArray(vmDetectedIps.node, policyCandidates)));
   const sourceRef = decodeNodeRef(sourceNode);
   const targetHostId = decodeNodeRef(targetNode).hostId;
   const sourceIpRows = sourceRef.hostId === null ? inArray(publicIpAssignments.node, candidates)
