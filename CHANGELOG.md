@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-04 — Clearer VM hardware dialog
+
+- The **Hardware** button on a VM page is now always shown. Without the edit-hardware permission it is disabled, with a tooltip saying why.
+- Disks in the hardware dialog show a readable label (for example `SCSI 0 · local-lvm · 32G`) with the raw Proxmox id underneath.
 ## 2026-11-24 — VM IP on the dashboard cards
 
 - Each VM card on the dashboard now shows the VM's IP address under its ID, so you no longer have to open the VM to find it.
