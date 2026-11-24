@@ -570,6 +570,13 @@ export async function resizeVMDisk(node, vmid, disk, size) {
   return makeRequest(host, 'PUT', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/resize`, { disk, size });
 }
 
+// force=1 deletes the volume; without it PVE only parks the disk as unusedN, still on storage.
+export async function deleteVMDisk(node, vmid, disk) {
+  const { host, nodeName } = await resolveNode(node, { vmid });
+  clearCachedVmConfig(node, vmid, 'qemu');
+  return makeRequest(host, 'PUT', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/unlink`, { idlist: disk, force: 1 });
+}
+
 export async function startVM(node, vmid) {
   const { host, nodeName } = await resolveNode(node, { vmid });
   return makeRequest(host, 'POST', `/nodes/${encodeURIComponent(nodeName)}/qemu/${vmid}/status/start`, {});

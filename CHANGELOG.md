@@ -5,6 +5,27 @@
 - An email a member saves on the Support page no longer matches payments by itself. The first payment from it waits in the review queue, marked "claimed by", until the owner links it; linking it with "remember this email" confirms the address, and later payments from it match automatically.
 - Members can remove their saved Ko-fi emails even while Ko-fi is switched off.
 - Cost coverage totals now follow the monthly allocations: support received later no longer counts toward a month the owner already paid for, credit from before the 24-month window is included, and a refund of support that was already spent counts as paid by the owner.
+## 2026-11-24 — Security updates
+
+- **A single crafted request can no longer crash the backend.** A compressed request body followed by extra bytes used to kill the backend process, without signing in. The JSON body parser is updated to fix this.
+- **The backend runs on a patched Node.js release** with fixes for HTTP and TLS handling.
+- **The frontend's web server is updated** to a patched nginx release, along with its XML libraries.
+- **Other server libraries are updated** to versions without known security advisories.
+
+## 2026-11-24 — Remove a disk from a VM
+
+- The hardware dialog's **Disks** tab now lists the VM's disks with a **Remove** button. Removing a disk detaches it and permanently deletes its volume, after a confirmation that names the disk. The storage it used is freed and stops counting against your storage quota.
+- Only the VM's owner (or an admin) with the edit-hardware permission can remove a disk, and only while the VM is stopped and has no snapshots, because Proxmox keeps a disk that a snapshot still uses. Removal is also blocked during a migration. The boot disk, host-path disks and volumes belonging to another VM cannot be removed: their button is disabled, with a tooltip saying why. CD-ROM and cloud-init drives are not offered.
+
+![Hardware dialog Disks tab with a Remove button per disk, disabled for the boot disk](docs/screenshots/changelog/2026-11-24-remove-vm-disk.png)
+
+## 2026-11-24 — No more deploys you can't log into
+
+- Deploying from a cloud image, or from a cloud-init template, now needs a password or an SSH key. The deploy form says so before you submit, and the API refuses the same request.
+- If you really want a VM with no login, tick **I know this VM will have no login** under the warning.
+- The username field shows the image's default user, for example `ubuntu` or `debian`. If the image's default user is unknown, the form asks you to set one.
+
+![Deploy form warning that the VM would have no login, with the image's default user shown](docs/screenshots/changelog/2026-11-24-deploy-login-guard.jpg)
 ## 2026-11-24 — Policies and charts use the shared colour tokens
 
 - **The Policies mesh drops its leftover stock blue, cyan and green glows.** Panels, the canvas grid and the VLAN cards now use the AARIS surfaces, orange accent and status colours, with no drop shadows.

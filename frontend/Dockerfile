@@ -1,4 +1,4 @@
-FROM node:26.13.0-alpine3.24 AS builder
+FROM node:26.13.1-alpine3.24 AS builder
 
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
@@ -9,7 +9,7 @@ COPY aaris-tokens.css /app/aaris-tokens.css
 COPY docs/screenshots/changelog/ /app/docs/screenshots/changelog/
 RUN npm run build
 
-FROM nginx:1.31.8-alpine3.24
+FROM nginx:1.31.10-alpine3.24
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 # Run as the image's unprivileged nginx user: drop the `user` directive (only
