@@ -14,6 +14,12 @@ const IP_SOURCE_LABELS = {
   dhcp_lease: 'DHCP lease',
 };
 
+// A fingerprint belongs to one host:port; changing either means it must be scanned again.
+function retarget(current, changes) {
+  const next = { ...current, ...changes };
+  return next.host === current.host && next.port === current.port ? next : { ...next, hostFingerprint: '' };
+}
+
 function describeCandidate(candidate) {
   const source = IP_SOURCE_LABELS[candidate.source] || candidate.source || 'unknown';
   return candidate.iface ? `${source} · ${candidate.iface}` : source;
@@ -145,7 +151,9 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
       setDetected({ ...data, candidates });
 
       if (candidates.length > 0) {
-        setForm((current) => (quiet && current.host ? current : { ...current, host: candidates[0].ip }));
+        setForm((current) => (quiet && current.host ? current : retarget(current, { host: candidates[0].ip })));
+        // Automatic run: also fetch the host key so a fresh VM needs no extra click (#288).
+        if (quiet) scanFingerprint({ host: candidates[0].ip, quiet: true, isStale });
       }
     } catch (e) {
       if (isStale()) return;
@@ -156,26 +164,28 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
     }
   };
 
-  const scanFingerprint = async () => {
-    if (!form.host) {
+  // quiet: the automatic scan after IP detection — keeps a fingerprint the user
+  // already entered, skips if they changed the host meanwhile, and stays silent on failure.
+  const scanFingerprint = async ({ host = form.host, port = form.port, quiet = false, isStale = () => false } = {}) => {
+    if (!host) {
       setError('Enter the SSH host/IP before scanning');
       return;
     }
 
     setScanningFingerprint(true);
-    setError('');
+    if (!quiet) setError('');
 
     try {
-      const { data } = await api.post(`/ssh/config/${vmNode}/${vm.vmid}/scan-fingerprint`, {
-        host: form.host,
-        port: form.port,
-      });
-
-      setForm((current) => ({ ...current, hostFingerprint: data.hostFingerprint || '' }));
+      const { data } = await api.post(`/ssh/config/${vmNode}/${vm.vmid}/scan-fingerprint`, { host, port });
+      if (isStale()) return;
+      setForm((current) => (quiet && (current.hostFingerprint || current.host !== host || current.port !== port)
+        ? current
+        : { ...current, hostFingerprint: data.hostFingerprint || '' }));
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to scan SSH fingerprint');
+      if (isStale()) return;
+      if (!quiet) setError(e.response?.data?.error || 'Failed to scan SSH fingerprint');
     } finally {
-      setScanningFingerprint(false);
+      if (!isStale()) setScanningFingerprint(false);
     }
   };
 
@@ -231,7 +241,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
               type="text"
               required
               value={form.host}
-              onChange={(e) => setForm((current) => ({ ...current, host: e.target.value }))}
+              onChange={(e) => setForm((current) => retarget(current, { host: e.target.value }))}
               className="input"
               placeholder="192.168.1.100"
             />
@@ -241,7 +251,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
             <input
               type="number"
               value={form.port}
-              onChange={(e) => setForm((current) => ({ ...current, port: Number.parseInt(e.target.value, 10) || 22 }))}
+              onChange={(e) => setForm((current) => retarget(current, { port: Number.parseInt(e.target.value, 10) || 22 }))}
               className="input"
             />
           </Field>
@@ -253,7 +263,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
               <button
                 key={`${candidate.ip}-${candidate.source}`}
                 type="button"
-                onClick={() => setForm((current) => ({ ...current, host: candidate.ip }))}
+                onClick={() => setForm((current) => retarget(current, { host: candidate.ip }))}
                 title={`Detected from ${describeCandidate(candidate)} (${candidate.confidence} confidence)`}
                 className={`px-2 py-1 rounded border text-xs font-mono transition-colors ${
                   form.host === candidate.ip
@@ -307,7 +317,7 @@ export default function SSHConnectForm({ vm, onConnect, connectEndpoint = '/ssh/
           <label className="block text-xs text-gray-400">Host Key Fingerprint</label>
           <button
             type="button"
-            onClick={scanFingerprint}
+            onClick={() => scanFingerprint()}
             disabled={scanningFingerprint}
             className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
           >
