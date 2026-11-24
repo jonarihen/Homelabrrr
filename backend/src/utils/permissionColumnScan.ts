@@ -26,7 +26,7 @@ export const LEGACY_PERMISSION_COLUMN_READ =
  */
 export const SANCTIONED_COLUMN_READS = [
   {
-    file: 'src/routes/provision.ts',
+    file: 'src/routes/provision/shared.ts',
     requires: ['can_provision', 'role_id'],
     why: 'loadProvisioner() re-derives can_provision from the role right after this read',
   },
