@@ -8,7 +8,7 @@ import express from 'express';
 import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase, type TestDatabase } from '../testUtils/pgTestDb.ts';
-import { users, roles, rolePermissions, apiTokens } from '../db/schema/index.ts';
+import { users, roles, rolePermissions, apiTokens, settings } from '../db/schema/index.ts';
 
 let testDb: TestDatabase;
 let closeDb: (() => Promise<void>) | undefined;
@@ -115,4 +115,10 @@ test('implied permissions count for the caller, in one direction only', async ()
   // can_operate_all_vms implies see_all_vms.
   assert.equal((await request(operatorApp).post(`/users/${seeTargetId}/unlock`)).status, 200);
   assert.equal((await request(seerApp).post(`/users/${operateTargetId}/unlock`)).status, 403);
+});
+
+test('the generic settings route cannot write a setting that has its own guarded endpoint', async () => {
+  const res = await request(adminApp).put('/settings/support_bank_transfer_enabled').send({ value: 'false' });
+  assert.equal(res.status, 403);
+  assert.equal((await testDb.db.select().from(settings).where(eq(settings.key, 'support_bank_transfer_enabled'))).length, 0);
 });

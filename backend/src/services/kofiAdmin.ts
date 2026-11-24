@@ -7,7 +7,7 @@ import { postProviderAdjustment, postReceipt, type ReceiptKind } from './paypalL
 import { dismissPaypalReviewEvent } from './paypalReview.ts';
 import { KOFI_ENVIRONMENT, KOFI_IGNORED_CODES, KOFI_INBOX_SOURCE, KOFI_LINKABLE_REASONS, KOFI_MERCHANT, KOFI_RECEIPT_KINDS, KOFI_SETTLEABLE_REASON,
   decimalToMinorUnits, ensureKofiEmailHashKey, evaluateKofiEvent, existingKofiEmailHashKey, hashKofiEmail, kofiConfigRow, kofiEmailHint,
-  kofiWebhookUrl, normalizeKofiEmail, recordKofiReceipt } from './kofi.ts';
+  MEMBER_ENTRY_SOURCE, MEMBER_VERIFIED_SOURCE, kofiWebhookUrl, normalizeKofiEmail, recordKofiReceipt } from './kofi.ts';
 
 // Administrator side of the Ko-fi integration: status, the review queue
 // (link, record in DKK, retry, dismiss), receipts (fee entry, reversal) and
@@ -125,7 +125,7 @@ export async function listKofiReviewEvents(status: unknown = 'needs_review', off
   }
   const wanted = [...new Set(hashes.values())];
   const members = wanted.length === 0 ? [] : await db.select({ hash: kofiMemberEmails.email_hash, userId: kofiMemberEmails.user_id,
-    username: users.username }).from(kofiMemberEmails).innerJoin(users, eq(users.id, kofiMemberEmails.user_id))
+    username: users.username, source: kofiMemberEmails.source }).from(kofiMemberEmails).innerJoin(users, eq(users.id, kofiMemberEmails.user_id))
     .where(inArray(kofiMemberEmails.email_hash, wanted));
   const items = shown.map((row) => {
     const kept = retained(row.payload);
@@ -144,6 +144,7 @@ export async function listKofiReviewEvents(status: unknown = 'needs_review', off
       isSubscriptionPayment: event ? event.is_subscription_payment === true : null,
       isFirstSubscriptionPayment: event ? event.is_first_subscription_payment === true : null,
       matchedUserId: member?.userId ?? null, matchedUsername: member?.username ?? null,
+      matchedVerified: member ? member.source !== MEMBER_ENTRY_SOURCE : null,
       resolution: row.resolution, resolvedAt: row.resolved_at,
     };
   });
@@ -160,11 +161,20 @@ async function requireMember(tx: DbOrTx, userId: number | null) {
   const [user] = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1);
   if (!user) throw new PayPalError('USER_NOT_FOUND', 404);
 }
-/** Binds a payer email to a member. A no-op when it is already bound to that member. */
+/**
+ * Binds a payer email to a member. A no-op when it is already verified for that
+ * member. An unverified member-entered claim is verified for its claimant, or,
+ * when the owner links the payment to someone else, handed to that member.
+ */
 async function bindEmail(tx: DbOrTx, email: string, userId: number, actorId: number) {
   const hash = hashKofiEmail(await ensureKofiEmailHashKey(tx), email);
-  const [existing] = await tx.select({ id: kofiMemberEmails.id, userId: kofiMemberEmails.user_id }).from(kofiMemberEmails)
-    .where(eq(kofiMemberEmails.email_hash, hash)).limit(1);
+  const [existing] = await tx.select({ id: kofiMemberEmails.id, userId: kofiMemberEmails.user_id, source: kofiMemberEmails.source })
+    .from(kofiMemberEmails).where(eq(kofiMemberEmails.email_hash, hash)).limit(1);
+  if (existing?.source === MEMBER_ENTRY_SOURCE) {
+    await tx.update(kofiMemberEmails).set({ user_id: userId, source: existing.userId === userId ? MEMBER_VERIFIED_SOURCE : 'admin_link',
+      verified_by: actorId, verified_at: new Date() }).where(eq(kofiMemberEmails.id, existing.id));
+    return existing.id;
+  }
   if (existing) {
     if (existing.userId !== userId) throw new PayPalError('EMAIL_ALREADY_LINKED', 409);
     return existing.id;
@@ -385,4 +395,53 @@ export async function removeKofiMemberEmail(id: unknown) {
   const result = await db.delete(kofiMemberEmails).where(eq(kofiMemberEmails.id, rowId));
   if (result.rowCount !== 1) throw new PayPalError('MEMBER_EMAIL_NOT_FOUND', 404);
   return { removed: true as const };
+}
+
+// ─── A member's own Ko-fi emails ─────────────────────────────────────────────
+// A member may bind the email they pay with on Ko-fi to their own account, so
+// later payments from it match once the owner has verified it. The address is
+// self-declared: such rows carry source `member_entry` and no verifier and do
+// not match payments, so the first payment from it waits in the review queue.
+// Linking that payment to the member with "remember" verifies the row
+// (`member_verified`). The owner sees these rows and can unlink them. An
+// address already bound (to anyone) is refused, and each member is capped.
+
+const OWN_SOURCES = [MEMBER_ENTRY_SOURCE, MEMBER_VERIFIED_SOURCE];
+export const MAX_OWN_KOFI_EMAILS = 3;
+const ownEmailColumns = { id: kofiMemberEmails.id, emailHint: kofiMemberEmails.email_hint, source: kofiMemberEmails.source,
+  verifiedAt: kofiMemberEmails.verified_at };
+
+/** Every email bound to this member, masked. `removable` marks the ones the member entered, `verified` the ones that match payments. */
+export async function ownKofiEmails(userId: number, database: DbOrTx = db) {
+  const rows = await database.select(ownEmailColumns).from(kofiMemberEmails).where(eq(kofiMemberEmails.user_id, userId))
+    .orderBy(desc(kofiMemberEmails.verified_at), desc(kofiMemberEmails.id)).limit(50);
+  return rows.map((row) => ({ id: row.id, emailHint: row.emailHint, addedAt: row.verifiedAt, removable: OWN_SOURCES.includes(row.source),
+    verified: row.source !== MEMBER_ENTRY_SOURCE }));
+}
+
+export async function addOwnKofiEmail(userId: number, input: any) {
+  const email = normalizeKofiEmail(input?.email);
+  if (!email) throw new PayPalError('INVALID_EMAIL', 400);
+  return emailConflicts(() => db.transaction(async (tx) => {
+    // Serializes one member's adds so the cap cannot be raced past.
+    await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for('update');
+    const [{ own }] = await tx.select({ own: count() }).from(kofiMemberEmails)
+      .where(and(eq(kofiMemberEmails.user_id, userId), inArray(kofiMemberEmails.source, OWN_SOURCES)));
+    if (own >= MAX_OWN_KOFI_EMAILS) throw new PayPalError('TOO_MANY_EMAILS', 409);
+    const hash = hashKofiEmail(await ensureKofiEmailHashKey(tx), email);
+    const [taken] = await tx.select({ id: kofiMemberEmails.id }).from(kofiMemberEmails).where(eq(kofiMemberEmails.email_hash, hash)).limit(1);
+    if (taken) throw new PayPalError('EMAIL_ALREADY_LINKED', 409);
+    const [created] = await tx.insert(kofiMemberEmails).values({ user_id: userId, email_hash: hash, email_hint: kofiEmailHint(email),
+      source: MEMBER_ENTRY_SOURCE, verified_by: null }).returning({ id: kofiMemberEmails.id });
+    return { id: created.id, items: await ownKofiEmails(userId, tx) };
+  }));
+}
+
+/** Removes only a row this member entered themselves; owner-made links stay with the owner. */
+export async function removeOwnKofiEmail(userId: number, id: unknown) {
+  const rowId = kofiRowId(id);
+  const result = await db.delete(kofiMemberEmails).where(and(eq(kofiMemberEmails.id, rowId), eq(kofiMemberEmails.user_id, userId),
+    inArray(kofiMemberEmails.source, OWN_SOURCES)));
+  if (result.rowCount !== 1) throw new PayPalError('MEMBER_EMAIL_NOT_FOUND', 404);
+  return { items: await ownKofiEmails(userId) };
 }

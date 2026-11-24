@@ -13,6 +13,7 @@ import { getLeaseSettings, setLeaseSettings, computeLeaseView, updateLease, rene
 import { getCapacitySettings, setCapacitySettings } from '../../utils/capacity.ts';
 import { MEMORY_MODES } from '../../utils/capacityPolicy.ts';
 import { serializeNodeIdentity } from './shared.ts';
+import { BANK_TRANSFER_SETTING } from '../../services/supportMethods.ts';
 
 const router = Router();
 
@@ -25,7 +26,11 @@ router.get('/settings', requireAdmin, async (req, res) => {
   res.json(result);
 });
 
+// Keys with their own endpoint (reauthentication, audit) cannot be written here.
+const DEDICATED_SETTINGS = new Set([BANK_TRANSFER_SETTING]);
+
 router.put('/settings/:key', requireAdmin, async (req, res) => {
+  if (DEDICATED_SETTINGS.has(req.params.key)) return res.status(403).json({ error: 'This setting has its own endpoint' });
   const { value } = req.body;
   await setSetting(req.params.key, String(value));
   res.json({ ok: true });

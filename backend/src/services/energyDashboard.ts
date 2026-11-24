@@ -561,7 +561,8 @@ export async function energyMonths(count: number, now = new Date()) {
       grossOre: funding ? funding.grossOre : null, feeDebitsOre: funding ? funding.feeDebitsOre : null,
       refundDebitsOre: funding ? funding.refundDebitsOre : null,
       knownNetOre: funding ? funding.knownNetOre : null, appliedOre: known ? funding.appliedOre : null,
-      ownerFundedOre: known ? funding.ownerFundedOre : null, carryForwardOre: known ? funding.carryForwardOre : null,
+      ownerFundedOre: known ? funding.ownerFundedOre : null, ownerAdjustmentOre: known ? funding.ownerAdjustmentOre : null,
+      carryForwardOre: known ? funding.carryForwardOre : null,
       fundingStatus: !funding ? 'error' : stale ? 'recalculation_pending' : funding.status };
   }));
   return { count, timeZone: 'Europe/Copenhagen', months: items };

@@ -4,6 +4,7 @@ import {
 import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
 import { ConsoleSessionsProvider } from './contexts/ConsoleSessionsContext.jsx';
 import { FeedbackProvider } from './contexts/FeedbackContext.jsx';
+import ReauthPrompt from './components/account/ReauthPrompt.jsx';
 import Login from './pages/Login.jsx';
 import AcceptInvite from './pages/AcceptInvite.jsx';
 import WelcomePage from './pages/WelcomePage.jsx';
@@ -159,7 +160,13 @@ const router = createBrowserRouter(createRoutesFromElements(
 
 function FeedbackBoundary({ children }) {
   const { user } = useAuth();
-  return <FeedbackProvider resetKey={user?.id ?? user?.username ?? null}>{children}</FeedbackProvider>;
+  const userKey = user?.id ?? user?.username ?? null;
+  return (
+    <FeedbackProvider resetKey={userKey}>
+      {children}
+      <ReauthPrompt key={userKey} />
+    </FeedbackProvider>
+  );
 }
 
 export default function App() {

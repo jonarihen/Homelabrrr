@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-24 — Saved Ko-fi emails need the owner's confirmation
+
+- An email a member saves on the Support page no longer matches payments by itself. The first payment from it waits in the review queue, marked "claimed by", until the owner links it; linking it with "remember this email" confirms the address, and later payments from it match automatically.
+- Members can remove their saved Ko-fi emails even while Ko-fi is switched off.
+- Cost coverage totals now follow the monthly allocations: support received later no longer counts toward a month the owner already paid for, credit from before the 24-month window is included, and a refund of support that was already spent counts as paid by the owner.
 ## 2026-11-24 — Security updates
 
 - **A single crafted request can no longer crash the backend.** A compressed request body followed by extra bytes used to kill the backend process, without signing in. The JSON body parser is updated to fix this.
@@ -61,6 +66,30 @@
 - The screenshot below is a stand-in to show the feature. Real entries will show the changed screen
 
 ![Example popup: this is where a screenshot of the changed screen appears](docs/screenshots/changelog/2026-11-24-changelog-example.jpg)
+
+## 2026-11-10 — VLAN tag preview for delegated VLAN managers
+
+- When a non-admin VLAN manager creates a VLAN, the form now shows the tag and subnet that will really be assigned. It used to guess from only the VLANs that user could see, so the preview could show a tag that was already taken by someone else.
+
+## 2026-11-10 — Save your own Ko-fi email
+
+- Members can save the email they pay with on Ko-fi, on the Support page. Payments from that email are then matched to their account automatically, so the owner no longer has to link the first one by hand.
+- The address is self-declared, not verified. The owner sees it under linked emails as "Entered by the member" and can unlink it; an address that is already linked to someone cannot be claimed. Linking by hand from the review queue works as before.
+
+## 2026-11-10 — Changelog formatting
+
+- The changelog panel now shows **bold**, *emphasis* and `code` as formatting instead of printing the raw `**` and backtick characters.
+
+## 2026-11-10 — Support payments: method switches and cost coverage
+
+- **Payment methods.** The Support payments admin page has one switch each for PayPal, Ko-fi and bank transfer. Members only see the methods that are on. Bank transfer reports can now be switched off; you can still record a transfer yourself.
+- With every method off, "Support the Lab" disappears from members' menu and from the Energy page. A member with a running PayPal subscription still sees it, so they can cancel.
+- **Cost coverage for everyone.** The Support page and the Energy & Budget page now show members the projected cost for this month, what the lab's electricity has cost in total, how much of it member support has covered, and what the owner paid. The admin page shows the same with a month-by-month table. Totals only; no member is named.
+- PayPal credentials are folded away behind "Change credentials" once PayPal is set up.
+
+## 2026-11-10 — Identity prompt on user, role and power changes
+
+- Creating or changing users, roles, invites and admin-revoked tokens, and changing live power policy, now opens the **Confirm your identity** dialog when a recent password and 2FA check is needed, then finishes the action. These pages previously showed only the error "Please confirm your password and second factor before continuing", with no way to confirm.
 
 ## 2026-11-09 — Ko-fi support
 

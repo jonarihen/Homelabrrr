@@ -87,6 +87,7 @@ test('a revised statement withholds the stale allocation instead of mixing revis
   assert.equal(august.costOre, 120000);
   assert.equal(august.statementRevision, 2);
   assert.equal(august.appliedOre, 9600);
+  assert.equal(august.ownerAdjustmentOre, 0);
   assert.equal(months.months[0].month, '2026-09');
   assert.equal(months.months[0].costStatus, 'open');
 });

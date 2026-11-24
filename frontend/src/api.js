@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { isPublicPath } from './utils/publicRoutes.js';
 import { isSftpSessionExpired } from './utils/sftpSession.js';
+import { requestReauth, shouldPromptReauth } from './utils/reauthPrompt.js';
 
 const api = axios.create({
   baseURL: '/api',
@@ -18,6 +19,9 @@ api.interceptors.response.use(
     }
     if (err.response?.status === 401 && !isSftpSessionExpired(err) && !isPublicPath(window.location.pathname)) {
       window.location.href = '/login';
+    }
+    if (shouldPromptReauth(err) && await requestReauth()) {
+      return api({ ...err.config, _reauthRetried: true });
     }
     return Promise.reject(err);
   }

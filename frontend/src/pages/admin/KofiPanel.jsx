@@ -51,7 +51,7 @@ const reasonCode = (code) => code.split('_').map((part, index) => <Fragment key=
 const REVIEW_FILTERS = [['needs_review', 'Needs review'], ['resolved', 'Resolved'], ['all', 'All']];
 const RECEIPT_FILTERS = [['net_unresolved', 'Awaiting fee'], ['posted', 'Posted'], ['reversed', 'Reversed'], ['voided', 'Voided'], ['all', 'All']];
 const RECEIPT_STATUS = { net_unresolved: ['warn', 'awaiting fee'], posted: ['ok', 'posted'], reversed: ['neutral', 'reversed'], voided: ['neutral', 'voided'] };
-const SOURCES = { admin_link: 'Linked from review', admin_entry: 'Entered in advance' };
+const SOURCES = { admin_link: 'Linked from review', admin_entry: 'Entered in advance', member_entry: 'Entered by the member (not verified)', member_verified: 'Entered by the member, verified' };
 const TILES = [
   ['Last event', (s) => s.lastEventAt ? [when(s.lastEventAt), s.lastEventType, s.lastEventOutcome].filter(Boolean).join(' · ') : '—'],
   ['Last test event', (s) => when(s.lastTestEventAt)],
@@ -232,8 +232,9 @@ function ReviewQueue({ list, failed, filter, onFilter, onMore, users, run, busy 
   const rows = useRowForm();
   const { form } = rows;
   const path = (item, action) => `${BASE}/review/${encodeURIComponent(item.id)}/${action}`;
-  // An email can only be remembered for a chosen member, when the event has a usable one that is not linked yet.
-  const canRemember = (item) => !!form.member && form.member !== 'none' && !!item.email && item.reason !== 'EMAIL_MISSING' && item.matchedUserId == null;
+  // An email can only be remembered for a chosen member, when the event has a usable one that is not verified yet.
+  // Remembering it verifies an unverified member claim, so for claimed emails it is never on by default.
+  const canRemember = (item) => !!form.member && form.member !== 'none' && !!item.email && item.reason !== 'EMAIL_MISSING' && !item.matchedVerified;
   const grossOre = toOre(form.gross);
   const feeOre = toOre(form.fee);
   const grossOk = grossOre != null && grossOre >= GROSS_MIN_ORE && grossOre <= GROSS_MAX_ORE;
@@ -272,7 +273,9 @@ function ReviewQueue({ list, failed, filter, onFilter, onMore, users, run, busy 
           <Cell>{item.payloadRetained === false ? <span className="text-xs text-gray-500 whitespace-nowrap">payer details removed</span> : <>
             <span className={`${clip} text-gray-200`} title={item.fromName || undefined}>{item.fromName || '—'}</span>
             <span className={`${clip} text-xs text-gray-400`} title={item.email || undefined}>{item.email || 'no email'}</span>
-            {item.matchedUsername && <span className={`${clip} text-xs text-green-400`}>linked to {item.matchedUsername}</span>}</>}</Cell>
+            {item.matchedUsername && (item.matchedVerified
+              ? <span className={`${clip} text-xs text-green-400`}>linked to {item.matchedUsername}</span>
+              : <span className={`${clip} text-xs text-yellow-400`}>claimed by {item.matchedUsername}, not verified</span>)}</>}</Cell>
           <Cell className="text-gray-400">{item.message ? <span className={clamp} title={item.message}>{item.message}</span> : '—'}</Cell>
           <Cell><span className="block min-w-[8.5rem] max-w-[13rem]">
             <span className="font-mono text-xs text-orange-300">{reasonCode(item.reason || 'review')}</span>
@@ -280,8 +283,8 @@ function ReviewQueue({ list, failed, filter, onFilter, onMore, users, run, busy 
           <Cell className="text-gray-400 whitespace-nowrap">{day(item.receivedAt)}<span className="block text-xs text-gray-500">{clock(item.receivedAt)}</span></Cell>
           <Cell>{item.status === 'needs_review' ? <Actions>
             {item.settleable && <button type="button" disabled={!!busy} className={btnSm}
-              onClick={() => rows.start('settle', item.id, { member: item.matchedUserId != null ? String(item.matchedUserId) : '', remember: true })}>Record in DKK</button>}
-            {item.linkable && !item.settleable && <button type="button" disabled={!!busy} className={btnSm} onClick={() => rows.start('link', item.id, { member: '', remember: true })}>Link</button>}
+              onClick={() => rows.start('settle', item.id, { member: item.matchedVerified ? String(item.matchedUserId) : '', remember: item.matchedUserId == null })}>Record in DKK</button>}
+            {item.linkable && !item.settleable && <button type="button" disabled={!!busy} className={btnSm} onClick={() => rows.start('link', item.id, { member: '', remember: item.matchedUserId == null })}>Link</button>}
             <button type="button" disabled={!!busy} className={btnSm} onClick={() => run('kofi-retry', () => api.post(path(item, 'retry')), rows.close)}>Retry</button>
             <button type="button" disabled={!!busy} className={btnSmDanger} onClick={() => rows.start('dismiss', item.id, { note: '' })}>Dismiss</button>
           </Actions> : <span className="text-xs text-gray-500 whitespace-nowrap">{item.resolution || item.status}{item.resolvedAt ? ` · ${when(item.resolvedAt)}` : ''}</span>}</Cell>
@@ -431,7 +434,9 @@ function LinkedEmails({ members, failed, users, run, busy }) {
 // Ko-fi is live only, so nothing here follows the page's sandbox/live selector.
 // Every action goes through the page's `act`, which opens the identity check on
 // REAUTHENTICATION_REQUIRED and replays the request afterwards.
-export default function KofiPanel({ act, busy }) {
+// `configKey` changes when the page switches Ko-fi on or off from its own
+// controls; `onStatus` hands the page the setup status this panel loads.
+export default function KofiPanel({ act, busy, configKey = 0, onStatus }) {
   const [status, setStatus] = useState(null);
   const [review, setReview] = useState(null);
   const [receipts, setReceipts] = useState(null);
@@ -456,7 +461,9 @@ export default function KofiPanel({ act, busy }) {
   const loadMembers = useCallback(() => fetchPart('members', () => api.get(`${BASE}/members`), (data) => setMembers(page(data).items)), [fetchPart]);
   const loadUsers = useCallback(() => fetchPart('users', () => api.get('/admin/users'),
     (data) => setUsers(Array.isArray(data) ? [...data].sort((a, b) => String(a.username).localeCompare(String(b.username))) : [])), [fetchPart]);
-  useEffect(() => { loadConfig(); loadMembers(); loadUsers(); }, [loadConfig, loadMembers, loadUsers]);
+  useEffect(() => { loadConfig(); }, [loadConfig, configKey]);
+  useEffect(() => { if (status) onStatus?.(status); }, [status, onStatus]);
+  useEffect(() => { loadMembers(); loadUsers(); }, [loadMembers, loadUsers]);
   useEffect(() => { setReview(null); loadReview(); }, [loadReview]);
   useEffect(() => { setReceipts(null); loadReceipts(); }, [loadReceipts]);
   const reload = () => Promise.all([loadConfig(), loadReview(), loadReceipts(), loadMembers()]);

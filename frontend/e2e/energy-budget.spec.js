@@ -32,6 +32,7 @@ async function mockEnergy(page, { values = summary(), hosts = { status: 'availab
   const writes = [];
   page.on('request', (request) => { if (request.url().includes('/api/') && request.method() !== 'GET') writes.push(`${request.method()} ${new URL(request.url()).pathname}`); });
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: user }));
+  await page.route('**/api/payments/status', (route) => route.fulfill({ json: { checkoutEnabled: true, bankTransfer: { enabled: true }, showSupport: true } }));
   await page.route('**/api/energy/summary?**', (route) => route.fulfill({ json: values }));
   await page.route('**/api/energy/hosts', (route) => route.fulfill({ json: hosts }));
   await page.route('**/api/energy/history**', (route) => route.fulfill({ json: history }));
@@ -67,13 +68,13 @@ test('authenticated member sees aggregate funding and calculated cost without co
 test('funding progress renders from the server value with its basis, even when cost is a decimal string', async ({ page }) => {
   await mockEnergy(page);
   await page.goto('/energy');
-  const bar = page.getByRole('progressbar');
+  const bar = page.getByRole('progressbar', { name: /Funding progress/ });
   await expect(bar).toHaveAttribute('aria-valuenow', '56.5');
   await expect(page.getByText(/current estimate \(cost calculated so far\): 56,5% \(estimate/)).toBeVisible();
   await expect(page.getByText('Pending or disputed (not counted)').locator('..')).toContainText('1 open');
   await mockEnergy(page, { values: summary({ funding: { ...summary().funding, progress: { status: 'no_cost', basis: 'finalized_lab_cost', percent: null } } }) });
   await page.reload();
-  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await expect(page.getByRole('progressbar', { name: /Funding progress/ })).toHaveCount(0);
   await expect(page.getByText(/Funding progress is shown once/)).toBeVisible();
 });
 
