@@ -4,6 +4,8 @@ import Layout from '../components/Layout.jsx';
 import api from '../api.js';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import useSupportStatus from '../hooks/useSupportStatus.js';
+import SupportCoverage from '../components/SupportCoverage.jsx';
 import EnergyBudgetAdminPanel from './admin/EnergyBudgetAdminPanel.jsx';
 import TimeSeriesChart from '../components/energy/TimeSeriesChart.jsx';
 import {
@@ -84,6 +86,7 @@ function PreviewTable({ preview }) {
 export default function EnergyBudgetPage() {
   useDocumentTitle('Energy & Budget');
   const { user } = useAuth();
+  const { visible: supportVisible } = useSupportStatus();
   const [month, setMonth] = useState(currentMonth);
   const [range, setRange] = useState('24h');
   const [summary, setSummary] = useState(null);
@@ -227,8 +230,9 @@ export default function EnergyBudgetPage() {
         {!ready('summary') ? <div className="mt-4">{v('summary', null, 'h-3 w-full')}</div> : progress ? <div className="mt-4"><p className="text-xs text-gray-300">Confirmed net credit applied / {progress.basis}: {quantity(progress.percent, 1)}%{progress.estimate ? ' (estimate, the month is still open)' : ''}</p><div className="mt-2 h-2 bg-gray-800" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percent} aria-label={`Funding progress against ${progress.basis}`}><div className="h-full bg-orange-500" style={{ width: `${progress.percent}%` }} /></div>{progress.estimate && <p className="mt-1 text-xs text-gray-500">Estimated owner share so far: {dkk(funding.progress.ownerRemainderOre)}</p>}</div>
           : <p className="mt-4 text-xs text-gray-500">Funding progress is shown once the cost is calculated and verified receipts are allocated.</p>}
       </div></div>
+      <div className={panel}><p className={`${eyebrow} pb-4`}>Cost coverage · last 24 months</p><SupportCoverage /></div>
       <p className="text-xs text-gray-500">Support is entirely optional. It never changes access, quotas or service priority, and it does not change the electricity cost itself. These figures describe this lab’s recorded receipts, not a PayPal or bank balance.</p>
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-3 font-mono text-xs"><Link className={linkCls} to="/support">Optional contribution controls and your private history →</Link>
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-3 font-mono text-xs">{supportVisible && <Link className={linkCls} to="/support">Optional contribution controls and your private history →</Link>}
         <button type="button" onClick={() => downloadCsv('/energy/summary.csv', { month }, `energy-budget-${month}.csv`).catch(() => setErrors((old) => ({ ...old, export: 'Export failed.' })))} className={btnGhost}>Download this month as CSV</button></div></Section>
 
     <Section number="06" id="energy-months" title="Monthly history" busy={pending.months}>{!ready('months') ? <div className={panel}>{blockFallback('months', 'h-32 w-full')}</div> : months?.months?.length ? <div className={`${panel} overflow-x-auto`}><table className="w-full min-w-[640px] text-left text-sm"><caption className="sr-only">Monthly lab energy, cost and support</caption><thead><tr className="text-xs text-gray-400"><th className="py-2 font-normal">Month</th><th className="font-normal">Lab kWh</th><th className="font-normal">Lab cost</th><th className="font-normal">Gross</th><th className="font-normal">Known net</th><th className="font-normal">Applied</th><th className="font-normal">Owner-funded</th><th className="font-normal">Carried forward</th></tr></thead>

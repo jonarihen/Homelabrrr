@@ -238,13 +238,18 @@ export async function existingKofiEmailHashKey(database: DbOrTx = db): Promise<B
   return row?.key ? Buffer.from(decryptSecret(row.key), 'hex') : null;
 }
 
-/** The member a payer email is bound to, if any. The unique hash allows at most one. */
+/** Source of an email a member entered themselves: unproven, so it never matches a payment until the owner verifies it. */
+export const MEMBER_ENTRY_SOURCE = 'member_entry';
+/** A member-entered email the owner has since verified. Matches, and the member can still remove it. */
+export const MEMBER_VERIFIED_SOURCE = 'member_verified';
+
+/** The verified member a payer email is bound to, if any. The unique hash allows at most one. */
 export async function matchKofiMember(database: DbOrTx, email: string | null): Promise<{ id: number; userId: number } | null> {
   if (!email) return null;
   const key = await existingKofiEmailHashKey(database);
   if (!key) return null;
   const [row] = await database.select({ id: kofiMemberEmails.id, userId: kofiMemberEmails.user_id }).from(kofiMemberEmails)
-    .where(eq(kofiMemberEmails.email_hash, hashKofiEmail(key, email))).limit(1);
+    .where(and(eq(kofiMemberEmails.email_hash, hashKofiEmail(key, email)), ne(kofiMemberEmails.source, MEMBER_ENTRY_SOURCE))).limit(1);
   return row ?? null;
 }
 

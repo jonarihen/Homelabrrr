@@ -70,12 +70,26 @@ test('the Ko-fi link is shown only when Ko-fi is enabled', async ({ page }) => {
   await expect(kofiLink).toHaveCount(0);
   await expect(unavailable).toHaveCount(0);
 
-  // Ko-fi disabled and PayPal not set up: nothing is offered.
+  // Ko-fi disabled and PayPal not set up: bank transfer (always on in an older
+  // answer) is still offered, so the page is not "unavailable".
   await mockSupport(page, { status: { configured: false, checkoutEnabled: false, monthlyAvailable: false, monthlyOptions: [], kofi: { enabled: false, pageUrl: null } } });
   await page.reload();
-  await expect(unavailable).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Paid by bank transfer?' })).toBeVisible();
+  await expect(unavailable).toHaveCount(0);
   await expect(kofiLink).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'One-off contribution' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Support via Ko-fi' })).toHaveCount(0);
+
+  // Ko-fi disabled but an email saved earlier: it stays listed and removable; nothing new can be added.
+  await mockSupport(page, { status: { configured: false, checkoutEnabled: false, monthlyAvailable: false, monthlyOptions: [], kofi: { enabled: false, pageUrl: null } },
+    history: { kofiEmails: [{ id: 5, emailHint: 'a•••@example.dk', addedAt: '2026-11-03T10:00:00Z', removable: true, verified: false }] } });
+  await page.reload();
+  const saved = page.locator('section', { has: page.getByRole('heading', { name: 'Support via Ko-fi' }) });
+  await expect(saved.getByText('a•••@example.dk')).toBeVisible();
+  await expect(saved.getByText("awaiting the owner's confirmation")).toBeVisible();
+  await expect(saved.getByRole('button', { name: 'Remove' })).toBeVisible();
+  await expect(saved.getByLabel('Email used on Ko-fi')).toHaveCount(0);
+  await expect(kofiLink).toHaveCount(0);
 
   // Ko-fi enabled: an external link, the matching rules, and the member's own Ko-fi payments.
   await mockSupport(page, {
@@ -92,7 +106,7 @@ test('the Ko-fi link is shown only when Ko-fi is enabled', async ({ page }) => {
   await expect(kofiLink).toHaveAttribute('rel', 'noopener noreferrer');
   await expect(unavailable).toHaveCount(0);
   const card = page.locator('section', { has: page.getByRole('heading', { name: 'Support via Ko-fi' }) });
-  for (const copy of [/voluntary/, /same email address on Ko-fi every time/, /first payment is matched by the owner/,
+  for (const copy of [/voluntary/, /same email address on Ko-fi every time/, /owner matches your first payment by hand/,
     /once the owner has confirmed the actual fee/, /another currency are counted at the DKK amount the owner actually received/,
     /Do not also report a Ko-fi payment as a bank transfer/]) await expect(card.getByText(copy)).toBeVisible();
   const historyCard = page.locator('section', { has: page.getByRole('heading', { name: 'Your contribution history' }) });
@@ -101,4 +115,64 @@ test('the Ko-fi link is shown only when Ko-fi is enabled', async ({ page }) => {
   await expect(historyCard.getByRole('listitem').filter({ hasText: '37,25' })).toContainText('counted');
   // A Ko-fi payment awaiting its fee is not yet a verified contribution.
   await expect(historyCard.getByText('No verified contributions recorded.')).toBeVisible();
+});
+
+test('PayPal that is configured but not switched on shows no PayPal cards', async ({ page }) => {
+  await mockSupport(page, { status: { configured: true, checkoutEnabled: false, monthlyAvailable: false, bankTransfer: { enabled: true }, showSupport: true } });
+  await page.goto('/support');
+  await expect(page.getByRole('heading', { name: 'Paid by bank transfer?' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'One-off contribution' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Optional monthly contribution' })).toHaveCount(0);
+  await expect(page.getByText('Online contributions are currently unavailable.')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Support the Lab' })).toBeVisible();
+});
+
+test('bank transfer disabled hides the report form but keeps earlier reports', async ({ page }) => {
+  const form = page.getByRole('button', { name: 'Report transfer' });
+  await mockSupport(page, { status: { bankTransfer: { enabled: false }, showSupport: true } });
+  await page.goto('/support');
+  await expect(page.getByRole('heading', { name: 'One-off contribution' })).toBeVisible();
+  await expect(form).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Paid by bank transfer?' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Bank transfer reports' })).toHaveCount(0);
+
+  await mockSupport(page, { status: { bankTransfer: { enabled: false }, showSupport: true },
+    history: { manualReports: [{ id: 1, amountOre: 25000, reference: 'BANK-REF-1', receivedAt: '2026-10-08T00:00:00Z', status: 'reported' }] } });
+  await page.reload();
+  const reports = page.locator('section', { has: page.getByRole('heading', { name: 'Bank transfer reports' }) });
+  await expect(reports.getByText('BANK-REF-1')).toBeVisible();
+  await expect(reports.getByText('awaiting confirmation')).toBeVisible();
+  await expect(form).toHaveCount(0);
+  await expect(page.getByLabel('Bank reference')).toHaveCount(0);
+});
+
+test('a report refused because bank transfer was switched off gets a readable message', async ({ page }) => {
+  await mockSupport(page, { posts: { '/api/payments/manual-reports': { status: 403, json: { error: 'BANK_TRANSFER_DISABLED' } } } });
+  await page.goto('/support');
+  await page.getByLabel('Amount · DKK').last().fill('250.00');
+  await page.getByLabel('Bank reference').fill('BANK-REF-2');
+  await page.getByLabel('Date sent').fill('2026-10-08');
+  await page.getByRole('button', { name: 'Report transfer' }).click();
+  await expect(page.getByRole('alert')).toContainText('Bank transfer reports are currently switched off');
+  await expect(page.getByRole('alert')).not.toContainText('BANK_TRANSFER_DISABLED');
+});
+
+test('with every method disabled the page says so, offers nothing, and the sidebar entry is gone', async ({ page }) => {
+  const allOff = { configured: true, checkoutEnabled: false, monthlyAvailable: false, monthlyOptions: [], kofi: { enabled: false, pageUrl: null }, bankTransfer: { enabled: false }, showSupport: false };
+  await mockSupport(page, { status: allOff });
+  await page.goto('/support');
+  await expect(page).toHaveURL(/\/support$/);
+  await expect(page.getByText('Online contributions are currently unavailable.')).toBeVisible();
+  for (const name of ['One-off contribution', 'Optional monthly contribution', 'Support via Ko-fi', 'Paid by bank transfer?', 'Bank transfer reports']) await expect(page.getByRole('heading', { name })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Report transfer' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Your subscriptions' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Your contribution history' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Support the Lab' })).toHaveCount(0);
+
+  // A member with a subscription left to manage keeps the entry and can still cancel.
+  await mockSupport(page, { status: { ...allOff, showSupport: true },
+    history: { subscriptions: [{ id: 'sub-1', amountOre: 2500, status: 'ACTIVE', environment: 'live', nextBillingAt: '2026-12-01T00:00:00Z' }] } });
+  await page.reload();
+  await expect(page.getByRole('link', { name: 'Support the Lab' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel subscription' })).toBeEnabled();
 });

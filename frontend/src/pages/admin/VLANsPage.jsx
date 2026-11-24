@@ -288,10 +288,16 @@ export default function VLANsPage() {
 
 function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
   const isAdmin = !!user?.isAdmin;
-  const suggestedTag = !vlan ? findNextAvailableVlanTag(vlans, firewalls) : null;
+  // A non-admin only sees their own VLANs, so the next free tag has to come
+  // from the server (it knows every tag in use). undefined = still asking,
+  // null = none free or the lookup failed.
+  const [serverTag, setServerTag] = useState(undefined);
+  const [serverTagFailed, setServerTagFailed] = useState(false);
+  const autoTag = !vlan && !isAdmin;
+  const suggestedTag = vlan ? null : isAdmin ? findNextAvailableVlanTag(vlans, firewalls) : serverTag ?? null;
   const [form, setForm] = useState({
     name: vlan?.name || '',
-    tag: vlan?.tag || suggestedTag || '',
+    tag: vlan?.tag || (isAdmin ? suggestedTag : '') || '',
     mode: vlan?.mode || 'managed',
     subnetCidr: vlan?.subnet_cidr || '',
     description: vlan?.description || '',
@@ -303,6 +309,15 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [subnet, setSubnet] = useState(null);
   const isTaggedOnly = form.mode === 'tagged_only';
+
+  useEffect(() => {
+    if (!autoTag) return undefined;
+    let stale = false;
+    api.get('/admin/vlans/next-tag')
+      .then(({ data }) => { if (stale) return; const tag = Number.isInteger(data?.tag) ? data.tag : null; setServerTag(tag); setForm(f => ({ ...f, tag: tag ?? '' })); })
+      .catch(() => { if (!stale) { setServerTag(null); setServerTagFailed(true); } });
+    return () => { stale = true; };
+  }, [autoTag]);
 
   // Compute subnet preview when tag changes
   useEffect(() => {
@@ -426,15 +441,20 @@ function VLANFormModal({ user, vlan, vlans, firewalls, onClose, onSaved }) {
             />
           ) : (
             <div className="w-full rounded-lg border border-emerald-800/40 bg-emerald-900/10 px-3 py-2.5 text-sm text-emerald-300">
-              {form.tag || 'Auto-assigned on create'}
+              {form.tag || (autoTag && serverTag === undefined ? 'Checking the next free tag…' : 'Auto-assigned on create')}
             </div>
           )}
-          {!vlan && !isAdmin && suggestedTag && (
+          {autoTag && suggestedTag && (
             <p className="mt-2 text-xs text-emerald-400">
-              Non-admin VLAN managers are assigned the next free tag automatically from the firewall pool.
+              This is the next free tag in the firewall pool; it is assigned to you automatically on create.
             </p>
           )}
-          {!vlan && !isAdmin && !suggestedTag && (
+          {autoTag && serverTagFailed && (
+            <p className="mt-2 text-xs text-amber-400">
+              The next free tag could not be looked up, so no preview is shown. The tag is still assigned automatically on create.
+            </p>
+          )}
+          {autoTag && serverTag === null && !serverTagFailed && (
             <p className="mt-2 text-xs text-amber-400">
               No free VLAN tags were found in the configured firewall pools. Ask an admin to expand the range or free a tag.
             </p>

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import api from '../api.js';
 import Layout from '../components/Layout.jsx';
 import useDocumentTitle from '../hooks/useDocumentTitle.js';
 import { useConfirm } from '../contexts/FeedbackContext.jsx';
+import { supportMethods } from '../utils/supportStatus.js';
+import SupportCoverage from '../components/SupportCoverage.jsx';
 
 const money = (ore) => typeof ore === 'number' ? new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(ore / 100) : '—';
 const date = (value) => value ? new Intl.DateTimeFormat('da-DK', { dateStyle: 'medium' }).format(new Date(value)) : '—';
@@ -23,6 +25,45 @@ const Skeleton = ({ className = 'h-4 w-40' }) => <div aria-hidden="true" classNa
 function Card({ title, hint, children, className = '' }) {
   return <section className={`${card} ${className}`}><h2 className="aaris-display text-base text-gray-100">{title}</h2>
     {hint && <p className="text-xs text-gray-500 mt-2">{hint}</p>}{children}</section>;
+}
+
+const KOFI_EMAIL_ERRORS = {
+  INVALID_EMAIL: 'That does not look like an email address.',
+  EMAIL_ALREADY_LINKED: 'That email is already linked to an account. If it is yours, ask the owner to sort it out.',
+  TOO_MANY_EMAILS: 'You have saved the maximum number of emails. Remove one first.',
+  KOFI_DISABLED: 'Ko-fi is switched off right now.',
+  RATE_LIMITED: 'Too many attempts. Try again in a few minutes.',
+};
+// The member's own Ko-fi email(s). Only a masked hint ever comes back from the
+// server; the address itself is not stored. Rows the owner linked are listed
+// but can only be removed by the owner. Saved rows stay removable while Ko-fi
+// is switched off; only adding needs it on.
+function KofiEmails({ emails, onChange, canAdd }) {
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const run = async (key, request, done) => {
+    setBusy(key); setError('');
+    try { const { data } = await request(); onChange(data.items || []); done?.(); }
+    catch (err) { setError(KOFI_EMAIL_ERRORS[err.response?.data?.error] || 'Could not save the change. Try again.'); }
+    finally { setBusy(''); }
+  };
+  const add = (event) => { event.preventDefault(); run('add', () => api.post('/payments/kofi-emails', { email: email.trim() }), () => setEmail('')); };
+  return <div className="mt-6 pt-6 border-t border-gray-800 max-w-2xl">
+    <h3 className="aaris-meta">Your Ko-fi email</h3>
+    <p className="text-xs text-gray-500 mt-2">Save the email you pay with on Ko-fi. The owner confirms it when matching your first payment from it; after that, payments from it are matched to your account by themselves. Only a masked hint is kept visible; the owner can see that you added it.</p>
+    {emails.length > 0 && <ul className="mt-4 divide-y divide-gray-800 text-sm">{emails.map((item) => <li key={item.id} className="py-2.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+      <span className="font-mono text-gray-300 break-all">{item.emailHint}{item.verified === false && <span className="ml-3 text-xs text-yellow-400">awaiting the owner's confirmation</span>}</span>
+      {item.removable ? <button type="button" disabled={!!busy} onClick={() => run(`remove:${item.id}`, () => api.delete(`/payments/kofi-emails/${item.id}`))} className={secondaryBtn}>{busy === `remove:${item.id}` ? 'Removing…' : 'Remove'}</button>
+        : <span className="font-mono text-xs text-gray-500">linked by the owner</span>}
+    </li>)}</ul>}
+    {canAdd && <form onSubmit={add} className="mt-4 flex flex-wrap items-end gap-3">
+      <div className="flex-1 min-w-[14rem]"><label htmlFor="kofi-email" className="block text-xs text-gray-400 mb-2">Email used on Ko-fi</label>
+        <input id="kofi-email" type="email" required maxLength={254} autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} className={inputCls} /></div>
+      <button disabled={!!busy || !email.trim()} className={secondaryBtn}>{busy === 'add' ? 'Saving…' : 'Save email'}</button>
+    </form>}
+    {error && <p role="alert" className="text-xs text-red-400 mt-3">{error}</p>}
+  </div>;
 }
 
 export default function SupportPage() {
@@ -77,7 +118,11 @@ export default function SupportPage() {
     setBusy('manual'); setError(''); setNotice('');
     try { await api.post('/payments/manual-reports', transfer); setTransfer({ amount: '', reference: '', receivedOn: '' });
       setNotice('Transfer reported. It counts only after the owner confirms it against the bank statement.', 'success'); await refresh(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not report the transfer.'); }
+    catch (err) {
+      const code = err.response?.data?.error;
+      if (code === 'BANK_TRANSFER_DISABLED') { setError('Bank transfer reports are currently switched off, so this transfer was not reported.'); refresh().catch(() => {}); }
+      else setError(code || 'Could not report the transfer.');
+    }
     finally { setBusy(''); }
   };
   const options = status?.monthlyOptions || [];
@@ -102,8 +147,12 @@ export default function SupportPage() {
   const loading = !loaded;
   const kofiUrl = kofiPage(status?.kofi);
   const kofiReceipts = history.kofiReceipts || [];
-  // PayPal cards are hidden once it is known that PayPal is not set up at all.
-  const showPayPal = !status || !!status.configured;
+  // No method is offered until the status answer is known: showing PayPal or
+  // the transfer form first and removing it a moment later looks like a glitch.
+  // A placeholder holds the space while loading.
+  const methods = supportMethods(status);
+  const showPayPal = methods.paypal;
+  const manualReports = history.manualReports || [];
   const amountValid = /^\d{1,5}\.\d{2}$/.test(amount);
   return <Layout><div className="max-w-5xl mx-auto p-6 lg:p-8 space-y-6">
     <header><p className="font-mono text-[11px] uppercase tracking-[0.2em] text-orange-500">Private · Energy & Budget</p>
@@ -112,16 +161,24 @@ export default function SupportPage() {
     {error && <p role="alert" className="rounded-2xl border border-red-800/50 bg-red-900/20 px-4 py-3 text-sm text-red-300">{error}</p>}
     {busy === 'capture' && <p role="status" className={`rounded-2xl border px-4 py-3 text-sm ${toneCls.info}`}>Verifying your PayPal payment…</p>}
     {notice.text && busy !== 'capture' && <p role="status" className={`rounded-2xl border px-4 py-3 text-sm ${toneCls[notice.tone]}`}>{notice.text}</p>}
-    {loaded && status && !status.checkoutEnabled && !kofiUrl && <p className="rounded-2xl border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">Online contributions are currently unavailable. Your existing contribution history remains private below.</p>}
-    {kofiUrl && <Card title="Support via Ko-fi">
+    {loaded && status && !methods.paypal && !kofiUrl && !methods.bankTransfer && <p className="rounded-2xl border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">Online contributions are currently unavailable. Your existing contribution history remains private below.</p>}
+    <Card title="What the lab costs" hint="Lab electricity over the last 24 months and how much of it member support has covered. Totals only; nobody is named.">
+      <div className="mt-5"><SupportCoverage /></div>
+      <p className="mt-5 font-mono text-xs"><Link to="/energy" className="text-gray-400 hover:text-white underline underline-offset-4 decoration-gray-700">Monthly history on Energy & Budget →</Link></p>
+    </Card>
+    {loading && <div className={card} aria-busy="true"><span className="sr-only">Loading contribution options</span><Skeleton className="h-5 w-48" /><Skeleton className="h-24 w-full mt-4" /></div>}
+    {(kofiUrl || history.kofiEmails?.length > 0) && <Card title="Support via Ko-fi">
+      {kofiUrl ? <>
       <p className="text-sm text-gray-400 mt-3 max-w-2xl">Ko-fi is a voluntary way to contribute. You pay on Ko-fi's own site; nothing is charged from this portal.</p>
       <ul className="mt-4 space-y-2 text-sm text-gray-400 max-w-2xl list-disc pl-5 marker:text-gray-600">
         <li>Use the same email address on Ko-fi every time. It is how a payment is matched to your account.</li>
-        <li>Your first payment is matched by the owner, so it can take a while before it shows in your history below.</li>
+        <li>Save that email below. The owner matches your first payment by hand, so it can take a while before it shows in your history below; after that, payments from the saved email are matched automatically.</li>
         <li>A payment counts toward the lab budget once the owner has confirmed the actual fee. Payments in another currency are counted at the DKK amount the owner actually received.</li>
         <li>Do not also report a Ko-fi payment as a bank transfer.</li>
       </ul>
       <div className="mt-6"><a href={kofiUrl} target="_blank" rel="noopener noreferrer" className={`${primaryBtn} inline-block`}>Open the Ko-fi page ↗</a></div>
+      </> : <p className="text-sm text-gray-400 mt-3 max-w-2xl">Ko-fi is switched off right now. You can still remove the emails you saved.</p>}
+      <KofiEmails emails={history.kofiEmails || []} canAdd={!!kofiUrl} onChange={(items) => setHistory((old) => ({ ...old, kofiEmails: items }))} />
     </Card>}
     {showPayPal && <div className="grid lg:grid-cols-2 gap-6 items-stretch">
       <Card title="One-off contribution" className="flex flex-col">
@@ -167,8 +224,9 @@ export default function SupportPage() {
             <button type="button" disabled={!!busy} onClick={() => cancel(item)} className={secondaryBtn}>{busy === `cancel:${item.id}` ? 'Cancelling…' : 'Cancel subscription'}</button></div>}
         </div>)}</div>}
     </Card>
-    <Card title="Paid by bank transfer?" hint="Report it here so the owner can match it against the bank statement. A report is not counted until confirmed.">
-      <form onSubmit={reportTransfer} className="mt-5 grid sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs text-gray-400">
+    {(methods.bankTransfer || manualReports.length > 0) && <Card title={methods.bankTransfer ? 'Paid by bank transfer?' : 'Bank transfer reports'}
+      hint={methods.bankTransfer ? 'Report it here so the owner can match it against the bank statement. A report is not counted until confirmed.' : 'New transfer reports are not being accepted right now. Your earlier reports stay listed here.'}>
+      {methods.bankTransfer && <form onSubmit={reportTransfer} className="mt-5 grid sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs text-gray-400">
         <div><label htmlFor="transfer-amount" className="block mb-2">Amount · DKK</label>
           <input id="transfer-amount" value={transfer.amount} inputMode="decimal" onChange={(event) => setTransfer((old) => ({ ...old, amount: event.target.value }))} className={inputCls} /></div>
         <div><label htmlFor="transfer-reference" className="block mb-2">Bank reference</label>
@@ -177,11 +235,11 @@ export default function SupportPage() {
           <input id="transfer-date" type="date" value={transfer.receivedOn} onChange={(event) => setTransfer((old) => ({ ...old, receivedOn: event.target.value }))} className={inputCls} /></div>
         <div className="sm:col-span-2 lg:col-span-3"><button disabled={!!busy || !transfer.amount || !transfer.reference || !transfer.receivedOn} className={primaryBtn}>
           {busy === 'manual' ? 'Reporting…' : 'Report transfer'}</button></div>
-      </form>
-      {(history.manualReports || []).length > 0 && <ul className="mt-6 divide-y divide-gray-800 text-sm">{history.manualReports.map((item) => <li key={item.id} className="py-3 flex flex-wrap justify-between gap-x-4 gap-y-1">
+      </form>}
+      {manualReports.length > 0 && <ul className={`${methods.bankTransfer ? 'mt-6' : 'mt-4'} divide-y divide-gray-800 text-sm`}>{manualReports.map((item) => <li key={item.id} className="py-3 flex flex-wrap justify-between gap-x-4 gap-y-1">
         <span className="text-gray-300">{money(item.amountOre)} · ref <span className="font-mono">{item.reference}</span> · {date(item.receivedAt)}</span>
         <span className="font-mono text-xs text-gray-400">{item.status === 'reported' ? 'awaiting confirmation' : item.status}</span></li>)}</ul>}
-    </Card>
+    </Card>}
     <Card title="Your contribution history" hint="Only verified postings count toward the lab budget. Refunds and actual payment fees reduce net support.">
       {loading ? <div className="mt-5 space-y-3" aria-busy="true"><Skeleton className="h-5 w-full" /><Skeleton className="h-5 w-full" /></div>
         : loadFailed ? <p className="text-sm text-gray-500 mt-5">Contribution history could not be loaded.</p>

@@ -261,7 +261,7 @@ test('a fee can be entered for a receipt awaiting its fee', async ({ page }) => 
 test('a foreign-currency payment is recorded with the DKK amount received', async ({ page }) => {
   const id = 'live:kofi:33333333-aaaa-4bbb-8ccc-000000000003';
   const state = await mockKofi(page, { review: [
-    reviewItem({ id, reason: 'CURRENCY_NOT_DKK', linkable: false, settleable: true, amount: '5.00', currency: 'EUR', matchedUserId: 7, matchedUsername: 'anders' }),
+    reviewItem({ id, reason: 'CURRENCY_NOT_DKK', linkable: false, settleable: true, amount: '5.00', currency: 'EUR', matchedUserId: 7, matchedUsername: 'anders', matchedVerified: true }),
   ] });
   await page.goto('/admin/paypal');
   const panel = kofi(page);
@@ -372,4 +372,20 @@ test.describe('at phone width', () => {
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(390);
   });
+});
+
+test('an unverified member claim is shown as such and never preselected', async ({ page }) => {
+  const id = 'live:kofi:33333333-aaaa-4bbb-8ccc-000000000009';
+  await mockKofi(page, { review: [
+    reviewItem({ id, reason: 'CURRENCY_NOT_DKK', linkable: false, settleable: true, amount: '5.00', currency: 'EUR', matchedUserId: 7, matchedUsername: 'anders', matchedVerified: false }),
+  ] });
+  await page.goto('/admin/paypal');
+  const row = kofi(page).getByRole('row', { name: /CURRENCY_NOT_DKK/ });
+  await expect(row).toContainText('claimed by anders, not verified');
+  await row.getByRole('button', { name: 'Record in DKK' }).click();
+  const form = kofi(page).getByRole('form', { name: 'Record payment in DKK' });
+  await expect(form.getByLabel('Member', { exact: true })).toHaveValue('');
+  await form.getByLabel('Member', { exact: true }).selectOption('7');
+  // Remembering would verify the claim, so it must be ticked on purpose.
+  await expect(form.getByLabel(/Remember this email/)).not.toBeChecked();
 });

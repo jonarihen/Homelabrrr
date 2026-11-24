@@ -1,8 +1,19 @@
 import { useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import changelogMarkdown from '../../../CHANGELOG.md?raw';
-import { parseChangelog } from '../utils/changelog.js';
+import { inlineTokens, parseChangelog } from '../utils/changelog.js';
 import Modal from './Modal.jsx';
+
+// Renders the inline markdown of one changelog line as elements.
+function renderTokens(tokens) {
+  return tokens.map((token, index) => {
+    if (token.type === 'bold') return <strong key={index} className="font-semibold text-gray-100">{renderTokens(token.children)}</strong>;
+    if (token.type === 'em') return <em key={index}>{renderTokens(token.children)}</em>;
+    if (token.type === 'code') return <code key={index} className="bg-gray-800 px-1 py-0.5 font-mono text-[0.85em] text-gray-200 break-words">{token.text}</code>;
+    return token.text;
+  });
+}
+const Inline = ({ text }) => renderTokens(inlineTokens(text));
 
 // Screenshots referenced from CHANGELOG.md as docs/screenshots/changelog/<file>; Vite bundles them.
 const screenshotUrls = import.meta.glob('../../../docs/screenshots/changelog/*.{png,jpg,jpeg,webp,gif}', {
@@ -68,7 +79,7 @@ export default function ChangelogPanel() {
                 </div>
               </div>
 
-              <p className="mt-3 text-sm text-gray-300">{entry.summary}</p>
+              <p className="mt-3 text-sm text-gray-300"><Inline text={entry.summary} /></p>
 
               <div className="mt-4 space-y-4">
                 {entry.sections.map((section) => (
@@ -78,7 +89,7 @@ export default function ChangelogPanel() {
                       {section.items.map((item) => (
                         <li key={item} className="flex gap-2">
                           <span className="mt-1.5 h-1.5 w-1.5 shrink-0 bg-orange-600" />
-                          <span>{item}</span>
+                          <span className="min-w-0"><Inline text={item} /></span>
                         </li>
                       ))}
                     </ul>
