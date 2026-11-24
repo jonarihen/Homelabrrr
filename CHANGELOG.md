@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-24 — Screenshots in the changelog
+
+- Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll
+- The screenshot below is a stand-in to show the feature. Real entries will show the changed screen
+
+![Example popup: this is where a screenshot of the changed screen appears](docs/screenshots/changelog/2026-11-24-changelog-example.jpg)
+
 ## 2026-11-09 — Ko-fi support
 
 - Members can support the lab through the owner's Ko-fi page without the owner needing a business account. Ko-fi posts each payment to the portal, which records donations and membership payments as support receipts in the existing ledger. Support never changes access, quotas or priority.
