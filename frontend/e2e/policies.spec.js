@@ -288,6 +288,13 @@ test('a real mouse hovers and clicks a route line above the node layer', async (
   await expect(page.getByRole('button', { name: 'Delete this policy' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Delete this policy' })).toHaveCount(0);
+  // A pan that starts on a route moves the canvas without opening the popover.
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 80, y + 50, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.getByRole('button', { name: 'Recenter' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Delete this policy' })).toHaveCount(0);
 });
 
 test('a real mouse still clicks and drags a VLAN node', async ({ page }) => {
