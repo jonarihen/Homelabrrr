@@ -6,6 +6,12 @@
 - **The backend runs on a patched Node.js release** with fixes for HTTP and TLS handling.
 - **The frontend's web server is updated** to a patched nginx release, along with its XML libraries.
 - **Other server libraries are updated** to versions without known security advisories.
+## 2026-11-24 — Remove a disk from a VM
+
+- The hardware dialog's **Disks** tab now lists the VM's disks with a **Remove** button. Removing a disk detaches it and permanently deletes its volume, after a confirmation that names the disk. The storage it used is freed and stops counting against your storage quota.
+- Only the VM's owner (or an admin) with the edit-hardware permission can remove a disk, and only while the VM is stopped and has no snapshots, because Proxmox keeps a disk that a snapshot still uses. Removal is also blocked during a migration. The boot disk, host-path disks and volumes belonging to another VM cannot be removed: their button is disabled, with a tooltip saying why. CD-ROM and cloud-init drives are not offered.
+
+![Hardware dialog Disks tab with a Remove button per disk, disabled for the boot disk](docs/screenshots/changelog/2026-11-24-remove-vm-disk.png)
 
 ## 2026-11-24 — No more deploys you can't log into
 
