@@ -16,6 +16,9 @@ const toneCls = {
   success: 'border-green-800/60 bg-green-900/20 text-green-300',
   warning: 'border-yellow-700/50 bg-yellow-900/20 text-yellow-300',
 };
+const KOFI_STATUS = { awaiting_fee: 'awaiting fee confirmation', counted: 'counted', reversed: 'reversed', voided: 'voided' };
+// The link leaves the portal, so only a Ko-fi page address is ever rendered.
+const kofiPage = (kofi) => kofi?.enabled && /^https:\/\/(www\.)?ko-fi\.com\//.test(kofi.pageUrl || '') ? kofi.pageUrl : null;
 const Skeleton = ({ className = 'h-4 w-40' }) => <div aria-hidden="true" className={`bg-gray-800 rounded-lg animate-pulse ${className}`} />;
 function Card({ title, hint, children, className = '' }) {
   return <section className={`${card} ${className}`}><h2 className="aaris-display text-base text-gray-100">{title}</h2>
@@ -97,6 +100,10 @@ export default function SupportPage() {
     finally { setBusy(''); }
   };
   const loading = !loaded;
+  const kofiUrl = kofiPage(status?.kofi);
+  const kofiReceipts = history.kofiReceipts || [];
+  // PayPal cards are hidden once it is known that PayPal is not set up at all.
+  const showPayPal = !status || !!status.configured;
   const amountValid = /^\d{1,5}\.\d{2}$/.test(amount);
   return <Layout><div className="max-w-5xl mx-auto p-6 lg:p-8 space-y-6">
     <header><p className="font-mono text-[11px] uppercase tracking-[0.2em] text-orange-500">Private · Energy & Budget</p>
@@ -105,8 +112,18 @@ export default function SupportPage() {
     {error && <p role="alert" className="rounded-2xl border border-red-800/50 bg-red-900/20 px-4 py-3 text-sm text-red-300">{error}</p>}
     {busy === 'capture' && <p role="status" className={`rounded-2xl border px-4 py-3 text-sm ${toneCls.info}`}>Verifying your PayPal payment…</p>}
     {notice.text && busy !== 'capture' && <p role="status" className={`rounded-2xl border px-4 py-3 text-sm ${toneCls[notice.tone]}`}>{notice.text}</p>}
-    {loaded && status && !status.checkoutEnabled && <p className="rounded-2xl border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">Online contributions are currently unavailable. Your existing contribution history remains private below.</p>}
-    <div className="grid lg:grid-cols-2 gap-6 items-stretch">
+    {loaded && status && !status.checkoutEnabled && !kofiUrl && <p className="rounded-2xl border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">Online contributions are currently unavailable. Your existing contribution history remains private below.</p>}
+    {kofiUrl && <Card title="Support via Ko-fi">
+      <p className="text-sm text-gray-400 mt-3 max-w-2xl">Ko-fi is a voluntary way to contribute. You pay on Ko-fi's own site; nothing is charged from this portal.</p>
+      <ul className="mt-4 space-y-2 text-sm text-gray-400 max-w-2xl list-disc pl-5 marker:text-gray-600">
+        <li>Use the same email address on Ko-fi every time. It is how a payment is matched to your account.</li>
+        <li>Your first payment is matched by the owner, so it can take a while before it shows in your history below.</li>
+        <li>A payment counts toward the lab budget once the owner has confirmed the actual fee. Payments in another currency are counted at the DKK amount the owner actually received.</li>
+        <li>Do not also report a Ko-fi payment as a bank transfer.</li>
+      </ul>
+      <div className="mt-6"><a href={kofiUrl} target="_blank" rel="noopener noreferrer" className={`${primaryBtn} inline-block`}>Open the Ko-fi page ↗</a></div>
+    </Card>}
+    {showPayPal && <div className="grid lg:grid-cols-2 gap-6 items-stretch">
       <Card title="One-off contribution" className="flex flex-col">
         <p className="text-sm text-gray-400 mt-3">Choose an amount in DKK. PayPal shows the final payment for your approval.</p>
         <div className="mt-6">
@@ -137,7 +154,7 @@ export default function SupportPage() {
             {busy === 'monthly' ? 'Opening PayPal…' : 'Review monthly subscription'}</button>
         </div>
       </Card>
-    </div>
+    </div>}
     <Card title="Your subscriptions">
       {loading ? <div className="mt-4" aria-busy="true"><Skeleton className="h-12 w-full" /></div>
         : loadFailed ? <p className="text-sm text-gray-500 mt-4">Subscriptions could not be loaded.</p>
@@ -165,14 +182,23 @@ export default function SupportPage() {
         <span className="text-gray-300">{money(item.amountOre)} · ref <span className="font-mono">{item.reference}</span> · {date(item.receivedAt)}</span>
         <span className="font-mono text-xs text-gray-400">{item.status === 'reported' ? 'awaiting confirmation' : item.status}</span></li>)}</ul>}
     </Card>
-    <Card title="Your contribution history" hint="Only verified postings count toward the lab budget. Refunds and actual PayPal fees reduce net support.">
+    <Card title="Your contribution history" hint="Only verified postings count toward the lab budget. Refunds and actual payment fees reduce net support.">
       {loading ? <div className="mt-5 space-y-3" aria-busy="true"><Skeleton className="h-5 w-full" /><Skeleton className="h-5 w-full" /></div>
         : loadFailed ? <p className="text-sm text-gray-500 mt-5">Contribution history could not be loaded.</p>
-        : history.postings.length === 0 ? <p className="text-sm text-gray-500 mt-5">No verified contributions recorded.</p> :
-        <div className="mt-5 divide-y divide-gray-800">{history.postings.map((item, index) => <div key={`${item.effectiveAt}-${index}`} className="flex justify-between gap-4 py-3 first:pt-0 last:pb-0 text-sm">
-          <span className="text-gray-300">{item.postingKind.replaceAll('_', ' ')} <span className="text-gray-500">· {date(item.effectiveAt)}{item.environment === 'sandbox' ? ' · sandbox' : ''}</span></span>
-          <span className={item.amountOre < 0 ? 'text-red-300' : 'text-green-300'}>{money(item.amountOre)}</span>
-        </div>)}</div>}
+        : <>
+          {kofiReceipts.length > 0 && <div className="mt-5">
+            <h3 className="aaris-meta">Ko-fi payments</h3>
+            <ul className="mt-2 divide-y divide-gray-800 text-sm">{kofiReceipts.map((item, index) => <li key={`${item.receivedAt}-${index}`} className="py-3 flex flex-wrap justify-between gap-x-4 gap-y-1">
+              <span className="text-gray-300">{money(item.amountOre)} · Ko-fi {item.kind === 'subscription' ? 'subscription' : 'donation'} <span className="text-gray-500">· {date(item.receivedAt)}</span></span>
+              <span className="font-mono text-xs text-gray-400">{KOFI_STATUS[item.status] || item.status}</span></li>)}</ul>
+            <h3 className="aaris-meta mt-5 pt-5 border-t border-gray-800">Verified postings</h3>
+          </div>}
+          {history.postings.length === 0 ? <p className={`text-sm text-gray-500 ${kofiReceipts.length > 0 ? 'mt-3' : 'mt-5'}`}>No verified contributions recorded.</p> :
+          <div className={`divide-y divide-gray-800 ${kofiReceipts.length > 0 ? 'mt-3' : 'mt-5'}`}>{history.postings.map((item, index) => <div key={`${item.effectiveAt}-${index}`} className="flex justify-between gap-4 py-3 first:pt-0 last:pb-0 text-sm">
+            <span className="text-gray-300">{item.postingKind.replaceAll('_', ' ')} <span className="text-gray-500">· {date(item.effectiveAt)}{item.environment === 'sandbox' ? ' · sandbox' : ''}</span></span>
+            <span className={item.amountOre < 0 ? 'text-red-300' : 'text-green-300'}>{money(item.amountOre)}</span>
+          </div>)}</div>}
+        </>}
     </Card>
   </div></Layout>;
 }

@@ -4,6 +4,32 @@
 
 - The **Hardware** button on a VM page is now always shown. Without the edit-hardware permission it is disabled, with a tooltip saying why.
 - Disks in the hardware dialog show a readable label (for example `SCSI 0 · local-lvm · 32G`) with the raw Proxmox id underneath.
+## 2026-11-24 — Screenshots in the changelog
+
+- Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll
+- The screenshot below is a stand-in to show the feature. Real entries will show the changed screen
+
+![Example popup: this is where a screenshot of the changed screen appears](docs/screenshots/changelog/2026-11-24-changelog-example.jpg)
+
+## 2026-11-09 — Ko-fi support
+
+- Members can support the lab through the owner's Ko-fi page without the owner needing a business account. Ko-fi posts each payment to the portal, which records donations and membership payments as support receipts in the existing ledger. Support never changes access, quotas or priority.
+- Payments in DKK are recorded straight away and count toward the budget once the owner has entered the actual processor fee. Payments in another currency (the owner's page charges EUR) wait in the review queue until the owner records the DKK amount actually received and the fee. Nothing is converted or estimated, and a missing fee is never treated as zero.
+- Payers are matched to members by a Ko-fi email the owner has verified; the portal stores only a keyed hash and a masked hint. A first payment from an unknown email waits for the owner to link it, which also remembers the email.
+- New Ko-fi section on the admin page now called **Support payments** (formerly PayPal): webhook URL to paste into Ko-fi, page URL, write-only verification token, enable/disable, delivery status, review queue (link, record in DKK, retry, dismiss), receipts (fee, void, reverse) and linked emails. `/support` links to the Ko-fi page when enabled and lists the member's own Ko-fi payments.
+- The only new public endpoint is `POST /api/payments/kofi/webhook`. It checks the verification token in constant time before storing anything, limits body size and rate, ignores replays, and never stores the token or shipping details. See `backend/docs/kofi-support.md` for setup, exposure and the live checklist. Ko-fi's webhook format could not be verified against Ko-fi's own documentation during development; confirm it with a small real payment.
+
+## 2026-11-09 — Month estimate, interactive power history, real server names
+
+- **Estimated month total.** The Energy page now gives a best guess for the whole month's lab electricity cost, with a likely range, from the first day of readings. It shows what is measured, what is filled in for time without readings, and what is projected for the rest of the month. The calculated cost itself is unchanged.
+- The guess learns each server's typical draw per hour of day, weekdays and weekends apart, with recent days counting more. Hours without a published spot price use the real tariffs plus a spot price estimated the same way from recent days. It replaces the "Month-end forecast" row, which only worked once all remaining prices were published.
+- **Power history** charts are interactive: move the pointer, tap, or use the arrow keys to read the exact value, interval, coverage and any mode change. They now have value and time axes, energy per interval is drawn as bars, and intervals with partial coverage are dimmed.
+- Administrators see the real node name on server cards and previews. Members still see only "Server 01", "Server 02".
+
+## 2026-11-09 — Saved meter stays selected, tariff import finds its own codes
+
+- The Energy data page now shows the saved meter and scope after a reload, instead of empty dropdowns that looked like the choice was lost. The selection itself was always saved.
+- `npm run import-datahub-tariffs -- --contract <id> --auto` finds the meter's grid company and tariff codes from its ElOverblik charges, so they no longer need looking up by hand. Rates still come from Datahub, it stays a dry run until `--apply`, and retailer margin stays manual.
 
 ## 2026-11-04 — Readable metadata text
 
