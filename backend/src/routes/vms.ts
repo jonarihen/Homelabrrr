@@ -4,7 +4,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmSchedules, pveHosts, vmSshConfigs, vmSshUserConfigs, vlans, firewallVlanSync, firewalls,
-  vmAssignments, vmMigrations, vmLeases, provisionedVms, backupTasks,
+  vmAssignments, vmMigrations, vmLeases, provisionedVms, backupTasks, vmDetectedIps,
   sshKeys as sshKeysTable, users, userVlans,
 } from '../db/schema/index.ts';
 import {
@@ -13,7 +13,7 @@ import {
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType, resolveLegacyVmNode,
   getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
-  getTaskStatus, getTaskLog, getVMAgentInterfaces,
+  getTaskStatus, getTaskLog, getVMAgentInterfaces, guestPresence,
 } from '../proxmox.ts';
 import { createClient } from '../fortigate.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
@@ -37,7 +37,7 @@ import { decryptSecret } from '../utils/secrets.ts';
 import { readTaskProgress } from '../utils/taskProgress.ts';
 import { parseUpid, inProgressVolids } from '../utils/backupTask.ts';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.ts';
-import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.ts';
+import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates, normalizeMac, parseVmNetworkInterfaces, findMatchingLease } from '../utils/detectedIps.ts';
 import { validatePassword } from '../utils/validation.ts';
 import { isUniqueViolation } from '../db/errors.ts';
 import { assertVmPolicyLocation, vmMigrationPending, withVmMigrationLock, withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
@@ -100,6 +100,23 @@ async function attachSchedules(list) {
   });
 }
 
+// Cached last-detected IP (written by GET .../detected-ips) so the dashboard
+// card can show an address without upstream calls per VM.
+async function attachDetectedIps(list) {
+  const vmids = [...new Set(list.map((item) => Number(item.vmid)).filter(Number.isInteger))];
+  if (vmids.length === 0) return list;
+  const rows = await db.select().from(vmDetectedIps).where(inArray(vmDetectedIps.vmid, vmids));
+  if (rows.length === 0) return list;
+  return list.map((item) => {
+    // Exact node-ref row first; a bare legacy alias only when no exact row exists.
+    const ref = item.nodeRef || item.node;
+    const candidates = new Set(nodeLookupCandidates(ref));
+    const sameVm = rows.filter((r) => r.vmid === Number(item.vmid));
+    const row = sameVm.find((r) => r.node === ref) || sameVm.find((r) => candidates.has(r.node));
+    return row ? { ...item, detectedIp: row.ip } : item;
+  });
+}
+
 // Editing a schedule requires strict ownership (admins bypass) — mirrors the
 // destructive-op gate. Reads are the 'vm.schedule.read' op at the call site.
 function canEditSchedule(req, node, vmid) {
@@ -119,14 +136,6 @@ async function hostNameForNode(nodeValue) {
 // which honours the tagged status and returns the message verbatim for 4xx —
 // these strings were written for the user, not scraped from an upstream.
 const badRequest = (message) => httpError(400, message);
-
-function normalizeMac(mac = '') {
-  return String(mac || '').trim().toLowerCase().replace(/-/g, ':');
-}
-
-function isLikelyMac(value = '') {
-  return /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i.test(normalizeMac(value));
-}
 
 function parseIpv4(value = '') {
   const parts = String(value || '').trim().split('.');
@@ -192,49 +201,6 @@ function formatSubnetCidr(gateway = '', netmask = '') {
   return `${intToIpv4(gatewayInt & netmaskInt)}/${prefix}`;
 }
 
-function parseVmNetworkInterfaces(config = {}) {
-  return Object.keys(config)
-    .filter((key) => /^net\d+$/.test(key))
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-    .map((name) => {
-      const raw = String(config[name] || '');
-      const parts = raw.split(',').map((part) => part.trim()).filter(Boolean);
-      const details = {
-        name,
-        raw,
-        model: '',
-        guestName: '',
-        bridge: '',
-        vlanTag: null,
-        mac: '',
-      };
-
-      if (parts[0]?.includes('=')) {
-        const [firstKey, firstValue = ''] = parts[0].split('=');
-        if (firstKey === 'name') {
-          details.guestName = firstValue;
-        } else if (isLikelyMac(firstValue)) {
-          details.model = firstKey;
-          details.mac = normalizeMac(firstValue);
-        }
-      }
-
-      for (const part of parts) {
-        const [key, value = ''] = part.split('=');
-        if (key === 'bridge') details.bridge = value;
-        if (key === 'tag') {
-          const tag = Number.parseInt(value, 10);
-          details.vlanTag = Number.isInteger(tag) ? tag : null;
-        }
-        if (key === 'hwaddr' || key === 'macaddr') details.mac = normalizeMac(value);
-        if (key === 'name') details.guestName = value;
-        if (!details.mac && isLikelyMac(value)) details.mac = normalizeMac(value);
-      }
-
-      return details;
-    });
-}
-
 async function loadVmConfigForIpManagement(node, vmid) {
   try {
     return await getVMConfig(node, vmid);
@@ -263,20 +229,6 @@ function nextReservationId(reservations = []) {
     const value = Number.parseInt(reservation.id ?? reservation.q_origin_key ?? 0, 10) || 0;
     return Math.max(max, value);
   }, 0) + 1;
-}
-
-function findMatchingLease(leases = [], interfaceName, mac) {
-  const normalizedMac = normalizeMac(mac);
-  const candidates = leases.filter((lease) => (
-    normalizeMac(lease.mac) === normalizedMac
-    && lease.interface === interfaceName
-    && (!lease.type || lease.type === 'ipv4')
-  ));
-
-  return candidates.find((lease) => lease.status === 'leased')
-    || candidates.find((lease) => lease.status === 'reserved')
-    || candidates[0]
-    || null;
 }
 
 // `vm_ssh_configs.host` is the portal's only record of "where this VM lives" —
@@ -423,7 +375,7 @@ router.get('/', async (req, res) => {
           lease: await summarizeLease(identity.nodeRef, vm.vmid),
         };
       }));
-      return res.json(await attachSchedules(withLease));
+      return res.json(await attachDetectedIps(await attachSchedules(withLease)));
     } catch (err) {
       return sendError(res, err);
     }
@@ -448,7 +400,7 @@ router.get('/', async (req, res) => {
     }
   }));
 
-  res.json(await attachSchedules(results));
+  res.json(await attachDetectedIps(await attachSchedules(results)));
 });
 
 // ─── VM Status ────────────────────────────────────────────────────────────────
@@ -617,6 +569,7 @@ router.delete('/:node/:vmid', async (req, res) => {
           for (const table of cleanupTables) {
             await tx.delete(table).where(and(eq(table.vmid, parsedVmid), eq(table.node, currentNode)));
           }
+          await tx.delete(vmDetectedIps).where(and(eq(vmDetectedIps.vmid, parsedVmid), inArray(vmDetectedIps.node, nodeLookupCandidates(currentNode))));
           await tx.delete(backupTasks).where(and(eq(backupTasks.vmid, parsedVmid), inArray(backupTasks.node, nodeLookupCandidates(currentNode))));
           await tx.delete(vmMigrations).where(and(eq(vmMigrations.vmid, parsedVmid), inArray(vmMigrations.status, ['ok', 'error', 'failed', 'timeout'])));
         });
@@ -918,6 +871,18 @@ router.get('/:node/:vmid/detected-ips', async (req, res) => {
     }
 
     const candidates = rankCandidates(observations);
+    if (candidates[0]) {
+      // Best-effort cache for the VM list; a failed write must not fail detection.
+      // Under the VM lock and only while the guest exists, so a write racing a
+      // delete or migration cannot leave a stale row for a reused VMID.
+      const cached = { ip: candidates[0].ip, source: candidates[0].source, detected_at: new Date() };
+      const parsedVmid = parseInt(vmid, 10);
+      await withVmPolicyWrite(node, parsedVmid, async (tx, currentNode) => {
+        if (!(await guestPresence(currentNode, parsedVmid, tx))) return;
+        await tx.insert(vmDetectedIps).values({ node: currentNode, vmid: parsedVmid, ...cached })
+          .onConflictDoUpdate({ target: [vmDetectedIps.node, vmDetectedIps.vmid], set: cached });
+      }).catch((err) => console.warn(`[detected-ips] cache write skipped for ${node}/${vmid}: ${err.message}`));
+    }
     // Legacy rows store the bare node name, so match on every candidate form.
     const lookupNodes = nodeLookupCandidates(node);
     const [sshRow] = lookupNodes.length > 0

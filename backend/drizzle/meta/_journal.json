@@ -169,6 +169,13 @@
       "when": 1794252321084,
       "tag": "0023_kofi_support",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1795538422968,
+      "tag": "0024_vm_detected_ips",
+      "breakpoints": true
     }
   ]
 }

@@ -184,7 +184,7 @@ export default function VLANsPage() {
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-blue-400 bg-blue-900/20 px-2 py-0.5 rounded text-xs">{v.tag}</span>
                       {v.mode === 'tagged_only' && (
-                        <span className="text-[10px] uppercase tracking-wider text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/20 px-2 py-0.5 rounded-full">
+                        <span className="text-[11px] uppercase tracking-wider text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/20 px-2 py-0.5 rounded-full">
                           Tagged only
                         </span>
                       )}

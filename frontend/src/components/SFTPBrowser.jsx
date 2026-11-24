@@ -514,12 +514,12 @@ export default function SFTPBrowser({ token, onReconnect }) {
                             type="button"
                             onClick={() => deleteEntry(entry.name, entry.type === 'directory')}
                             disabled={mutationsDisabled}
-                            className="rounded px-1.5 py-0.5 text-[10px] bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white transition-colors"
+                            className="rounded px-1.5 py-0.5 text-[11px] bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white transition-colors"
                           >Yes</button>
                           <button
                             type="button"
                             onClick={() => setDeleteConfirm(null)}
-                            className="rounded px-1.5 py-0.5 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+                            className="rounded px-1.5 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
                           >No</button>
                         </div>
                       ) : (

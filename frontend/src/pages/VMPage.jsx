@@ -45,13 +45,15 @@ function fmtUptime(s) {
 
 // ── Chart ────────────────────────────────────────────────────────────────────
 
-function MiniChart({ data, color, label, formatValue, height = 64 }) {
+function MiniChart({ data, token, label, formatValue, height = 64 }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !data || data.length === 0) return;
     const ctx = canvas.getContext('2d');
+    // Canvas can't resolve var(); read the token's hex so the alpha suffixes below work.
+    const color = getComputedStyle(canvas).getPropertyValue(token).trim();
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     canvas.width = w * dpr; canvas.height = h * dpr;
@@ -84,7 +86,7 @@ function MiniChart({ data, color, label, formatValue, height = 64 }) {
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     ctx.stroke();
-  }, [data, color]);
+  }, [data, token]);
 
   const lastVal = data?.filter(v => v != null).slice(-1)[0];
 
@@ -92,7 +94,7 @@ function MiniChart({ data, color, label, formatValue, height = 64 }) {
     <div className="bg-gray-800/50 border border-gray-700/30 rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs text-gray-400 font-medium">{label}</span>
-        <span className="text-xs font-mono font-semibold" style={{ color }}>
+        <span className="text-xs font-mono font-semibold" style={{ color: `var(${token})` }}>
           {formatValue ? formatValue(lastVal) : lastVal?.toFixed(1) ?? '—'}
         </span>
       </div>
@@ -159,6 +161,7 @@ export default function VMPage() {
   const [ipCopied, setIpCopied] = useState(false);
   const stickyRef = useRef(null);
   const { user } = useAuth();
+  const canEditHw = !!(user?.isAdmin || user?.permissions?.canEditVmHardware);
 
   useDocumentTitle(vm ? (vm.name || `VM ${vm.vmid}`) : 'VM Details');
 
@@ -488,14 +491,12 @@ export default function VMPage() {
               }>Credentials</ActionBtn>
             )}
 
-            {(user?.isAdmin || user?.permissions?.canEditVmHardware) && (
-              <>
+            <>
                 <Divider />
-                <ActionBtn color="gray" onClick={() => setHardwareModal(true)} icon={
+                <ActionBtn color="gray" onClick={() => setHardwareModal(true)} disabled={!canEditHw} title={canEditHw ? undefined : 'Requires the "edit VM hardware" permission — ask an admin'} icon={
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25z" /></svg>
                 }>Hardware</ActionBtn>
-              </>
-            )}
+            </>
 
             {vm.lease?.hasLease && !vm.lease.exempt && (
               <>
@@ -635,12 +636,12 @@ export default function VMPage() {
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <MiniChart data={cpuData}       color="#ff5a1f" label="CPU"         formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'} />
-                <MiniChart data={memData}        color="#ff8a55" label="Memory"      formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'} />
-                <MiniChart data={netInData}      color="#3fd97f" label="Network In"  formatValue={fmtRate} />
-                <MiniChart data={netOutData}     color="#ffb224" label="Network Out" formatValue={fmtRate} />
-                <MiniChart data={diskReadData}   color="#8b939e" label="Disk Read"   formatValue={fmtRate} />
-                <MiniChart data={diskWriteData}  color="#e9ecef" label="Disk Write"  formatValue={fmtRate} />
+                <MiniChart data={cpuData}       token="--accent"       label="CPU"         formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'} />
+                <MiniChart data={memData}        token="--accent-hover" label="Memory"      formatValue={v => v != null ? `${v.toFixed(1)}%` : '—'} />
+                <MiniChart data={netInData}      token="--ok"           label="Network In"  formatValue={fmtRate} />
+                <MiniChart data={netOutData}     token="--warning"      label="Network Out" formatValue={fmtRate} />
+                <MiniChart data={diskReadData}   token="--muted"        label="Disk Read"   formatValue={fmtRate} />
+                <MiniChart data={diskWriteData}  token="--ink"          label="Disk Write"  formatValue={fmtRate} />
               </div>
             )}
           </div>
@@ -1073,7 +1074,7 @@ function Divider() {
   return <div className="w-px h-7 bg-gray-700/50 mx-1" />;
 }
 
-function ActionBtn({ children, color, onClick, disabled, icon }) {
+function ActionBtn({ children, color, onClick, disabled, icon, title }) {
   const styles = {
     green:  'bg-green-600/15 text-green-400 hover:bg-green-600/25 ring-green-500/20',
     red:    'bg-red-600/15 text-red-400 hover:bg-red-600/25 ring-red-500/20',
@@ -1082,7 +1083,7 @@ function ActionBtn({ children, color, onClick, disabled, icon }) {
     blue:   'bg-blue-600/15 text-blue-400 hover:bg-blue-600/25 ring-blue-500/20',
     gray:   'bg-gray-600/15 text-gray-300 hover:bg-gray-600/25 ring-gray-500/20',
   };
-  return (
+  const btn = (
     <button
       onClick={onClick}
       disabled={disabled}
@@ -1091,6 +1092,8 @@ function ActionBtn({ children, color, onClick, disabled, icon }) {
       {icon}{children}
     </button>
   );
+  // Disabled buttons don't fire hover, so the tooltip lives on a wrapper.
+  return title ? <span title={title} className="inline-flex">{btn}<span className="sr-only">{title}</span></span> : btn;
 }
 
 // ── Backups Section ─────────────────────────────────────────────────────────

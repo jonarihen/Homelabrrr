@@ -7,6 +7,39 @@
 - The username field shows the image's default user, for example `ubuntu` or `debian`. If the image's default user is unknown, the form asks you to set one.
 
 ![Deploy form warning that the VM would have no login, with the image's default user shown](docs/screenshots/changelog/2026-11-24-deploy-login-guard.jpg)
+## 2026-11-24 — Policies and charts use the shared colour tokens
+
+- **The Policies mesh drops its leftover stock blue, cyan and green glows.** Panels, the canvas grid and the VLAN cards now use the AARIS surfaces, orange accent and status colours, with no drop shadows.
+- **Service badges and routes keep their colours, now read from the shared tokens.** Web traffic is orange, SSH/RDP amber, all traffic green and deny red, as before.
+- **The VM performance charts take their colours from the same tokens.** The Memory chart is a slightly deeper orange than before.
+- **The frontend and `aaris.css` now share one token file, `aaris-tokens.css`.** A colour changed there applies everywhere.
+
+![Policies mesh with routes and badges drawn from the AARIS tokens](docs/screenshots/changelog/2026-11-24-policies-design-tokens.png)
+## 2026-11-04 — Clearer VM hardware dialog
+
+- The **Hardware** button on a VM page is now always shown. Without the edit-hardware permission it is disabled, with a tooltip saying why.
+- Disks in the hardware dialog show a readable label (for example `SCSI 0 · local-lvm · 32G`) with the raw Proxmox id underneath.
+## 2026-11-24 — VM IP on the dashboard cards
+
+- Each VM card on the dashboard now shows the VM's IP address under its ID, so you no longer have to open the VM to find it.
+- The card shows the address the VM page last found. That covers DHCP reservations and leases, static cloud-init addresses and the guest agent. A VM you have never opened shows no IP until you open its page once; after that the dashboard remembers it.
+
+![Dashboard VM cards with each VM's IP address under its ID](docs/screenshots/changelog/2026-11-24-dashboard-vm-ip.png)
+
+## 2026-11-24 — Port forwarding no longer needs an SSH config
+
+- **A VM no longer needs browser SSH set up before it can be published.** When no SSH Host/IP is recorded, the Target VM list now uses the address the firewall's own DHCP server holds for the VM: its reservation, or else its current lease on the VM's VLAN. The form shows where the internal IP came from
+- **Port forwards follow the same address rules as browser SSH.** A user with *Manage port forwards* can only publish an address inside a VLAN assigned to them or one an admin assigned to that VM. Addresses reported from inside the guest never count. A VM with any other address is listed as *IP outside your networks* and cannot be selected. Admins and users with firewall-wide rights are unchanged
+
+![Port forwarding form with a VM whose internal IP comes from a DHCP reservation](docs/screenshots/changelog/2026-11-24-port-forward-dhcp-targets.png)
+
+## 2026-11-24 — SSH host key filled in for new VMs
+
+- Opening SSH on a VM with no saved connection now also reads the VM's host key fingerprint after it finds the IP, so a freshly deployed VM is ready to connect with no extra clicks. Check the fingerprint before you click Connect, the same as after a manual scan.
+- The automatic scan never replaces a fingerprint you typed, skips if you changed the host, and stays quiet if the VM isn't answering yet. "Scan fingerprint" still works as before.
+- Changing the host or port now clears the fingerprint, so a key scanned for one address is never saved for another.
+
+![SSH connect form for a new VM with the IP, cloud-init user and host key fingerprint already filled in](docs/screenshots/changelog/2026-11-24-ssh-prefilled-after-deploy.png)
 
 ## 2026-11-24 — Screenshots in the changelog
 
@@ -34,6 +67,11 @@
 
 - The Energy data page now shows the saved meter and scope after a reload, instead of empty dropdowns that looked like the choice was lost. The selection itself was always saved.
 - `npm run import-datahub-tariffs -- --contract <id> --auto` finds the meter's grid company and tariff codes from its ElOverblik charges, so they no longer need looking up by hand. Rates still come from Datahub, it stays a dry run until `--apply`, and retailer margin stays manual.
+
+## 2026-11-04 — Branding and label size cleanup
+
+- The sidebar header now reads "Homelabrrr" instead of "VM Manager", and the unmanaged-VIP delete error uses the same name.
+- Remaining 10px labels on the Websites, Policies, Welcome, Hardware, VM card and other pages are now 11px; two empty-state messages use the standard muted grey.
 
 ## 2026-11-04 — Readable metadata text
 

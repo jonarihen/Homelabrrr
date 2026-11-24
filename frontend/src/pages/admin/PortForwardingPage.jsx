@@ -24,6 +24,14 @@ const BLOCK_TITLES = {
   untagged: n => (n === 1 ? 'VM has no VLAN tag' : 'No VLAN tags on your VMs'),
   vlan_not_synced: () => 'VLAN not synced to this firewall',
   vlan_not_assigned: n => (n === 1 ? 'VLAN not assigned to you' : 'No VLANs assigned to you'),
+  untrusted_ip: n => (n === 1 ? 'VM IP outside your networks' : 'VM IPs outside your networks'),
+};
+
+// Where the backend found the internal IP (target.ipSource).
+const IP_SOURCE_LABELS = {
+  ssh_config: 'from SSH config',
+  dhcp_reservation: 'from DHCP reservation',
+  dhcp_lease: 'from DHCP lease',
 };
 
 // Used when several VMs are blocked by the same code but for different VLANs,
@@ -33,6 +41,7 @@ const BLOCK_SUMMARIES = {
   untagged: n => `None of your ${n} accessible VMs have a VLAN tag on their network interface, so there's no firewall interface to publish through.`,
   vlan_not_synced: n => `The VLANs behind your ${n} accessible VMs haven't been synced to this firewall yet.`,
   vlan_not_assigned: n => `The VLANs behind your ${n} accessible VMs aren't assigned to you.`,
+  untrusted_ip: n => `The recorded IPs of your ${n} accessible VMs aren't in a VLAN network or address assigned to you.`,
 };
 
 function portProtocolLabel(port, protocol) {
@@ -575,7 +584,7 @@ export default function PortForwardingPage() {
             {selectedVm && (
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-gray-800/30 rounded-lg p-3 border border-gray-800/50">
                 <div>
-                  <label className="block text-[11px] text-gray-500 mb-0.5">Internal IP (from SSH config)</label>
+                  <label className="block text-[11px] text-gray-500 mb-0.5">Internal IP{selectedVm.ipSource ? ` (${IP_SOURCE_LABELS[selectedVm.ipSource] || selectedVm.ipSource})` : ''}</label>
                   <span className="text-sm text-white font-mono">{form.mappedIp || '—'}</span>
                 </div>
                 <div>

@@ -19,22 +19,23 @@ const SERVICES = [
 
 const SERVICE_LABELS = Object.fromEntries(SERVICES.map(service => [service.name, service.label]));
 
-// AARIS tokens only (aaris.css): services are grouped by role, the mono
-// labels carry the exact service. Hex, not var(), because callers append alpha.
+// AARIS tokens only (aaris-tokens.css): services are grouped by role, the mono
+// labels carry the exact service.
 const SERVICE_COLORS = {
-  ALL: '#3fd97f',     // --ok
-  HTTP: '#ff5a1f',    // --accent
-  HTTPS: '#ff5a1f',
-  SSH: '#ffb224',     // --warning
-  RDP: '#ffb224',
-  DNS: '#e9ecef',     // --ink
-  PING: '#e9ecef',
-  ALL_TCP: '#8b939e', // --muted
-  ALL_UDP: '#8b939e',
+  ALL: 'var(--ok)',
+  HTTP: 'var(--accent)',
+  HTTPS: 'var(--accent)',
+  SSH: 'var(--warning)',
+  RDP: 'var(--warning)',
+  DNS: 'var(--ink)',
+  PING: 'var(--ink)',
+  ALL_TCP: 'var(--muted)',
+  ALL_UDP: 'var(--muted)',
 };
-const FALLBACK_COLOR = '#8b939e';
+const FALLBACK_COLOR = 'var(--muted)';
 
-const DENY_COLOR = '#e5484d'; // --danger
+const DENY_COLOR = 'var(--danger)';
+const tint = (color, pct) => `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 const NODE_CARD_SIZE = 160;
 const NODE_SAFETY_PADDING = 26;
 const MIN_NODE_SPACING = 172;
@@ -59,8 +60,8 @@ function badgeStyle(service, action = 'accept') {
   const color = action !== 'accept' ? DENY_COLOR : (SERVICE_COLORS[service] || FALLBACK_COLOR);
   return {
     color,
-    backgroundColor: `${color}1a`,
-    borderColor: `${color}33`,
+    backgroundColor: tint(color, 10),
+    borderColor: tint(color, 20),
   };
 }
 
@@ -406,7 +407,7 @@ function GraphLegend({ usedServices, hasDeny }) {
           <span
             key={service.name}
             title={used ? undefined : 'No policy currently uses this service'}
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] transition-opacity ${used ? '' : 'opacity-40'}`}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] transition-opacity ${used ? '' : 'opacity-40'}`}
             style={badgeStyle(service.name)}
           >
             <span
@@ -419,7 +420,7 @@ function GraphLegend({ usedServices, hasDeny }) {
       })}
       {hasDeny && (
         <span
-          className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em]"
+          className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em]"
           style={badgeStyle('DENY', 'deny')}
         >
           <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: DENY_COLOR }} />
@@ -900,7 +901,7 @@ export default function PoliciesPage() {
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
       <div className="space-y-4">
-        <div className="rounded-3xl border border-gray-800 bg-[radial-gradient(circle_at_top,_rgba(59,130,246,0.16),_transparent_35%),linear-gradient(180deg,_rgba(15,23,42,0.98),_rgba(2,6,23,0.98))] p-6">
+        <div className="rounded-3xl border border-gray-800 bg-gray-900 p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-3">
               <div>
@@ -946,7 +947,7 @@ export default function PoliciesPage() {
 
           <div
             ref={canvasRef}
-            className="relative mt-6 overflow-hidden border border-slate-800 bg-[radial-gradient(circle_at_center,_rgba(30,41,59,0.75),_rgba(2,6,23,0.98)_68%)] px-4 py-4 min-h-[620px]"
+            className="relative mt-6 overflow-hidden border border-slate-800 bg-gray-950 px-4 py-4 min-h-[620px]"
             style={{ minHeight: `${meshMinHeight}px`, cursor: panRef.current ? 'grabbing' : 'grab' }}
             onMouseLeave={() => setHoveredLine(null)}
             onPointerDown={handleCanvasPointerDown}
@@ -963,8 +964,7 @@ export default function PoliciesPage() {
                 Recenter
               </button>
             )}
-            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.05)_1px,transparent_1px)] bg-[size:72px_72px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }} />
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(56,189,248,0.12),_transparent_46%)]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }} />
+            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(var(--line-soft)_1px,transparent_1px),linear-gradient(90deg,var(--line-soft)_1px,transparent_1px)] bg-[size:72px_72px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }} />
             {selectedTag && (
               <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }}>
                 <div
@@ -981,10 +981,10 @@ export default function PoliciesPage() {
                     height: `${Math.min(Math.max(canvasSize.width * 0.78, 360), 680)}px`,
                   }}
                 />
-                <div className="absolute left-1/2 top-[22%] -translate-x-1/2 rounded-full border border-cyan-400/15 bg-cyan-500/5 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-cyan-200/80">
+                <div className="absolute left-1/2 top-[22%] -translate-x-1/2 rounded-full border border-cyan-400/15 bg-cyan-500/5 px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-cyan-200/80">
                   Existing Paths
                 </div>
-                <div className="absolute left-1/2 top-[11%] -translate-x-1/2 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-400">
+                <div className="absolute left-1/2 top-[11%] -translate-x-1/2 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-slate-400">
                   Available Targets
                 </div>
               </div>
@@ -1124,7 +1124,7 @@ export default function PoliciesPage() {
                         />
                         <path
                           d={line.pathD}
-                          stroke="rgba(15,23,42,0.92)"
+                          stroke="var(--bg)"
                           strokeWidth={isHovered ? 8.5 : 7}
                           strokeLinecap="round"
                           fill="none"
@@ -1193,7 +1193,7 @@ export default function PoliciesPage() {
                                     cx="0"
                                     cy="0"
                                     r={isHovered ? 1.25 : 1}
-                                    fill="rgba(255,255,255,0.9)"
+                                    fill="var(--ink)"
                                   >
                                     <animateMotion
                                       dur={duration}
@@ -1242,7 +1242,7 @@ export default function PoliciesPage() {
                     >
                       <div
                         className="min-w-[220px] rounded-2xl border bg-slate-950/95 px-4 py-3 shadow-2xl backdrop-blur-sm"
-                        style={{ borderColor: `${edgeColor}40` }}
+                        style={{ borderColor: tint(edgeColor, 25) }}
                       >
                         <div className="flex items-center gap-2 text-xs">
                           <span className="font-medium text-cyan-300">{line.srcName}</span>
@@ -1255,7 +1255,7 @@ export default function PoliciesPage() {
                           {line.services.map(service => (
                             <span
                               key={`${line.id}-${service}`}
-                              className="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em]"
+                              className="rounded-full border px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.14em]"
                               style={badgeStyle(service, line.action)}
                             >
                               {service}
@@ -1269,7 +1269,7 @@ export default function PoliciesPage() {
                       {!flipBelow && (
                         <div
                           className="mx-auto -mt-1 h-2 w-2 rotate-45 bg-slate-950"
-                          style={{ borderBottom: `1px solid ${edgeColor}40`, borderRight: `1px solid ${edgeColor}40` }}
+                          style={{ borderBottom: `1px solid ${tint(edgeColor, 25)}`, borderRight: `1px solid ${tint(edgeColor, 25)}` }}
                         />
                       )}
                     </div>
@@ -1293,7 +1293,7 @@ export default function PoliciesPage() {
                     >
                       <div
                         className="min-w-[250px] rounded-2xl border bg-slate-950/95 px-4 py-3 shadow-2xl backdrop-blur-sm"
-                        style={{ borderColor: `${edgeColor}40` }}
+                        style={{ borderColor: tint(edgeColor, 25) }}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex items-center gap-2 text-xs">
@@ -1316,7 +1316,7 @@ export default function PoliciesPage() {
                           {line.services.map(service => (
                             <span
                               key={`popover-${line.id}-${service}`}
-                              className="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em]"
+                              className="rounded-full border px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.14em]"
                               style={badgeStyle(service, line.action)}
                             >
                               {service}
@@ -1372,9 +1372,9 @@ export default function PoliciesPage() {
                         onPointerDown={(e) => handleNodePointerDown(e, vlan)}
                         className={`absolute z-[5] h-36 w-36 cursor-grab rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${
                           isSource
-                            ? 'border-cyan-300/80 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.22),0_0_0_12px_rgba(8,145,178,0.08),0_26px_60px_rgba(8,145,178,0.24)]'
+                            ? 'border-cyan-300/80 bg-cyan-500/10'
                             : isDestination
-                              ? 'border-emerald-300/80 bg-emerald-500/10 shadow-[0_0_0_1px_rgba(16,185,129,0.2),0_0_0_10px_rgba(5,150,105,0.08),0_24px_60px_rgba(5,150,105,0.22)]'
+                              ? 'border-emerald-300/80 bg-emerald-500/10'
                               : isPeer
                                 ? 'border-slate-500/80 bg-slate-800/92 hover:border-cyan-300/50'
                                 : 'border-slate-800 bg-slate-900/88 hover:border-slate-600 hover:bg-slate-900'
@@ -1394,12 +1394,12 @@ export default function PoliciesPage() {
                             className="absolute inset-[18%] rounded-[20px] opacity-80 blur-sm"
                             style={{
                               background: isSource
-                                ? 'radial-gradient(circle, rgba(34,211,238,0.35), transparent 72%)'
+                                ? `radial-gradient(circle, ${tint('var(--accent)', 35)}, transparent 72%)`
                                 : isDestination
-                                  ? 'radial-gradient(circle, rgba(16,185,129,0.35), transparent 72%)'
+                                  ? `radial-gradient(circle, ${tint('var(--ok)', 35)}, transparent 72%)`
                                   : isPeer
-                                    ? 'radial-gradient(circle, rgba(148,163,184,0.18), transparent 72%)'
-                                    : 'radial-gradient(circle, rgba(59,130,246,0.12), transparent 72%)',
+                                    ? `radial-gradient(circle, ${tint('var(--muted)', 18)}, transparent 72%)`
+                                    : `radial-gradient(circle, ${tint('var(--accent)', 12)}, transparent 72%)`,
                             }}
                           />
                           <div className="relative z-[1] mx-auto flex w-full max-w-[72%] flex-col items-center justify-center text-center">
@@ -1409,7 +1409,7 @@ export default function PoliciesPage() {
                             <h3 className="mt-1 line-clamp-2 break-words text-[12px] font-semibold leading-[1.12] text-white [overflow-wrap:anywhere] sm:text-[14px]">
                               {vlan.name}
                             </h3>
-                            <div className="mt-3 flex flex-wrap items-center justify-center gap-1 text-[8px] uppercase tracking-[0.1em] text-slate-400 sm:text-[9px]">
+                            <div className="mt-3 flex flex-wrap items-center justify-center gap-1 text-[8px] uppercase tracking-[0.1em] text-slate-400 sm:text-[11px]">
                               <span className="rounded-full border border-slate-700/80 bg-slate-950/70 px-2 py-0.5">
                                 {routeCount} route{routeCount !== 1 ? 's' : ''}
                               </span>
@@ -1522,7 +1522,7 @@ export default function PoliciesPage() {
                           {policy.service.map(service => (
                             <span
                               key={`${policy.policyid}-${service}`}
-                              className="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em]"
+                              className="rounded-full border px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.14em]"
                               style={badgeStyle(service, policy.action)}
                             >
                               {service}
@@ -1530,7 +1530,7 @@ export default function PoliciesPage() {
                           ))}
                         </div>
 
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ${
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ${
                           policy.action === 'accept'
                             ? 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/20'
                             : 'bg-red-500/10 text-red-300 ring-red-500/20'
@@ -1577,7 +1577,7 @@ export default function PoliciesPage() {
                   <div key={object.name} className="flex items-center gap-3 px-5 py-2.5 transition-colors hover:bg-gray-800/20">
                     <span className="flex-1 truncate text-xs font-medium text-white">{object.name}</span>
                     <span className="shrink-0 text-xs font-mono text-gray-400">{object.subnet || object.fqdn || ''}</span>
-                    <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{object.type}</span>
+                    <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-500">{object.type}</span>
                     <button
                       onClick={async () => {
                         if (!await confirm({ message: `Delete address object "${object.name}"?`, confirmLabel: 'Delete', danger: true })) return;
@@ -1668,9 +1668,9 @@ export default function PoliciesPage() {
                 {serviceObjects.map(object => (
                   <div key={object.name} className="flex items-center gap-3 px-5 py-2.5 transition-colors hover:bg-gray-800/20">
                     <span className="flex-1 truncate text-xs font-medium text-white">{object.name}</span>
-                    {object.tcpPortrange && <span className="rounded px-1.5 py-0.5 text-[10px] font-mono text-blue-400" style={{ backgroundColor: `${SERVICE_COLORS.HTTP}14` }}>TCP {object.tcpPortrange}</span>}
-                    {object.udpPortrange && <span className="rounded px-1.5 py-0.5 text-[10px] font-mono text-amber-400" style={{ backgroundColor: `${SERVICE_COLORS.SSH}14` }}>UDP {object.udpPortrange}</span>}
-                    <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{object.protocol}</span>
+                    {object.tcpPortrange && <span className="rounded px-1.5 py-0.5 text-[11px] font-mono text-blue-400" style={{ backgroundColor: tint(SERVICE_COLORS.HTTP, 8) }}>TCP {object.tcpPortrange}</span>}
+                    {object.udpPortrange && <span className="rounded px-1.5 py-0.5 text-[11px] font-mono text-amber-400" style={{ backgroundColor: tint(SERVICE_COLORS.SSH, 8) }}>UDP {object.udpPortrange}</span>}
+                    <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-500">{object.protocol}</span>
                     <button
                       onClick={async () => {
                         if (!await confirm({ message: `Delete service object "${object.name}"?`, confirmLabel: 'Delete', danger: true })) return;
@@ -1783,8 +1783,8 @@ export default function PoliciesPage() {
                         onClick={() => toggleService(service.name)}
                         className="rounded-full border px-3 py-1.5 text-xs font-medium uppercase tracking-[0.14em] transition-all"
                         style={active
-                          ? { color: '#0e1014', backgroundColor: color, borderColor: color, boxShadow: `0 0 0 1px ${color}55` }
-                          : { color: '#94a3b8', backgroundColor: '#1f2937', borderColor: '#334155' }}
+                          ? { color: 'var(--bg)', backgroundColor: color, borderColor: color }
+                          : { color: 'var(--muted)', backgroundColor: 'var(--line-soft)', borderColor: 'var(--line)' }}
                       >
                         {service.label}
                       </button>
@@ -1797,10 +1797,10 @@ export default function PoliciesPage() {
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Policy Preview</p>
                 <p className="mt-2 text-sm text-slate-200">{policyPreviewText}</p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-cyan-200">
+                  <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-[11px] uppercase tracking-[0.14em] text-cyan-200">
                     {policyCountPreview} firewall rule{policyCountPreview !== 1 ? 's' : ''}
                   </span>
-                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-slate-300">
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] uppercase tracking-[0.14em] text-slate-300">
                     Direction: {bidirectional ? 'two-way' : 'one-way'}
                   </span>
                 </div>

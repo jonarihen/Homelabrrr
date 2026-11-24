@@ -85,7 +85,7 @@ export default function ElectricityBillsPanel() {
             {editing.mode !== 'paid' && field('reason', 'Reason (audited)', { required: true, maxLength: 1000 })}
             <div className="flex flex-wrap gap-3 md:col-span-2"><button disabled={busy} className={`${editing.mode === 'void' ? 'rounded-lg bg-red-700 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50' : 'btn-primary rounded-lg px-4 py-2 text-sm font-medium'}`}>{editing.mode === 'paid' ? 'Save payment' : editing.mode === 'void' ? 'Void bill' : 'Save revision'}</button><button type="button" onClick={() => setEditing(null)} className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-medium text-gray-200 transition-colors hover:border-gray-500">Cancel</button></div>
           </form></td></tr>}</Fragment>)}</tbody></table></div>
-        : <p className="rounded-xl border border-gray-800 bg-gray-900 px-4 py-6 text-center text-xs italic text-gray-600">No bills recorded.</p>}
+        : <p className="rounded-xl border border-gray-800 bg-gray-900 px-4 py-6 text-center text-xs italic text-gray-400">No bills recorded.</p>}
     </div>
   </section>;
 }

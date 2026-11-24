@@ -61,7 +61,7 @@ export default function Layout({ children }) {
         >
           <Icon d="M4 6h16M4 12h16M4 18h16" />
         </button>
-        <span className="aaris-display text-gray-100 text-sm leading-none">VM Manager</span>
+        <span className="aaris-display text-gray-100 text-sm leading-none">Homelabrrr</span>
       </header>
 
       {/* Backdrop above the console layer (z-40) so console windows cannot
