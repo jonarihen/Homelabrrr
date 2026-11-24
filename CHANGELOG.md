@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-24 — Security updates
+
+- **A single crafted request can no longer crash the backend.** A compressed request body followed by extra bytes used to kill the backend process, without signing in. The JSON body parser is updated to fix this.
+- **The backend runs on a patched Node.js release** with fixes for HTTP and TLS handling.
+- **The frontend's web server is updated** to a patched nginx release, along with its XML libraries.
+- **Other server libraries are updated** to versions without known security advisories.
+
 ## 2026-11-24 — Remove a disk from a VM
 
 - The hardware dialog's **Disks** tab now lists the VM's disks with a **Remove** button. Removing a disk detaches it and permanently deletes its volume, after a confirmation that names the disk. The storage it used is freed and stops counting against your storage quota.
