@@ -2,6 +2,7 @@ const ENTRY_RE = /^##\s+(\d{4}-\d{2}-\d{2})\s+[—-]\s+(.+)$/;
 const SECTION_RE = /^###\s+(.+)$/;
 const DASH_BULLET_RE = /^-\s+(.+)$/;
 const NUMBERED_BULLET_RE = /^\d+\.\s+(.+)$/;
+const IMAGE_RE = /^!\[([^\]]*)\]\(([^)\s]+)\)$/;
 
 function createParser() {
   return { entries: [], entry: null, section: null };
@@ -17,7 +18,7 @@ function closeEntry(state) {
 
 function startEntry(state, [, date, title]) {
   closeEntry(state);
-  state.entry = { date, title, summary: '', sections: [] };
+  state.entry = { date, title, summary: '', sections: [], images: [] };
   state.section = null;
 }
 
@@ -49,6 +50,11 @@ const HANDLERS = [
   (state, line) => {
     const match = line.match(DASH_BULLET_RE) || line.match(NUMBERED_BULLET_RE);
     if (match) addBullet(state, match[1]);
+    return Boolean(match);
+  },
+  (state, line) => {
+    const match = line.match(IMAGE_RE);
+    if (match) state.entry.images.push({ alt: match[1], src: match[2] });
     return Boolean(match);
   },
 ];

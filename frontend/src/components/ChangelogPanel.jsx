@@ -15,6 +15,17 @@ function renderTokens(tokens) {
 }
 const Inline = ({ text }) => renderTokens(inlineTokens(text));
 
+// Screenshots referenced from CHANGELOG.md as docs/screenshots/changelog/<file>; Vite bundles them.
+const screenshotUrls = import.meta.glob('../../../docs/screenshots/changelog/*.{png,jpg,jpeg,webp,gif}', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+});
+function resolveScreenshot(src) {
+  const file = src.split('/').pop();
+  return Object.entries(screenshotUrls).find(([p]) => p.endsWith(`/${file}`))?.[1] || null;
+}
+
 function formatDateLabel(date) {
   return new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', {
     year: 'numeric',
@@ -26,6 +37,7 @@ function formatDateLabel(date) {
 
 export default function ChangelogPanel() {
   const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState(null);
   const triggerRef = useRef(null);
   const entries = useMemo(() => parseChangelog(changelogMarkdown), []);
   const latestEntry = entries[0];
@@ -48,9 +60,23 @@ export default function ChangelogPanel() {
                   </p>
                   <h3 className="mt-1 text-base font-semibold text-white">{entry.title}</h3>
                 </div>
-                <span className="border border-gray-700 bg-gray-950 px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.14em] text-gray-400">
-                  Release Note
-                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  {entry.images.some((img) => resolveScreenshot(img.src)) && (
+                    <button
+                      type="button"
+                      onClick={() => setPreview(entry)}
+                      className="inline-flex items-center gap-1.5 border border-orange-700/60 bg-orange-950/40 px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.14em] text-orange-300 transition-colors hover:bg-orange-900/50 hover:text-orange-100"
+                    >
+                      <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A1.5 1.5 0 0021.75 19.5V4.5A1.5 1.5 0 0020.25 3H3.75A1.5 1.5 0 002.25 4.5v15A1.5 1.5 0 003.75 21zM16.5 8.25h.008v.008H16.5V8.25z" />
+                      </svg>
+                      Example
+                    </button>
+                  )}
+                  <span className="border border-gray-700 bg-gray-950 px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.14em] text-gray-400">
+                    Release Note
+                  </span>
+                </div>
               </div>
 
               <p className="mt-3 text-sm text-gray-300"><Inline text={entry.summary} /></p>
@@ -73,6 +99,21 @@ export default function ChangelogPanel() {
             </section>
           ))}
         </div>
+      {preview && (
+        <Modal title={`Example — ${preview.title}`} onClose={() => setPreview(null)} size="xl">
+          <div className="space-y-4 p-4">
+            {preview.images.map((img) => {
+              const url = resolveScreenshot(img.src);
+              return url ? (
+                <figure key={img.src}>
+                  <img src={url} alt={img.alt} className="w-full border border-gray-800" />
+                  {img.alt && <figcaption className="mt-2 font-mono text-[11px] uppercase tracking-[0.12em] text-gray-500">{img.alt}</figcaption>}
+                </figure>
+              ) : null;
+            })}
+          </div>
+        </Modal>
+      )}
     </Modal>
   ) : null;
 
