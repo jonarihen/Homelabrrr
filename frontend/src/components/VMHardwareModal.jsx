@@ -259,7 +259,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                         );
                       })}
                     </ul>
-                    {isRunning && <p className="text-[11px] text-gray-500 mt-1">Stop the VM to remove a disk.</p>}
+                    <p className="text-[11px] text-gray-500 mt-1">The VM must be stopped and have no snapshots.</p>
                   </div>
                 </>
               )}

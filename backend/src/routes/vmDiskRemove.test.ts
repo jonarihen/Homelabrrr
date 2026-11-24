@@ -18,6 +18,7 @@ let ownerId: number;
 let operatorId: number;
 let sessionUserId: number;
 let vmStatus = 'stopped';
+let snapshots: { name: string }[] = [{ name: 'current' }];
 let quota: typeof import('../utils/quota.ts');
 const unlinks: { path: string; method: string; body: string }[] = [];
 
@@ -61,6 +62,7 @@ before(async () => {
 beforeEach(t => {
   sessionUserId = ownerId;
   vmStatus = 'stopped';
+  snapshots = [{ name: 'current' }];
   unlinks.length = 0;
   t.mock.method(https, 'request', (url: URL, options: { method?: string }, callback: (res: EventEmitter) => void) => {
     const outgoing = new EventEmitter();
@@ -81,6 +83,7 @@ beforeEach(t => {
           else if (path === '/api2/json/cluster/resources') data = [{ vmid: 500, node: 'pve', type: 'qemu' }];
           else if (path.endsWith('/qemu/500/config')) data = CONFIG;
           else if (path.endsWith('/qemu/500/status/current')) data = { status: vmStatus };
+          else if (path.endsWith('/qemu/500/snapshot')) data = snapshots;
           else if (path.endsWith('/qemu/500/unlink')) unlinks.push({ path, method: options?.method || '', body });
           incoming.emit('data', JSON.stringify({ data }));
           incoming.emit('end');
@@ -125,6 +128,14 @@ test('a running VM is refused', async () => {
   const res = await remove('scsi1');
   assert.equal(res.status, 409);
   assert.match(res.body.error, /Stop the VM/);
+  assert.equal(unlinks.length, 0);
+});
+
+test('a VM with snapshots is refused, since PVE would keep the volume', async () => {
+  snapshots = [{ name: 'before-upgrade' }, { name: 'current' }];
+  const res = await remove('scsi1');
+  assert.equal(res.status, 409);
+  assert.match(res.body.error, /snapshots/);
   assert.equal(unlinks.length, 0);
 });
 

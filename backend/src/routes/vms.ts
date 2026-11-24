@@ -1392,6 +1392,10 @@ router.delete('/:node/:vmid/disks/:disk', pHardware, async (req, res) => {
     }
     if (bootDiskKeys(config).has(disk)) throw httpError(409, `${disk} is a boot disk and cannot be removed`);
     if ((await getVMStatus(node, vmid))?.status !== 'stopped') throw httpError(409, 'Stop the VM before removing a disk');
+    // PVE keeps a volume a snapshot still references (as unusedN), so the delete would silently not happen.
+    if ((await getSnapshots(node, vmid))?.some((snap) => snap.name !== 'current')) {
+      throw httpError(409, 'Delete this VM\'s snapshots before removing a disk');
+    }
 
     await deleteVMDisk(node, vmid, disk);
     await refreshHardwareAllocation(node, Number(vmid), { removeDiskGb: diskSizeGb(value) || 0, config });
