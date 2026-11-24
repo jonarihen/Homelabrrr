@@ -233,7 +233,7 @@ function ReviewQueue({ list, failed, filter, onFilter, onMore, users, run, busy 
   const { form } = rows;
   const path = (item, action) => `${BASE}/review/${encodeURIComponent(item.id)}/${action}`;
   // An email can only be remembered for a chosen member, when the event has a usable one that is not verified yet.
-  // Remembering it for a member who claimed it unverified verifies their claim.
+  // Remembering it verifies an unverified member claim, so for claimed emails it is never on by default.
   const canRemember = (item) => !!form.member && form.member !== 'none' && !!item.email && item.reason !== 'EMAIL_MISSING' && !item.matchedVerified;
   const grossOre = toOre(form.gross);
   const feeOre = toOre(form.fee);
@@ -283,8 +283,8 @@ function ReviewQueue({ list, failed, filter, onFilter, onMore, users, run, busy 
           <Cell className="text-gray-400 whitespace-nowrap">{day(item.receivedAt)}<span className="block text-xs text-gray-500">{clock(item.receivedAt)}</span></Cell>
           <Cell>{item.status === 'needs_review' ? <Actions>
             {item.settleable && <button type="button" disabled={!!busy} className={btnSm}
-              onClick={() => rows.start('settle', item.id, { member: item.matchedUserId != null ? String(item.matchedUserId) : '', remember: true })}>Record in DKK</button>}
-            {item.linkable && !item.settleable && <button type="button" disabled={!!busy} className={btnSm} onClick={() => rows.start('link', item.id, { member: '', remember: true })}>Link</button>}
+              onClick={() => rows.start('settle', item.id, { member: item.matchedVerified ? String(item.matchedUserId) : '', remember: item.matchedUserId == null })}>Record in DKK</button>}
+            {item.linkable && !item.settleable && <button type="button" disabled={!!busy} className={btnSm} onClick={() => rows.start('link', item.id, { member: '', remember: item.matchedUserId == null })}>Link</button>}
             <button type="button" disabled={!!busy} className={btnSm} onClick={() => run('kofi-retry', () => api.post(path(item, 'retry')), rows.close)}>Retry</button>
             <button type="button" disabled={!!busy} className={btnSmDanger} onClick={() => rows.start('dismiss', item.id, { note: '' })}>Dismiss</button>
           </Actions> : <span className="text-xs text-gray-500 whitespace-nowrap">{item.resolution || item.status}{item.resolvedAt ? ` · ${when(item.resolvedAt)}` : ''}</span>}</Cell>

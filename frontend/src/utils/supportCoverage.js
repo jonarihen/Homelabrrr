@@ -33,28 +33,30 @@ export function coverageOverview(months, current = null) {
     // Months before the lab was metered carry nothing and are left out.
     if (!month.open && costOre === null && !supportOre && !metered) continue;
     const state = month.open ? (costOre === null ? 'open_unknown' : 'so_far') : costOre === null ? 'not_finalized' : 'finalized';
-    rows.push({ month: month.month, costOre, supportOre, state,
-      appliedOre: ore(month.appliedOre), ownerFundedOre: ore(month.ownerFundedOre), carryForwardOre: ore(month.carryForwardOre) });
+    rows.push({ month: month.month, costOre, supportOre, state, appliedOre: ore(month.appliedOre),
+      ownerAdjustmentOre: ore(month.ownerAdjustmentOre), carryForwardOre: ore(month.carryForwardOre) });
   }
   // Coverage is allocated month by month, oldest first, as the backend does:
   // an owner-funded shortfall stays with the owner and is never repaid by
   // later support. A reconciled month's stored allocation is used as is (it
-  // includes credit from before the window); other months with a cost (the
-  // open one, or one not reconciled yet) apply the credit carried into them.
-  let costOre = 0; let coveredOre = 0; let ownerOre = 0; let creditOre = 0;
+  // includes credit from before the window); a refund after its credit was
+  // spent is an owner adjustment that takes back covered cost. A month without
+  // a known allocation counts only its own support plus credit carried into
+  // it, and breaks the chain: no credit is carried out of it.
+  let costOre = 0; let appliedOre = 0; let adjustedOre = 0; let creditOre = 0;
   for (const row of [...rows].reverse()) {
-    const { appliedOre, ownerFundedOre, carryForwardOre } = row;
-    if (row.costOre !== null && appliedOre !== null && ownerFundedOre !== null) {
-      costOre += row.costOre; coveredOre += appliedOre; ownerOre += ownerFundedOre; creditOre = carryForwardOre ?? 0;
+    if (row.costOre !== null && row.appliedOre !== null) {
+      costOre += row.costOre; appliedOre += row.appliedOre; adjustedOre += row.ownerAdjustmentOre ?? 0; creditOre = row.carryForwardOre ?? 0;
       continue;
     }
-    const available = creditOre + (row.supportOre ?? 0);
+    const available = (creditOre ?? 0) + (row.supportOre ?? 0);
     const applied = row.costOre === null ? 0 : Math.min(row.costOre, Math.max(0, available));
-    if (row.costOre !== null) { costOre += row.costOre; coveredOre += applied; ownerOre += row.costOre - applied; }
-    creditOre = Math.max(0, available - applied);
+    costOre += row.costOre ?? 0; appliedOre += applied;
+    creditOre = ['so_far', 'open_unknown'].includes(row.state) ? Math.max(0, available - applied) : null;
   }
+  const coveredOre = Math.max(0, appliedOre - adjustedOre);
   return {
-    rows, costOre, coveredOre, ownerOre, creditOre,
+    rows, costOre, coveredOre, ownerOre: costOre - coveredOre, creditOre: creditOre ?? 0,
     supportOre: rows.reduce((sum, row) => sum + (row.supportOre ?? 0), 0),
     projection: monthProjection(rows, current),
     percent: costOre > 0 ? coveredOre / costOre * 100 : null,

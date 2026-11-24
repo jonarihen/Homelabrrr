@@ -4,7 +4,7 @@
 
 - An email a member saves on the Support page no longer matches payments by itself. The first payment from it waits in the review queue, marked "claimed by", until the owner links it; linking it with "remember this email" confirms the address, and later payments from it match automatically.
 - Members can remove their saved Ko-fi emails even while Ko-fi is switched off.
-- Cost coverage totals now follow the monthly allocations: support received later no longer counts toward a month the owner already paid for, and credit from before the 24-month window is included.
+- Cost coverage totals now follow the monthly allocations: support received later no longer counts toward a month the owner already paid for, credit from before the 24-month window is included, and a refund of support that was already spent counts as paid by the owner.
 ## 2026-11-24 — Policies and charts use the shared colour tokens
 
 - **The Policies mesh drops its leftover stock blue, cyan and green glows.** Panels, the canvas grid and the VLAN cards now use the AARIS surfaces, orange accent and status colours, with no drop shadows.

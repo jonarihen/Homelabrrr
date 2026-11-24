@@ -15,7 +15,7 @@ test('support below cost leaves the remainder with the owner', () => {
 });
 
 test('support above cost caps coverage at 100% and reports the credit', () => {
-  const view = coverageOverview([month({ knownNetOre: 50000 })]);
+  const view = coverageOverview([month({ knownNetOre: 50000, appliedOre: 40000, ownerFundedOre: 0, carryForwardOre: 10000 })]);
   assert.equal(view.coveredOre, 40000);
   assert.equal(view.ownerOre, 0);
   assert.equal(view.creditOre, 10000);
@@ -89,4 +89,19 @@ test('the open month applies the credit carried into it, then its own support', 
   const closed = month({ costOre: 40000, knownNetOre: 50000, appliedOre: 40000, ownerFundedOre: 0, carryForwardOre: 10000 });
   const view = coverageOverview([open, closed], { month: '2026-11', cost: { actualOre: '15000' } });
   assert.deepEqual([view.costOre, view.coveredOre, view.ownerOre, view.creditOre], [55000, 51000, 4000, 0]);
+});
+
+test('a month without a known allocation does not pass credit on', () => {
+  const open = month({ month: '2026-11', open: true, costOre: null, knownNetOre: 0 });
+  const unreconciled = month({ costOre: 40000, knownNetOre: 50000 });
+  const view = coverageOverview([open, unreconciled], { month: '2026-11', cost: { actualOre: '20000' } });
+  assert.deepEqual([view.costOre, view.coveredOre, view.ownerOre, view.creditOre], [60000, 40000, 20000, 0]);
+});
+
+test('a refund after its credit was spent takes back covered cost', () => {
+  const view = coverageOverview([
+    month({ costOre: 0, knownNetOre: -10000, appliedOre: 0, ownerFundedOre: 0, ownerAdjustmentOre: 10000, carryForwardOre: 0 }),
+    month({ month: '2026-09', costOre: 10000, knownNetOre: 10000, appliedOre: 10000, ownerFundedOre: 0, carryForwardOre: 0 }),
+  ]);
+  assert.deepEqual([view.costOre, view.coveredOre, view.ownerOre, view.percent], [10000, 0, 10000, 0]);
 });
