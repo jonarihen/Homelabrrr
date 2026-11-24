@@ -140,6 +140,9 @@ test('power control import graph cannot reach Proxmox, VM lifecycle or another h
   for (const banned of ['scheduler.ts', 'routes/vms.ts', 'utils/vmOps.ts', 'fortigate.ts', 'services/hardwareTelemetry.ts']) {
     assert.ok(!reached.includes(banned), `power control reaches ${banned}`);
   }
+  // routes/vms.ts is only a mount since the split; the handlers live under routes/vms/.
+  const vmRouteFile = reached.find((file) => file.startsWith('routes/vms/'));
+  assert.ok(!vmRouteFile, `power control reaches ${vmRouteFile}`);
   // The only path to proxmox.ts is the notification helper's read-only
   // host-status lookup; no power module imports Proxmox itself.
   for (const file of seen) {
