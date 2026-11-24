@@ -279,7 +279,7 @@ export default function WelcomePage() {
                         {status.maintenance.map(m => (
                           <div key={m.id} className="flex items-center gap-2.5 flex-wrap">
                             <span className="aaris-led aaris-led--warning" />
-                            <span className="border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] border-amber-500/40 text-amber-400">
+                            <span className="border px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-[0.12em] border-amber-500/40 text-amber-400">
                               Maintenance
                             </span>
                             <span className="font-mono text-xs text-gray-200 uppercase tracking-[0.08em]">{m.node}</span>
@@ -366,7 +366,7 @@ export default function WelcomePage() {
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <span className="font-mono text-xs text-gray-200 uppercase tracking-[0.08em]">{check.label}</span>
-                                  <span className={`border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] ${state.tag}`}>
+                                  <span className={`border px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-[0.12em] ${state.tag}`}>
                                     {state.label}
                                   </span>
                                 </div>
@@ -449,7 +449,7 @@ export default function WelcomePage() {
                         className={`px-4 py-3 border-l-2 ${level.accent} border-b border-gray-800/60 last:border-b-0 ${!n.active ? 'opacity-40' : ''}`}
                       >
                         <div className="flex items-center gap-2.5 flex-wrap">
-                          <span className={`border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] ${level.tag}`}>
+                          <span className={`border px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-[0.12em] ${level.tag}`}>
                             {level.label}
                           </span>
                           <span className="text-sm font-medium text-gray-100">{n.title}</span>
@@ -625,7 +625,7 @@ function PanelButton({ primary, disabled, onClick, children }) {
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`font-mono text-[10px] font-semibold uppercase tracking-[0.12em] px-2.5 py-1 border transition-colors disabled:opacity-50 ${
+      className={`font-mono text-[11px] font-semibold uppercase tracking-[0.12em] px-2.5 py-1 border transition-colors disabled:opacity-50 ${
         primary
           ? 'text-gray-950 bg-orange-600 border-orange-600 hover:bg-orange-500 hover:border-orange-500'
           : 'text-gray-400 border-gray-700 hover:text-gray-100 hover:bg-gray-800'
