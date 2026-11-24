@@ -124,10 +124,11 @@ test('an assignee with can_edit_vm_hardware may do everything', () => {
 
 // ─── can_edit_vm_hardware is an independent axis ─────────────────────────────
 
-test('hardware ops need can_edit_vm_hardware on top of the operate tier', () => {
+test('hardware ops need can_edit_vm_hardware on top of their tier', () => {
   for (const op of HARDWARE_OPS) {
     assert.equal(canPerformVmOp(op, operator), false, `${op} without can_edit_vm_hardware`);
-    assert.equal(canPerformVmOp(op, { ...operator, canEditHardware: true }), true, `${op} with can_edit_vm_hardware`);
+    // Owner-tier hardware ops (disk removal) stay out of an operator's reach.
+    assert.equal(canPerformVmOp(op, { ...operator, canEditHardware: true }), VM_OP_TIERS[op] === 'operate', `${op} with can_edit_vm_hardware`);
   }
 });
 

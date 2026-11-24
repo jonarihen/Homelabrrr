@@ -61,12 +61,14 @@ export const VM_OP_TIERS = {
   'vm.cloudinit.credentials': 'own',
   'vm.lease.renew': 'own',
   'vm.schedule.write': 'own',
+  // Deletes the disk's volume outright.
+  'vm.disk.remove': 'own',
 };
 
 // Operations that additionally require the separate `can_edit_vm_hardware`
 // axis — even the VM's own assignee needs it (matching the existing
 // requirePermission('can_edit_vm_hardware') middleware on those routes).
-export const HARDWARE_OPS = new Set(['vm.hardware', 'vm.disk.resize']);
+export const HARDWARE_OPS = new Set(['vm.hardware', 'vm.disk.resize', 'vm.disk.remove']);
 
 /**
  * Decide whether a user may perform `op` on one VM.
