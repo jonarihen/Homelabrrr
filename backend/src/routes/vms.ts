@@ -13,7 +13,7 @@ import {
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType, resolveLegacyVmNode,
   getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
   getSnapshots, createSnapshot, deleteSnapshot, rollbackSnapshot,
-  getTaskStatus, getTaskLog, getVMAgentInterfaces,
+  getTaskStatus, getTaskLog, getVMAgentInterfaces, guestPresence,
 } from '../proxmox.ts';
 import { createClient } from '../fortigate.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
@@ -108,8 +108,11 @@ async function attachDetectedIps(list) {
   const rows = await db.select().from(vmDetectedIps).where(inArray(vmDetectedIps.vmid, vmids));
   if (rows.length === 0) return list;
   return list.map((item) => {
-    const candidates = new Set(nodeLookupCandidates(item.nodeRef || item.node));
-    const row = rows.find((r) => r.vmid === Number(item.vmid) && candidates.has(r.node));
+    // Exact node-ref row first; a bare legacy alias only when no exact row exists.
+    const ref = item.nodeRef || item.node;
+    const candidates = new Set(nodeLookupCandidates(ref));
+    const sameVm = rows.filter((r) => r.vmid === Number(item.vmid));
+    const row = sameVm.find((r) => r.node === ref) || sameVm.find((r) => candidates.has(r.node));
     return row ? { ...item, detectedIp: row.ip } : item;
   });
 }
@@ -935,10 +938,15 @@ router.get('/:node/:vmid/detected-ips', async (req, res) => {
     const candidates = rankCandidates(observations);
     if (candidates[0]) {
       // Best-effort cache for the VM list; a failed write must not fail detection.
+      // Under the VM lock and only while the guest exists, so a write racing a
+      // delete or migration cannot leave a stale row for a reused VMID.
       const cached = { ip: candidates[0].ip, source: candidates[0].source, detected_at: new Date() };
-      await db.insert(vmDetectedIps).values({ node, vmid: parseInt(vmid, 10), ...cached })
-        .onConflictDoUpdate({ target: [vmDetectedIps.node, vmDetectedIps.vmid], set: cached })
-        .catch((err) => console.warn(`[detected-ips] cache write failed for ${node}/${vmid}: ${err.message}`));
+      const parsedVmid = parseInt(vmid, 10);
+      await withVmPolicyWrite(node, parsedVmid, async (tx, currentNode) => {
+        if (!(await guestPresence(currentNode, parsedVmid, tx))) return;
+        await tx.insert(vmDetectedIps).values({ node: currentNode, vmid: parsedVmid, ...cached })
+          .onConflictDoUpdate({ target: [vmDetectedIps.node, vmDetectedIps.vmid], set: cached });
+      }).catch((err) => console.warn(`[detected-ips] cache write skipped for ${node}/${vmid}: ${err.message}`));
     }
     // Legacy rows store the bare node name, so match on every candidate form.
     const lookupNodes = nodeLookupCandidates(node);
