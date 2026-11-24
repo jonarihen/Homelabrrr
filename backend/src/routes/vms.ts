@@ -4,7 +4,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db, type DbOrTx } from '../db/client.ts';
 import {
   vmSchedules, pveHosts, vmSshConfigs, vmSshUserConfigs, vlans, firewallVlanSync, firewalls,
-  vmAssignments, vmMigrations, vmLeases, provisionedVms, backupTasks,
+  vmAssignments, vmMigrations, vmLeases, provisionedVms, backupTasks, vmDetectedIps,
   sshKeys as sshKeysTable, users, userVlans,
 } from '../db/schema/index.ts';
 import {
@@ -97,6 +97,20 @@ async function attachSchedules(list) {
     ));
     const badge = row ? scheduleBadge(row, now) : null;
     return badge ? { ...item, schedule: badge } : item;
+  });
+}
+
+// Cached last-detected IP (written by GET .../detected-ips) so the dashboard
+// card can show an address without upstream calls per VM.
+async function attachDetectedIps(list) {
+  const vmids = [...new Set(list.map((item) => Number(item.vmid)).filter(Number.isInteger))];
+  if (vmids.length === 0) return list;
+  const rows = await db.select().from(vmDetectedIps).where(inArray(vmDetectedIps.vmid, vmids));
+  if (rows.length === 0) return list;
+  return list.map((item) => {
+    const candidates = new Set(nodeLookupCandidates(item.nodeRef || item.node));
+    const row = rows.find((r) => r.vmid === Number(item.vmid) && candidates.has(r.node));
+    return row ? { ...item, detectedIp: row.ip } : item;
   });
 }
 
@@ -423,7 +437,7 @@ router.get('/', async (req, res) => {
           lease: await summarizeLease(identity.nodeRef, vm.vmid),
         };
       }));
-      return res.json(await attachSchedules(withLease));
+      return res.json(await attachDetectedIps(await attachSchedules(withLease)));
     } catch (err) {
       return sendError(res, err);
     }
@@ -448,7 +462,7 @@ router.get('/', async (req, res) => {
     }
   }));
 
-  res.json(await attachSchedules(results));
+  res.json(await attachDetectedIps(await attachSchedules(results)));
 });
 
 // ─── VM Status ────────────────────────────────────────────────────────────────
@@ -617,6 +631,7 @@ router.delete('/:node/:vmid', async (req, res) => {
           for (const table of cleanupTables) {
             await tx.delete(table).where(and(eq(table.vmid, parsedVmid), eq(table.node, currentNode)));
           }
+          await tx.delete(vmDetectedIps).where(and(eq(vmDetectedIps.vmid, parsedVmid), inArray(vmDetectedIps.node, nodeLookupCandidates(currentNode))));
           await tx.delete(backupTasks).where(and(eq(backupTasks.vmid, parsedVmid), inArray(backupTasks.node, nodeLookupCandidates(currentNode))));
           await tx.delete(vmMigrations).where(and(eq(vmMigrations.vmid, parsedVmid), inArray(vmMigrations.status, ['ok', 'error', 'failed', 'timeout'])));
         });
@@ -918,6 +933,13 @@ router.get('/:node/:vmid/detected-ips', async (req, res) => {
     }
 
     const candidates = rankCandidates(observations);
+    if (candidates[0]) {
+      // Best-effort cache for the VM list; a failed write must not fail detection.
+      const cached = { ip: candidates[0].ip, source: candidates[0].source, detected_at: new Date() };
+      await db.insert(vmDetectedIps).values({ node, vmid: parseInt(vmid, 10), ...cached })
+        .onConflictDoUpdate({ target: [vmDetectedIps.node, vmDetectedIps.vmid], set: cached })
+        .catch((err) => console.warn(`[detected-ips] cache write failed for ${node}/${vmid}: ${err.message}`));
+    }
     // Legacy rows store the bare node name, so match on every candidate form.
     const lookupNodes = nodeLookupCandidates(node);
     const [sshRow] = lookupNodes.length > 0

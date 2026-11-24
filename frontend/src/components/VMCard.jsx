@@ -69,6 +69,11 @@ export default function VMCard({ vm, selected, onSelect }) {
             ID {vm.vmid} / {displayNode(vm.node)}
             {vm.hostName && <span className="text-blue-400/70"> @ {vm.hostName}</span>}
           </p>
+          {vm.detectedIp && (
+            <p className="text-[11px] text-gray-500 mt-0.5 font-mono uppercase tracking-[0.1em]" title="Last detected IP address">
+              IP <span className="text-gray-300 select-all">{vm.detectedIp}</span>
+            </p>
+          )}
           {vm.lease && <LeaseBadge lease={vm.lease} className="mt-1.5" />}
           {vm.schedule?.enabled && (
             <span

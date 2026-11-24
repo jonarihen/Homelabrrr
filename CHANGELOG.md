@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-24 — VM IP on the dashboard cards
+
+- Each VM card on the dashboard now shows the VM's IP address under its ID, so you no longer have to open the VM to find it.
+- The card shows the address the VM page last found. That covers DHCP reservations and leases, static cloud-init addresses and the guest agent. A VM you have never opened shows no IP until you open its page once; after that the dashboard remembers it.
+
+![Dashboard VM cards with each VM's IP address under its ID](docs/screenshots/changelog/2026-11-24-dashboard-vm-ip.png)
+
 ## 2026-11-24 — Screenshots in the changelog
 
 - Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll
