@@ -51,10 +51,10 @@
     "@types/ws": "^8.18.2",
     "better-sqlite3": "^13.0.2",
     "drizzle-kit": "^0.31.11",
-    "eslint": "^10.14.0",
+    "eslint": "^10.15.0",
     "globals": "^17.13.0",
     "supertest": "^7.3.1",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.72.1"
+    "typescript-eslint": "^8.74.0"
   }
 }
