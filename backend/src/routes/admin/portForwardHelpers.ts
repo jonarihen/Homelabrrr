@@ -5,7 +5,10 @@ import { getAllVMs, getVMConfig } from '../../proxmox.ts';
 import { createClient } from '../../fortigate.ts';
 import { userCanAccessVm } from '../../utils/vmAccess.ts';
 import { userHasPermission } from '../../utils/permissions.ts';
-import { buildPortForwardTargets } from '../../utils/portForwardTargets.ts';
+import { buildPortForwardTargets, dhcpAddressFor } from '../../utils/portForwardTargets.ts';
+import { parseVmNetworkInterfaces } from '../../utils/detectedIps.ts';
+import { userVlanCidrs } from '../../utils/vlanSubnets.ts';
+import { explicitlyAssignedAddresses } from '../../services/sshTargetPolicy.ts';
 import { canManageAllPortForwards } from './shared.ts';
 
 export async function getScopedFirewallSyncs(userId, firewallId, unrestricted = false) {
@@ -58,38 +61,76 @@ export async function getScopedPortForwardTargets(req, fw) {
   const accessibleVms = vms.filter((_vm, i) => accessChecks[i]);
   const accessibleKeys = accessibleVms.map(vm => `${vm.nodeRef || vm.node}/${vm.vmid}`);
 
-  // Only VMs that already have an IP need a config fetch: a VM without one is
-  // blocked by `no_ip` regardless of its VLAN tag, and that reason outranks the
-  // VLAN ones. Keeps the Proxmox call count identical to before this change.
+  // A VM with an SSH host needs its config for the VLAN tag. A VM without one
+  // needs it too when any VLAN is synced here: its net0 MAC + tag is how the
+  // firewall's DHCP reservation/lease is found. With no synced VLAN, a VM
+  // without an SSH host is `no_ip` regardless, so its config is not fetched.
   const sshKeys = new Set(sshConfigs.filter(c => c.host).map(c => `${c.node}/${c.vmid}`));
   const rawVmCounts = new Map();
   for (const vm of vms) {
     const raw = `${vm.node}/${vm.vmid}`;
     rawVmCounts.set(raw, (rawVmCounts.get(raw) || 0) + 1);
   }
-  const configTargets = accessibleVms.filter(vm => {
+  const hasSshHost = (vm) => {
     const raw = `${vm.node}/${vm.vmid}`;
     return sshKeys.has(`${vm.nodeRef || vm.node}/${vm.vmid}`)
       || (rawVmCounts.get(raw) === 1 && sshKeys.has(raw));
-  });
+  };
+  const configTargets = accessibleVms.filter(vm => vlanSyncs.length > 0 || hasSshHost(vm));
 
   const configResults = await Promise.allSettled(
     configTargets.map(async vm => {
       const routeNode = vm.nodeRef || vm.node;
       try {
         const cfg = await getVMConfig(routeNode, vm.vmid);
-        const net0 = cfg.net0 || '';
-        const tagMatch = net0.match(/tag=(\d+)/);
-        return { key: `${routeNode}/${vm.vmid}`, vlanTag: tagMatch ? parseInt(tagMatch[1], 10) : null };
+        const net0 = parseVmNetworkInterfaces(cfg).find(n => n.name === 'net0');
+        return { key: `${routeNode}/${vm.vmid}`, vlanTag: net0?.vlanTag ?? null, mac: net0?.mac || '' };
       } catch {
-        return { key: `${routeNode}/${vm.vmid}`, vlanTag: null };
+        return { key: `${routeNode}/${vm.vmid}`, vlanTag: null, mac: '' };
       }
     })
   );
 
   const vlanTagMap = new Map();
+  const macMap = new Map();
   for (const result of configResults) {
-    if (result.status === 'fulfilled') vlanTagMap.set(result.value.key, result.value.vlanTag);
+    if (result.status === 'fulfilled') {
+      vlanTagMap.set(result.value.key, result.value.vlanTag);
+      macMap.set(result.value.key, result.value.mac);
+    }
+  }
+
+  // Firewall DHCP stands in for a missing SSH host. One fetch per page load,
+  // only when some VM actually needs it; an unreachable firewall just leaves
+  // those VMs at `no_ip`.
+  const interfaceByTag = new Map(vlanSyncs.map(s => [s.vlan_tag, s.interface_name]));
+  const needDhcp = accessibleVms.filter(vm => {
+    const key = `${vm.nodeRef || vm.node}/${vm.vmid}`;
+    return macMap.get(key) && interfaceByTag.has(vlanTagMap.get(key)) && !hasSshHost(vm);
+  });
+  const dhcpIps = new Map();
+  if (needDhcp.length) {
+    try {
+      const client = createClient(fw);
+      const [servers, leases] = await Promise.all([client.getDhcpServers(), client.getDhcpLeases()]);
+      for (const vm of needDhcp) {
+        const key = `${vm.nodeRef || vm.node}/${vm.vmid}`;
+        const found = dhcpAddressFor({ mac: macMap.get(key), interfaceName: interfaceByTag.get(vlanTagMap.get(key)), servers, leases });
+        if (found) dhcpIps.set(key, found);
+      }
+    } catch { /* best-effort: see above */ }
+  }
+
+  // Restricted users publish only into their own VLAN networks or onto an
+  // address an admin assigned to the VM — the browser-SSH trust model.
+  let trustedNetworks = null;
+  const trustedAddresses = new Map();
+  if (!unrestricted) {
+    trustedNetworks = await userVlanCidrs(db, req.session.userId);
+    await Promise.all(accessibleVms.map(async (vm) => {
+      const routeNode = vm.nodeRef || vm.node;
+      trustedAddresses.set(`${routeNode}/${vm.vmid}`, await explicitlyAssignedAddresses(req.session.userId, routeNode, vm.vmid));
+    }));
   }
 
   return buildPortForwardTargets({
@@ -104,6 +145,9 @@ export async function getScopedPortForwardTargets(req, fw) {
     canManageVlans,
     rootDstInterface: fw.root_vdom_link || 'lab-root1',
     firewallName: fw.name || '',
+    dhcpIps,
+    trustedNetworks,
+    trustedAddresses,
   });
 }
 

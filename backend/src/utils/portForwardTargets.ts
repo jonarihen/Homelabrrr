@@ -13,8 +13,11 @@
 // classification can be unit-tested standalone and so the API route and the
 // create path share exactly one definition of "blocked".
 
+import { findMatchingLease, normalizeMac } from './detectedIps.ts';
+import { sshAddressAllowed } from './sshTargetAuthorization.ts';
+
 /** Reason codes, listed in the precedence order they are reported in. */
-export const BLOCKED_CODES = ['no_ip', 'untagged', 'vlan_not_synced', 'vlan_not_assigned'];
+export const BLOCKED_CODES = ['no_ip', 'untagged', 'vlan_not_synced', 'vlan_not_assigned', 'untrusted_ip'];
 
 const VM_TYPES = new Set(['qemu', 'lxc']);
 
@@ -82,7 +85,7 @@ function blockedNoIp(vm) {
     code: 'no_ip',
     short: 'no IP recorded',
     message: "Homelabrrr doesn't know this VM's IP address yet.",
-    action: 'Set the SSH Host/IP on the VM page.',
+    action: 'Reserve an address in the IP management panel on the VM page, or set its SSH Host/IP there.',
     href: vmHref(vm),
   };
 }
@@ -120,6 +123,33 @@ function blockedVlanNotAssigned(label) {
   };
 }
 
+function blockedUntrustedIp(vm, ip) {
+  return {
+    code: 'untrusted_ip',
+    short: 'IP outside your networks',
+    message: `${ip} is not in a VLAN network or address assigned to you.`,
+    action: 'Reserve an address in the IP management panel on the VM page, or set its SSH Host/IP to an address in your VLAN.',
+    href: vmHref(vm),
+  };
+}
+
+/**
+ * The address the firewall's own DHCP server holds for a NIC on
+ * `interfaceName`: the reservation first, else the current lease. Both come
+ * from the firewall, not from inside the guest, so unlike guest-agent or
+ * cloud-init addresses they are a trusted source for a port-forward target.
+ * Returns null when the firewall knows nothing for this MAC.
+ */
+export function dhcpAddressFor({ mac, interfaceName, servers = [], leases = [] }) {
+  if (!mac || !interfaceName) return null;
+  const server = servers.find((entry) => entry.interface === interfaceName);
+  const reserved = (server?.['reserved-address'] || [])
+    .find((entry) => entry.ip && normalizeMac(entry.mac) === normalizeMac(mac));
+  if (reserved) return { ip: reserved.ip, source: 'dhcp_reservation' };
+  const lease = findMatchingLease(leases, interfaceName, mac);
+  return lease?.ip ? { ip: lease.ip, source: 'dhcp_lease' } : null;
+}
+
 /**
  * Annotate every VM the caller decided the user may see with its port-forward
  * eligibility.
@@ -143,6 +173,11 @@ function blockedVlanNotAssigned(label) {
  * @param {boolean} opts.canManageVlans  user may sync VLANs (controls the fix link)
  * @param {string} opts.rootDstInterface root-VDOM link interface for the firewall
  * @param {string} opts.firewallName     used in the vlan_not_synced message
+ * @param {Map} opts.dhcpIps             `"<nodeRef>/<vmid>"` → { ip, source } from the
+ *                                       firewall's DHCP; used when no SSH host is set
+ * @param {string[]|null} opts.trustedNetworks  restricted users: CIDRs they may
+ *                                       publish into; null skips the check
+ * @param {Map} opts.trustedAddresses    `"<nodeRef>/<vmid>"` → admin-assigned addresses
  */
 export function buildPortForwardTargets({
   vms = [],
@@ -156,6 +191,9 @@ export function buildPortForwardTargets({
   canManageVlans = false,
   rootDstInterface = '',
   firewallName = '',
+  dhcpIps = null,
+  trustedNetworks = null,
+  trustedAddresses = null,
 } = {}) {
   const accessible = accessibleKeys ? new Set(accessibleKeys) : null;
   const findSsh = makeSshLookup(vms, sshConfigs);
@@ -186,7 +224,10 @@ export function buildPortForwardTargets({
     if (accessible && !accessible.has(key)) continue;
 
     const ssh = findSsh(vm);
-    const ip = String(ssh?.host || '').trim();
+    const sshIp = String(ssh?.host || '').trim();
+    const dhcp = sshIp ? null : dhcpIps?.get(key) || null;
+    const ip = sshIp || dhcp?.ip || '';
+    const ipSource = sshIp ? 'ssh_config' : dhcp?.source || null;
     const vlanTag = intOrNull(tagMap.get(key)) || null;
     const vlanName = vlanTag !== null ? (vlanNameByTag.get(vlanTag) || '') : '';
     const syncedInterface = vlanTag !== null ? (interfaceByTag.get(vlanTag) || '') : '';
@@ -201,6 +242,11 @@ export function buildPortForwardTargets({
       blocked = blockedVlanNotSynced(vlanLabel(vlanTag, vlanName), firewallName, canManageVlans);
     } else if (!unrestricted && !vlanAssigned) {
       blocked = blockedVlanNotAssigned(vlanLabel(vlanTag, vlanName));
+    } else if (!unrestricted && trustedNetworks
+      && !sshAddressAllowed(ip, { networks: trustedNetworks, exactAddresses: trustedAddresses?.get(key) || [] })) {
+      // Same trust model as browser SSH (GHSA-fhvj): a restricted user may only
+      // publish an address inside their VLAN networks or one an admin assigned.
+      blocked = blockedUntrustedIp(vm, ip);
     }
 
     // A restricted user must never be handed an interface for a VLAN that is
@@ -218,6 +264,7 @@ export function buildPortForwardTargets({
       status: vm.status,
       type: vm.type,
       ip,
+      ipSource,
       sshPort: ssh?.port || 22,
       vlanTag,
       vlanName,
@@ -247,5 +294,5 @@ export function blockedErrorText(blocked) {
 
 /** HTTP status for a blocked reason: authorization vs. missing configuration. */
 export function blockedStatus(blocked) {
-  return blocked?.code === 'vlan_not_assigned' ? 403 : 400;
+  return blocked?.code === 'vlan_not_assigned' || blocked?.code === 'untrusted_ip' ? 403 : 400;
 }

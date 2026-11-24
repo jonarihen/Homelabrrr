@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-24 — Port forwarding no longer needs an SSH config
+
+- **A VM no longer needs browser SSH set up before it can be published.** When no SSH Host/IP is recorded, the Target VM list now uses the address the firewall's own DHCP server holds for the VM: its reservation, or else its current lease on the VM's VLAN. The form shows where the internal IP came from
+- **Port forwards follow the same address rules as browser SSH.** A user with *Manage port forwards* can only publish an address inside a VLAN assigned to them or one an admin assigned to that VM. Addresses reported from inside the guest never count. A VM with any other address is listed as *IP outside your networks* and cannot be selected. Admins and users with firewall-wide rights are unchanged
+
+![Port forwarding form with a VM whose internal IP comes from a DHCP reservation](docs/screenshots/changelog/2026-11-24-port-forward-dhcp-targets.png)
+
 ## 2026-11-24 — Screenshots in the changelog
 
 - Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll
