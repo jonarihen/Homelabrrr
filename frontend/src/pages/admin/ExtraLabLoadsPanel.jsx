@@ -47,7 +47,7 @@ export default function ExtraLabLoadsPanel() {
           <p className="text-sm text-white">{load.label} · <span className="font-mono tabular-nums">{load.estimated_watts} W</span> <span className="text-gray-500">estimated</span></p>
           <p className="text-gray-400 md:text-right"><span className="font-mono">{load.source_key}</span> · {new Date(load.valid_from).toLocaleString()} to {new Date(load.valid_to).toLocaleString()}</p>
         </li>)}</ul>
-        : <p className="rounded-xl border border-gray-800 px-4 py-6 text-center text-xs italic text-gray-600">No extra loads configured; calculated lab energy uses measured servers only.</p>}
+        : <p className="rounded-xl border border-gray-800 px-4 py-6 text-center text-xs italic text-gray-400">No extra loads configured; calculated lab energy uses measured servers only.</p>}
     </div>
     <form onSubmit={(event) => { event.preventDefault(); save(); }} className="mt-6 grid gap-4 border-t border-gray-800 pt-5 md:grid-cols-2">
       <h3 className="text-sm font-semibold text-white md:col-span-2">Add dated estimate</h3>

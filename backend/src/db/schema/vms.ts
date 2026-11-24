@@ -243,3 +243,18 @@ export const vmMigrations = pgTable(
     uniqueIndex('vm_migrations_vmid_running_unique').on(t.vmid).where(sql`status = 'running'`),
   ]
 );
+
+// Last address GET /vms/:node/:vmid/detected-ips found, so the VM list can show
+// an IP without a firewall + guest-agent round trip per VM. Best-effort cache.
+export const vmDetectedIps = pgTable(
+  'vm_detected_ips',
+  {
+    id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+    node: text('node').notNull(),
+    vmid: integer('vmid').notNull(),
+    ip: text('ip').notNull(),
+    source: text('source').notNull().default(''),
+    detected_at: timestamp('detected_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('vm_detected_ips_node_vmid_unique').on(t.node, t.vmid)]
+);

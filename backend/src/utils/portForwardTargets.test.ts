@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildPortForwardTargets, blockedErrorText, blockedStatus, vlanLabel, BLOCKED_CODES,
+  buildPortForwardTargets, blockedErrorText, blockedStatus, vlanLabel, BLOCKED_CODES, dhcpAddressFor,
 } from './portForwardTargets.ts';
 
 const VM = (over = {}) => ({
@@ -118,7 +118,7 @@ test('vlan_not_assigned never fires for a firewall-wide manager', () => {
 });
 
 test('precedence follows BLOCKED_CODES: the fact closest to the VM wins', () => {
-  assert.deepEqual(BLOCKED_CODES, ['no_ip', 'untagged', 'vlan_not_synced', 'vlan_not_assigned']);
+  assert.deepEqual(BLOCKED_CODES, ['no_ip', 'untagged', 'vlan_not_synced', 'vlan_not_assigned', 'untrusted_ip']);
 
   // All four broken at once → no_ip.
   assert.equal(only({
@@ -208,13 +208,14 @@ test('blockedErrorText joins message and action into one API error line', () => 
   const t = only({ sshConfigs: [] });
   assert.equal(
     blockedErrorText(t.blocked),
-    "Homelabrrr doesn't know this VM's IP address yet. Set the SSH Host/IP on the VM page.",
+    "Homelabrrr doesn't know this VM's IP address yet. Reserve an address in the IP management panel on the VM page, or set its SSH Host/IP there.",
   );
   assert.equal(blockedErrorText(null), '');
 });
 
 test('blockedStatus is 403 for the authorization reason and 400 for the rest', () => {
   assert.equal(blockedStatus({ code: 'vlan_not_assigned' }), 403);
+  assert.equal(blockedStatus({ code: 'untrusted_ip' }), 403);
   for (const code of ['no_ip', 'untagged', 'vlan_not_synced']) {
     assert.equal(blockedStatus({ code }), 400);
   }
@@ -222,4 +223,87 @@ test('blockedStatus is 403 for the authorization reason and 400 for the rest', (
 
 test('a VM with no name falls back to "VM <vmid>"', () => {
   assert.equal(only({ vms: [VM({ name: '' })] }).name, 'VM 105');
+});
+
+// ─── Issue #294: no SSH-config prerequisite, but only trusted addresses ─────
+
+const MAC = 'bc:24:11:aa:bb:cc';
+const servers = [
+  { interface: 'vlan1001', 'reserved-address': [{ ip: '10.10.1.50', mac: 'BC-24-11-AA-BB-CC' }] },
+  { interface: 'vlan2002', 'reserved-address': [] },
+];
+const leases = [
+  { interface: 'vlan2002', mac: MAC, ip: '10.20.2.77', status: 'leased', type: 'ipv4' },
+  { interface: 'vlan9999', mac: MAC, ip: '192.168.0.9', status: 'leased', type: 'ipv4' },
+];
+
+test('dhcpAddressFor prefers the reservation, falls back to the lease, and stays on the interface', () => {
+  assert.deepEqual(dhcpAddressFor({ mac: MAC, interfaceName: 'vlan1001', servers, leases }),
+    { ip: '10.10.1.50', source: 'dhcp_reservation' });
+  assert.deepEqual(dhcpAddressFor({ mac: MAC, interfaceName: 'vlan2002', servers, leases }),
+    { ip: '10.20.2.77', source: 'dhcp_lease' });
+  // A lease on some other interface never counts for this VLAN.
+  assert.equal(dhcpAddressFor({ mac: MAC, interfaceName: 'vlan3003', servers, leases }), null);
+  assert.equal(dhcpAddressFor({ mac: '', interfaceName: 'vlan1001', servers, leases }), null);
+});
+
+test('dhcpAddressFor ignores an expired or released lease: its IP may belong to someone else now', () => {
+  const stale = [{ interface: 'vlan2002', mac: MAC, ip: '10.20.2.77', status: 'expired', type: 'ipv4' }];
+  assert.equal(dhcpAddressFor({ mac: MAC, interfaceName: 'vlan2002', servers, leases: stale }), null);
+});
+
+test('a VM with no SSH config is publishable from its firewall DHCP address', () => {
+  const t = only({
+    sshConfigs: [],
+    dhcpIps: new Map([['1~pve/105', { ip: '10.10.1.50', source: 'dhcp_reservation' }]]),
+    trustedNetworks: ['10.10.1.0/24'],
+  });
+  assert.equal(t.eligible, true);
+  assert.equal(t.ip, '10.10.1.50');
+  assert.equal(t.ipSource, 'dhcp_reservation');
+  assert.equal(t.vlanInterface, 'vlan1001');
+});
+
+test('the SSH host still wins over DHCP when both are known', () => {
+  const t = only({ dhcpIps: new Map([['1~pve/105', { ip: '10.10.1.50', source: 'dhcp_lease' }]]) });
+  assert.equal(t.ip, '10.10.1.20');
+  assert.equal(t.ipSource, 'ssh_config');
+});
+
+test('untrusted_ip: a restricted user cannot publish an address outside their networks', () => {
+  const t = only({
+    sshConfigs: [{ node: '1~pve', vmid: 105, host: '172.16.0.10', port: 22 }],
+    trustedNetworks: ['10.10.1.0/24'],
+  });
+  assert.equal(t.eligible, false);
+  assert.equal(t.blocked.code, 'untrusted_ip');
+  assert.match(t.blocked.message, /172\.16\.0\.10/);
+  assert.equal(t.overridable, false);
+});
+
+test('untrusted_ip: an admin-assigned address for this VM is trusted even outside the VLAN', () => {
+  const t = only({
+    sshConfigs: [{ node: '1~pve', vmid: 105, host: '172.16.0.10', port: 22 }],
+    trustedNetworks: ['10.10.1.0/24'],
+    trustedAddresses: new Map([['1~pve/105', ['172.16.0.10']]]),
+  });
+  assert.equal(t.eligible, true);
+});
+
+test('untrusted_ip never fires for a firewall-wide manager', () => {
+  const t = only({
+    sshConfigs: [{ node: '1~pve', vmid: 105, host: '172.16.0.10', port: 22 }],
+    trustedNetworks: ['10.10.1.0/24'],
+    unrestricted: true,
+  });
+  assert.equal(t.eligible, true);
+});
+
+test('untrusted_ip ranks after vlan_not_assigned', () => {
+  const t = only({
+    sshConfigs: [{ node: '1~pve', vmid: 105, host: '172.16.0.10', port: 22 }],
+    trustedNetworks: [],
+    userVlanTags: [],
+  });
+  assert.equal(t.blocked.code, 'vlan_not_assigned');
 });

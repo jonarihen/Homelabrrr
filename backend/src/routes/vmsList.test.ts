@@ -14,7 +14,7 @@ const testDb = await createTestDatabase();
 process.env.DATABASE_URL = testDb.url;
 
 const { default: vmsRouter } = await import('./vms.ts');
-const { users, pveHosts, vmAssignments } = await import('../db/schema/index.ts');
+const { users, pveHosts, vmAssignments, vmDetectedIps } = await import('../db/schema/index.ts');
 
 // Long-lived self-signed certificate for the fake PVE API (verify_tls=false
 // on the test host row makes rejectUnauthorized irrelevant).
@@ -76,6 +76,18 @@ const STATUS_PLAN: Record<string, { code: number; data: Record<string, unknown> 
   '/api2/json/nodes/pve1/lxc/102/status/current': { code: 500, data: null },
   '/api2/json/nodes/pve1/qemu/103/status/current': { code: 200, data: { status: 'stopped', name: 'vm-103', vmid: 103 } },
   '/api2/json/nodes/pve1/lxc/103/status/current': { code: 500, data: null },
+  // Static cloud-init address on an untagged NIC: no DHCP lookup, and the
+  // missing guest agent (404) must degrade quietly.
+  '/api2/json/nodes/pve1/qemu/103/config': {
+    code: 200,
+    data: { net0: 'virtio=BC:24:11:00:00:03,bridge=vmbr0', ipconfig0: 'ip=10.0.20.50/24,gw=10.0.20.1' },
+  },
+  // Config still answers but status 404s: the guest is gone (deleted mid-request),
+  // so detection must not leave a cache row behind.
+  '/api2/json/nodes/pve1/qemu/104/config': {
+    code: 200,
+    data: { net0: 'virtio=BC:24:11:00:00:04,bridge=vmbr0', ipconfig0: 'ip=10.0.20.60/24' },
+  },
 };
 
 const pveCalls: string[] = [];
@@ -113,6 +125,7 @@ await testDb.db.insert(vmAssignments).values([
   { user_id: userId, node: nodeRef, vmid: 101 },
   { user_id: userId, node: nodeRef, vmid: 102 },
   { user_id: userId, node: nodeRef, vmid: 103 },
+  { user_id: userId, node: nodeRef, vmid: 104 },
 ]);
 
 test.after(async () => {
@@ -155,4 +168,29 @@ test('GET /vms falls back to LXC status and only reports error when both lookups
   assert.equal(broken.status, 'error');
   assert.equal(broken.name, 'VM 102');
   assert.equal('type' in broken, false);
+});
+
+test('GET /vms shows the IP last found by detected-ips, including legacy bare-node rows', async () => {
+  const detected = await request(app()).get(`/api/vms/${nodeRef}/103/detected-ips`);
+  assert.equal(detected.status, 200);
+  assert.equal(detected.body.guestAgent, 'unavailable');
+  assert.equal(detected.body.candidates[0].ip, '10.0.20.50');
+
+  await testDb.db.insert(vmDetectedIps).values([
+    { node: 'pve1', vmid: 101, ip: '10.0.30.7', source: 'dhcp_lease' },
+    // Stale legacy alias must not shadow the exact node-ref row written above.
+    { node: 'pve1', vmid: 103, ip: '10.0.99.99', source: 'dhcp_lease' },
+  ]);
+
+  const gone = await request(app()).get(`/api/vms/${nodeRef}/104/detected-ips`);
+  assert.equal(gone.status, 200);
+  assert.equal(gone.body.candidates[0].ip, '10.0.20.60');
+
+  const response = await request(app()).get('/api/vms');
+  assert.equal(response.status, 200);
+  const byVmid = Object.fromEntries(response.body.map((vm: Record<string, unknown>) => [vm.vmid, vm]));
+  assert.equal(byVmid[103].detectedIp, '10.0.20.50');
+  assert.equal(byVmid[101].detectedIp, '10.0.30.7');
+  assert.equal('detectedIp' in byVmid[102], false);
+  assert.equal('detectedIp' in byVmid[104], false);
 });

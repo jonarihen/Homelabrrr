@@ -2,6 +2,7 @@ import { useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 import Modal from './Modal.jsx';
+import { diskLabel } from '../utils/diskLabel.js';
 
 
 export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
@@ -184,10 +185,13 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                     >
                       {disks.map((d) => (
                         <option key={d.name} value={d.name}>
-                          {d.name} — {d.size} ({d.storage})
+                          {diskLabel(d)}
                         </option>
                       ))}
                     </select>
+                    <p className="text-[11px] text-gray-500 mt-1 font-mono break-all">
+                      {selectedDisk} {disks.find((d) => d.name === selectedDisk)?.storage}
+                    </p>
                   </div>
 
                   <div>
