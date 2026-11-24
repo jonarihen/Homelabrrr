@@ -3,8 +3,9 @@ import { MUTED_LINE_OPACITY, clamp } from './graphLayout.js';
 // SVG layer of policy routes: hit area, glow, flow particles and endpoints.
 export default function MeshRouteLines({ mesh }) {
   const { canvasRef, canvasSize, hoveredLine, setHoveredLine, setTooltipPos, setLinePopover, panOffset, zoom, lines } = mesh;
+  // Decorative strokes inherit pointer-events: none; only each route's hit path opts back in.
   return (
-    <svg className="absolute inset-0 z-[3] h-full w-full" style={{ overflow: 'visible' }}>
+    <svg className="pointer-events-none absolute inset-0 z-[3] h-full w-full" style={{ overflow: 'visible' }}>
       <g transform={`translate(${panOffset.x}, ${panOffset.y}) scale(${zoom})`}>
       <defs>
         {lines.map(line => (

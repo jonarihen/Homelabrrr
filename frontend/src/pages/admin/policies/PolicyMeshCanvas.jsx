@@ -120,7 +120,8 @@ export default function PolicyMeshCanvas({ mesh, vlans, srcVlan, dstVlan, polici
 
           {linePopover && <RoutePopover mesh={mesh} onDelete={onDeletePolicy} />}
 
-          <div className="relative z-[4] min-h-[588px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }}>
+          {/* The node layer spans the canvas above the routes, so only the nodes themselves take the pointer. */}
+          <div className="pointer-events-none relative z-[4] min-h-[588px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }}>
             {vlans.map((vlan) => {
               const position = nodePositions[vlan.tag];
               if (!position) return null;
@@ -150,7 +151,7 @@ export default function PolicyMeshCanvas({ mesh, vlans, srcVlan, dstVlan, polici
                   key={vlan.tag}
                   onClick={() => onCardClick(vlan)}
                   onPointerDown={(e) => handleNodePointerDown(e, vlan)}
-                  className={`absolute z-[5] h-36 w-36 cursor-grab rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${
+                  className={`pointer-events-auto absolute z-[5] h-36 w-36 cursor-grab rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${
                     isSource
                       ? 'border-cyan-300/80 bg-cyan-500/10'
                       : isDestination

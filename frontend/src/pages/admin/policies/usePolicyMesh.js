@@ -168,7 +168,8 @@ export default function usePolicyMesh({ vlans, policies, srcVlan, loading }) {
     };
 
     const onPointerUp = () => {
-      dragRef.current = null;
+      // The node's click fires after pointerup and reads dragRef.moved to skip drags, so clear it after that.
+      setTimeout(() => { dragRef.current = null; });
       panRef.current = null;
     };
 
