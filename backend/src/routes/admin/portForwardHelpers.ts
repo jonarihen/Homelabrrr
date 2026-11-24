@@ -1,7 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { db } from '../../db/client.ts';
 import { users, vmAssignments, vmSshConfigs, vlans, userVlans, firewallVlanSync } from '../../db/schema/index.ts';
-import { getAllVMs, getVMConfig } from '../../proxmox.ts';
+import { getAllVMs, getLXCConfig, getVMConfig } from '../../proxmox.ts';
 import { createClient } from '../../fortigate.ts';
 import { userCanAccessVm } from '../../utils/vmAccess.ts';
 import { userHasPermission } from '../../utils/permissions.ts';
@@ -65,7 +65,7 @@ export async function getScopedPortForwardTargets(req, fw) {
   // needs it too when any VLAN is synced here: its net0 MAC + tag is how the
   // firewall's DHCP reservation/lease is found. With no synced VLAN, a VM
   // without an SSH host is `no_ip` regardless, so its config is not fetched.
-  const sshKeys = new Set(sshConfigs.filter(c => c.host).map(c => `${c.node}/${c.vmid}`));
+  const sshKeys = new Set(sshConfigs.filter(c => String(c.host || '').trim()).map(c => `${c.node}/${c.vmid}`));
   const rawVmCounts = new Map();
   for (const vm of vms) {
     const raw = `${vm.node}/${vm.vmid}`;
@@ -82,7 +82,7 @@ export async function getScopedPortForwardTargets(req, fw) {
     configTargets.map(async vm => {
       const routeNode = vm.nodeRef || vm.node;
       try {
-        const cfg = await getVMConfig(routeNode, vm.vmid);
+        const cfg = await (vm.type === 'lxc' ? getLXCConfig : getVMConfig)(routeNode, vm.vmid);
         const net0 = parseVmNetworkInterfaces(cfg).find(n => n.name === 'net0');
         return { key: `${routeNode}/${vm.vmid}`, vlanTag: net0?.vlanTag ?? null, mac: net0?.mac || '' };
       } catch {
@@ -110,15 +110,18 @@ export async function getScopedPortForwardTargets(req, fw) {
   });
   const dhcpIps = new Map();
   if (needDhcp.length) {
+    // Each source fails on its own, so reservations still count if the lease monitor is down.
+    let servers = [];
+    let leases = [];
     try {
       const client = createClient(fw);
-      const [servers, leases] = await Promise.all([client.getDhcpServers(), client.getDhcpLeases()]);
-      for (const vm of needDhcp) {
-        const key = `${vm.nodeRef || vm.node}/${vm.vmid}`;
-        const found = dhcpAddressFor({ mac: macMap.get(key), interfaceName: interfaceByTag.get(vlanTagMap.get(key)), servers, leases });
-        if (found) dhcpIps.set(key, found);
-      }
-    } catch { /* best-effort: see above */ }
+      [servers, leases] = await Promise.all([client.getDhcpServers().catch(() => []), client.getDhcpLeases().catch(() => [])]);
+    } catch { /* no client: every VM stays at `no_ip` */ }
+    for (const vm of needDhcp) {
+      const key = `${vm.nodeRef || vm.node}/${vm.vmid}`;
+      const found = dhcpAddressFor({ mac: macMap.get(key), interfaceName: interfaceByTag.get(vlanTagMap.get(key)), servers, leases });
+      if (found) dhcpIps.set(key, found);
+    }
   }
 
   // Restricted users publish only into their own VLAN networks or onto an

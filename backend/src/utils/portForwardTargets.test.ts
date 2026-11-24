@@ -247,6 +247,11 @@ test('dhcpAddressFor prefers the reservation, falls back to the lease, and stays
   assert.equal(dhcpAddressFor({ mac: '', interfaceName: 'vlan1001', servers, leases }), null);
 });
 
+test('dhcpAddressFor ignores an expired or released lease: its IP may belong to someone else now', () => {
+  const stale = [{ interface: 'vlan2002', mac: MAC, ip: '10.20.2.77', status: 'expired', type: 'ipv4' }];
+  assert.equal(dhcpAddressFor({ mac: MAC, interfaceName: 'vlan2002', servers, leases: stale }), null);
+});
+
 test('a VM with no SSH config is publishable from its firewall DHCP address', () => {
   const t = only({
     sshConfigs: [],

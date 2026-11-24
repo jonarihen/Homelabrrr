@@ -146,8 +146,9 @@ export function dhcpAddressFor({ mac, interfaceName, servers = [], leases = [] }
   const reserved = (server?.['reserved-address'] || [])
     .find((entry) => entry.ip && normalizeMac(entry.mac) === normalizeMac(mac));
   if (reserved) return { ip: reserved.ip, source: 'dhcp_reservation' };
+  // Only a live lease: an expired/released entry's IP may now belong to another guest.
   const lease = findMatchingLease(leases, interfaceName, mac);
-  return lease?.ip ? { ip: lease.ip, source: 'dhcp_lease' } : null;
+  return lease?.ip && lease.status === 'leased' ? { ip: lease.ip, source: 'dhcp_lease' } : null;
 }
 
 /**
