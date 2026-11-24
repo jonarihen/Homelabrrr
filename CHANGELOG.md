@@ -1,10 +1,13 @@
 # Changelog
 
-## 2026-11-04 — Deploy polish
+## 2026-11-24 — Deploy polish
 
 - A failed cloud image or template load now shows a **Retry** button.
 - **Start the VM after deployment** is on by default for cloud images.
 - The invalid-invite page tells you to contact the administrator who invited you.
+
+![Deploy page after the cloud image list failed to load, with a Retry button under the error](docs/screenshots/changelog/2026-11-24-deploy-retry.png)
+
 ## 2026-11-24 — Screenshots in the changelog
 
 - Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll
