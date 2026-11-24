@@ -150,7 +150,6 @@ export default function VMPage() {
   const [disks, setDisks] = useState([]);
   const [vlanModal, setVlanModal] = useState(false);
   const [hardwareModal, setHardwareModal] = useState(false);
-  const canEditHw = !!(user?.isAdmin || user?.permissions?.canEditVmHardware);
   const [scheduleModal, setScheduleModal] = useState(false);
   const [schedule, setSchedule] = useState(null);
   const [deleteModal, setDeleteModal] = useState(false);
@@ -160,6 +159,7 @@ export default function VMPage() {
   const [ipCopied, setIpCopied] = useState(false);
   const stickyRef = useRef(null);
   const { user } = useAuth();
+  const canEditHw = !!(user?.isAdmin || user?.permissions?.canEditVmHardware);
 
   useDocumentTitle(vm ? (vm.name || `VM ${vm.vmid}`) : 'VM Details');
 
