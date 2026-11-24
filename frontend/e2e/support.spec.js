@@ -78,6 +78,18 @@ test('the Ko-fi link is shown only when Ko-fi is enabled', async ({ page }) => {
   await expect(unavailable).toHaveCount(0);
   await expect(kofiLink).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'One-off contribution' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Support via Ko-fi' })).toHaveCount(0);
+
+  // Ko-fi disabled but an email saved earlier: it stays listed and removable; nothing new can be added.
+  await mockSupport(page, { status: { configured: false, checkoutEnabled: false, monthlyAvailable: false, monthlyOptions: [], kofi: { enabled: false, pageUrl: null } },
+    history: { kofiEmails: [{ id: 5, emailHint: 'a•••@example.dk', addedAt: '2026-11-03T10:00:00Z', removable: true, verified: false }] } });
+  await page.reload();
+  const saved = page.locator('section', { has: page.getByRole('heading', { name: 'Support via Ko-fi' }) });
+  await expect(saved.getByText('a•••@example.dk')).toBeVisible();
+  await expect(saved.getByText("awaiting the owner's confirmation")).toBeVisible();
+  await expect(saved.getByRole('button', { name: 'Remove' })).toBeVisible();
+  await expect(saved.getByLabel('Email used on Ko-fi')).toHaveCount(0);
+  await expect(kofiLink).toHaveCount(0);
 
   // Ko-fi enabled: an external link, the matching rules, and the member's own Ko-fi payments.
   await mockSupport(page, {
@@ -94,7 +106,7 @@ test('the Ko-fi link is shown only when Ko-fi is enabled', async ({ page }) => {
   await expect(kofiLink).toHaveAttribute('rel', 'noopener noreferrer');
   await expect(unavailable).toHaveCount(0);
   const card = page.locator('section', { has: page.getByRole('heading', { name: 'Support via Ko-fi' }) });
-  for (const copy of [/voluntary/, /same email address on Ko-fi every time/, /first payment is matched by the owner/,
+  for (const copy of [/voluntary/, /same email address on Ko-fi every time/, /owner matches your first payment by hand/,
     /once the owner has confirmed the actual fee/, /another currency are counted at the DKK amount the owner actually received/,
     /Do not also report a Ko-fi payment as a bank transfer/]) await expect(card.getByText(copy)).toBeVisible();
   const historyCard = page.locator('section', { has: page.getByRole('heading', { name: 'Your contribution history' }) });
