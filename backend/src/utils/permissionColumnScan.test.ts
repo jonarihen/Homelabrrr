@@ -63,7 +63,7 @@ test('handles empty / missing contents without throwing', () => {
 // ─── the allowlist ──────────────────────────────────────────────────────────
 
 const PROVISION_LINE = {
-  file: 'src/routes/provision.ts',
+  file: 'src/routes/provision/shared.ts',
   line: 134,
   text: "  const user = db.prepare('SELECT id, can_provision, is_admin, role_id FROM users WHERE id = ?').get(req.session.userId);",
 };
@@ -135,7 +135,7 @@ test('no legacy raw permission-column SQL reads remain after the Drizzle migrati
 });
 
 test('the sanctioned provision.js read really does fold the role back in', () => {
-  const src = fs.readFileSync(path.join(SRC_ROOT, 'routes', 'provision.ts'), 'utf8');
+  const src = fs.readFileSync(path.join(SRC_ROOT, 'routes', 'provision', 'shared.ts'), 'utf8');
   // The optional `)` tolerates the async form: (await getRolePermissions(...)).has(...)
   assert.match(src, /getRolePermissions\(user\.role_id\)\)?\.has\('can_provision'\)/);
 });
