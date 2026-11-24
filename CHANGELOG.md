@@ -6,6 +6,13 @@
 - **Port forwards follow the same address rules as browser SSH.** A user with *Manage port forwards* can only publish an address inside a VLAN assigned to them or one an admin assigned to that VM. Addresses reported from inside the guest never count. A VM with any other address is listed as *IP outside your networks* and cannot be selected. Admins and users with firewall-wide rights are unchanged
 
 ![Port forwarding form with a VM whose internal IP comes from a DHCP reservation](docs/screenshots/changelog/2026-11-24-port-forward-dhcp-targets.png)
+## 2026-11-24 — SSH host key filled in for new VMs
+
+- Opening SSH on a VM with no saved connection now also reads the VM's host key fingerprint after it finds the IP, so a freshly deployed VM is ready to connect with no extra clicks. Check the fingerprint before you click Connect, the same as after a manual scan.
+- The automatic scan never replaces a fingerprint you typed, skips if you changed the host, and stays quiet if the VM isn't answering yet. "Scan fingerprint" still works as before.
+- Changing the host or port now clears the fingerprint, so a key scanned for one address is never saved for another.
+
+![SSH connect form for a new VM with the IP, cloud-init user and host key fingerprint already filled in](docs/screenshots/changelog/2026-11-24-ssh-prefilled-after-deploy.png)
 
 ## 2026-11-24 — Screenshots in the changelog
 
