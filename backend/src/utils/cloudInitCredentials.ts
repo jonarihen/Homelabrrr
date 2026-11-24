@@ -106,10 +106,11 @@ export function unusableKeysError(unusable) {
 // Refuse a cloud-init deploy that would leave the guest with no credentials at
 // all. `sshKeys` accepts either the resolved array or the joined string the
 // provisioning options carry. Non-cloud-init deploys (ISO / template installs
-// that bring their own installer) are left alone. Throws a 400-tagged Error,
+// that bring their own installer) are left alone, as is a deploy where the user
+// explicitly opted in with `allowNoLogin: true`. Throws a 400-tagged Error,
 // matching the other assert* guards in this directory.
-export function assertLoginPossible({ ciPassword, sshKeys, cloudInitCapable }) {
-  if (!cloudInitCapable) return;
+export function assertLoginPossible({ ciPassword, sshKeys, cloudInitCapable, allowNoLogin = false }) {
+  if (!cloudInitCapable || allowNoLogin === true) return;
 
   const hasPassword = typeof ciPassword === 'string' && ciPassword.length > 0;
   const hasKey = Array.isArray(sshKeys)
