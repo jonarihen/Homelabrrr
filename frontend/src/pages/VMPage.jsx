@@ -16,6 +16,7 @@ import api from '../api.js';
 import { displayNode, routeNode } from '../utils/nodeRef.js';
 import { sleepLabel, describeDays } from '../utils/schedule.js';
 import { useConfirm, useToast } from '../contexts/FeedbackContext.jsx';
+import { bootDiskKeys } from '../utils/diskLabel.js';
 
 // ── Formatters ───────────────────────────────────────────────────────────────
 
@@ -192,11 +193,12 @@ export default function VMPage() {
       const diskKeys = Object.keys(cfg).filter(k =>
         /^(scsi|virtio|sata|ide|efidisk|tpmstate)\d+$/.test(k) && !cfg[k].includes('media=cdrom') && cfg[k] !== 'none'
       );
+      const boot = bootDiskKeys(cfg);
       setDisks(diskKeys.map(k => {
         const val = cfg[k];
         const sizeMatch = val.match(/size=(\d+[A-Z]?)/i);
         const storageMatch = val.match(/^([^,]+)/);
-        return { name: k, storage: storageMatch?.[1] || val, size: sizeMatch?.[1] || '—' };
+        return { name: k, storage: storageMatch?.[1] || val, size: sizeMatch?.[1] || '—', boot: boot.has(k) };
       }));
     }).catch(() => {});
   }, [node, vmid]);

@@ -97,14 +97,16 @@ export async function getUserResourceUsage(
  */
 export async function refreshHardwareAllocation(
   node: string, vmid: number,
-  updates: { cores?: number; memoryMb?: number; addDiskGb?: number; config?: Record<string, any> },
+  updates: { cores?: number; memoryMb?: number; addDiskGb?: number; removeDiskGb?: number; config?: Record<string, any> },
 ) {
   const candidates = nodeLookupCandidates(node);
   if (!candidates.length) return;
   const addDiskGb = updates.addDiskGb && updates.addDiskGb > 0 ? updates.addDiskGb : 0;
   // PVE maxdisk only reflects the boot disk, so growth of any disk is kept in
   // the allocation floor instead; it is measured against every disk in config.
-  const measuredDiskGb = addDiskGb && updates.config ? configDiskGb(updates.config).diskGb : 0;
+  const removeDiskGb = updates.removeDiskGb && updates.removeDiskGb > 0 ? updates.removeDiskGb : 0;
+  // `config` is the pre-change config, so a removed disk is still part of the measure.
+  const measuredDiskGb = (addDiskGb || removeDiskGb) && updates.config ? configDiskGb(updates.config).diskGb : 0;
   await db.transaction(async tx => {
     const owners = await tx.select({ user_id: vmAssignments.user_id }).from(vmAssignments)
       .where(and(eq(vmAssignments.vmid, vmid), inArray(vmAssignments.node, candidates)));
@@ -126,6 +128,7 @@ export async function refreshHardwareAllocation(
         ...(updates.cores !== undefined ? { cores: updates.cores } : {}),
         ...(updates.memoryMb !== undefined ? { memoryMb: updates.memoryMb } : {}),
         ...(addDiskGb ? { diskGb: Math.max(base.diskGb, measuredDiskGb) + addDiskGb } : {}),
+        ...(removeDiskGb ? { diskGb: Math.max(0, Math.max(base.diskGb, measuredDiskGb) - removeDiskGb) } : {}),
       } }).where(eq(vmAssignments.id, row.id));
     }
   });

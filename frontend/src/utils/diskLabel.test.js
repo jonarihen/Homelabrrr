@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { diskLabel } from './diskLabel.js';
+import { diskLabel, bootDiskKeys, diskRemoveBlocker } from './diskLabel.js';
 
 test('friendly disk label', () => {
   assert.equal(diskLabel({ name: 'scsi0', storage: 'local-lvm:vm-101-disk-0', size: '32G' }), 'SCSI 0 · local-lvm · 32G');
@@ -14,4 +14,20 @@ test('edge values', () => {
   assert.equal(diskLabel({ name: 'scsi0', storage: 'local-lvm:vm-1-disk-0', size: '—' }), 'SCSI 0 · local-lvm · —');
   assert.equal(diskLabel({ name: 'tpmstate0', storage: 'local-lvm:vm-1-disk-2', size: '4M' }), 'TPM state 0 · local-lvm · 4M');
   assert.equal(diskLabel({ name: 'scsi2', storage: '/dev/disk/by-id/x', size: '1T' }), 'SCSI 2 · /dev/disk/by-id/x · 1T');
+});
+
+test('boot disks come from the boot order, then bootdisk, then scsi0/virtio0', () => {
+  const disk = 'local-lvm:vm-1-disk-0,size=8G';
+  assert.deepEqual([...bootDiskKeys({ boot: 'order=virtio1;ide2;net0', virtio1: disk })], ['virtio1', 'ide2', 'net0']);
+  assert.ok(bootDiskKeys({ boot: 'cdn', bootdisk: 'sata0', sata0: disk }).has('sata0'));
+  const fallback = bootDiskKeys({ boot: 'order=ide2;net0', scsi0: disk });
+  assert.ok(fallback.has('scsi0') && fallback.has('virtio0'));
+});
+
+test('remove blockers', () => {
+  assert.equal(diskRemoveBlocker({ name: 'scsi1', storage: 'local-lvm:vm-1-disk-1' }, false), '');
+  assert.equal(diskRemoveBlocker({ name: 'scsi0', storage: 'local-lvm:vm-1-disk-0', boot: true }, false), 'Boot disk: cannot be removed');
+  assert.equal(diskRemoveBlocker({ name: 'ide2', storage: 'local-lvm:vm-1-cloudinit' }, false), 'Not a data disk');
+  assert.equal(diskRemoveBlocker({ name: 'efidisk0', storage: 'local-lvm:vm-1-disk-2' }, false), 'Not a data disk');
+  assert.equal(diskRemoveBlocker({ name: 'scsi1', storage: 'local-lvm:vm-1-disk-1' }, true), 'Stop the VM to remove disks');
 });

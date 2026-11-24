@@ -8,7 +8,7 @@ import {
   sshKeys as sshKeysTable, users, userVlans,
 } from '../db/schema/index.ts';
 import {
-  getVMStatus, vmAction, getVNCTicket, getVMConfig, getVMConfigCurrent, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
+  getVMStatus, vmAction, getVNCTicket, getVMConfig, getVMConfigCurrent, updateVMConfig, resizeVMDisk, deleteVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType, resolveLegacyVmNode,
   getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
@@ -24,7 +24,7 @@ import { notify, portalLink } from '../utils/notify.ts';
 import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.ts';
 import { checkVlanAssignment, parseVlanTag, parseNetInterface } from '../utils/vlanAccess.ts';
 import { summarizeLease, renewLease } from '../utils/leases.ts';
-import { assertUserQuota, configDiskGb, refreshHardwareAllocation, sizeToGb, vmQuotaUserId } from '../utils/quota.ts';
+import { assertUserQuota, configDiskGb, diskSizeGb, refreshHardwareAllocation, sizeToGb, vmQuotaUserId } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
 import { assertStorageExposed } from '../utils/storageVisibility.ts';
@@ -1356,6 +1356,46 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
     await resizeVMDisk(node, vmid, disk, size);
     await refreshHardwareAllocation(node, Number(vmid), { addDiskGb, config });
     await logAudit(req, 'vm_disk_resize', `${node}/${vmid}`, `${disk}=${size}`);
+    res.json({ ok: true });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// Disks the VM boots from: every entry of `boot: order=...` plus the legacy
+// `bootdisk`; with neither naming a present disk, scsi0/virtio0 are assumed.
+function bootDiskKeys(config) {
+  const order = String(config?.boot ?? '').match(/(?:^|,)order=([^,]*)/)?.[1];
+  const keys = new Set([...(order ? order.split(';') : []), ...(config?.bootdisk ? [config.bootdisk] : [])]);
+  if (![...keys].some((k) => /^(scsi|virtio|sata|ide)\d+$/.test(k) && typeof config?.[k] === 'string')) { keys.add('scsi0'); keys.add('virtio0'); }
+  return keys;
+}
+
+// Detach a data disk and delete its volume, freeing the storage and the
+// owner's disk quota. Stopped VMs only: hot-unplug depends on the guest.
+router.delete('/:node/:vmid/disks/:disk', pHardware, async (req, res) => {
+  const { node, vmid, disk } = req.params;
+
+  if (!(await allowOp(req, node, vmid, 'vm.disk.remove'))) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  if (!/^(scsi|virtio|sata|ide)\d+$/.test(disk)) {
+    return res.status(400).json({ error: 'Invalid disk name' });
+  }
+
+  try {
+    const config = await getVMConfigCurrent(node, vmid);
+    const value = typeof config?.[disk] === 'string' ? config[disk] : '';
+    if (!value || value.split(',')[0] === 'none') throw httpError(404, `Disk ${disk} not found on this VM`);
+    if (value.includes('cloudinit') || value.split(',').includes('media=cdrom')) {
+      throw httpError(400, 'CD-ROM and cloud-init drives cannot be removed here');
+    }
+    if (bootDiskKeys(config).has(disk)) throw httpError(409, `${disk} is a boot disk and cannot be removed`);
+    if ((await getVMStatus(node, vmid))?.status !== 'stopped') throw httpError(409, 'Stop the VM before removing a disk');
+
+    await deleteVMDisk(node, vmid, disk);
+    await refreshHardwareAllocation(node, Number(vmid), { removeDiskGb: diskSizeGb(value) || 0, config });
+    await logAudit(req, 'vm_disk_remove', `${node}/${vmid}`, `${disk} (${value.split(',')[0]})`);
     res.json({ ok: true });
   } catch (err) {
     sendError(res, err);

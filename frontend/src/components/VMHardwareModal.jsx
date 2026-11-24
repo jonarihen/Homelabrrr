@@ -2,13 +2,15 @@ import { useState } from 'react';
 import api from '../api.js';
 import { routeNode } from '../utils/nodeRef.js';
 import Modal from './Modal.jsx';
-import { diskLabel } from '../utils/diskLabel.js';
+import { diskLabel, diskRemoveBlocker } from '../utils/diskLabel.js';
+import { useConfirm } from '../contexts/FeedbackContext.jsx';
 
 
 export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
   // Display value only; an untouched field submits the exact MB (see saveCpuMem).
   const initialGb = vm.maxmem ? Math.round(vm.maxmem / 1024 ** 3 * 100) / 100 : 2;
   const vmNode = routeNode(vm);
+  const confirm = useConfirm();
   const [tab, setTab] = useState('cpu-mem');
   const [cores, setCores] = useState(vm.maxcpu || vm.cpus || 2);
   // Memory is edited in GB to match the deploy forms; the API still takes MB.
@@ -81,6 +83,28 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
     }
   };
 
+  const removeDisk = async (d) => {
+    if (!await confirm({
+      title: `Remove ${diskLabel(d)}?`,
+      message: `${d.name} (${d.storage}) will be detached and its volume permanently deleted, with all data on it. This cannot be undone.`,
+      confirmLabel: `Delete ${d.name}`,
+      danger: true,
+    })) return;
+    setDiskSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      await api.delete(`/vms/${vmNode}/${vm.vmid}/disks/${d.name}`);
+      if (selectedDisk === d.name) setSelectedDisk(disks.find((x) => x.name !== d.name)?.name || '');
+      setSuccess(`Disk ${d.name} removed and deleted`);
+      onSaved?.();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to remove disk');
+    } finally {
+      setDiskSaving(false);
+    }
+  };
+
   return (
     <Modal title={`Edit Hardware — ${vm.name || `VM ${vm.vmid}`}`} onClose={onClose}>
 
@@ -97,7 +121,7 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
               tab === 'disk' ? 'bg-blue-600 text-gray-950' : 'text-gray-400 hover:text-white hover:bg-gray-800'
             }`}
-          >Disk Resize</button>
+          >Disks</button>
         </div>
 
         {/* Body */}
@@ -213,6 +237,30 @@ export default function VMHardwareModal({ vm, disks, onClose, onSaved }) {
                   >
                     {diskSaving ? 'Resizing...' : `Expand ${selectedDisk} by +${diskAddGb}G`}
                   </button>
+
+                  <div className="pt-3 border-t border-gray-800">
+                    <p className="text-xs text-gray-400 mb-1.5">Remove a disk</p>
+                    <ul className="space-y-1.5">
+                      {disks.map((d) => {
+                        const blocker = diskRemoveBlocker(d, isRunning);
+                        return (
+                          <li key={d.name} className="flex items-center justify-between gap-3 bg-gray-900/50 rounded-lg px-3 py-2">
+                            <span className="text-xs text-gray-300 truncate" title={`${d.name} ${d.storage}`}>{diskLabel(d)}</span>
+                            <span title={blocker || undefined}>
+                              <button
+                                type="button"
+                                onClick={() => removeDisk(d)}
+                                disabled={!!blocker || diskSaving}
+                                aria-label={`Remove ${d.name}`}
+                                className="text-[11px] px-2 py-1 rounded-md border border-red-700/50 text-red-400 hover:bg-red-900/30 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                              >Remove</button>
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    {isRunning && <p className="text-[11px] text-gray-500 mt-1">Stop the VM to remove a disk.</p>}
+                  </div>
                 </>
               )}
             </>
