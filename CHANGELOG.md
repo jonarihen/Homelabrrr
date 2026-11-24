@@ -7,6 +7,7 @@
 - The invalid-invite page tells you to contact the administrator who invited you.
 
 ![Deploy page after the cloud image list failed to load, with a Retry button under the error](docs/screenshots/changelog/2026-11-24-deploy-retry.png)
+
 ## 2026-11-04 — Clearer VM hardware dialog
 
 - The **Hardware** button on a VM page is now always shown. Without the edit-hardware permission it is disabled, with a tooltip saying why.
