@@ -69,6 +69,27 @@ async function mockPolicies(page, { user = admin, failFirstCreate = false } = {}
 const node = (page, tag) => page.locator('button', { hasText: new RegExp(`^VLAN ${tag}\\D`) });
 const tab = (page, name) => page.getByRole('button', { name: new RegExp(`^${name}`) });
 const row = (page, text) => page.locator('[class*="hover:bg-gray-800/20"]', { hasText: text });
+// Selecting a source re-lays out the mesh (460ms animation); wait for nodes to stop moving.
+const layout = (page) => page.locator('button', { hasText: /^VLAN \d/ })
+  .evaluateAll((els) => els.map((el) => `${el.style.left},${el.style.top},${getComputedStyle(el).transform}`).join('|'));
+const settled = (page) => expect.poll(async () => {
+  const before = await layout(page);
+  await page.waitForTimeout(150);
+  return before === await layout(page);
+}).toBe(true);
+const pickRoute = async (page, src, dst) => {
+  await node(page, src).click();
+  await settled(page);
+  await node(page, dst).click();
+};
+const openPage = async (page, options) => {
+  const api = await mockPolicies(page, options);
+  await page.goto('/admin/policies');
+  await expect(node(page, 10)).toBeVisible();
+  await expect.poll(() => api.calls.length).toBe(4);
+  api.take();
+  return api;
+};
 const confirmDelete = async (page, message) => {
   const dialog = page.getByRole('dialog', { name: /confirm/i }).or(page.getByRole('dialog').filter({ hasText: message }));
   await expect(dialog).toContainText(message);
@@ -97,7 +118,10 @@ test('the mesh renders the synced VLANs, legend and summary cards', async ({ pag
   await expect(page.locator('select')).toHaveValue('1');
   await expect(page.locator('svg path[stroke="transparent"]')).toHaveCount(3); // internet policy has no line
   await expect(page.getByText('No VLAN selected. Click any node in the mesh to start routing from that source.')).toBeVisible();
+});
 
+test('search, zoom and the firewall picker drive the mesh', async ({ page }) => {
+  const api = await openPage(page);
   // Search fades non-matching nodes and rings matches.
   await page.getByPlaceholder('Find VLAN...').fill('io');
   await expect(node(page, 30)).toHaveClass(/ring-2/);
@@ -126,12 +150,8 @@ test('the mesh renders the synced VLANs, legend and summary cards', async ({ pag
   ]);
 });
 
-test('picking source and destination opens the create modal and posts the exact payload', async ({ page }) => {
-  const api = await mockPolicies(page, { failFirstCreate: true });
-  await page.goto('/admin/policies');
-  await expect(node(page, 10)).toBeVisible();
-  api.take();
-
+test('a source selection highlights its peers and steps back out', async ({ page }) => {
+  await openPage(page);
   await node(page, 10).click();
   await expect(page.getByText('Source locked on servers.', { exact: false })).toBeVisible();
   await expect(node(page, 10)).toContainText('Source');
@@ -151,9 +171,11 @@ test('picking source and destination opens the create modal and posts the exact 
   await node(page, 10).click();
   await node(page, 10).click();
   await expect(page.getByText('No source selected')).toBeVisible();
+});
 
-  await node(page, 10).click();
-  await node(page, 30).click();
+test('picking source and destination opens the create modal and posts the exact payload', async ({ page }) => {
+  const api = await openPage(page, { failFirstCreate: true });
+  await pickRoute(page, 10, 30);
   const modal = page.getByRole('dialog', { name: 'Create Policy' });
   await expect(modal).toBeVisible();
   await expect(modal).toContainText('servers');
@@ -186,25 +208,27 @@ test('picking source and destination opens the create modal and posts the exact 
     { method: 'GET', url: '/admin/policies?firewallId=1' },
   ]);
 
-  // Selecting "All Traffic" resets the mix; Esc and Cancel both close without posting.
-  await node(page, 20).click();
-  await node(page, 40).click();
+});
+
+test('the create modal resets to All Traffic and closes without posting', async ({ page }) => {
+  const api = await openPage(page);
+  const modal = page.getByRole('dialog', { name: 'Create Policy' });
+  await pickRoute(page, 20, 40);
   await modal.getByRole('button', { name: 'DNS', exact: true }).click();
   await modal.getByRole('button', { name: 'All Traffic', exact: true }).click();
   await expect(modal).toContainText('Allow all traffic from lab to dmz.');
   await page.keyboard.press('Escape');
   await expect(modal).toHaveCount(0);
   await expect(page.getByText('No source selected')).toBeVisible();
-  await node(page, 20).click();
-  await node(page, 40).click();
+  await settled(page);
+  await pickRoute(page, 20, 40);
   await modal.getByRole('button', { name: 'Cancel' }).click();
   await expect(modal).toHaveCount(0);
   expect(api.take()).toEqual([]);
 });
 
-test('policies are deleted from the list and from a route popover', async ({ page }) => {
-  const api = await mockPolicies(page);
-  await page.goto('/admin/policies');
+test('a policy is deleted from the list', async ({ page }) => {
+  const api = await openPage(page);
   await expect(tab(page, 'Policies')).toContainText('(4)');
   await expect(page.getByText('servers-lab')).toBeVisible();
   await expect(row(page, 'Internet')).toContainText('ALL');
@@ -220,7 +244,10 @@ test('policies are deleted from the list and from a route popover', async ({ pag
     { method: 'GET', url: '/admin/vlans' },
     { method: 'GET', url: '/admin/policies?firewallId=1' },
   ]);
+});
 
+test('a route shows a hover card and a popover that deletes its policy', async ({ page }) => {
+  const api = await openPage(page);
   // Hover shows the route card; a click pins the popover with its delete action.
   const hit = page.locator('svg path[stroke="transparent"]').first();
   await hit.dispatchEvent('mouseover', { clientX: 500, clientY: 600 });
@@ -244,11 +271,8 @@ test('policies are deleted from the list and from a route popover', async ({ pag
   ]);
 });
 
-test('address and service objects are listed, created and deleted', async ({ page }) => {
-  const api = await mockPolicies(page);
-  await page.goto('/admin/policies');
-  await expect(node(page, 10)).toBeVisible();
-  api.take();
+test('address objects are listed, created and deleted', async ({ page }) => {
+  const api = await openPage(page);
 
   await tab(page, 'Address Objects').click();
   await expect(page.getByText('2 address objects')).toBeVisible();
@@ -286,8 +310,10 @@ test('address and service objects are listed, created and deleted', async ({ pag
   await expect(page.getByPlaceholder('Comment (optional)')).toHaveValue('kept');
   await page.getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByPlaceholder('Comment (optional)')).toHaveCount(0);
-  api.take();
+});
 
+test('service objects are listed, created and deleted', async ({ page }) => {
+  const api = await openPage(page);
   await tab(page, 'Service Objects').click();
   await expect(page.getByText('2 service objects')).toBeVisible();
   await expect(row(page, 'Minecraft')).toContainText('TCP 25565');
