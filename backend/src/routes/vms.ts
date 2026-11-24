@@ -8,7 +8,7 @@ import {
   sshKeys as sshKeysTable, users, userVlans,
 } from '../db/schema/index.ts';
 import {
-  getVMStatus, vmAction, getVNCTicket, getVMConfig, getVMConfigCurrent, updateVMConfig, resizeVMDisk, getAllVMs, getVMRRD,
+  getVMStatus, vmAction, getVNCTicket, getVMConfig, getVMConfigCurrent, updateVMConfig, resizeVMDisk, deleteVMDisk, getAllVMs, getVMRRD,
   getVMBackups, createVMBackup, deleteVMBackup, getBackupStorages,
   restoreVMBackup, listBackupFiles, downloadBackupFile, deleteVM, getGuestType, resolveLegacyVmNode,
   getLXCStatus, lxcAction, getLXCConfig, getLXCVNCTicket,
@@ -24,7 +24,7 @@ import { notify, portalLink } from '../utils/notify.ts';
 import { userCanPerformVmOp, userSeesAllVms } from '../utils/vmAccess.ts';
 import { checkVlanAssignment, parseVlanTag, parseNetInterface } from '../utils/vlanAccess.ts';
 import { summarizeLease, renewLease } from '../utils/leases.ts';
-import { assertUserQuota, configDiskGb, refreshHardwareAllocation, sizeToGb, vmQuotaUserId } from '../utils/quota.ts';
+import { assertUserQuota, configDiskGb, diskSizeGb, refreshHardwareAllocation, sizeToGb, vmQuotaUserId } from '../utils/quota.ts';
 import { decodeNodeRef, nodeLookupCandidates } from '../utils/nodeRef.ts';
 import { computeCpuTopology } from '../utils/cpuTopology.ts';
 import { assertStorageExposed } from '../utils/storageVisibility.ts';
@@ -1356,6 +1356,72 @@ router.put('/:node/:vmid/resize-disk', pHardware, async (req, res) => {
     await resizeVMDisk(node, vmid, disk, size);
     await refreshHardwareAllocation(node, Number(vmid), { addDiskGb, config });
     await logAudit(req, 'vm_disk_resize', `${node}/${vmid}`, `${disk}=${size}`);
+    res.json({ ok: true });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// Disks the VM boots from: every entry of `boot: order=...` plus the legacy
+// `bootdisk`. With neither naming a present disk, PVE boots its first disk
+// (ide, sata, scsi, virtio order; see resolve_first_disk), so that one is protected.
+const DISK_BUSES = ['ide', 'sata', 'scsi', 'virtio'];
+function bootDiskKeys(config) {
+  const order = String(config?.boot ?? '').match(/(?:^|,)order=([^,]*)/)?.[1];
+  const keys = new Set([...(order ? order.split(';') : []), ...(config?.bootdisk ? [config.bootdisk] : [])]);
+  const disks = Object.keys(config || {})
+    .map((k) => k.match(/^(ide|sata|scsi|virtio)(\d+)$/))
+    .filter((m) => m && typeof config[m[0]] === 'string' && !config[m[0]].split(',').includes('media=cdrom'))
+    .sort((a, b) => DISK_BUSES.indexOf(a[1]) - DISK_BUSES.indexOf(b[1]) || Number(a[2]) - Number(b[2]));
+  if (!disks.some((m) => keys.has(m[0])) && disks[0]) keys.add(disks[0][0]);
+  return keys;
+}
+
+// Detach a data disk and delete its volume, freeing the storage and the
+// owner's disk quota. Stopped VMs only: hot-unplug depends on the guest.
+router.delete('/:node/:vmid/disks/:disk', pHardware, async (req, res) => {
+  const { node, vmid, disk } = req.params;
+
+  if (!(await allowOp(req, node, vmid, 'vm.disk.remove'))) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  if (!/^(scsi|virtio|sata|ide)\d+$/.test(disk)) {
+    return res.status(400).json({ error: 'Invalid disk name' });
+  }
+
+  try {
+    const parsedVmid = parseInt(vmid, 10);
+    // Conflicting owner aliases would leave the quota unaccounted: refuse before deleting anything.
+    await vmQuotaUserId(node, parsedVmid, req.session.userId);
+    const value = await withVmMigrationLock(parsedVmid, async (database) => {
+      if (await vmMigrationPending(database, parsedVmid)) {
+        throw httpError(409, 'VM migration is running or awaiting review; disk removal is blocked');
+      }
+      // Also refuses a migrated-away source copy, whose disks may be shared with the target.
+      await assertVmPolicyLocation(database, node, parsedVmid);
+      const config = await getVMConfigCurrent(node, vmid);
+      const value = typeof config?.[disk] === 'string' ? config[disk] : '';
+      const volume = value.split(',')[0];
+      if (!value || volume === 'none') throw httpError(404, `Disk ${disk} not found on this VM`);
+      if (value.includes('cloudinit') || value.split(',').includes('media=cdrom')) {
+        throw httpError(400, 'CD-ROM and cloud-init drives cannot be removed here');
+      }
+      // PVE only deletes a managed volume this VM owns; a host path or another VM's volume would just be detached.
+      if (!new RegExp(`^[A-Za-z0-9][\\w.-]*:(?:[^,]*/)?vm-${parsedVmid}-disk-\\d+(?:\\.\\w+)?$`).test(volume)) {
+        throw httpError(400, `${disk} is not a storage volume owned by this VM; ask an administrator to remove it`);
+      }
+      if (bootDiskKeys(config).has(disk)) throw httpError(409, `${disk} is a boot disk and cannot be removed`);
+      if ((await getVMStatus(node, vmid))?.status !== 'stopped') throw httpError(409, 'Stop the VM before removing a disk');
+      // PVE keeps a volume a snapshot still references (as unusedN), so the delete would silently not happen.
+      if ((await getSnapshots(node, vmid))?.some((snap) => snap.name !== 'current')) {
+        throw httpError(409, 'Delete this VM\'s snapshots before removing a disk');
+      }
+      await deleteVMDisk(node, vmid, disk);
+      return value;
+    });
+
+    await refreshHardwareAllocation(node, parsedVmid, { removeDiskGb: diskSizeGb(value) || 0 });
+    await logAudit(req, 'vm_disk_remove', `${node}/${vmid}`, `${disk} (${value.split(',')[0]})`);
     res.json({ ok: true });
   } catch (err) {
     sendError(res, err);
