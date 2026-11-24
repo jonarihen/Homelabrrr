@@ -131,6 +131,17 @@ test('cloud-init deploy: neither a password nor a key is refused with 400', () =
   }
 });
 
+test('cloud-init deploy: an explicit opt-in allows no credentials', () => {
+  assert.doesNotThrow(() => assertLoginPossible({
+    ciPassword: '', sshKeys: [], cloudInitCapable: true, allowNoLogin: true,
+  }));
+  // Only a literal true opts in; a truthy string from a sloppy client does not.
+  assert.throws(
+    () => assertLoginPossible({ ciPassword: '', sshKeys: [], cloudInitCapable: true, allowNoLogin: 'yes' }),
+    (err) => err.status === 400 && err.message === NO_LOGIN_MESSAGE,
+  );
+});
+
 test('a non-cloud-init deploy with no credentials is left alone', () => {
   // ISO / template installs run their own installer, which sets up the account.
   assert.doesNotThrow(() => assertLoginPossible({

@@ -36,3 +36,22 @@ export function cloudInitLoginMissing({ password, keyIds, keys }) {
   const usable = new Set((Array.isArray(keys) ? keys : []).filter(isUsableKey).map((k) => k.id));
   return !(Array.isArray(keyIds) ? keyIds : []).some((id) => usable.has(id));
 }
+
+// Default login user of well-known distro cloud images, guessed from the image
+// (or template) name and download URL. '' when unknown — the deploy form then
+// asks for a username instead of implying one.
+// shortcut: name/URL match only, add a stored per-image default user if admins hit misses.
+const DEFAULT_USERS = [
+  [/\bubuntu\b/, 'ubuntu'],
+  [/\bdebian\b/, 'debian'],
+  [/\bfedora\b/, 'fedora'],
+  [/\brocky\b/, 'rocky'],
+  [/\balma(linux)?\b/, 'almalinux'],
+  [/\barch(linux)?\b/, 'arch'],
+  [/\balpine\b/, 'alpine'],
+];
+
+export function imageDefaultUser(image) {
+  const text = `${image?.name || ''} ${image?.url || ''}`.toLowerCase();
+  return DEFAULT_USERS.find(([re]) => re.test(text))?.[1] || '';
+}

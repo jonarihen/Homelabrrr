@@ -4,431 +4,9 @@ import useDocumentTitle from '../../hooks/useDocumentTitle.js';
 import Modal from '../../components/Modal.jsx';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useConfirm, useToast } from '../../contexts/FeedbackContext.jsx';
-
-const SERVICES = [
-  { name: 'ALL', label: 'All Traffic' },
-  { name: 'HTTP', label: 'HTTP' },
-  { name: 'HTTPS', label: 'HTTPS' },
-  { name: 'SSH', label: 'SSH' },
-  { name: 'RDP', label: 'RDP' },
-  { name: 'DNS', label: 'DNS' },
-  { name: 'PING', label: 'Ping' },
-  { name: 'ALL_TCP', label: 'All TCP' },
-  { name: 'ALL_UDP', label: 'All UDP' },
-];
-
-const SERVICE_LABELS = Object.fromEntries(SERVICES.map(service => [service.name, service.label]));
-
-// AARIS tokens only (aaris.css): services are grouped by role, the mono
-// labels carry the exact service. Hex, not var(), because callers append alpha.
-const SERVICE_COLORS = {
-  ALL: '#3fd97f',     // --ok
-  HTTP: '#ff5a1f',    // --accent
-  HTTPS: '#ff5a1f',
-  SSH: '#ffb224',     // --warning
-  RDP: '#ffb224',
-  DNS: '#e9ecef',     // --ink
-  PING: '#e9ecef',
-  ALL_TCP: '#8b939e', // --muted
-  ALL_UDP: '#8b939e',
-};
-const FALLBACK_COLOR = '#8b939e';
-
-const DENY_COLOR = '#e5484d'; // --danger
-const NODE_CARD_SIZE = 160;
-const NODE_SAFETY_PADDING = 26;
-const MIN_NODE_SPACING = 172;
-const NODE_COLLISION_GAP = 18;
-const MUTED_LINE_OPACITY = 0.44;
-const MUTED_NODE_OPACITY = 0.68;
-
-function servicePalette(services = [], action = 'accept') {
-  if (action !== 'accept') return [DENY_COLOR];
-
-  const unique = Array.from(new Set(services.filter(Boolean)));
-  if (unique.length === 0) return [SERVICE_COLORS.ALL];
-
-  const ordered = unique.length > 1
-    ? [...unique.filter(s => s !== 'ALL'), ...(unique.includes('ALL') ? ['ALL'] : [])]
-    : unique;
-
-  return ordered.slice(0, 4).map(s => SERVICE_COLORS[s] || FALLBACK_COLOR);
-}
-
-function badgeStyle(service, action = 'accept') {
-  const color = action !== 'accept' ? DENY_COLOR : (SERVICE_COLORS[service] || FALLBACK_COLOR);
-  return {
-    color,
-    backgroundColor: `${color}1a`,
-    borderColor: `${color}33`,
-  };
-}
-
-function describeServices(services = []) {
-  if (!services.length || services.includes('ALL')) return 'All traffic';
-  const labels = services.map(service => SERVICE_LABELS[service] || service);
-  if (labels.length === 1) return labels[0];
-  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
-  return `${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]}`;
-}
-
-function buildPolicyGraph(policies) {
-  const degree = new Map();
-  const peers = new Map();
-  const interVlan = policies.filter(p => !p.isInternet && p.srcVlan && p.dstVlan);
-
-  const touch = (a, b) => {
-    degree.set(a, (degree.get(a) || 0) + 1);
-    if (!peers.has(a)) peers.set(a, new Set());
-    peers.get(a).add(b);
-  };
-
-  interVlan.forEach((p) => {
-    touch(p.srcVlan.tag, p.dstVlan.tag);
-    touch(p.dstVlan.tag, p.srcVlan.tag);
-  });
-
-  return { degree, peers, interVlan };
-}
-
-function ellipseCircumference(radiusX, radiusY) {
-  if (radiusX <= 0 || radiusY <= 0) return 0;
-  const h = ((radiusX - radiusY) ** 2) / ((radiusX + radiusY) ** 2 || 1);
-  return Math.PI * (radiusX + radiusY) * (1 + ((3 * h) / (10 + Math.sqrt(4 - (3 * h)))));
-}
-
-function placeOnEllipse(tags, radiusX, radiusY, cx, cy, startAngle = -Math.PI / 2, spread = Math.PI * 2) {
-  if (tags.length === 0) return [];
-  return tags.map((tag, index) => {
-    const angle = startAngle + (spread * index) / tags.length;
-    return {
-      tag,
-      x: cx + Math.cos(angle) * radiusX,
-      y: cy + Math.sin(angle) * radiusY,
-    };
-  });
-}
-
-function placeAcrossBands(tags, {
-  baseRadiusX,
-  baseRadiusY,
-  maxRadiusX,
-  maxRadiusY,
-  cx,
-  cy,
-  spacing = MIN_NODE_SPACING,
-  startAngle = -Math.PI / 2,
-}) {
-  if (tags.length === 0) return [];
-
-  const placed = [];
-  const remaining = [...tags];
-  const gapX = Math.max(74, spacing * 0.72);
-  const gapY = Math.max(42, spacing * 0.38);
-  let bandIndex = 0;
-
-  while (remaining.length > 0) {
-    const radiusX = Math.min(maxRadiusX, baseRadiusX + (bandIndex * gapX));
-    const radiusY = Math.min(maxRadiusY, baseRadiusY + (bandIndex * gapY));
-    const circumference = ellipseCircumference(radiusX, radiusY);
-    let capacity = Math.max(1, Math.floor(circumference / spacing));
-
-    const atLimit = radiusX >= maxRadiusX - 1 && radiusY >= maxRadiusY - 1;
-    if (atLimit) capacity = remaining.length;
-
-    const count = Math.min(remaining.length, capacity);
-    const slice = remaining.splice(0, count);
-    const angleOffset = bandIndex % 2 === 0 ? 0 : Math.PI / Math.max(6, count);
-    placed.push(...placeOnEllipse(slice, radiusX, radiusY, cx, cy, startAngle + angleOffset));
-
-    bandIndex += 1;
-    if (bandIndex > 8 && remaining.length > 0) {
-      placed.push(...placeOnEllipse(remaining.splice(0), maxRadiusX, maxRadiusY, cx, cy, startAngle + 0.2));
-      break;
-    }
-  }
-
-  return placed;
-}
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function resolveSquareCollisions(initialPositions, width, height, fixedTags = new Set()) {
-  const tags = Object.keys(initialPositions);
-  if (tags.length <= 1) return initialPositions;
-
-  const half = NODE_CARD_SIZE / 2;
-  const minX = half + NODE_SAFETY_PADDING;
-  const maxX = Math.max(minX, width - half - NODE_SAFETY_PADDING);
-  const minY = half + NODE_SAFETY_PADDING;
-  const maxY = Math.max(minY, height - half - NODE_SAFETY_PADDING);
-
-  const positions = Object.fromEntries(
-    tags.map(tag => [
-      tag,
-      {
-        x: clamp(initialPositions[tag].x, minX, maxX),
-        y: clamp(initialPositions[tag].y, minY, maxY),
-      },
-    ])
-  );
-
-  for (let iteration = 0; iteration < 90; iteration += 1) {
-    let moved = false;
-    const adjustments = Object.fromEntries(tags.map(tag => [tag, { x: 0, y: 0 }]));
-
-    for (let i = 0; i < tags.length; i += 1) {
-      for (let j = i + 1; j < tags.length; j += 1) {
-        const tagA = tags[i];
-        const tagB = tags[j];
-        const a = positions[tagA];
-        const b = positions[tagB];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const overlapX = (NODE_CARD_SIZE + NODE_COLLISION_GAP) - Math.abs(dx);
-        const overlapY = (NODE_CARD_SIZE + NODE_COLLISION_GAP) - Math.abs(dy);
-
-        if (overlapX <= 0 || overlapY <= 0) continue;
-
-        moved = true;
-        const pushAlongX = overlapX < overlapY;
-        const fixedA = fixedTags.has(tagA);
-        const fixedB = fixedTags.has(tagB);
-        const dirX = dx === 0 ? (i % 2 === 0 ? -1 : 1) : Math.sign(dx);
-        const dirY = dy === 0 ? (j % 2 === 0 ? -1 : 1) : Math.sign(dy);
-
-        if (pushAlongX) {
-          const amount = overlapX + 0.5;
-          if (!fixedA && !fixedB) {
-            adjustments[tagA].x -= dirX * (amount / 2);
-            adjustments[tagB].x += dirX * (amount / 2);
-          } else if (fixedA && !fixedB) {
-            adjustments[tagB].x += dirX * amount;
-          } else if (!fixedA && fixedB) {
-            adjustments[tagA].x -= dirX * amount;
-          }
-        } else {
-          const amount = overlapY + 0.5;
-          if (!fixedA && !fixedB) {
-            adjustments[tagA].y -= dirY * (amount / 2);
-            adjustments[tagB].y += dirY * (amount / 2);
-          } else if (fixedA && !fixedB) {
-            adjustments[tagB].y += dirY * amount;
-          } else if (!fixedA && fixedB) {
-            adjustments[tagA].y -= dirY * amount;
-          }
-        }
-      }
-    }
-
-    tags.forEach((tag) => {
-      if (fixedTags.has(tag)) {
-        positions[tag] = {
-          x: clamp(initialPositions[tag].x, minX, maxX),
-          y: clamp(initialPositions[tag].y, minY, maxY),
-        };
-        return;
-      }
-
-      positions[tag] = {
-        x: clamp(positions[tag].x + (adjustments[tag].x * 0.92), minX, maxX),
-        y: clamp(positions[tag].y + (adjustments[tag].y * 0.92), minY, maxY),
-      };
-    });
-
-    if (!moved) break;
-  }
-
-  return positions;
-}
-
-function buildNodePositions(vlans, policies, srcTag, width, height) {
-  const { degree, peers } = buildPolicyGraph(policies);
-  const sortedTags = vlans
-    .map(v => v.tag)
-    .sort((a, b) => (degree.get(b) || 0) - (degree.get(a) || 0) || a - b);
-
-  const cx = width / 2;
-  const cy = height / 2;
-  const safeRadiusX = Math.max(120, (width / 2) - ((NODE_CARD_SIZE / 2) + NODE_SAFETY_PADDING));
-  const safeRadiusY = Math.max(100, (height / 2) - ((NODE_CARD_SIZE / 2) + NODE_SAFETY_PADDING));
-  const positions = {};
-
-  if (sortedTags.length === 1) {
-    positions[sortedTags[0]] = { x: cx, y: cy };
-    return resolveSquareCollisions(positions, width, height);
-  }
-
-  if (srcTag) {
-    positions[srcTag] = { x: cx, y: cy };
-
-    const peerTags = Array.from(peers.get(srcTag) || []).sort(
-      (a, b) => (degree.get(b) || 0) - (degree.get(a) || 0) || a - b
-    );
-    const otherTags = sortedTags.filter(tag => tag !== srcTag && !peerTags.includes(tag));
-
-    const innerBaseX = Math.min(Math.max(safeRadiusX * 0.42, 165), safeRadiusX);
-    const innerBaseY = Math.min(Math.max(safeRadiusY * 0.3, 110), safeRadiusY);
-    const innerMaxX = Math.min(safeRadiusX * 0.7, safeRadiusX - 26);
-    const innerMaxY = Math.min(safeRadiusY * 0.58, safeRadiusY - 22);
-    const outerBaseX = Math.min(Math.max(safeRadiusX * 0.7, innerMaxX + 32), safeRadiusX);
-    const outerBaseY = Math.min(Math.max(safeRadiusY * 0.72, innerMaxY + 18), safeRadiusY);
-
-    placeAcrossBands(peerTags, {
-      baseRadiusX: innerBaseX,
-      baseRadiusY: innerBaseY,
-      maxRadiusX: Math.max(innerBaseX, innerMaxX),
-      maxRadiusY: Math.max(innerBaseY, innerMaxY),
-      cx,
-      cy,
-      spacing: MIN_NODE_SPACING - 8,
-    }).forEach(({ tag, x, y }) => {
-      positions[tag] = { x, y };
-    });
-
-    placeAcrossBands(otherTags, {
-      baseRadiusX: outerBaseX,
-      baseRadiusY: outerBaseY,
-      maxRadiusX: safeRadiusX,
-      maxRadiusY: safeRadiusY,
-      cx,
-      cy,
-      startAngle: -Math.PI / 2 + 0.28,
-    }).forEach(({ tag, x, y }) => {
-      positions[tag] = { x, y };
-    });
-
-    return resolveSquareCollisions(positions, width, height, new Set([String(srcTag)]));
-  }
-
-  if (sortedTags.length <= 4) {
-    placeOnEllipse(
-      sortedTags,
-      Math.min(Math.max(safeRadiusX * 0.65, 160), safeRadiusX),
-      Math.min(Math.max(safeRadiusY * 0.6, 120), safeRadiusY),
-      cx,
-      cy
-    ).forEach(({ tag, x, y }) => {
-      positions[tag] = { x, y };
-    });
-    return resolveSquareCollisions(positions, width, height);
-  }
-
-  const innerCount = Math.max(2, Math.ceil(sortedTags.length / 3));
-  const innerTags = sortedTags.slice(0, innerCount);
-  const outerTags = sortedTags.slice(innerCount);
-
-  placeAcrossBands(innerTags, {
-    baseRadiusX: Math.min(Math.max(safeRadiusX * 0.34, 140), safeRadiusX),
-    baseRadiusY: Math.min(Math.max(safeRadiusY * 0.28, 95), safeRadiusY),
-    maxRadiusX: Math.min(safeRadiusX * 0.58, safeRadiusX - 32),
-    maxRadiusY: Math.min(safeRadiusY * 0.5, safeRadiusY - 24),
-    cx,
-    cy,
-    spacing: MIN_NODE_SPACING - 10,
-  }).forEach(({ tag, x, y }) => {
-    positions[tag] = { x, y };
-  });
-
-  placeAcrossBands(outerTags, {
-    baseRadiusX: Math.min(Math.max(safeRadiusX * 0.72, 220), safeRadiusX),
-    baseRadiusY: Math.min(Math.max(safeRadiusY * 0.72, 150), safeRadiusY),
-    maxRadiusX: safeRadiusX,
-    maxRadiusY: safeRadiusY,
-    cx,
-    cy,
-    startAngle: -Math.PI / 2 + 0.18,
-  }).forEach(({ tag, x, y }) => {
-    positions[tag] = { x, y };
-  });
-
-  return resolveSquareCollisions(positions, width, height);
-}
-
-function buildLineModels(policies, positions, srcTag) {
-  const pairCounts = new Map();
-
-  return policies
-    .filter(p => !p.isInternet && p.srcVlan && p.dstVlan)
-    .map((p) => {
-      const src = positions[p.srcVlan.tag];
-      const dst = positions[p.dstVlan.tag];
-      if (!src || !dst) return null;
-
-      const dx = dst.x - src.x;
-      const dy = dst.y - src.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len;
-      const ny = dx / len;
-      const midX = (src.x + dst.x) / 2;
-      const midY = (src.y + dst.y) / 2;
-      const pairKey = [p.srcVlan.tag, p.dstVlan.tag].sort((a, b) => a - b).join('-');
-      const pairIndex = pairCounts.get(pairKey) || 0;
-      pairCounts.set(pairKey, pairIndex + 1);
-
-      const bendBase = Math.max(30, Math.min(90, len * 0.16));
-      const direction = pairIndex % 2 === 0 ? 1 : -1;
-      const intensity = Math.floor(pairIndex / 2) + 1;
-      const bend = (srcTag && (p.srcVlan.tag === srcTag || p.dstVlan.tag === srcTag))
-        ? bendBase * 0.45 * direction * intensity
-        : bendBase * direction * intensity;
-      const controlX = midX + nx * bend;
-      const controlY = midY + ny * bend;
-
-      return {
-        id: p.policyid,
-        pathD: `M ${src.x} ${src.y} Q ${controlX} ${controlY} ${dst.x} ${dst.y}`,
-        srcX: src.x,
-        srcY: src.y,
-        dstX: dst.x,
-        dstY: dst.y,
-        srcName: p.srcVlan.name,
-        dstName: p.dstVlan.name,
-        srcTag: p.srcVlan.tag,
-        dstTag: p.dstVlan.tag,
-        action: p.action,
-        services: p.service || [],
-        colors: servicePalette(p.service, p.action),
-        isFocused: !srcTag || p.srcVlan.tag === srcTag || p.dstVlan.tag === srcTag,
-      };
-    })
-    .filter(Boolean);
-}
-
-function GraphLegend({ usedServices, hasDeny }) {
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {SERVICES.map(service => {
-        const used = !usedServices || usedServices.has(service.name);
-        return (
-          <span
-            key={service.name}
-            title={used ? undefined : 'No policy currently uses this service'}
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] transition-opacity ${used ? '' : 'opacity-40'}`}
-            style={badgeStyle(service.name)}
-          >
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{ backgroundColor: SERVICE_COLORS[service.name] }}
-            />
-            {service.label}
-          </span>
-        );
-      })}
-      {hasDeny && (
-        <span
-          className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em]"
-          style={badgeStyle('DENY', 'deny')}
-        >
-          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: DENY_COLOR }} />
-          Deny
-        </span>
-      )}
-    </div>
-  );
-}
+import { SERVICES, SERVICE_COLORS, tint, badgeStyle, describeServices } from './policies/services.js';
+import { MUTED_LINE_OPACITY, MUTED_NODE_OPACITY, buildPolicyGraph, clamp, buildNodePositions, buildLineModels } from './policies/graphLayout.js';
+import GraphLegend from './policies/GraphLegend.jsx';
 
 export default function PoliciesPage() {
   const confirm = useConfirm();
@@ -900,7 +478,7 @@ export default function PoliciesPage() {
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
       <div className="space-y-4">
-        <div className="rounded-3xl border border-gray-800 bg-[radial-gradient(circle_at_top,_rgba(59,130,246,0.16),_transparent_35%),linear-gradient(180deg,_rgba(15,23,42,0.98),_rgba(2,6,23,0.98))] p-6">
+        <div className="rounded-3xl border border-gray-800 bg-gray-900 p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-3">
               <div>
@@ -946,7 +524,7 @@ export default function PoliciesPage() {
 
           <div
             ref={canvasRef}
-            className="relative mt-6 overflow-hidden border border-slate-800 bg-[radial-gradient(circle_at_center,_rgba(30,41,59,0.75),_rgba(2,6,23,0.98)_68%)] px-4 py-4 min-h-[620px]"
+            className="relative mt-6 overflow-hidden border border-slate-800 bg-gray-950 px-4 py-4 min-h-[620px]"
             style={{ minHeight: `${meshMinHeight}px`, cursor: panRef.current ? 'grabbing' : 'grab' }}
             onMouseLeave={() => setHoveredLine(null)}
             onPointerDown={handleCanvasPointerDown}
@@ -963,8 +541,7 @@ export default function PoliciesPage() {
                 Recenter
               </button>
             )}
-            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.05)_1px,transparent_1px)] bg-[size:72px_72px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }} />
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(56,189,248,0.12),_transparent_46%)]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }} />
+            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(var(--line-soft)_1px,transparent_1px),linear-gradient(90deg,var(--line-soft)_1px,transparent_1px)] bg-[size:72px_72px]" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }} />
             {selectedTag && (
               <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: '0 0' }}>
                 <div
@@ -1124,7 +701,7 @@ export default function PoliciesPage() {
                         />
                         <path
                           d={line.pathD}
-                          stroke="rgba(15,23,42,0.92)"
+                          stroke="var(--bg)"
                           strokeWidth={isHovered ? 8.5 : 7}
                           strokeLinecap="round"
                           fill="none"
@@ -1193,7 +770,7 @@ export default function PoliciesPage() {
                                     cx="0"
                                     cy="0"
                                     r={isHovered ? 1.25 : 1}
-                                    fill="rgba(255,255,255,0.9)"
+                                    fill="var(--ink)"
                                   >
                                     <animateMotion
                                       dur={duration}
@@ -1242,7 +819,7 @@ export default function PoliciesPage() {
                     >
                       <div
                         className="min-w-[220px] rounded-2xl border bg-slate-950/95 px-4 py-3 shadow-2xl backdrop-blur-sm"
-                        style={{ borderColor: `${edgeColor}40` }}
+                        style={{ borderColor: tint(edgeColor, 25) }}
                       >
                         <div className="flex items-center gap-2 text-xs">
                           <span className="font-medium text-cyan-300">{line.srcName}</span>
@@ -1269,7 +846,7 @@ export default function PoliciesPage() {
                       {!flipBelow && (
                         <div
                           className="mx-auto -mt-1 h-2 w-2 rotate-45 bg-slate-950"
-                          style={{ borderBottom: `1px solid ${edgeColor}40`, borderRight: `1px solid ${edgeColor}40` }}
+                          style={{ borderBottom: `1px solid ${tint(edgeColor, 25)}`, borderRight: `1px solid ${tint(edgeColor, 25)}` }}
                         />
                       )}
                     </div>
@@ -1293,7 +870,7 @@ export default function PoliciesPage() {
                     >
                       <div
                         className="min-w-[250px] rounded-2xl border bg-slate-950/95 px-4 py-3 shadow-2xl backdrop-blur-sm"
-                        style={{ borderColor: `${edgeColor}40` }}
+                        style={{ borderColor: tint(edgeColor, 25) }}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex items-center gap-2 text-xs">
@@ -1372,9 +949,9 @@ export default function PoliciesPage() {
                         onPointerDown={(e) => handleNodePointerDown(e, vlan)}
                         className={`absolute z-[5] h-36 w-36 cursor-grab rounded-[30px] border text-center transition-[transform,opacity,border-color,background-color,box-shadow] duration-300 active:cursor-grabbing sm:h-40 sm:w-40 ${
                           isSource
-                            ? 'border-cyan-300/80 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.22),0_0_0_12px_rgba(8,145,178,0.08),0_26px_60px_rgba(8,145,178,0.24)]'
+                            ? 'border-cyan-300/80 bg-cyan-500/10'
                             : isDestination
-                              ? 'border-emerald-300/80 bg-emerald-500/10 shadow-[0_0_0_1px_rgba(16,185,129,0.2),0_0_0_10px_rgba(5,150,105,0.08),0_24px_60px_rgba(5,150,105,0.22)]'
+                              ? 'border-emerald-300/80 bg-emerald-500/10'
                               : isPeer
                                 ? 'border-slate-500/80 bg-slate-800/92 hover:border-cyan-300/50'
                                 : 'border-slate-800 bg-slate-900/88 hover:border-slate-600 hover:bg-slate-900'
@@ -1394,12 +971,12 @@ export default function PoliciesPage() {
                             className="absolute inset-[18%] rounded-[20px] opacity-80 blur-sm"
                             style={{
                               background: isSource
-                                ? 'radial-gradient(circle, rgba(34,211,238,0.35), transparent 72%)'
+                                ? `radial-gradient(circle, ${tint('var(--accent)', 35)}, transparent 72%)`
                                 : isDestination
-                                  ? 'radial-gradient(circle, rgba(16,185,129,0.35), transparent 72%)'
+                                  ? `radial-gradient(circle, ${tint('var(--ok)', 35)}, transparent 72%)`
                                   : isPeer
-                                    ? 'radial-gradient(circle, rgba(148,163,184,0.18), transparent 72%)'
-                                    : 'radial-gradient(circle, rgba(59,130,246,0.12), transparent 72%)',
+                                    ? `radial-gradient(circle, ${tint('var(--muted)', 18)}, transparent 72%)`
+                                    : `radial-gradient(circle, ${tint('var(--accent)', 12)}, transparent 72%)`,
                             }}
                           />
                           <div className="relative z-[1] mx-auto flex w-full max-w-[72%] flex-col items-center justify-center text-center">
@@ -1668,8 +1245,8 @@ export default function PoliciesPage() {
                 {serviceObjects.map(object => (
                   <div key={object.name} className="flex items-center gap-3 px-5 py-2.5 transition-colors hover:bg-gray-800/20">
                     <span className="flex-1 truncate text-xs font-medium text-white">{object.name}</span>
-                    {object.tcpPortrange && <span className="rounded px-1.5 py-0.5 text-[11px] font-mono text-blue-400" style={{ backgroundColor: `${SERVICE_COLORS.HTTP}14` }}>TCP {object.tcpPortrange}</span>}
-                    {object.udpPortrange && <span className="rounded px-1.5 py-0.5 text-[11px] font-mono text-amber-400" style={{ backgroundColor: `${SERVICE_COLORS.SSH}14` }}>UDP {object.udpPortrange}</span>}
+                    {object.tcpPortrange && <span className="rounded px-1.5 py-0.5 text-[11px] font-mono text-blue-400" style={{ backgroundColor: tint(SERVICE_COLORS.HTTP, 8) }}>TCP {object.tcpPortrange}</span>}
+                    {object.udpPortrange && <span className="rounded px-1.5 py-0.5 text-[11px] font-mono text-amber-400" style={{ backgroundColor: tint(SERVICE_COLORS.SSH, 8) }}>UDP {object.udpPortrange}</span>}
                     <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-500">{object.protocol}</span>
                     <button
                       onClick={async () => {
@@ -1783,8 +1360,8 @@ export default function PoliciesPage() {
                         onClick={() => toggleService(service.name)}
                         className="rounded-full border px-3 py-1.5 text-xs font-medium uppercase tracking-[0.14em] transition-all"
                         style={active
-                          ? { color: '#0e1014', backgroundColor: color, borderColor: color, boxShadow: `0 0 0 1px ${color}55` }
-                          : { color: '#94a3b8', backgroundColor: '#1f2937', borderColor: '#334155' }}
+                          ? { color: 'var(--bg)', backgroundColor: color, borderColor: color }
+                          : { color: 'var(--muted)', backgroundColor: 'var(--line-soft)', borderColor: 'var(--line)' }}
                       >
                         {service.label}
                       </button>
