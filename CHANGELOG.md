@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-24 — Security updates
+
+- **A single crafted request can no longer crash the backend.** A compressed request body followed by extra bytes used to kill the backend process, without signing in. The JSON body parser is updated to fix this.
+- **The backend runs on a patched Node.js release** with fixes for HTTP and TLS handling.
+- **The frontend's web server is updated** to a patched nginx release, along with its XML libraries.
+- **Other server libraries are updated** to versions without known security advisories.
+
 ## 2026-11-24 — No more deploys you can't log into
 
 - Deploying from a cloud image, or from a cloud-init template, now needs a password or an SSH key. The deploy form says so before you submit, and the API refuses the same request.
