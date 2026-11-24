@@ -171,7 +171,7 @@ export default function VMScheduleModal({ vm, node, vmid, onClose, onSaved }) {
                       key={preset.label}
                       type="button"
                       onClick={() => set({ days: preset.mask })}
-                      className={`px-2 py-0.5 rounded font-mono text-[10px] uppercase tracking-wide border transition-colors ${
+                      className={`px-2 py-0.5 rounded font-mono text-[11px] uppercase tracking-wide border transition-colors ${
                         form.days === preset.mask
                           ? 'border-orange-600 text-orange-400 bg-orange-600/10'
                           : 'border-gray-700 text-gray-400 hover:text-gray-200'

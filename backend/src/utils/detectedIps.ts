@@ -200,3 +200,70 @@ export function rankCandidates(list) {
       || a.ip.localeCompare(b.ip, undefined, { numeric: true })
     ));
 }
+
+// ─── NIC / DHCP lease matching (shared by the IP panel and port forwarding) ──
+
+export function normalizeMac(mac = '') {
+  return String(mac || '').trim().toLowerCase().replace(/-/g, ':');
+}
+
+function isLikelyMac(value = '') {
+  return /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i.test(normalizeMac(value));
+}
+
+export function parseVmNetworkInterfaces(config = {}) {
+  return Object.keys(config)
+    .filter((key) => /^net\d+$/.test(key))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    .map((name) => {
+      const raw = String(config[name] || '');
+      const parts = raw.split(',').map((part) => part.trim()).filter(Boolean);
+      const details = {
+        name,
+        raw,
+        model: '',
+        guestName: '',
+        bridge: '',
+        vlanTag: null,
+        mac: '',
+      };
+
+      if (parts[0]?.includes('=')) {
+        const [firstKey, firstValue = ''] = parts[0].split('=');
+        if (firstKey === 'name') {
+          details.guestName = firstValue;
+        } else if (isLikelyMac(firstValue)) {
+          details.model = firstKey;
+          details.mac = normalizeMac(firstValue);
+        }
+      }
+
+      for (const part of parts) {
+        const [key, value = ''] = part.split('=');
+        if (key === 'bridge') details.bridge = value;
+        if (key === 'tag') {
+          const tag = Number.parseInt(value, 10);
+          details.vlanTag = Number.isInteger(tag) ? tag : null;
+        }
+        if (key === 'hwaddr' || key === 'macaddr') details.mac = normalizeMac(value);
+        if (key === 'name') details.guestName = value;
+        if (!details.mac && isLikelyMac(value)) details.mac = normalizeMac(value);
+      }
+
+      return details;
+    });
+}
+
+export function findMatchingLease(leases = [], interfaceName, mac) {
+  const normalizedMac = normalizeMac(mac);
+  const candidates = leases.filter((lease) => (
+    normalizeMac(lease.mac) === normalizedMac
+    && lease.interface === interfaceName
+    && (!lease.type || lease.type === 'ipv4')
+  ));
+
+  return candidates.find((lease) => lease.status === 'leased')
+    || candidates.find((lease) => lease.status === 'reserved')
+    || candidates[0]
+    || null;
+}

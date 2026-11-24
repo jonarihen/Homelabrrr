@@ -37,7 +37,7 @@ import { decryptSecret } from '../utils/secrets.ts';
 import { readTaskProgress } from '../utils/taskProgress.ts';
 import { parseUpid, inProgressVolids } from '../utils/backupTask.ts';
 import { resolveRestoreGuestType } from '../utils/backupGuestType.ts';
-import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates } from '../utils/detectedIps.ts';
+import { parseIpConfig0, normalizeGuestAgentInterfaces, rankCandidates, normalizeMac, parseVmNetworkInterfaces, findMatchingLease } from '../utils/detectedIps.ts';
 import { validatePassword } from '../utils/validation.ts';
 import { isUniqueViolation } from '../db/errors.ts';
 import { assertVmPolicyLocation, vmMigrationPending, withVmMigrationLock, withVmPolicyWrite } from '../utils/vmMigrationLock.ts';
@@ -120,14 +120,6 @@ async function hostNameForNode(nodeValue) {
 // these strings were written for the user, not scraped from an upstream.
 const badRequest = (message) => httpError(400, message);
 
-function normalizeMac(mac = '') {
-  return String(mac || '').trim().toLowerCase().replace(/-/g, ':');
-}
-
-function isLikelyMac(value = '') {
-  return /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i.test(normalizeMac(value));
-}
-
 function parseIpv4(value = '') {
   const parts = String(value || '').trim().split('.');
   if (parts.length !== 4) return null;
@@ -192,49 +184,6 @@ function formatSubnetCidr(gateway = '', netmask = '') {
   return `${intToIpv4(gatewayInt & netmaskInt)}/${prefix}`;
 }
 
-function parseVmNetworkInterfaces(config = {}) {
-  return Object.keys(config)
-    .filter((key) => /^net\d+$/.test(key))
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-    .map((name) => {
-      const raw = String(config[name] || '');
-      const parts = raw.split(',').map((part) => part.trim()).filter(Boolean);
-      const details = {
-        name,
-        raw,
-        model: '',
-        guestName: '',
-        bridge: '',
-        vlanTag: null,
-        mac: '',
-      };
-
-      if (parts[0]?.includes('=')) {
-        const [firstKey, firstValue = ''] = parts[0].split('=');
-        if (firstKey === 'name') {
-          details.guestName = firstValue;
-        } else if (isLikelyMac(firstValue)) {
-          details.model = firstKey;
-          details.mac = normalizeMac(firstValue);
-        }
-      }
-
-      for (const part of parts) {
-        const [key, value = ''] = part.split('=');
-        if (key === 'bridge') details.bridge = value;
-        if (key === 'tag') {
-          const tag = Number.parseInt(value, 10);
-          details.vlanTag = Number.isInteger(tag) ? tag : null;
-        }
-        if (key === 'hwaddr' || key === 'macaddr') details.mac = normalizeMac(value);
-        if (key === 'name') details.guestName = value;
-        if (!details.mac && isLikelyMac(value)) details.mac = normalizeMac(value);
-      }
-
-      return details;
-    });
-}
-
 async function loadVmConfigForIpManagement(node, vmid) {
   try {
     return await getVMConfig(node, vmid);
@@ -263,20 +212,6 @@ function nextReservationId(reservations = []) {
     const value = Number.parseInt(reservation.id ?? reservation.q_origin_key ?? 0, 10) || 0;
     return Math.max(max, value);
   }, 0) + 1;
-}
-
-function findMatchingLease(leases = [], interfaceName, mac) {
-  const normalizedMac = normalizeMac(mac);
-  const candidates = leases.filter((lease) => (
-    normalizeMac(lease.mac) === normalizedMac
-    && lease.interface === interfaceName
-    && (!lease.type || lease.type === 'ipv4')
-  ));
-
-  return candidates.find((lease) => lease.status === 'leased')
-    || candidates.find((lease) => lease.status === 'reserved')
-    || candidates[0]
-    || null;
 }
 
 // `vm_ssh_configs.host` is the portal's only record of "where this VM lives" —
