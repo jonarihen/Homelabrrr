@@ -59,8 +59,9 @@ test('mutation audit records success, denial, and failure without request bodies
 test('high-risk route sources declare stable mutation audit actions', async () => {
   // Keep the taxonomy reviewable: these are the concrete mutations called out
   // by issue #114, in addition to the global outcome event above.
-  const { readFile } = await import('node:fs/promises');
-  const admin = await readFile(new URL('../routes/admin.ts', import.meta.url), 'utf8');
+  const { readFile, readdir } = await import('node:fs/promises');
+  // admin.ts is a thin mount; the handlers live in routes/admin/*.ts.
+  const admin = (await Promise.all((await readdir(new URL('../routes/admin/', import.meta.url))).map((f) => readFile(new URL(`../routes/admin/${f}`, import.meta.url), 'utf8')))).join('\n');
   const ssh = await readFile(new URL('../routes/ssh.ts', import.meta.url), 'utf8');
   const sftp = await readFile(new URL('../routes/sftp.ts', import.meta.url), 'utf8');
   for (const action of ['pve_host_created', 'pve_host_updated', 'pve_host_deleted', 'admin_toggle_permission']) assert.match(admin, new RegExp(action));
