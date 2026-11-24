@@ -667,7 +667,7 @@ function ApiTokensSection() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <p className="text-sm text-white truncate font-mono">{t.name}</p>
-                    {t.expired && <span className="text-[10px] bg-red-900 text-red-300 px-1.5 py-0.5 rounded uppercase tracking-wide">Expired</span>}
+                    {t.expired && <span className="text-[11px] bg-red-900 text-red-300 px-1.5 py-0.5 rounded uppercase tracking-wide">Expired</span>}
                   </div>
                   <p className="text-[11px] text-gray-500 mt-0.5">
                     Created {fmtDate(t.createdAt)} · Expires {t.expiresAt ? fmtDate(t.expiresAt) : 'never'} · Last used {fmtDate(t.lastUsedAt)}

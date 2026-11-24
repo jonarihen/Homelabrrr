@@ -5,33 +5,15 @@
    ========================================================================== */
 
 @import url("/static/fonts/fonts.css");
+@import url("aaris-tokens.css");
 
 :root {
-  /* ── AARIS canonical tokens (doc §4/§5) ── */
-  --bg:        #0e1014;
-  --bg-raise:  #12151a;
-  --ink:       #e9ecef;
-  --muted:     #8b939e;
-  --dim:       #4d545e;
-  --line:      #232830;
-  --line-soft: #1a1e25;
-  --accent:    #ff5a1f;
-  --ok:        #3fd97f;
-  --warning:   #ffb224;
-  --danger:    #e5484d;
-
-  --font-sans: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-
-  --grid: 48px;
-
   /* ── Back-compat aliases: old TTSRoad token names → AARIS values ──
      Lets the bulk of the 2,877-line app sheet convert without per-line edits. */
   --bg-card:    var(--bg-raise);
   --surface2:   var(--bg-raise);
   --bg-hover:   #1a1e25;
   --surface3:   #1a1e25;
-  --bg-input:   #0b0d11;
 
   --text:       var(--ink);
   --text-muted: var(--muted);
@@ -42,7 +24,6 @@
   --panel-border-strong: var(--accent);
 
   --accent-dim:   rgba(255, 90, 31, .15);
-  --accent-hover: #ff7a44;
 
   --green:   var(--ok);      --green-dim:  rgba(63, 217, 127, .12);
   --yellow:  var(--warning); --yellow-dim: rgba(255, 178, 36, .12);
