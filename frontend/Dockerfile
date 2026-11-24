@@ -5,6 +5,7 @@ COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
 COPY CHANGELOG.md /app/CHANGELOG.md
+COPY docs/screenshots/changelog/ /app/docs/screenshots/changelog/
 RUN npm run build
 
 FROM nginx:1.31.8-alpine3.24
