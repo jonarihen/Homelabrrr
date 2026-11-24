@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-24 — Saved Ko-fi emails need the owner's confirmation
+
+- An email a member saves on the Support page no longer matches payments by itself. The first payment from it waits in the review queue, marked "claimed by", until the owner links it; linking it with "remember this email" confirms the address, and later payments from it match automatically.
+- Members can remove their saved Ko-fi emails even while Ko-fi is switched off.
+- Cost coverage totals now follow the monthly allocations: support received later no longer counts toward a month the owner already paid for, and credit from before the 24-month window is included.
+
+## 2026-11-24 — Screenshots in the changelog
+
+- Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll
+- The screenshot below is a stand-in to show the feature. Real entries will show the changed screen
+
+![Example popup: this is where a screenshot of the changed screen appears](docs/screenshots/changelog/2026-11-24-changelog-example.jpg)
+
 ## 2026-11-10 — VLAN tag preview for delegated VLAN managers
 
 - When a non-admin VLAN manager creates a VLAN, the form now shows the tag and subnet that will really be assigned. It used to guess from only the VLANs that user could see, so the preview could show a tag that was already taken by someone else.
@@ -23,12 +36,6 @@
 ## 2026-11-10 — Identity prompt on user, role and power changes
 
 - Creating or changing users, roles, invites and admin-revoked tokens, and changing live power policy, now opens the **Confirm your identity** dialog when a recent password and 2FA check is needed, then finishes the action. These pages previously showed only the error "Please confirm your password and second factor before continuing", with no way to confirm.
-## 2026-11-24 — Screenshots in the changelog
-
-- Changelog entries that change the UI now come with a screenshot. Entries with one show an Example button next to the date; click it to see the picture in a popup instead of having it inlined in the list, so the changelog stays short to scroll
-- The screenshot below is a stand-in to show the feature. Real entries will show the changed screen
-
-![Example popup: this is where a screenshot of the changed screen appears](docs/screenshots/changelog/2026-11-24-changelog-example.jpg)
 
 ## 2026-11-09 — Ko-fi support
 

@@ -69,3 +69,24 @@ test('the open month carries the projected total only for a real estimate', () =
   assert.equal(coverageOverview([open], { month: '2026-11', cost: { actualOre: '23912', estimate: null } }).projection, null);
   assert.equal(coverageOverview([month()], { month: '2026-10', cost: { estimate } }).projection, null);
 });
+
+test('later support never repays a shortfall the owner already funded', () => {
+  // Newest first, as the endpoint returns them. September cost 100 DKK with no support; October cost nothing and received 100 DKK.
+  const view = coverageOverview([
+    month({ costOre: 0, knownNetOre: 10000, appliedOre: 0, ownerFundedOre: 0, carryForwardOre: 10000 }),
+    month({ month: '2026-09', costOre: 10000, knownNetOre: 0, appliedOre: 0, ownerFundedOre: 10000, carryForwardOre: 0 }),
+  ]);
+  assert.deepEqual([view.costOre, view.coveredOre, view.ownerOre, view.creditOre, view.percent], [10000, 0, 10000, 10000, 0]);
+});
+
+test('reconciled allocations include credit from before the window', () => {
+  const view = coverageOverview([month({ costOre: 40000, knownNetOre: 0, appliedOre: 40000, ownerFundedOre: 0, carryForwardOre: 5000 })]);
+  assert.deepEqual([view.coveredOre, view.ownerOre, view.creditOre, view.percent], [40000, 0, 5000, 100]);
+});
+
+test('the open month applies the credit carried into it, then its own support', () => {
+  const open = month({ month: '2026-11', open: true, costOre: null, knownNetOre: 1000 });
+  const closed = month({ costOre: 40000, knownNetOre: 50000, appliedOre: 40000, ownerFundedOre: 0, carryForwardOre: 10000 });
+  const view = coverageOverview([open, closed], { month: '2026-11', cost: { actualOre: '15000' } });
+  assert.deepEqual([view.costOre, view.coveredOre, view.ownerOre, view.creditOre], [55000, 51000, 4000, 0]);
+});

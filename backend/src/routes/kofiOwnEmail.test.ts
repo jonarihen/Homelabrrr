@@ -6,7 +6,8 @@ import request from 'supertest';
 import signature from 'cookie-signature';
 import { eq } from 'drizzle-orm';
 import { createTestDatabase } from '../testUtils/pgTestDb.ts';
-import { auditLog, kofiMemberEmails, users } from '../db/schema/index.ts';
+import { auditLog, kofiMemberEmails, paypalWebhookInbox, users } from '../db/schema/index.ts';
+import { kofiEvent } from '../testUtils/kofiFixtures.ts';
 
 // A member's own Ko-fi email binding, on the real session, CSRF and payments
 // router stack. Throwaway PostgreSQL, no network.
@@ -72,7 +73,7 @@ test('adding is refused while Ko-fi is switched off', async () => {
   assert.deepEqual(await mine(member), []);
 });
 
-test('a member binds their own email and payments from it match their account', async () => {
+test('a member binds their own email, unverified', async () => {
   await kofi.saveKofiConfiguration({ pageUrl: 'https://ko-fi.com/homelab', verificationToken: 'kofi-own-email-token' }, ADMIN);
   await kofi.setKofiEnabled(true, ADMIN);
   assert.equal((await add(member, 'not-an-email')).body.error, 'INVALID_EMAIL');
@@ -86,12 +87,32 @@ test('a member binds their own email and payments from it match their account', 
   const [row] = await fixture.db.select().from(kofiMemberEmails).where(eq(kofiMemberEmails.id, item.id));
   assert.deepEqual([row.user_id, row.source, row.verified_by], [MEMBER, 'member_entry', null]);
   assert.ok(!JSON.stringify(row).toLowerCase().includes('anders@example.dk'));
-  assert.deepEqual(await kofi.matchKofiMember(fixture.db as any, kofi.normalizeKofiEmail('anders@example.dk')), { id: item.id, userId: MEMBER });
+  assert.equal(item.verified, false);
   assert.deepEqual(await mine(member), res.body.items);
   assert.deepEqual(await mine(other), []);
   const audit = await fixture.db.select().from(auditLog).where(eq(auditLog.action, 'kofi.member_email.self_add'));
   assert.equal(audit.length, 1);
   assert.ok(!JSON.stringify(audit).toLowerCase().includes('example.dk'));
+});
+
+test('a member-entered email matches no payment until the owner verifies it by linking one', async () => {
+  const email = kofi.normalizeKofiEmail('anders@example.dk');
+  // Anyone can type any address, so the claim alone must not attribute another payer's receipts.
+  assert.equal(await kofi.matchKofiMember(fixture.db as any, email), null);
+  const event = kofiEvent({ email: 'Anders@example.dk', verification_token: 'kofi-own-email-token' });
+  assert.deepEqual(await kofi.storeKofiWebhook(JSON.stringify(event)), { stored: true });
+  await kofi.processKofiInbox();
+  const id = `live:kofi:${String(event.message_id)}`;
+  const [held] = await fixture.db.select().from(paypalWebhookInbox).where(eq(paypalWebhookInbox.id, id));
+  assert.deepEqual([held.status, held.error_code], ['needs_review', 'MEMBER_UNMATCHED']);
+  const review = (await kofiAdmin.listKofiReviewEvents()).items.find((item) => item.id === id)!;
+  assert.deepEqual([review.matchedUserId, review.matchedVerified], [MEMBER, false]);
+  await kofiAdmin.linkKofiReviewEvent(id, { userId: MEMBER }, ADMIN);
+  assert.equal((await kofi.matchKofiMember(fixture.db as any, email))?.userId, MEMBER);
+  const [row] = await fixture.db.select().from(kofiMemberEmails).where(eq(kofiMemberEmails.user_id, MEMBER));
+  assert.deepEqual([row.source, row.verified_by], ['member_verified', ADMIN]);
+  const [own] = await mine(member);
+  assert.deepEqual([own.removable, own.verified], [true, true]);
 });
 
 test('an address someone already holds cannot be claimed, by them or by another member', async () => {

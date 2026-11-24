@@ -51,7 +51,7 @@ const reasonCode = (code) => code.split('_').map((part, index) => <Fragment key=
 const REVIEW_FILTERS = [['needs_review', 'Needs review'], ['resolved', 'Resolved'], ['all', 'All']];
 const RECEIPT_FILTERS = [['net_unresolved', 'Awaiting fee'], ['posted', 'Posted'], ['reversed', 'Reversed'], ['voided', 'Voided'], ['all', 'All']];
 const RECEIPT_STATUS = { net_unresolved: ['warn', 'awaiting fee'], posted: ['ok', 'posted'], reversed: ['neutral', 'reversed'], voided: ['neutral', 'voided'] };
-const SOURCES = { admin_link: 'Linked from review', admin_entry: 'Entered in advance', member_entry: 'Entered by the member (not verified)' };
+const SOURCES = { admin_link: 'Linked from review', admin_entry: 'Entered in advance', member_entry: 'Entered by the member (not verified)', member_verified: 'Entered by the member, verified' };
 const TILES = [
   ['Last event', (s) => s.lastEventAt ? [when(s.lastEventAt), s.lastEventType, s.lastEventOutcome].filter(Boolean).join(' · ') : '—'],
   ['Last test event', (s) => when(s.lastTestEventAt)],
@@ -232,8 +232,9 @@ function ReviewQueue({ list, failed, filter, onFilter, onMore, users, run, busy 
   const rows = useRowForm();
   const { form } = rows;
   const path = (item, action) => `${BASE}/review/${encodeURIComponent(item.id)}/${action}`;
-  // An email can only be remembered for a chosen member, when the event has a usable one that is not linked yet.
-  const canRemember = (item) => !!form.member && form.member !== 'none' && !!item.email && item.reason !== 'EMAIL_MISSING' && item.matchedUserId == null;
+  // An email can only be remembered for a chosen member, when the event has a usable one that is not verified yet.
+  // Remembering it for a member who claimed it unverified verifies their claim.
+  const canRemember = (item) => !!form.member && form.member !== 'none' && !!item.email && item.reason !== 'EMAIL_MISSING' && !item.matchedVerified;
   const grossOre = toOre(form.gross);
   const feeOre = toOre(form.fee);
   const grossOk = grossOre != null && grossOre >= GROSS_MIN_ORE && grossOre <= GROSS_MAX_ORE;
@@ -272,7 +273,9 @@ function ReviewQueue({ list, failed, filter, onFilter, onMore, users, run, busy 
           <Cell>{item.payloadRetained === false ? <span className="text-xs text-gray-500 whitespace-nowrap">payer details removed</span> : <>
             <span className={`${clip} text-gray-200`} title={item.fromName || undefined}>{item.fromName || '—'}</span>
             <span className={`${clip} text-xs text-gray-400`} title={item.email || undefined}>{item.email || 'no email'}</span>
-            {item.matchedUsername && <span className={`${clip} text-xs text-green-400`}>linked to {item.matchedUsername}</span>}</>}</Cell>
+            {item.matchedUsername && (item.matchedVerified
+              ? <span className={`${clip} text-xs text-green-400`}>linked to {item.matchedUsername}</span>
+              : <span className={`${clip} text-xs text-yellow-400`}>claimed by {item.matchedUsername}, not verified</span>)}</>}</Cell>
           <Cell className="text-gray-400">{item.message ? <span className={clamp} title={item.message}>{item.message}</span> : '—'}</Cell>
           <Cell><span className="block min-w-[8.5rem] max-w-[13rem]">
             <span className="font-mono text-xs text-orange-300">{reasonCode(item.reason || 'review')}</span>
