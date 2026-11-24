@@ -35,6 +35,8 @@ const services = [
   { name: 'Minecraft', protocol: 'TCP/UDP/SCTP', tcpPortrange: '25565', udpPortrange: '', comment: '' },
   { name: 'SIP', protocol: 'TCP/UDP/SCTP', tcpPortrange: '', udpPortrange: '5060', comment: '' },
 ];
+// The first render waits on the Vite dev server, which is slow on a busy CI runner.
+const FIRST_RENDER = 15_000;
 const PAGE_API = /\/api\/admin\/(firewalls|vlans|policies|objects)/;
 
 async function mockPolicies(page, { user = admin, failFirstCreate = false } = {}) {
@@ -85,7 +87,7 @@ const pickRoute = async (page, src, dst) => {
 const openPage = async (page, options) => {
   const api = await mockPolicies(page, options);
   await page.goto('/admin/policies');
-  await expect(node(page, 10)).toBeVisible();
+  await expect(node(page, 10)).toBeVisible({ timeout: FIRST_RENDER });
   await expect.poll(() => api.calls.length).toBe(4);
   api.take();
   return api;
@@ -99,7 +101,7 @@ const confirmDelete = async (page, message) => {
 test('the mesh renders the synced VLANs, legend and summary cards', async ({ page }) => {
   const api = await mockPolicies(page);
   await page.goto('/admin/policies');
-  await expect(page.getByRole('heading', { name: 'Policy Mesh' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Policy Mesh' })).toBeVisible({ timeout: FIRST_RENDER });
   await expect.poll(() => api.calls.length).toBe(4);
   expect(api.take()).toEqual([
     { method: 'GET', url: '/admin/firewalls' },
@@ -343,7 +345,7 @@ test('service objects are listed, created and deleted', async ({ page }) => {
 test('a delegated policy manager sees only the policies tab', async ({ page }) => {
   const api = await mockPolicies(page, { user: delegate });
   await page.goto('/admin/policies');
-  await expect(tab(page, 'Policies')).toContainText('(4)');
+  await expect(tab(page, 'Policies')).toContainText('(4)', { timeout: FIRST_RENDER });
   await expect(tab(page, 'Address Objects')).toHaveCount(0);
   await expect(tab(page, 'Service Objects')).toHaveCount(0);
   expect(api.calls.some((call) => call.url.startsWith('/admin/objects'))).toBe(false);
