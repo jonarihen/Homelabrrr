@@ -7,6 +7,7 @@
 - The invalid-invite page tells you to contact the administrator who invited you.
 
 ![Deploy page after the cloud image list failed to load, with a Retry button under the error](docs/screenshots/changelog/2026-11-24-deploy-retry.png)
+
 ## 2026-11-24 — Security updates
 
 - **A single crafted request can no longer crash the backend.** A compressed request body followed by extra bytes used to kill the backend process, without signing in. The JSON body parser is updated to fix this.
