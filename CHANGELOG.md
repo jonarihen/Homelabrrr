@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-24 — Policy routes respond to the mouse
+
+- Hovering a route line on the Policies mesh shows its card again, and clicking it opens the route popover. The VLAN node layer used to cover the lines.
+- Dragging a VLAN node keeps it where you drop it. A drag no longer also counts as a click that selected the node and snapped it back.
+
+![Policies mesh with the mouse over the servers to lab route and its card showing HTTPS and SSH](docs/screenshots/changelog/2026-11-24-policies-route-hover.png)
+
 ## 2026-11-24 — Deploy polish
 
 - A failed cloud image or template load now shows a **Retry** button.

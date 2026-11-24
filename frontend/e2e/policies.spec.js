@@ -273,6 +273,49 @@ test('a route shows a hover card and a popover that deletes its policy', async (
   ]);
 });
 
+// Viewport point halfway along a route's hit path, so a real mouse lands on the stroke.
+const routeMidpoint = (hit) => hit.evaluate((path) => {
+  const point = path.getPointAtLength(path.getTotalLength() / 2).matrixTransform(path.getScreenCTM());
+  return { x: point.x, y: point.y };
+});
+
+test('a real mouse hovers and clicks a route line above the node layer', async ({ page }) => {
+  await openPage(page);
+  const { x, y } = await routeMidpoint(page.locator('svg path[stroke="transparent"]').first());
+  await page.mouse.move(x, y);
+  await expect(page.getByText('Allowed traffic path')).toBeVisible();
+  await page.mouse.click(x, y);
+  await expect(page.getByRole('button', { name: 'Delete this policy' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Delete this policy' })).toHaveCount(0);
+  // A pan that starts on a route moves the canvas without opening the popover.
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 80, y + 50, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.getByRole('button', { name: 'Recenter' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Delete this policy' })).toHaveCount(0);
+});
+
+test('a real mouse still clicks and drags a VLAN node', async ({ page }) => {
+  await openPage(page);
+  const center = async () => {
+    const box = await node(page, 30).boundingBox();
+    return [box.x + box.width / 2, box.y + box.height / 2];
+  };
+  await page.mouse.click(...await center());
+  await expect(page.getByText('Source locked on iot.', { exact: false })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await settled(page);
+  const before = await node(page, 30).evaluate((el) => el.style.left);
+  const [x, y] = await center();
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 60, y + 40, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(() => node(page, 30).evaluate((el) => el.style.left)).not.toBe(before);
+});
+
 test('address objects are listed, created and deleted', async ({ page }) => {
   const api = await openPage(page);
 

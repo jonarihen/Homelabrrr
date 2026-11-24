@@ -160,6 +160,7 @@ export default function usePolicyMesh({ vlans, policies, srcVlan, loading }) {
       if (panRef.current) {
         const dx = e.clientX - panRef.current.startX;
         const dy = e.clientY - panRef.current.startY;
+        if (Math.hypot(dx, dy) >= DRAG_THRESHOLD) panRef.current.moved = true;
         setPanOffset({
           x: panRef.current.origPanX + dx,
           y: panRef.current.origPanY + dy,
@@ -168,8 +169,8 @@ export default function usePolicyMesh({ vlans, policies, srcVlan, loading }) {
     };
 
     const onPointerUp = () => {
-      dragRef.current = null;
-      panRef.current = null;
+      // Node and route clicks fire after pointerup and read .moved to skip drags and pans, so clear after them.
+      setTimeout(() => { dragRef.current = null; panRef.current = null; });
     };
 
     window.addEventListener('pointermove', onPointerMove);
