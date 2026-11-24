@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import test from 'node:test';
 import { previewWorkflow, runWorkflow } from './engine.ts';
 
@@ -121,7 +121,8 @@ test('failed-run recording errors do not mask the workflow error', async (t) => 
 });
 
 test('VLAN, policy, and port-forward entry points await and validate their bundles', async () => {
-  const admin = await readFile(new URL('../routes/admin.ts', import.meta.url), 'utf8');
+  // admin.ts is a thin mount; the handlers live in routes/admin/*.ts.
+  const admin = (await Promise.all((await readdir(new URL('../routes/admin/', import.meta.url))).map((f) => readFile(new URL(`../routes/admin/${f}`, import.meta.url), 'utf8')))).join('\n');
   const entryPoints = [
     ['vlan_provision', 'VLAN provision workflow is unavailable'],
     ['policy_create', 'Policy creation workflow is unavailable'],

@@ -13,6 +13,7 @@ import { controllerDecisionInput, observedMode, storedManualOverride, supportedM
 import { buildPowerPreview } from './powerPreview.ts';
 import { pricePolicyBoundaries } from './powerPriceBoundaries.ts';
 import { log } from '../utils/logger.ts';
+import { decodeNodeRef } from '../utils/nodeRef.ts';
 
 // Member-facing Energy & Budget reads. Every function here is read-only: no
 // upstream (iLO, ElOverblik, PayPal, spot provider) call and no DB write. All
@@ -105,11 +106,11 @@ export function safeHosts(rows: HostRow[], now: Date) {
 
 const HOST_SELECT = sql`
   WITH ranked AS (
-    SELECT id, collection_enabled, control_enabled, capabilities, lifecycle_state, created_at,
+    SELECT id, node_ref, collection_enabled, control_enabled, capabilities, lifecycle_state, created_at,
       row_number() OVER (ORDER BY id) AS alias_rank
     FROM hardware_connections
   )
-  SELECT c.id, c.alias_rank, c.collection_enabled, c.control_enabled, c.capabilities, c.lifecycle_state, c.created_at,
+  SELECT c.id, c.node_ref, c.alias_rank, c.collection_enabled, c.control_enabled, c.capabilities, c.lifecycle_state, c.created_at,
     s.watts, s.mode, s.observed_at, t.last_error_code
   FROM ranked c
   LEFT JOIN LATERAL (
@@ -160,9 +161,22 @@ function priceRulesEnabled(policy: PowerPricePolicy | null | undefined): boolean
   return Boolean(policy?.enabled && (policy.expensive?.enabled || policy.cheap?.enabled));
 }
 
-export async function energyHosts(now = new Date()) {
+type HostNameOptions = { names?: boolean };
+
+// The real Proxmox node name is an administrator-only addition. It is read
+// from the raw row here and never inside safeHosts(), so the member DTO stays
+// alias-only unless a caller explicitly asks for names.
+function nodeNameOf(row: { node_ref?: string | null }): string {
+  return decodeNodeRef(row.node_ref).nodeName;
+}
+
+export async function energyHosts(now = new Date(), { names = false }: HostNameOptions = {}) {
   const rows = await loadHostPolicies();
   const hosts = safeHosts(rows as HostRow[], now);
+  if (names) hosts.forEach((host, index) => {
+    const name = nodeNameOf(rows[index]);
+    if (name) Object.assign(host, { name });
+  });
   const globalPaused = await getSetting('power_automation_paused') === 'true';
   const priceAt = priceLookup();
   await Promise.all(hosts.map(async (host, index) => {
@@ -189,7 +203,7 @@ export const PREVIEW_HOURS = 24;
 // same resolver input and price boundaries as the admin preview and worker.
 // Periods beyond the published price horizon come back with selectedMode=null
 // (unknown) while the weekly baseline is still shown separately.
-export async function energyPreview(now = new Date()) {
+export async function energyPreview(now = new Date(), { names = false }: HostNameOptions = {}) {
   const rows = await loadHostPolicies();
   const hosts = safeHosts(rows as HostRow[], now);
   const globalPaused = await getSetting('power_automation_paused') === 'true';
@@ -197,7 +211,10 @@ export async function energyPreview(now = new Date()) {
   const end = new Date(now.getTime() + PREVIEW_HOURS * 3_600_000);
   const result = await Promise.all(hosts.map(async (host, index) => {
     const row = rows[index];
-    if (!row.schedule || !row.price_policy) return { alias: host.alias, status: 'unconfigured', segments: [], nextKnownChangeAt: null, nextKnownMode: null, priceKnownUntil: null, priceRulesEnabled: false };
+    const identity: { alias: string; name?: string } = { alias: host.alias };
+    const name = names ? nodeNameOf(row) : '';
+    if (name) identity.name = name;
+    if (!row.schedule || !row.price_policy) return { ...identity, status: 'unconfigured', segments: [], nextKnownChangeAt: null, nextKnownMode: null, priceKnownUntil: null, priceRulesEnabled: false };
     try {
       const state = policyState(row, globalPaused);
       const boundaries = await pricePolicyBoundaries(state.pricePolicy, now, end);
@@ -211,11 +228,11 @@ export async function energyPreview(now = new Date()) {
       }));
       const firstUnknown = segments.find((segment) => segment.unknown);
       const nextKnown = preview.nextKnownTransition && Date.parse(preview.nextKnownTransition) < end.getTime() ? preview.nextKnownTransition : null;
-      return { alias: host.alias, status: 'available', segments,
+      return { ...identity, status: 'available', segments,
         nextKnownChangeAt: nextKnown,
         nextKnownMode: nextKnown ? segments.find((segment) => segment.startAt === nextKnown)?.selectedMode ?? null : null,
         priceKnownUntil: firstUnknown ? firstUnknown.startAt : null, priceRulesEnabled: priceRulesEnabled(state.pricePolicy) };
-    } catch { return { alias: host.alias, status: 'unavailable', segments: [], nextKnownChangeAt: null, nextKnownMode: null, priceKnownUntil: null, priceRulesEnabled: false }; }
+    } catch { return { ...identity, status: 'unavailable', segments: [], nextKnownChangeAt: null, nextKnownMode: null, priceKnownUntil: null, priceRulesEnabled: false }; }
   }));
   return { from: now, through: end, timeZone: 'Europe/Copenhagen', hosts: result };
 }
@@ -309,12 +326,13 @@ async function priceSection(now: Date): Promise<PriceDto> {
     knownHorizon: applicable.known_horizon, reason: valid ? null : applicable.reason, contractRevision: applicable.contract_revision };
 }
 
-type CostDto = { status: string; actualOre: string | null; forecastOre: string | null; forecastStatus: string | null;
+type CostEstimate = NonNullable<Awaited<ReturnType<typeof previewMonthlyElectricity>>['estimate']>;
+type CostDto = { status: string; actualOre: string | null; forecastOre: string | null; forecastStatus: string | null; estimate: CostEstimate | null;
   statementId?: number; statementRevision?: number; finalizedAt?: Date; observedThrough: string | null;
   source: 'finalized_statement' | 'live_calculation' | null; fixedFeeStatus: string | null; variableComplete: boolean | null;
   coverageComplete: boolean | null; contractCount: number | null;
   components: Array<{ key: string; label: string; ore: string; status: string }> };
-const emptyCost = (status: string): CostDto => ({ status, actualOre: null, forecastOre: null, forecastStatus: null, observedThrough: null,
+const emptyCost = (status: string): CostDto => ({ status, actualOre: null, forecastOre: null, forecastStatus: null, estimate: null, observedThrough: null,
   source: null, fixedFeeStatus: null, variableComplete: null, coverageComplete: null, contractCount: null, components: [] });
 
 async function costSection(month: string, startAt: Date, endAt: Date, now: Date): Promise<CostDto> {
@@ -341,6 +359,8 @@ async function costSection(month: string, startAt: Date, endAt: Date, now: Date)
     actualOre: calculation.calculatedLabCostOre,
     forecastOre: statement || closed ? null : calculation.forecast?.forecastTotalOre ?? null,
     forecastStatus: statement || closed ? null : calculation.forecast?.status ?? 'unavailable',
+    // Best-guess month total with an 80% range; lab-level figures only.
+    estimate: statement || closed ? null : calculation.estimate ?? null,
     ...(statement ? { statementId: statement.id, statementRevision: statement.revision, finalizedAt: statement.created_at } : {}),
     observedThrough: calculation.observedThrough ?? null,
     source: statement ? 'finalized_statement' : 'live_calculation',

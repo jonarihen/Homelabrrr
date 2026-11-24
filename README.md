@@ -114,7 +114,7 @@ An optional, private feature set for an owner who wants to see and manage what t
 
 Everything here was verified with fixtures, fakes and throwaway databases only, never against a live iLO, ElOverblik account or PayPal account. Work through the live verification checklist before relying on it.
 
-**Docs:** [Power & Energy operator runbook](backend/docs/power-energy-runbook.md) (rollout order, defaults, rollback, live checklist) · [ElOverblik](backend/docs/eloverblik.md) · [Energy dashboard, contracts and refunds](backend/docs/energy-dashboard.md) · [PayPal support](backend/docs/paypal-support.md)
+**Docs:** [Power & Energy operator runbook](backend/docs/power-energy-runbook.md) (rollout order, defaults, rollback, live checklist) · [ElOverblik](backend/docs/eloverblik.md) · [Energy dashboard, contracts and refunds](backend/docs/energy-dashboard.md) · [PayPal support](backend/docs/paypal-support.md) · [Ko-fi support](backend/docs/kofi-support.md)
 
 ## UI Overview
 
@@ -508,10 +508,12 @@ Example values live in [`.env.example`](.env.example).
 | `ALLOW_INSECURE_UPSTREAM_TLS` | Break-glass override for self-signed Proxmox/FortiGate certs (default `false`). For a self-signed Proxmox host, prefer pinning its certificate under **Admin → PVE Hosts** (Fetch certificate → confirm): only that host is affected and no flag is needed |
 | `NODE_EXTRA_CA_CERTS` | Path to a PEM bundle of private CAs the backend should trust in addition to the public ones (standard Node.js variable, read at start). Use it when your Proxmox/FortiGate/Caddy certificates are issued by an internal CA: mount the bundle into the backend container (e.g. `./certs/lab-ca.pem:/certs/lab-ca.pem:ro` under `volumes:`) and set `NODE_EXTRA_CA_CERTS=/certs/lab-ca.pem` in its `environment:`. Hosts then keep **Verify TLS certificate** on |
 | `ALLOW_INTERNAL_IMAGE_URLS` | Allow cloud-image and ISO downloads from internal/reserved addresses, e.g. an internal mirror (default `false`) |
-| `PORTAL_BASE_URL` | Absolute portal URL used for "open in portal" links in Discord embeds and as the HTTPS origin for PayPal return URLs and webhook registration (falls back to `ALLOWED_ORIGIN`; Discord links omitted if neither is set) |
+| `PORTAL_BASE_URL` | Absolute portal URL used for "open in portal" links in Discord embeds and as the HTTPS origin for PayPal return URLs and webhook registration and for the Ko-fi webhook URL shown in the admin panel (falls back to `ALLOWED_ORIGIN`; Discord links omitted if neither is set) |
 | `PAYPAL_RECONCILE_INTERVAL_MINUTES` | PayPal reconciliation interval in minutes (default `360`, range 15–1440); a startup pass runs after boot |
 | `PAYPAL_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Per-client limit on the PayPal webhook ingress (default `120`); throttled events are redelivered by PayPal |
 | `PAYPAL_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE` | Overall limit on the PayPal webhook ingress across all clients (default `600`); protects the PayPal API quota used for checkout and reconciliation |
+| `KOFI_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Per-client limit on the Ko-fi webhook ingress (default `60`); an invalid or non-positive value falls back to the default |
+| `KOFI_WEBHOOK_GLOBAL_RATE_LIMIT_PER_MINUTE` | Overall limit on the Ko-fi webhook ingress across all clients (default `300`) |
 | `HARDWARE_POLL_INTERVAL_MS` | iLO telemetry poll interval for nodes with power telemetry explicitly enabled (default `60000`; minimum `30000`) |
 | `HARDWARE_RAW_RETENTION_DAYS` | Days raw iLO watt samples are kept (default `30`; minimum `2`) |
 | `HARDWARE_INTERVAL_RETENTION_DAYS` | Days 15-minute server energy buckets are kept after their daily rollup (default `730`; minimum `400`, because buckets feed monthly cost statements) |
@@ -714,6 +716,7 @@ Proxy requirements:
 - set `ALLOWED_ORIGIN` to the exact external URL, for example `https://portal.example.com`
 - keep `COOKIE_SECURE` at its secure default (`true`) — the `Secure` cookie flag must stay on behind the TLS-terminating proxy
 - if PayPal support is enabled, expose only `POST /api/payments/paypal/webhook/<environment>` to PayPal over HTTPS and keep everything else private (see the [Power & Energy runbook](backend/docs/power-energy-runbook.md#9-paypal-private-support))
+- if Ko-fi support is enabled, let `POST /api/payments/kofi/webhook` through to the internet over HTTPS without an access list, keep everything else private, and do not log request bodies at the proxy, because the verification token is in the body (see [Ko-fi support](backend/docs/kofi-support.md#exposure-and-environment))
 
 ## Repo Layout
 
