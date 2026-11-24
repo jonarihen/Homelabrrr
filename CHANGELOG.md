@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-24 — Port forwarding no longer needs an SSH config
+
+- **A VM no longer needs browser SSH set up before it can be published.** When no SSH Host/IP is recorded, the Target VM list now uses the address the firewall's own DHCP server holds for the VM: its reservation, or else its current lease on the VM's VLAN. The form shows where the internal IP came from
+- **Port forwards follow the same address rules as browser SSH.** A user with *Manage port forwards* can only publish an address inside a VLAN assigned to them or one an admin assigned to that VM. Addresses reported from inside the guest never count. A VM with any other address is listed as *IP outside your networks* and cannot be selected. Admins and users with firewall-wide rights are unchanged
+
+![Port forwarding form with a VM whose internal IP comes from a DHCP reservation](docs/screenshots/changelog/2026-11-24-port-forward-dhcp-targets.png)
 ## 2026-11-24 — SSH host key filled in for new VMs
 
 - Opening SSH on a VM with no saved connection now also reads the VM's host key fingerprint after it finds the IP, so a freshly deployed VM is ready to connect with no extra clicks. Check the fingerprint before you click Connect, the same as after a manual scan.

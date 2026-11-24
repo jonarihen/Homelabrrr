@@ -36,7 +36,7 @@ async function assignedNetworks(userId: number): Promise<string[]> {
   return userVlanCidrs(db, userId);
 }
 
-async function explicitlyAssignedAddresses(userId: number, node: string, vmid: number | string): Promise<string[]> {
+export async function explicitlyAssignedAddresses(userId: number, node: string, vmid: number | string): Promise<string[]> {
   // NaN matched nothing in SQLite; PostgreSQL rejects it as an integer
   // parameter, so keep the same fail-closed outcome without a round trip.
   const parsedVmid = Number.parseInt(String(vmid), 10);
